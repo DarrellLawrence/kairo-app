@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-13 — build: Milestone B (the gate)
+- `gate.py` + `actions.py`: default deny, per-action schemas (unknown fields refused), tiers can only be made stricter by config, holds allow-list, Kairo/ labels only, jobs can't make cards, limits.
+- PreToolUse hook fails closed (every error = exit 2; `onFailure: block`); verified with the real CLI, including the control that a missing hook WITHOUT onFailure lets a tool run.
+- `mcp_kairo` (only MCP server) -> `/internal/tools/call` (per-start token, loopback) -> gate -> tools / `executor.py` / approval card. Google read and write tokens; only `executor.py` creates a write client (test-enforced).
+- Approval cards: exact resolved args, backend-built summaries, edit re-checked by the gate, second confirm for tier 4, 48 h expiry, limits re-checked; Approvals screen; Web Push (quiet hours respected).
+- Append-only audit log (DB triggers) + Activity screen; kill switch stops a running call.
+- Google sign-in (PKCE, account must match profile.yaml) + installer walkthrough.
+- Real-model acceptance tests: injection (forward, invite), money, approved = exact.
+
 ## 2026-10-13 — build: Windows hardening (before Milestone B)
 - Kairo runs as its own limited Windows account `kairo-svc` (no admin, hidden, sees only C:\Kairo).
 - Claude Code: pinned official Windows binary from npm, SHA-512 checked, in C:\Kairo\tools.

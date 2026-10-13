@@ -291,7 +291,7 @@ Same zip, same double-click. The installer detects the existing install, skips e
 - **Gate fails closed (LOCKED, v3).** Verified against the Claude Code hooks docs (Oct 2026): only exit code 2 (or a JSON `deny`) blocks; exit 1, any other non-zero, a timeout, or a hook that can't start are **non-blocking and the tool runs**. Therefore:
   - The hook script wraps everything in `try/except BaseException` → print reason to stderr → `exit 2`. Missing config, bad YAML, import error, DB error: all block.
   - Register the hook with `"onFailure": "block"` (needs Claude Code ≥ v2.1.295; check the installed version) and a short explicit `timeout`, so a crash before Python starts or a hang also blocks.
-  - Allow is explicit: the hook prints a JSON `allow` only for listed tools; silence is not approval.
+  - The hook never grants: on "no objection" it exits 0 silently, so the CLI's own allow-list still has to allow the tool. It can only block. (Build decision, Milestone B: stricter than printing a JSON allow.)
 - **Execution is the backend's job.** `propose_action` → gate → tier 2: `executor.py` runs it now with the backend's write-scoped Google token, logs it, adds it to the digest; tier 3–4: card; tier 5 or unknown: deny + log. Approved cards are executed by `executor.py` from stored action + args; result posted to the thread. The model never sees the write token.
 - **Google credentials:** two OAuth tokens from the same Google Cloud client (Desktop app type, loopback redirect to `127.0.0.1:8000`, PKCE): read-only (`gmail.readonly`, `calendar.readonly`) for read tools, and write-scoped (`gmail.modify`, `gmail.compose`, `calendar.events`) used only by `executor.py`. Both in `C:\Kairo\data\secrets\`, never in the CLI's workspace or environment.
 - **MCP (phase 2, v4):** only `mcp_kairo` (its read tools cover Gmail, Calendar and the vault). No third-party MCP servers.
@@ -369,6 +369,8 @@ limits:
 ```
 
 Map real MCP tool names → these action names in one table in `gate.py`. Read tools map 1:1. Tier 2–4 actions have **no** MCP tool mapping: the only tool that reaches them is `mcp_kairo.propose_action`.
+
+**Build decisions (Milestone B):** `gmail.label` may only add/remove Kairo's own labels (`Kairo/...`), so tier 2 can't archive or re-file mail. A card stores the resolved recipient/thread (reply) and who gets notified (delete), so what the owner approves is exactly what runs; the owner may edit only the text-like fields (body, subject, recipients of a new mail, invite answer). Jobs (origin `job`) can never create cards.
 
 **`create_hold` is allow-list, not block-list.** The `deny_if_present` list documents intent; the real check is `allow_only_fields`: any field outside it → deny + log. The executor also sends `sendUpdates=none` explicitly on every Calendar write.
 
@@ -591,13 +593,14 @@ start the next until its checks pass and the owner says go.
 - [ ] On kairo-home: install, restart once, Kairo reachable on the iPhone, one real chat end to end
 
 **Milestone B — the gate (week 3)**
-- [ ] permissions.yaml + gate.py (incl. `create_hold` field allow-list), tests for every tier
-- [ ] PreToolUse hook that fails closed (catch-all exit 2, `onFailure: block`, timeout); broken-hook tests (section 8)
-- [ ] Runtime tool list = read + internal + `propose_action` only; built-in Bash/write/web tools disabled; test that no Google write tool is reachable
-- [ ] Google OAuth (production mode, Desktop client, PKCE): read-only token for read tools, write token for `executor.py` only; guided setup in the installer; `mcp_kairo` bridge to the backend
-- [ ] `executor.py`: tier 2 auto-executed by the backend (logged, digest); approved tier 3–4 executed from stored args
-- [ ] Approvals table + screen, Web Push
-- [ ] Audit log + Activity screen; kill switch
+- [x] permissions.yaml + gate.py (incl. `create_hold` field allow-list), tests for every tier
+- [x] PreToolUse hook that fails closed (catch-all exit 2, `onFailure: block`, timeout); broken-hook tests (section 8), incl. real-CLI tests (e)/(f)
+- [x] Runtime tool list = read + internal + `propose_action` only; built-in Bash/write/web tools disabled; test that no Google write tool is reachable
+- [x] Google OAuth (production mode, Desktop client, PKCE): read-only token for read tools, write token for `executor.py` only; guided setup in the installer; `mcp_kairo` bridge to the backend
+- [x] `executor.py`: tier 2 auto-executed by the backend (logged, digest in Milestone C); approved tier 3–4 executed from stored args
+- [x] Approvals table + screen, Web Push
+- [x] Audit log + Activity screen; kill switch
+- [ ] On kairo-home: Google sign-in done, one approved reply sent from the iPhone
 
 **Milestone C — jobs (week 4)**
 - [ ] Scheduler + queue + job_runs; schedule.yaml; quiet window

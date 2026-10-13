@@ -45,6 +45,14 @@ Kairo runs as its own Windows account **kairo-svc**: no admin rights, hidden fro
 
 Logs: `C:\Kairo\data\logs\` (`kairo.log` for the app, `install-*.log` for every install/update).
 
+## Tests
+
+```bash
+cd server && .venv/bin/python -m pytest                                   # fast, fakes only
+KAIRO_REAL_CLI=1 .venv/bin/python -m pytest tests/test_realcli.py -o addopts="" -v   # real Claude CLI (a few tiny calls)
+```
+Run the real-CLI tests before a release that touches the hook, the workspace config, the brain adapter or prompts.
+
 ## Status
 
-Milestone A (skeleton) and A2 (Windows install) code is done. The gate (Milestone B) is **not** built yet: until then the brain runs with **no tools at all** (`--tools ""`, no MCP servers), so it can only talk.
+Milestones A, A2 and B (the gate) are built. Kairo can read Gmail, Calendar and the vault, keep tasks and notes, label and draft by itself, and asks on the Approvals screen before it sends, replies, answers an invite or deletes anything.
