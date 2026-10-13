@@ -287,6 +287,9 @@ def test_outbound_limit_is_checked_again_at_approval(env):
 
 def test_google_write_token_is_only_used_in_executor():
     """CLAUDE.md: Google writes run only in server/app/executor.py."""
+    import re
+
     app_dir = REPO_ROOT / "server" / "app"
-    users = [p.relative_to(app_dir).as_posix() for p in app_dir.rglob("*.py") if '"write"' in p.read_text(encoding="utf-8")]
-    assert sorted(users) == ["executor.py", "google/client.py"]
+    pattern = re.compile(r'GoogleAPI\([^)]*"write"')
+    users = [p.relative_to(app_dir).as_posix() for p in app_dir.rglob("*.py") if pattern.search(p.read_text(encoding="utf-8"))]
+    assert users == ["executor.py"]

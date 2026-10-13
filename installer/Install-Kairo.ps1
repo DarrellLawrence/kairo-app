@@ -105,8 +105,7 @@ try {
         $results['Tailscale'] = Connect-Tailscale 8000
         $results['Claude'] = Connect-Claude $P ((Read-EnvFile $P)['KAIRO_CLAUDE_BIN'])
         if ($repo) { $results['GitHub updates'] = Connect-GitHub $P $repo }
-        Write-Step 'Google (Gmail + Calendar)'
-        Write-Note 'Comes with the next Kairo version (Milestone B). "Update Kairo" will add it.'
+        $results['Google'] = Connect-Google $P
 
         Write-Step 'Summary'
         foreach ($k in $results.Keys) {

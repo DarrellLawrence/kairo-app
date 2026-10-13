@@ -197,7 +197,7 @@ function Get-KairoUrl {
 }
 
 function Connect-Tailscale([int]$Port) {
-    Write-Step 'Login 1 of 3: Tailscale (private network to your iPhone)'
+    Write-Step 'Login 1 of 4: Tailscale (private network to your iPhone)'
     $s = Get-TailscaleStatus
     if ($s -and $s.BackendState -eq 'Running') {
         Write-Ok "Already signed in as $($s.Self.HostName)"
@@ -233,7 +233,7 @@ function Open-ClaudeLogin($P, [string]$ClaudeExe) {
 }
 
 function Connect-Claude($P, [string]$ClaudeExe) {
-    Write-Step 'Login 2 of 3: Claude (your Max subscription)'
+    Write-Step 'Login 2 of 4: Claude (your Max subscription)'
     $cred = Join-Path $P.ClaudeConfig '.credentials.json'
     # The login is stored in C:\Kairo\data\claude-config, where Kairo's own account
     # can use it after every reboot, with nobody logged in.
@@ -264,6 +264,87 @@ function Invoke-SelfTest {
     } catch { return $null }
 }
 
+# ---------------------------------------------------------------- Google
+
+function Get-GoogleStatus {
+    try { return (Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/setup/google/status' -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json }
+    catch { return $null }
+}
+
+function Select-JsonFile {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title = 'Choose the Google client file you downloaded (client_secret_....json)'
+    $dlg.Filter = 'Google client file (*.json)|*.json'
+    $dlg.InitialDirectory = Join-Path $env:USERPROFILE 'Downloads'
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $dlg.FileName }
+    return $null
+}
+
+function Wait-GoogleKind([string]$Kind, [int]$Seconds = 600) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $st = Get-GoogleStatus
+        if ($st -and $st.$Kind) { return [string]$st.$Kind }
+        Start-Sleep -Seconds 3
+    }
+    return $null
+}
+
+function Connect-Google($P) {
+    Write-Step 'Login 4 of 4: Google (Gmail + Calendar)'
+    $st = Get-GoogleStatus
+    if (-not $st) { Write-Bad 'Kairo is not answering, so Google can''t be set up now. Run "Kairo Logins" later.'; return $false }
+    if ($st.read -and $st.write) { Write-Ok "Already connected: $($st.read)"; return $true }
+    $account = if ($st.expected) { $st.expected } else { 'your Gmail account' }
+
+    if (-not $st.client) {
+        Write-Note 'First, a one-time Google Cloud setup (about 5 minutes). Use a browser on this PC,'
+        Write-Note "signed in as $account. Each step is one page:"
+        Write-Note '  1. Open  https://console.cloud.google.com/projectcreate'
+        Write-Note '     Project name: Kairo  -> Create.  (Top bar: make sure project "Kairo" is selected.)'
+        Write-Note '  2. Open  https://console.cloud.google.com/apis/library/gmail.googleapis.com  -> Enable'
+        Write-Note '     Open  https://console.cloud.google.com/apis/library/calendar-json.googleapis.com  -> Enable'
+        Write-Note '  3. Open  https://console.cloud.google.com/auth/overview  -> Get started'
+        Write-Note "     App name: Kairo. Support email: $account. Audience: External. Contact email: $account."
+        Write-Note '     Agree -> Create.'
+        Write-Note '  4. Left menu "Audience" -> Publish app -> Confirm.  (Status must say "In production".'
+        Write-Note '     In "Testing" Google logs Kairo out every 7 days.)'
+        Write-Note '  5. Left menu "Clients" -> Create client -> Application type: Desktop app -> Name: Kairo'
+        Write-Note '     -> Create -> Download JSON.'
+        Wait-Enter 'When the JSON file is downloaded, press Enter to choose it'
+        $file = Select-JsonFile
+        if (-not $file) { Write-Warn 'No file chosen. Run "Kairo Logins" later to finish Google.'; return $false }
+        try {
+            $json = Get-Content -Raw $file | ConvertFrom-Json
+            if (-not $json.installed -or -not $json.installed.client_id -or -not $json.installed.client_secret) { throw 'wrong type' }
+        } catch {
+            Write-Bad 'That is not a Desktop-app client file. In step 5, pick "Desktop app" and download its JSON.'
+            return $false
+        }
+        Copy-Item -Force $file (Join-Path $P.Secrets 'google-client.json')
+        Write-Ok 'Google client saved (only Kairo and admins can read it)'
+    }
+
+    $steps = @(@{ kind = 'read'; what = 'read your mail and calendar' }, @{ kind = 'write'; what = 'make drafts and labels, and send ONLY what you approve' })
+    $n = 0
+    foreach ($s in $steps) {
+        $n++
+        $now = Get-GoogleStatus
+        if ($now -and $now.$($s.kind)) { Write-Ok "Sign-in $n of 2 already done"; continue }
+        Write-Note "Sign-in $n of 2: lets Kairo $($s.what). A browser opens:"
+        Write-Note "  - choose $account"
+        Write-Note '  - "Google hasn''t verified this app": click Advanced -> Go to Kairo (unsafe). It is your own app.'
+        Write-Note '  - tick every box -> Continue. The page then says "Done".'
+        Wait-Enter 'Press Enter to open the browser'
+        Start-Process "http://127.0.0.1:8000/setup/google/start?kind=$($s.kind)"
+        $email = Wait-GoogleKind $s.kind
+        if (-not $email) { Write-Bad 'No sign-in seen within 10 minutes. Run "Kairo Logins" later to finish Google.'; return $false }
+        Write-Ok "Sign-in $n of 2 done: $email"
+    }
+    return $true
+}
+
 # ---------------------------------------------------------------- GitHub (updates)
 
 function Get-TokenPath($P) { return Join-Path $P.Secrets 'github-token.dpapi' }
@@ -286,7 +367,7 @@ function Test-GitHubToken([string]$Token, [string]$Repo) {
 }
 
 function Connect-GitHub($P, [string]$Repo) {
-    Write-Step 'Login 3 of 3: GitHub (so "Update Kairo" can download new versions)'
+    Write-Step 'Login 3 of 4: GitHub (so "Update Kairo" can download new versions)'
     $existing = Get-GitHubToken $P
     if ($existing -and (Test-GitHubToken $existing $Repo)) { Write-Ok 'Update access already set up'; return $true }
     Write-Note 'Create a read-only key for the kairo repository (about 1 minute), on any device:'

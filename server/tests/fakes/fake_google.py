@@ -35,6 +35,10 @@ class FakeGoogle:
         self.trashed: set[str] = set()
         self.deleted_events: list[tuple[str, str | None]] = []
         self.revoked = False
+        self.grant_scope = " ".join([
+            "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.compose",
+            "https://www.googleapis.com/auth/calendar.events"])
         self._next = 1
 
     # ---- seed
@@ -74,6 +78,11 @@ class FakeGoogle:
         if request.url.host == "oauth2.googleapis.com":
             if self.revoked:
                 return httpx.Response(400, json={"error": "invalid_grant"})
+            if body and body.get("grant_type") == ["authorization_code"]:
+                if body.get("code") != ["good-code"] or not body.get("code_verifier"):
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                return httpx.Response(200, json={"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600,
+                                                 "scope": self.grant_scope})
             return httpx.Response(200, json={"access_token": "at-" + str(len(self.calls)), "expires_in": 3600})
 
         g = "/gmail/v1/users/me"

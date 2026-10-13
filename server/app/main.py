@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
@@ -23,6 +23,7 @@ from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
 from .gate_context import read_context
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
+from .google.oauth import GoogleOAuth, OAuthError
 from .mcp_tools import tool_list, tool_names
 from .tools import ToolRunner
 from .workspace import write_workspace
@@ -77,6 +78,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.gate = gate
     app.state.tool_token = tool_token
     app.state.executor = Executor(secrets_dir=settings.secrets_dir)
+    app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
+                                  redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
 
     @app.middleware("http")
     async def reject_cross_origin(request, call_next):
@@ -184,6 +187,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 notify(card)
             return {"text": f"Approval card #{card.id} created: {card.summary}. Nothing happens until the owner "
                             f"approves it in the Kairo app.", "is_error": False}
+
+    # ---------------------------------------------------------------- Google sign-in (only on the PC itself)
+
+    def _page(title: str, text: str, ok: bool) -> HTMLResponse:
+        colour = "#1a7f37" if ok else "#c62828"
+        body = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                f"<title>Kairo</title><body style='font:18px system-ui;max-width:640px;margin:40px auto;padding:0 16px'>"
+                f"<h1 style='color:{colour}'>{_esc(title)}</h1><p>{_esc(text)}</p>")
+        return HTMLResponse(body, status_code=200 if ok else 400)
+
+    @app.get("/setup/google/start")
+    def google_start(request: Request, kind: str):
+        if not is_local_request(request):
+            raise HTTPException(403, "Google sign-in only on the PC itself")
+        try:
+            return RedirectResponse(app.state.oauth.start_url(kind), status_code=302)
+        except GoogleNotConnected as exc:
+            return _page("Google is not set up yet", str(exc), ok=False)
+        except OAuthError as exc:
+            return _page("Can't start", str(exc), ok=False)
+
+    @app.get("/setup/google/callback")
+    def google_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+        if not is_local_request(request):
+            raise HTTPException(403, "Google sign-in only on the PC itself")
+        if error:
+            return _page("Not signed in", f"Google said: {error}. Go back to the setup window and try again.", ok=False)
+        try:
+            result = app.state.oauth.finish(state=state, code=code)
+        except (OAuthError, GoogleNotConnected) as exc:
+            return _page("Not signed in", str(exc), ok=False)
+        with session_for(engine) as s:
+            audit(s, actor="owner", action=f"google.signin.{result['kind']}", outcome=f"signed in as {result['email']}")
+        what = "reading" if result["kind"] == "read" else "drafts, labels and approved sends"
+        return _page("Done", f"Kairo can now use {result['email']} for {what}. Close this tab and go back to the setup window.", ok=True)
+
+    @app.get("/api/setup/google/status")
+    def google_status():
+        return app.state.oauth.status()
 
     # ---------------------------------------------------------------- approvals (owner's app)
 
@@ -351,6 +393,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 LOCAL_HOSTS = {"127.0.0.1", "::1"}
+
+
+def _esc(text: str) -> str:
+    import html
+    return html.escape(text, quote=True)
 
 
 def is_loopback(request: Request) -> bool:
