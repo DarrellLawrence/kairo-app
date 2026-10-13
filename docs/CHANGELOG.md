@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14 — docs: kickoff v5 (memory first)
+- New Milestone M before C: vault and sync, onboarding interview, all reviews.
+- iPhone sync uses Möbius Sync (Syncthing) instead of Remotely Save/WebDAV, chosen by the owner.
+- Review schedule set from daily to yearly. Voice stays in phase 3.
+
 ## 2026-10-14 — build: iPhone app design pass (before Milestone C)
 - **Design system.**
   - Tokens in `web/src/design/tokens.css`: dark first plus light, one violet accent, glass, spacing 4/8/12/16/24/32, radii, shadows, SF Pro type.

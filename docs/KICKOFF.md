@@ -1,4 +1,11 @@
-# Kairo — Kickoff & Build Spec (v4)
+# Kairo — Kickoff & Build Spec (v5)
+
+### Changelog v4 → v5 (memory first; owner's request 2026-10-14)
+- **Build order.** New **Milestone M (memory first)** runs between B and C: vault + sync, an onboarding interview, and all scheduled reviews. Everything later depends on what Kairo knows.
+- **Vault.** Kairo reads the vault on every chat: Profile and Goals as context, the rest through `vault.read`. It writes only in its own files.
+- **iPhone sync.** Möbius Sync (Syncthing for iOS) replaces Remotely Save/WebDAV: one sync tool on PC, laptop and phone, nothing extra on kairo-home. Syncthing listens only on the Tailscale address (no public port).
+- **Reviews.** Daily (evening check-in), weekly (Sun), monthly (last Sun), quarterly, half-yearly (end of June and December), yearly (late December). Each has a push and a short form in the app; Kairo pre-fills it from data.
+- **Voice/calls.** Stay phase 3. The chat API stays transport-neutral so a voice client can use it later.
 
 > **Version:** v4 · 2026-10-13 · replaces v3 (`archive/KICKOFF_v3.md`)
 > **Source of truth:** the copy at `~/kairo/docs/KICKOFF.md` in the git repo. Every other copy is a hand-off copy.
@@ -125,7 +132,7 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 | Night | Quiet mode 23:00–06:00 (GPU power-limited via `nvidia-smi`, no jobs, no push); PC stays reachable, never sleeps | LOCKED |
 
 **Machine roles**
-- **iPhone:** Kairo PWA, iOS Shortcuts for capture, Obsidian (Remotely Save → WebDAV) for the vault.
+- **iPhone:** Kairo PWA, iOS Shortcuts for capture, Obsidian + Möbius Sync (Syncthing) for the vault (v5).
 - **`kairo-home`:** runs Kairo 24/7.
 - **Windows laptop (WSL2):** dev machine; Claude Code builds/tests here and deploys.
 - **MacBook:** Obsidian via Syncthing; optional second terminal.
@@ -398,7 +405,7 @@ Map real MCP tool names → these action names in one table in `gate.py`. Read t
 | audit_log | id, ts, actor (brain/backend/owner), action, tier, args_hash, outcome |
 | job_runs | id, job, started_at, finished_at, status, output_path, error |
 | checkins | date, energy_1_5, done_text, top3_json, note |
-| reviews | id, kind (daily/weekly/monthly/quarterly/yearly), period_start, vault_path, commitments_json |
+| reviews | id, kind (daily/weekly/monthly/quarterly/half_year/yearly), period_start, vault_path, commitments_json |
 | school_events | id, subject, kind (test/deadline/lesson), date, notes |
 | grades | id, subject, date, grade, weight |
 | lerndoku | week, raw_notes, draft_path, status (draft/approved) |
@@ -480,8 +487,12 @@ One at a time from a queue; times in `config/schedule.yaml`; all runnable on dem
 | Email triage | Hourly 07–21 | New Gmail | Labels Kairo/Reply, Kairo/FYI, Kairo/Ignore; deadlines → tasks; drafts; flags suspicious mails | Tier 0–2; replies → cards |
 | Morning brief | 06:20 weekdays, 08:20 weekends | Calendar 2 d, triage, tasks due 7 d, school_events, last check-in, captures | Brief + push | Tier 0–1 |
 | Capture processing | Every 15 min if inbox non-empty | New captures | Tasks, notes, school_events, people notes; asks if unclear | Tier 0–1 |
-| Evening check-in | 21:00 | Today's tasks, calendar | Push with 3 questions → checkins | Tier 0–1 |
-| Weekly review | Sun 18:00 | Week's data | Review note, 3 priorities, Lerndoku prompt | Tier 0–1 |
+| Evening check-in (daily review) | 21:00 | Today's tasks, calendar | Push + 2-min form → checkins | Tier 0–1 |
+| Weekly review | Sun 18:00 | Week's data | Pre-filled form, review note, 3 priorities, Lerndoku prompt | Tier 0–1 |
+| Monthly review | Last Sun 18:30 | Month's data, goals | Pre-filled form, note | Tier 0–1 |
+| Quarterly review | Last Sun of Mar/Jun/Sep/Dec 19:00 | Quarter, goals | Pre-filled form, note, goal check | Tier 0–1 |
+| Half-year review | End of June + December | Half-year, goals | Pre-filled form, note | Tier 0–1 |
+| Yearly review | Late December (Sun before 31 Dec) | Year, goals | Pre-filled form, note, next year's goals | Tier 0–1 |
 | Lerndokumentation | Fri 17:30 push | The owner's 2-min note | German draft in `50 Apprenticeship/` (draft until approved) | Tier 0–1 |
 
 **Brief format:** headline · calendar + travel · top 3 with reasons · needs reply (max 5) · next 7 days · open approvals.
@@ -602,6 +613,12 @@ start the next until its checks pass and the owner says go.
 - [x] Audit log + Activity screen; kill switch
 - [ ] On kairo-home: Google sign-in done, one approved reply sent from the iPhone
 
+**Milestone M — memory first (v5, before C)**
+- [ ] Vault on kairo-home (`10 Profile` … `Ideas`), Kairo reads Profile + Goals on every chat, writes only Kairo-owned files
+- [ ] Syncthing on kairo-home (Tailscale address only) + laptop + Möbius Sync on iPhone; plain-words setup
+- [ ] Onboarding interview in the app (~20 min, redo/edit anytime) → vault
+- [ ] Scheduler + all reviews (daily … yearly) with push, pre-filled short forms, notes in `90 Reviews/`
+
 **Milestone C — jobs (week 4)**
 - [ ] Scheduler + queue + job_runs; schedule.yaml; quiet window
 - [ ] Email triage, morning brief, evening check-in
@@ -610,8 +627,7 @@ start the next until its checks pass and the owner says go.
 
 **Milestone D — board, reviews, school (week 5)**
 - [ ] Board (Kanban + timeline)
-- [ ] Weekly review + Reviews screen; commitments → tasks
-- [ ] Vault on kairo-home + Syncthing (MacBook) + WebDAV (Obsidian iPhone)
+- [ ] Commitments from reviews → tasks (reviews themselves moved to Milestone M)
 - [ ] school_events, grades, Lerndokumentation job
 - [ ] Backups + one restore tested
 - [ ] The owner turns off phase 1 scheduled tasks
