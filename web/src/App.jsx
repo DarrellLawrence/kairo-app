@@ -2,30 +2,42 @@ import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { spring, tabVariants } from './design/motion.js'
-import { Badge, IconChat, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
+import { Badge, IconChat, IconMore, IconReview, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
 import Today from './screens/Today.jsx'
 import Chat from './screens/Chat.jsx'
 import Approvals from './screens/Approvals.jsx'
 import More from './screens/More.jsx'
+import Reviews from './screens/Reviews.jsx'
+import Onboarding from './screens/Onboarding.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
 
-// Board and Reviews join the tab bar when they are built (Milestone D).
+// Board joins the tab bar when it is built (Milestone D).
 const TABS = [
   { id: 'today', label: 'Today', Icon: IconToday },
   { id: 'chat', label: 'Chat', Icon: IconChat },
   { id: 'approvals', label: 'Approvals', Icon: IconShield },
+  { id: 'reviews', label: 'Reviews', Icon: IconReview },
   { id: 'more', label: 'More', Icon: IconMore },
 ]
 
+// Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
 function readRoute() {
   const hash = window.location.hash.replace(/^#\/?/, '')
   if (hash === 'dev/components' || window.location.pathname === '/dev/components') return 'dev'
-  return TABS.some((t) => t.id === hash) ? hash : 'today'
+  if (hash === 'onboarding') return 'onboarding'
+  const base = hash.split('/')[0]
+  return TABS.some((t) => t.id === base) ? base : 'today'
+}
+
+function readParam() {
+  const m = window.location.hash.match(/^#\/?reviews\/(\d+)$/)
+  return m ? Number(m[1]) : null
 }
 
 export default function App() {
   const [route, setRoute] = useState(readRoute)
+  const [param, setParam] = useState(readParam)
   const [dir, setDir] = useState(1)
   const [openCards, setOpenCards] = useState(0)
 
@@ -37,7 +49,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const onHash = () => setRoute(readRoute())
+    const onHash = () => { setRoute(readRoute()); setParam(readParam()) }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
@@ -56,7 +68,9 @@ export default function App() {
   }))
 
   const screen = {
-    today: <Today openCards={openCards} go={go} />,
+    today: <Today openCards={openCards} go={go} onboarding={() => { window.location.hash = '#onboarding' }} />,
+    reviews: <Reviews key={param ?? 'list'} openId={param} />,
+    onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,
     approvals: <Approvals onCount={setOpenCards} />,
     more: <More />,
@@ -83,7 +97,7 @@ export default function App() {
               </motion.div>
             </AnimatePresence>
           </main>
-          {route !== 'dev' && <TabBar tabs={tabs} active={route} onSelect={go} />}
+          {route !== 'dev' && route !== 'onboarding' && <TabBar tabs={tabs} active={route} onSelect={go} />}
         </div>
       </ToastProvider>
     </MotionConfig>

@@ -232,3 +232,12 @@
 .k-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-3); margin: 0 var(--s-4) var(--s-3); }
 .k-grid2 .k-card { margin: 0; }
 .k-demo-row { display: flex; flex-wrap: wrap; gap: var(--s-2); padding: 0 var(--s-4) var(--s-3); }
+
+/* onboarding */
+.k-onboarding { padding-top: calc(var(--topbar-h) + var(--safe-top)); }
+.k-progress { height: 4px; margin: var(--s-2) var(--s-4) 0; border-radius: 4px; background: var(--surface-strong); overflow: hidden; }
+.k-progress-bar { height: 100%; background: var(--accent-gradient); transform-origin: left; }
+.k-ob-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-5) var(--s-4); }
+.k-ob-input { width: 100%; margin-top: var(--s-4); padding: 12px 14px; border-radius: var(--r-md); border: 0; background: var(--surface-strong); box-shadow: inset 0 0 0 0.5px var(--hairline-strong); resize: none; line-height: 1.4; }
+.k-ob-actions { display: flex; gap: var(--s-2); padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--kb-safe, var(--safe-bottom))); background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); border-top: 0.5px solid var(--hairline); }
+.k-ob-actions .k-btn:last-child { flex: 1; }

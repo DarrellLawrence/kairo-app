@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { OnboardingCard } from './Onboarding.jsx'
 import { api } from '../api.js'
 import {
   Badge, Card, EmptyState, Expandable, IconCalendar, IconMail, IconPulse, IconShield, IconSparkle,
@@ -28,11 +29,12 @@ function BriefDetail({ startDrag, close }) {
   )
 }
 
-export default function Today({ openCards, go }) {
+export default function Today({ openCards, go, onboarding }) {
   const [health, setHealth] = useState(null)
   const [status, setStatus] = useState(null)
   const [google, setGoogle] = useState(null)
   const [briefOpen, setBriefOpen] = useState(false)
+  const [due, setDue] = useState([])
 
   const load = useCallback(async () => {
     const [h, s, g] = await Promise.allSettled([
@@ -43,6 +45,7 @@ export default function Today({ openCards, go }) {
     setHealth(h.status === 'fulfilled' ? (h.value.detail ?? h.value) : { status: 'unreachable' })
     setStatus(s.status === 'fulfilled' ? s.value : {})
     setGoogle(g.status === 'fulfilled' ? g.value : null)
+    api('/api/reviews?status=open').then(setDue).catch(() => setDue([]))
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -55,6 +58,16 @@ export default function Today({ openCards, go }) {
   return (
     <Page title="Today" onRefresh={load}>
       <p className="k-hello">{greeting()} · {new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+
+      {due.map((r) => (
+        <Card key={r.id} accent interactive onClick={() => { window.location.hash = `#reviews/${r.id}` }}>
+          <p className="k-eyebrow">{r.title} · {r.minutes} min</p>
+          <p className="k-card-title">Ready when you are</p>
+          <p className="k-card-sub">Kairo filled in what it knows. A few questions, then it's saved to your vault.</p>
+        </Card>
+      ))}
+
+      <OnboardingCard onOpen={onboarding} />
 
       <Expandable
         id="brief"
