@@ -25,6 +25,7 @@ from .gate_context import read_context
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
 from .google.oauth import GoogleOAuth, OAuthError
 from .mcp_tools import tool_list, tool_names
+from .push import Pusher
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
@@ -78,6 +79,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.gate = gate
     app.state.tool_token = tool_token
     app.state.executor = Executor(secrets_dir=settings.secrets_dir)
+    app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
+    app.state.on_new_card = lambda card: app.state.pusher.notify(
+        f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
 
@@ -226,6 +230,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/setup/google/status")
     def google_status():
         return app.state.oauth.status()
+
+    # ---------------------------------------------------------------- push (owner's devices)
+
+    @app.get("/api/push/key")
+    def push_key():
+        return {"publicKey": app.state.pusher.public_key}
+
+    @app.post("/api/push/subscribe")
+    def push_subscribe(body: dict):
+        try:
+            app.state.pusher.subscribe(str(body.get("endpoint") or ""), body.get("keys") or {}, body.get("device"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="push.subscribe", outcome=f"device {body.get('device') or '?'} added")
+        return {"ok": True}
+
+    @app.get("/api/push/devices")
+    def push_devices():
+        from .db import PushSubscription
+        with session_for(engine) as s:
+            return [{"id": r.id, "device": r.device} for r in s.exec(select(PushSubscription)).all()]
+
+    @app.post("/api/push/test")
+    def push_test():
+        app.state.pusher.notify("Kairo", "Notifications work.", "/#more", ignore_quiet=True)
+        return {"ok": True}
 
     # ---------------------------------------------------------------- approvals (owner's app)
 
