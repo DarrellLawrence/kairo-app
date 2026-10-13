@@ -13,9 +13,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import chat
+from . import chat, killswitch
+from .audit import audit
 from .brain import BrainStatus, EventKind, make_brain
-from .db import ChatMessage, ChatThread, make_engine, session_for
+from .db import AuditLog, ChatMessage, ChatThread, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import Settings, get_settings
 
@@ -82,6 +83,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail=body)
         return body
 
+    @app.get("/api/kill-switch")
+    def get_kill_switch():
+        with session_for(engine) as s:
+            return {"paused": killswitch.is_paused(s)}
+
+    @app.post("/api/kill-switch")
+    def set_kill_switch(body: dict):
+        paused = bool(body.get("paused"))
+        with session_for(engine) as s:
+            killswitch.set_paused(s, paused)
+            audit(s, actor="owner", action="kill_switch.on" if paused else "kill_switch.off", outcome="set")
+        if paused:
+            runner.cancel()
+        return {"paused": paused}
+
+    @app.get("/api/activity")
+    def activity(limit: int = 200):
+        with session_for(engine) as s:
+            rows = s.exec(select(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 1000))).all()
+            return [{"id": r.id, "ts": r.ts, "actor": r.actor, "action": r.action, "tier": r.tier, "outcome": r.outcome} for r in rows]
+
     @app.get("/api/threads")
     def list_threads(limit: int = 30):
         with session_for(engine) as s:
@@ -134,6 +156,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def _handle_message(ws: WebSocket, thread_id, text_in: str) -> None:
         with session_for(engine) as s:
+            if killswitch.is_paused(s):
+                await ws.send_json({"type": "error", "status": "paused",
+                                    "message": "Kairo is paused (kill switch). Resume it under More."})
+                return
+        with session_for(engine) as s:
             thread = s.get(ChatThread, thread_id) if isinstance(thread_id, int) else None
             if thread is None:
                 thread = chat.today_thread(s, brain_name=runner.brain.name, profile=profile)
@@ -166,7 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.add(thread)
                 s.commit()
             if error is not None:
-                status = (error.status or BrainStatus.unavailable).value
+                status = "paused" if error.data.get("cancelled") else (error.status or BrainStatus.unavailable).value
                 chat.add_message(s, tid, "system", f"[{status}] {error.text}")
                 await ws.send_json({"type": "error", "message": error.text, "status": status})
                 return

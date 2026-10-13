@@ -113,6 +113,8 @@ class ClaudeCLIBrain:
         self._env = build_env(env)
         self._status = BrainStatus.ok
         self._run_limited = False
+        self._proc: subprocess.Popen | None = None
+        self._cancelled = threading.Event()
 
     # -- command ---------------------------------------------------------
 
@@ -152,6 +154,13 @@ class ClaudeCLIBrain:
         path.write_text(system, encoding="utf-8")
         return path
 
+    def cancel(self) -> None:
+        """Stop the running call (kill switch). Safe to call when idle."""
+        self._cancelled.set()
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
     # -- Brain protocol --------------------------------------------------
 
     def health(self) -> BrainStatus:
@@ -170,6 +179,7 @@ class ClaudeCLIBrain:
     ) -> Iterator[BrainEvent]:
         cmd = self.build_command(session_id=session_id, system=system, tools=tools)
         self._run_limited = False
+        self._cancelled.clear()
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.Popen(
@@ -195,6 +205,7 @@ class ClaudeCLIBrain:
             timed_out.set()
             proc.kill()
 
+        self._proc = proc
         timer = threading.Timer(self.timeout_s, on_timeout)
         timer.start()
         stderr_chunks: list[str] = []
@@ -219,9 +230,13 @@ class ClaudeCLIBrain:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+            self._proc = None
         stderr_reader.join(timeout=5)
         if not finished:
             stderr = "".join(stderr_chunks).strip()
+            if self._cancelled.is_set():
+                yield BrainEvent(EventKind.error, text="Stopped by the kill switch.", status=self._status, data={"cancelled": True})
+                return
             msg = "The Claude CLI timed out." if timed_out.is_set() else (stderr or f"The Claude CLI exited with code {proc.returncode}.")
             self._status = classify_error(msg, None)
             yield BrainEvent(EventKind.error, text=msg, status=self._status)

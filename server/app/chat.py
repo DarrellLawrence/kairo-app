@@ -31,6 +31,11 @@ class BrainRunner:
     def busy(self) -> bool:
         return self._lock.locked()
 
+    def cancel(self) -> None:
+        cancel = getattr(self.brain, "cancel", None)
+        if cancel is not None:
+            cancel()
+
     async def stream(self, prompt: str, *, session_id: str | None, system: str, tools: list[str]) -> AsyncIterator[BrainEvent]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[BrainEvent | None] = asyncio.Queue()
