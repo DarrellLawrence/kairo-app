@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-14 — build: Milestone M (memory first)
+- **Vault.** Fixed folders. Profile and Goals go into every chat as notes, never as instructions. The backend writes only Kairo-owned sections between markers, so the owner's text stays.
+- **Onboarding.** A 25-question interview in the app, saved to the database and rendered into the vault. It can be edited or redone anytime.
+- **Reviews.**
+  - Schedule: daily at 21:00, plus the biggest due review on Sundays at 18:00 (weekly, monthly on the last Sunday, quarterly, half-year in June and December, yearly in December).
+  - Each review is pre-filled from data. Answers go to the database, a vault note, a check-in row and tasks.
+  - The push opens the form. Reviews missed while the PC was off are caught up.
+- **Sync.**
+  - Syncthing runs as kairo-svc and listens only on the Tailscale address. No discovery, relays or NAT.
+  - The firewall allows only 100.64.0.0/10. Old file versions are kept for 30 days.
+  - Kairo Logins pairs the laptop and the iPhone (Möbius Sync).
+- **Email tests.** The owner's three test mails were run with the real CLI. Test 3 (injection) was flagged, nothing was forwarded and nobody was invited.
+
 ## 2026-10-14 — docs: kickoff v5 (memory first)
 - New Milestone M before C: vault and sync, onboarding interview, all reviews.
 - iPhone sync uses Möbius Sync (Syncthing) instead of Remotely Save/WebDAV, chosen by the owner.

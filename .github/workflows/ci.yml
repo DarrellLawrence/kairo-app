@@ -58,6 +58,16 @@ jobs:
         run: |
           $root = Split-Path (Split-Path '${{ steps.py.outputs.python-path }}')
           icacls $root /grant '*S-1-5-32-545:(OI)(CI)RX' /T /Q | Out-Null
+      - name: Get Syncthing (the real PC gets it from winget)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(gh api repos/syncthing/syncthing/releases/latest --jq '.assets[] | select(.name | test("windows-amd64.*zip$")) | .browser_download_url')
+          curl -sSL "$url" -o "$RUNNER_TEMP/st.zip"
+          mkdir -p "$RUNNER_TEMP/st" && unzip -q "$RUNNER_TEMP/st.zip" -d "$RUNNER_TEMP/st"
+          exe=$(find "$RUNNER_TEMP/st" -name syncthing.exe | head -1)
+          echo "KAIRO_SYNCTHING=$(cygpath -w "$exe")" >> "$GITHUB_ENV"
       - name: Install / update / rollback / uninstall
         shell: powershell
         env:

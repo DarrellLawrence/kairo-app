@@ -71,6 +71,7 @@ function Get-KairoPaths([string]$Root) {
         State        = Join-Path $app 'state.json'
         Installer    = Join-Path $Root 'installer'
         Updater      = Join-Path $Root 'updater'
+        Vault        = Join-Path $data 'vault'
         Tools        = Join-Path $Root 'tools'
         Downloads    = Join-Path $Root 'downloads'
         Data         = $data
@@ -105,7 +106,7 @@ function Read-ReleaseInfo([string]$AppDir) {
 # ---------------------------------------------------------------- folders & permissions
 
 function Initialize-Folders($P) {
-    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Data, $P.Config, $P.Secrets,
+    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Data, $P.Vault, $P.Config, $P.Secrets,
                      $P.Logs, $P.Backups, $P.Workspace, $P.ClaudeConfig, (Split-Path $P.Db))) {
         if (-not (Test-Path $d)) { [void](New-Item -ItemType Directory -Path $d) }
     }

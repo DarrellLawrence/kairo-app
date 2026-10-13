@@ -58,3 +58,11 @@ Run the real-CLI tests before a release that touches the hook, the workspace con
 ## Status
 
 Milestones A, A2 and B (the gate) are built. Kairo can read Gmail, Calendar and the vault, keep tasks and notes, label and draft by itself, and asks on the Approvals screen before it sends, replies, answers an invite or deletes anything.
+
+## Vault and sync (Milestone M)
+
+- The vault is in `C:\Kairo\data\vault`, with the folders `00 Inbox` … `90 Reviews`, `Ideas` and `Kairo`.
+- Kairo reads `10 Profile` and `20 Goals` in every chat. It changes only its own parts, between `<!-- kairo:... -->` markers, and its `Kairo/` folder.
+- Sync uses Syncthing on the PC. It runs as Kairo's account and is reachable only through Tailscale.
+- To connect the laptop and the iPhone (Möbius Sync + Obsidian), run Start menu → Kairo → Kairo Logins, step 5, and follow the steps it shows.
+- Old versions of changed files are kept for 30 days in `vault\.stversions`.

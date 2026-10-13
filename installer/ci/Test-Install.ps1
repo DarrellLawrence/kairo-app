@@ -101,6 +101,43 @@ Check ((Test-Path $log) -and ((Get-Content -Raw $log) -match 'Kairo setup')) "se
 $logIds = @((Get-Acl $log).Access | ForEach-Object { $_.IdentityReference.Value })
 Check (@($logIds | Where-Object { $_ -match 'kairo-svc' }).Count -eq 0) "Kairo's own account cannot read the setup log"
 
+# ---- vault sync: runs as kairo-svc, never listens beyond Tailscale/loopback, shares only the vault
+$syncTask = Get-ScheduledTask -TaskName 'Kairo Sync' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue
+Check ($syncTask -and $syncTask.Principal.UserId -match 'kairo-svc$') 'sync task runs as kairo-svc'
+[xml]$stc = Get-Content -Raw (Join-Path $Root 'data\syncthing\config.xml')
+$o = $stc.configuration.options
+Check ($o.globalAnnounceEnabled -eq 'false' -and $o.localAnnounceEnabled -eq 'false' -and $o.relaysEnabled -eq 'false' -and $o.natEnabled -eq 'false') 'sync: no discovery, relays or NAT traversal'
+$la = @($o.listenAddress)
+Check ($la.Count -ge 1 -and @($la | Where-Object { $_ -notmatch '://(127\.0\.0\.1|100\.\d+\.\d+\.\d+):22000$' }).Count -eq 0) "sync listens only on loopback/Tailscale ($($la -join ', '))"
+Check ($stc.configuration.gui.address -eq '127.0.0.1:8384') 'sync admin page only on this PC'
+$vf = $stc.configuration.SelectSingleNode("folder[@id='kairo-vault']")
+Check ($vf -and $vf.path -eq (Join-Path $Root 'data\vault') -and @($stc.configuration.SelectNodes('folder')).Count -eq 1) 'sync shares exactly one folder: the vault'
+$stProc = $null
+for ($i = 0; $i -lt 30 -and -not $stProc; $i++) {
+    $stProc = Get-CimInstance Win32_Process -Filter "Name = 'syncthing.exe'" | Where-Object { $_.ExecutablePath -like "$Root\*" } | Select-Object -First 1
+    if (-not $stProc) { Start-Sleep -Seconds 2 }
+}
+Check ($stProc -and (Invoke-CimMethod -InputObject $stProc -MethodName GetOwner).User -eq 'kairo-svc') 'syncthing is running as kairo-svc'
+Import-Module (Join-Path $Root 'installer\KairoSync.psm1') -Force -DisableNameChecking
+$KPs = Get-KairoPaths $Root
+$apiUp = Wait-SyncApi $KPs 60
+Check ($null -ne $apiUp -and $apiUp.myID) 'sync API answers on 127.0.0.1'
+$other = Join-Path $work 'st-other'
+$ErrorActionPreference = 'Continue'   # Windows PowerShell 5.1: redirected stderr would throw
+& $env:KAIRO_SYNCTHING generate "--home=$other" --no-default-folder 2>&1 | Out-Null
+$ErrorActionPreference = 'Stop'
+[xml]$oc = Get-Content -Raw (Join-Path $other 'config.xml')
+$otherId = $oc.configuration.SelectSingleNode('device').GetAttribute('id')
+Add-SyncDevice $KPs $otherId 'CI laptop'
+Add-SyncDevice $KPs $otherId 'CI laptop'   # twice: harmless
+$fold = Invoke-SyncApi $KPs 'GET' '/rest/config/folders/kairo-vault'
+Check (@($fold.devices | Where-Object { $_.deviceID -eq $otherId }).Count -eq 1) 'a paired device gets the vault folder (once)'
+$badId = $false; try { Add-SyncDevice $KPs 'not-an-id' 'x' } catch { $badId = $true }
+Check $badId 'a wrong device ID is refused'
+$fw = @(Get-NetFirewallRule -DisplayName 'Kairo Sync (Tailscale only)' | Get-NetFirewallAddressFilter)
+Check ($fw.Count -eq 2 -and @($fw | Where-Object { $_.RemoteAddress -ne '100.64.0.0/10' -and $_.RemoteAddress -ne '100.64.0.0/255.192.0.0' }).Count -eq 0) 'firewall: sync port open only to Tailscale addresses'
+Check (Test-Path (Join-Path $Root 'data\vault\10 Profile')) 'vault folders created'
+
 # ---- the .bat never closes on an error: it says why, logs it, waits for a key
 $broken = Join-Path $env:USERPROFILE 'Downloads\Kairo Setup broken (2)'
 $failRoot = 'C:\Kairo CI fail'
@@ -276,6 +313,8 @@ Check ($LASTEXITCODE -eq 0) 'uninstall exits 0'
 Check (-not (Get-ScheduledTask -TaskName 'Kairo' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue)) 'boot task removed'
 Check (-not (Get-ScheduledTask -TaskName 'Kairo Boot Check' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue)) 'boot check task removed'
 Check (-not (Get-LocalUser -Name 'kairo-svc' -ErrorAction SilentlyContinue)) 'kairo-svc account removed'
+Check (-not (Get-ScheduledTask -TaskName 'Kairo Sync' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue)) 'sync task removed'
+Check (-not (Get-NetFirewallRule -DisplayName 'Kairo Sync (Tailscale only)' -ErrorAction SilentlyContinue)) 'sync firewall rule removed'
 Check (-not (Test-Path (Join-Path $Root 'app'))) 'program files removed'
 Check (Test-Path (Join-Path $Root 'data\db\kairo.sqlite')) 'data kept'
 Check ($null -eq (Get-HealthObj)) 'nothing listening any more'

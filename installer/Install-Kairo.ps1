@@ -26,6 +26,8 @@ $logging = $false
 try {
     Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force -DisableNameChecking
     Import-Module (Join-Path $PSScriptRoot 'KairoSetup.psm1') -Force -DisableNameChecking
+    Import-Module (Join-Path $PSScriptRoot 'KairoSync.psm1') -Force -DisableNameChecking
+    $svc = $null
 
     $passArgs = @('-Root', "`"$Root`"")
     if ($Logins) { $passArgs += '-Logins' }
@@ -114,6 +116,8 @@ try {
         Install-StartMenu $P
         Register-BootCheckTask $P
         Register-AutoUpdateTask $P
+        # Vault sync: nice to have, never a reason for the install to fail.
+        try { Install-Sync $P $svc } catch { Write-Warn "Vault sync not set up: $($_.Exception.Message.Trim())" }
     }
 
     # 7. One-time logins
@@ -125,6 +129,7 @@ try {
         $results['Claude'] = Connect-Claude $P ((Read-EnvFile $P)['KAIRO_CLAUDE_BIN'])
         if ($repo) { $results['GitHub updates'] = Connect-GitHub $P $repo }
         $results['Google'] = Connect-Google $P
+        $results['Vault sync'] = Connect-Sync $P $svc
 
         Write-Step 'Summary'
         foreach ($k in $results.Keys) {

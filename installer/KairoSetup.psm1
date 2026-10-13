@@ -210,7 +210,7 @@ function Get-KairoUrl {
 }
 
 function Connect-Tailscale([int]$Port) {
-    Write-Step 'Login 1 of 4: Tailscale (private network to your iPhone)'
+    Write-Step 'Login 1 of 5: Tailscale (private network to your iPhone)'
     $s = Get-TailscaleStatus
     if ($s -and $s.BackendState -eq 'Running') {
         Write-Ok "Already signed in as $($s.Self.HostName)"
@@ -269,7 +269,7 @@ function Test-ClaudeForKairo($P) {
 }
 
 function Connect-Claude($P, [string]$ClaudeExe) {
-    Write-Step 'Login 2 of 4: Claude (your Max subscription)'
+    Write-Step 'Login 2 of 5: Claude (your Max subscription)'
     # The login is stored in C:\Kairo\data\claude-config, where Kairo's own account
     # can use it after every reboot, with nobody logged in.
     [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $P.ClaudeConfig, 'Process')
@@ -373,7 +373,7 @@ function Connect-GooglePhone($P) {
 }
 
 function Connect-Google($P) {
-    Write-Step 'Login 4 of 4: Google (Gmail + Calendar)'
+    Write-Step 'Login 4 of 5: Google (Gmail + Calendar)'
     $st = Get-GoogleStatus
     if (-not $st) { Write-Bad 'Kairo is not answering, so Google can''t be set up now. Run "Kairo Logins" later.'; return $false }
     $account = if ($st.expected) { $st.expected } else { 'your Gmail account' }
@@ -515,7 +515,7 @@ function Test-GitHubToken([string]$Token, [string]$Repo) {
 }
 
 function Connect-GitHub($P, [string]$Repo) {
-    Write-Step 'Login 3 of 4: GitHub (so "Update Kairo" can download new versions)'
+    Write-Step 'Login 3 of 5: GitHub (so "Update Kairo" can download new versions)'
     $existing = Get-GitHubToken $P
     if ($existing -and (Test-GitHubToken $existing $Repo)) { Write-Ok 'Update access already set up'; return $true }
     Write-Note 'Create a read-only key for the kairo repository (about 1 minute), on any device:'
