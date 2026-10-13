@@ -49,19 +49,27 @@ try {
     if (-not $loginsOnly) {
         $info = Read-ReleaseInfo $sourceApp
 
-        # 1. Programs
+        # 1. Kairo's own limited Windows account + folders it may use
+        Write-Step "Kairo's own Windows account and folders"
+        $svc = Initialize-ServiceAccount
+        Set-KairoAcl $P $owner $svc.Name
+        Write-Ok "account kairo-svc ready (no admin rights, hidden from the sign-in screen)"
+        Write-Ok "$Root ready (code: read-only for Kairo; data: Kairo and you; nobody else)"
+
+        # 2. Programs
         if ($CI) {
-            $python = Find-Python312
+            $python = Find-Python312 -MachineWide
             if (-not $python) { throw 'CI: set KAIRO_PYTHON to a Python 3.12 executable' }
             $claudeExe = $ClaudeBin
         } else {
-            $python = Install-Prerequisites ([string]$info.claude_code_version)
-            $claudeExe = if ($ClaudeBin) { $ClaudeBin } else { Get-ClaudeExe }
+            $python = Install-Prerequisites
+            $versions = Get-Content -Raw (Join-Path $PSScriptRoot 'versions.json') | ConvertFrom-Json
+            $claudeExe = if ($ClaudeBin) { $ClaudeBin } else {
+                Install-ClaudeCode $P ([string]$info.claude_code_version) ([string]$versions.claude_code_win_x64_sha512)
+            }
         }
 
-        # 2. Folders, permissions, settings file
-        Write-Step 'Folders and permissions'
-        Set-KairoAcl $P $owner
+        # 3. Settings file
         Write-EnvFile $P @{
             KAIRO_DATA_DIR    = $P.Data
             KAIRO_CONFIG_DIR  = $P.Config
@@ -69,35 +77,33 @@ try {
             CLAUDE_CONFIG_DIR = $P.ClaudeConfig
             KAIRO_PORT        = '8000'
         }
-        Write-Ok "$Root ready (code: admins only; data: you)"
 
-        # 3. Windows settings (real PC only)
+        # 4. Windows settings (real PC only)
         if (-not $CI) {
             Set-AlwaysOnPower
             Set-WindowsUpdatePolicy
             if ($interactive) { Enable-BitLockerIfPossible }
         }
 
-        # 4. Kairo itself (backup, switch, migrate, health check, auto-rollback)
-        $ok = Deploy-Release $P $sourceApp $python $owner -Force:$Force
+        # 5. Kairo itself (backup, switch, migrate, health check, auto-rollback), running as kairo-svc
+        $ok = Deploy-Release $P $sourceApp $python $svc -Force:$Force
         if (-not $ok) { $exitCode = 1 }
 
-        # 5. Keep the newest installer + the double-click files in C:\Kairo
+        # 6. Newest installer, boot check, and the double-click files in C:\Kairo
         Copy-Tree $PSScriptRoot $P.Installer
-        foreach ($bat in @('Update Kairo.bat', 'Rollback Kairo.bat', 'Uninstall Kairo.bat', 'Kairo Logins.bat')) {
+        foreach ($bat in @('Update Kairo.bat', 'Rollback Kairo.bat', 'Uninstall Kairo.bat', 'Kairo Logins.bat', 'Kairo Check.bat')) {
             Copy-Item -Force (Join-Path $PSScriptRoot "bat\$bat") (Join-Path $Root $bat)
         }
+        Register-BootCheckTask $P
     }
 
-    # 6. One-time logins
+    # 7. One-time logins
     if (($interactive -or $Logins) -and -not $CI -and $exitCode -eq 0) {
         $repo = $null
         if (Test-Path (Join-Path $P.Current 'release.json')) { $repo = [string](Read-ReleaseInfo $P.Current).update_repo }
         $results = [ordered]@{}
         $results['Tailscale'] = Connect-Tailscale 8000
-        $claudeForLogin = (Read-EnvFile $P)['KAIRO_CLAUDE_BIN']
-        if (-not $claudeForLogin) { $claudeForLogin = Get-ClaudeExe }
-        $results['Claude'] = Connect-Claude $P $claudeForLogin
+        $results['Claude'] = Connect-Claude $P ((Read-EnvFile $P)['KAIRO_CLAUDE_BIN'])
         if ($repo) { $results['GitHub updates'] = Connect-GitHub $P $repo }
         Write-Step 'Google (Gmail + Calendar)'
         Write-Note 'Comes with the next Kairo version (Milestone B). "Update Kairo" will add it.'
@@ -116,7 +122,8 @@ try {
             Write-Note 'Then Share -> Add to Home Screen -> Add.'
         }
         if ($interactive) {
-            Write-Note 'Last check: restart this PC once and do NOT log in. After ~3 minutes Kairo should open on the iPhone.'
+            Write-Note 'Last check: restart this PC and do NOT log in. After about 5 minutes, on the iPhone:'
+            Write-Note '  open Kairo -> More: "Last boot check" should be all green. Then send a chat message.'
         }
     }
 } catch {

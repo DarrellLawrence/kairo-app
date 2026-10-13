@@ -53,6 +53,11 @@ jobs:
         env:
           PYTHON: python
         run: scripts/build-release.sh
+      - name: Let normal users read Python (like C:\Program Files on a real PC)
+        shell: powershell
+        run: |
+          $root = Split-Path (Split-Path '${{ steps.py.outputs.python-path }}')
+          icacls $root /grant '*S-1-5-32-545:(OI)(CI)RX' /T /Q | Out-Null
       - name: Install / update / rollback / uninstall
         shell: powershell
         env:

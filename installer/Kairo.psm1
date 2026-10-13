@@ -5,8 +5,10 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:TaskName = 'Kairo'
+$script:BootCheckTaskName = 'Kairo Boot Check'
 $script:TaskPath = '\Kairo\'
 $script:Port = 8000
+$script:ServiceUser = 'kairo-svc'   # Kairo's own limited Windows account
 
 # ---------------------------------------------------------------- output
 
@@ -63,6 +65,7 @@ function Get-KairoPaths([string]$Root) {
         Current      = Join-Path $app 'current'
         State        = Join-Path $app 'state.json'
         Installer    = Join-Path $Root 'installer'
+        Tools        = Join-Path $Root 'tools'
         Downloads    = Join-Path $Root 'downloads'
         Data         = $data
         Config       = Join-Path $data 'config'
@@ -95,21 +98,111 @@ function Read-ReleaseInfo([string]$AppDir) {
 # ---------------------------------------------------------------- folders & permissions
 
 function Initialize-Folders($P) {
-    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Downloads, $P.Data, $P.Config, $P.Secrets,
+    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Data, $P.Config, $P.Secrets,
                      $P.Logs, $P.Backups, $P.Workspace, $P.ClaudeConfig, (Split-Path $P.Db))) {
         if (-not (Test-Path $d)) { [void](New-Item -ItemType Directory -Path $d) }
     }
 }
 
-# Code: owner can read/run, only admins can change it (so nothing running as the
-# owner, the model included, can rewrite Kairo's code). Data: owner full access.
-# Everyone else: nothing.
-function Set-KairoAcl($P, [string]$Owner) {
+# Code and tools: read/run for Kairo's account and the owner; only admins can
+# change them (nothing Kairo runs, the model included, can rewrite its own
+# code). Data: Kairo's account and the owner can change it. Everyone else:
+# nothing.
+function Set-KairoAcl($P, [string]$Owner, [string]$Service) {
     $sys = '*S-1-5-18'; $admins = '*S-1-5-32-544'
-    & icacls.exe $P.Root /inheritance:r /grant:r "${sys}:(OI)(CI)F" "${admins}:(OI)(CI)F" "${Owner}:(OI)(CI)RX" /Q | Out-Null
+    & icacls.exe $P.Root /inheritance:r /grant:r "${sys}:(OI)(CI)F" "${admins}:(OI)(CI)F" "${Owner}:(OI)(CI)RX" "${Service}:(OI)(CI)RX" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.Root)" }
-    & icacls.exe $P.Data /grant:r "${Owner}:(OI)(CI)M" /Q | Out-Null
+    & icacls.exe $P.Data /grant:r "${Owner}:(OI)(CI)M" "${Service}:(OI)(CI)M" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.Data)" }
+}
+
+# ---------------------------------------------------------------- Kairo's own Windows account
+
+function New-RandomPassword {
+    $bytes = New-Object byte[] 30
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes); $rng.Dispose()
+    return [Convert]::ToBase64String($bytes) + 'aA1!'   # + one of each class for password policies
+}
+
+# kairo-svc: a standard (non-admin) local account that only Kairo uses. It
+# gets a new random password on every install, which only Task Scheduler
+# keeps (Kairo never stores it), is hidden from the sign-in screen, and can
+# only reach C:\Kairo plus what every Windows user can (not your files).
+function Initialize-ServiceAccount {
+    $name = $script:ServiceUser
+    $plain = New-RandomPassword
+    $secure = ConvertTo-SecureString $plain -AsPlainText -Force
+    $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+    if ($user) {
+        Set-LocalUser -Name $name -Password $secure -PasswordNeverExpires $true -AccountNeverExpires
+        Enable-LocalUser -Name $name
+    } else {
+        [void](New-LocalUser -Name $name -Password $secure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires `
+            -FullName 'Kairo' -Description 'Runs Kairo in the background. No sign-in.')
+    }
+    $usersGroup = (Get-LocalGroup -SID 'S-1-5-32-545').Name
+    $adminsGroup = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+    if (-not (Get-LocalGroupMember -Group $usersGroup -Member $name -ErrorAction SilentlyContinue)) { Add-LocalGroupMember -Group $usersGroup -Member $name }
+    if (Get-LocalGroupMember -Group $adminsGroup -Member $name -ErrorAction SilentlyContinue) { Remove-LocalGroupMember -Group $adminsGroup -Member $name }
+    $hide = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
+    if (-not (Test-Path $hide)) { [void](New-Item -Path $hide -Force) }
+    Set-ItemProperty -Path $hide -Name $name -Value 0 -Type DWord
+    $full = "$env:COMPUTERNAME\$name"
+    # May run as a background task at boot; may NOT sign in at the PC or over Remote Desktop.
+    Grant-UserRight $full 'SeBatchLogonRight'
+    Grant-UserRight $full 'SeDenyInteractiveLogonRight'
+    Grant-UserRight $full 'SeDenyRemoteInteractiveLogonRight'
+    return [pscustomobject]@{ Name = $full; Password = $plain }
+}
+
+# User rights via the LSA API (no secedit export/import round trip).
+$script:LsaCode = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class KairoLsa {
+    [StructLayout(LayoutKind.Sequential)] struct LSA_UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+    [StructLayout(LayoutKind.Sequential)] struct LSA_OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+    [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr systemName, ref LSA_OBJECT_ATTRIBUTES attrs, uint access, out IntPtr handle);
+    [DllImport("advapi32.dll")] static extern uint LsaAddAccountRights(IntPtr handle, byte[] sid, LSA_UNICODE_STRING[] rights, uint count);
+    [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr handle);
+    [DllImport("advapi32.dll")] static extern int LsaNtStatusToWinError(uint status);
+    public static void Grant(string account, string right) {
+        var sid = (SecurityIdentifier)new NTAccount(account).Translate(typeof(SecurityIdentifier));
+        var bytes = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(bytes, 0);
+        var attrs = new LSA_OBJECT_ATTRIBUTES();
+        IntPtr handle;
+        uint r = LsaOpenPolicy(IntPtr.Zero, ref attrs, 0x000F0FFF, out handle);
+        if (r != 0) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(r));
+        try {
+            var s = new LSA_UNICODE_STRING();
+            s.Buffer = Marshal.StringToHGlobalUni(right);
+            s.Length = (ushort)(right.Length * 2);
+            s.MaximumLength = (ushort)((right.Length + 1) * 2);
+            try {
+                r = LsaAddAccountRights(handle, bytes, new[] { s }, 1);
+                if (r != 0) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(r));
+            } finally { Marshal.FreeHGlobal(s.Buffer); }
+        } finally { LsaClose(handle); }
+    }
+}
+'@
+
+function Grant-UserRight([string]$Account, [string]$Right) {
+    if (-not ('KairoLsa' -as [type])) { Add-Type -TypeDefinition $script:LsaCode }
+    [KairoLsa]::Grant($Account, $Right)
+}
+
+function Remove-ServiceAccount {
+    $name = $script:ServiceUser
+    $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+    if (-not $user) { return }
+    $sid = $user.SID.Value
+    Remove-LocalUser -Name $name
+    Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid } | Remove-CimInstance -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList' -Name $name -ErrorAction SilentlyContinue
 }
 
 function Copy-Tree([string]$From, [string]$To) {
@@ -162,7 +255,9 @@ function Use-KairoEnv($P) {
 
 # ---------------------------------------------------------------- python
 
-function Find-Python312 {
+# -MachineWide: ignore a Python inside a user profile (Kairo's account can't read it).
+function Find-Python312([switch]$MachineWide) {
+    $profiles = Join-Path $env:SystemDrive 'Users'
     if ($env:KAIRO_PYTHON -and (Test-Path $env:KAIRO_PYTHON)) { return $env:KAIRO_PYTHON }
     $py = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($py) {
@@ -170,11 +265,14 @@ function Find-Python312 {
         $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         try { $exe = & $py.Source -3.12 -c 'import sys; print(sys.executable)' } catch { $exe = $null }
         finally { $ErrorActionPreference = $old }
-        if ($LASTEXITCODE -eq 0 -and $exe) { return ([string]$exe).Trim() }
+        if ($LASTEXITCODE -eq 0 -and $exe) {
+            $found = ([string]$exe).Trim()
+            if (-not ($MachineWide -and $found.StartsWith($profiles, 'OrdinalIgnoreCase'))) { return $found }
+        }
     }
-    foreach ($c in @("$env:ProgramFiles\Python312\python.exe", "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe")) {
-        if (Test-Path $c) { return $c }
-    }
+    $candidates = @("$env:ProgramFiles\Python312\python.exe")
+    if (-not $MachineWide) { $candidates += "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" }
+    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
     return $null
 }
 
@@ -294,27 +392,66 @@ function Wait-Healthy([int]$Seconds = 90) {
     return $null
 }
 
-# Boot task: starts at boot as the owner WITHOUT a stored password (S4U: runs
-# whether or not anyone is logged in; local resources only). A second trigger
-# re-checks every 5 minutes; IgnoreNew means it only starts Kairo if it isn't
-# running. No time limit.
-function Register-KairoTask($P, [string]$UserId) {
+# Boot task: starts at boot as kairo-svc, whether or not anyone is logged in
+# (Task Scheduler keeps the account's password; that also gives it the
+# "log on as a batch job" right). A second trigger re-checks every 5 minutes;
+# IgnoreNew means it only starts Kairo if it isn't running. No time limit.
+function Register-KairoTask($P, $Svc) {
+    # Task Scheduler history on, so "why didn't Kairo start?" has an answer.
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & wevtutil.exe sl Microsoft-Windows-TaskScheduler/Operational /e:true | Out-Null } catch { } finally { $ErrorActionPreference = $old }
     $py = Join-Path $P.Current 'venv\Scripts\python.exe'
     $taskArgs = "-m app.serve --env-file `"$($P.EnvFile)`""
     $action = New-ScheduledTaskAction -Execute $py -Argument $taskArgs -WorkingDirectory (Join-Path $P.Current 'server')
     $atBoot = New-ScheduledTaskTrigger -AtStartup
     $watchdog = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
-    $principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType S4U -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
     [void](Register-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -Action $action `
-        -Trigger @($atBoot, $watchdog) -Principal $principal -Settings $settings -Force `
-        -Description 'Kairo personal assistant. Starts at boot, nobody needs to be logged in.')
+        -Trigger @($atBoot, $watchdog) -User $Svc.Name -Password $Svc.Password -RunLevel Limited -Settings $settings -Force `
+        -Description 'Kairo personal assistant. Starts at boot as kairo-svc, nobody needs to be logged in.')
+}
+
+# Boot check: 3 minutes after every boot, as SYSTEM, checks that Kairo, the
+# Claude login, Tailscale and the HTTPS address all came back, and writes
+# data\logs\boot-check.json (shown on the More screen).
+function Register-BootCheckTask($P) {
+    $script = Join-Path $P.Installer 'Kairo-BootCheck.ps1'
+    $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Root `"$($P.Root)`""
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $trigger.Delay = 'PT3M'
+    $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $script:BootCheckTaskName -TaskPath $script:TaskPath -Action $action `
+        -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Checks after every boot that Kairo, Claude, Tailscale and HTTPS came back.')
 }
 
 function Unregister-KairoTask {
-    $task = Get-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
-    if ($task) { Unregister-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -Confirm:$false }
+    foreach ($n in @($script:TaskName, $script:BootCheckTaskName)) {
+        $task = Get-ScheduledTask -TaskName $n -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
+        if ($task) { Unregister-ScheduledTask -TaskName $n -TaskPath $script:TaskPath -Confirm:$false }
+    }
+}
+
+# Why didn't Kairo start? Task result + the end of its log, in plain view.
+function Show-StartProblem($P) {
+    $info = Get-ScheduledTaskInfo -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
+    if ($info) { Write-Note ("Task 'Kairo': last result 0x{0:X8}, last run {1}" -f $info.LastTaskResult, $info.LastRunTime) }
+    try {
+        $events = Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 200 -ErrorAction Stop |
+            Where-Object { $_.Message -like "*\Kairo\Kairo*" } | Select-Object -First 5
+        foreach ($e in $events) { Write-Note ("Task Scheduler {0:HH:mm:ss}: {1}" -f $e.TimeCreated, ($e.Message -split "`r?`n")[0]) }
+    } catch { }
+    $log = Join-Path $P.Logs 'kairo.log'
+    if (Test-Path $log) {
+        Write-Note 'Last lines of kairo.log:'
+        Get-Content $log -Tail 15 | ForEach-Object { Write-Note "  $_" }
+    } else {
+        Write-Note 'kairo.log was never written: Python did not start (check that Kairo''s account can read Python and C:\Kairo).'
+    }
 }
 
 # ---------------------------------------------------------------- deploy with auto-rollback
@@ -322,7 +459,7 @@ function Unregister-KairoTask {
 # Installs $SourceApp as the running release. On any failure after the switch:
 # schema downgrade (with the new code, which knows every migration), back to
 # the previous release, restart. Returns $true on success.
-function Deploy-Release($P, [string]$SourceApp, [string]$Python, [string]$UserId, [switch]$Force) {
+function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$Force) {
     $info = Read-ReleaseInfo $SourceApp
     $version = [string]$info.version
     $state = Read-State $P
@@ -331,7 +468,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, [string]$UserId
     Write-Step "Installing Kairo $version"
     if ($prev -eq $version -and -not $Force) {
         Write-Ok "Kairo $version is already the installed version"
-        Register-KairoTask $P $UserId
+        Register-KairoTask $P $Svc
         if (-not (Get-Health)) { Start-Kairo }
         if (Wait-Healthy 90) { Write-Ok 'Kairo is running'; return $true }
         Write-Bad 'Kairo is installed but not answering. See the log in C:\Kairo\data\logs\kairo.log'
@@ -345,7 +482,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, [string]$UserId
     Write-Step 'Switching to the new version'
     Stop-Kairo $P
     Set-CurrentRelease $P $version
-    Register-KairoTask $P $UserId
+    Register-KairoTask $P $Svc
     $migrated = Invoke-Alembic $P $newDir @('upgrade', 'head')
     $healthy = $null
     if ($migrated) {
@@ -366,6 +503,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, [string]$UserId
     }
 
     Write-Bad "Kairo $version did not start correctly."
+    Show-StartProblem $P
     if (-not $prev) {
         Stop-Kairo $P
         Write-Bad 'There is no earlier version to go back to. See C:\Kairo\data\logs\kairo.log'

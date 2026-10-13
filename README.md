@@ -32,12 +32,15 @@ Everything on kairo-home is double-click. Nothing gets wiped, no Docker, no WSL.
 2. Get the setup zip: on GitHub open the kairo repo → **Releases** (right side) → newest release → download `Kairo-Setup-….zip`. Or build one on the laptop: `scripts/build-release.sh` → `dist/`.
 3. On kairo-home: right-click the zip → **Extract All** → open the folder → double-click **Install Kairo.bat** → Windows asks for admin rights → **Yes**.
 4. Follow the screen. It installs Python, Tailscale and Claude Code, sets up the boot task, turns off sleep, sets Windows Update to Sundays 04:00, offers BitLocker if the PC has a TPM, then walks you through three logins (Tailscale, Claude, GitHub for updates).
-5. Restart the PC once and **don't log in**. After about 3 minutes Kairo should open on the iPhone.
+5. Restart the PC once and **don't log in**. After about 5 minutes, on the iPhone: Kairo → **More** → "Last boot check" should be all green (Claude, Tailscale, HTTPS). Then send a chat message.
 
 **Afterwards, in `C:\Kairo`:**
 - **Update Kairo.bat**: downloads the newest *tested* release from GitHub (CI publishes one only after all tests and the Windows install test pass), checks its checksum, installs it, and switches back by itself if the new version doesn't come up.
 - **Rollback Kairo.bat**: back to the previous version (database schema first).
 - **Kairo Logins.bat**: redo a login (e.g. Claude login expired).
+- **Kairo Check.bat**: the same checks the PC runs after every reboot (Kairo up, own account, Claude, Tailscale, HTTPS).
+
+Kairo runs as its own Windows account **kairo-svc**: no admin rights, hidden from the sign-in screen, can only use `C:\Kairo`.
 - **Uninstall Kairo.bat**: removes Kairo; your data stays unless you type DELETE.
 
 Logs: `C:\Kairo\data\logs\` (`kairo.log` for the app, `install-*.log` for every install/update).

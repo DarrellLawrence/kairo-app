@@ -27,7 +27,8 @@ try {
     Write-Step 'Stopping Kairo'
     Stop-Kairo $P
     Unregister-KairoTask
-    Write-Ok 'Kairo stopped; it will no longer start at boot'
+    Remove-ServiceAccount
+    Write-Ok 'Kairo stopped; it will no longer start at boot; its Windows account kairo-svc is removed'
     if (-not $CI) {
         $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
         if (Test-Path $ts) { & $ts serve reset | Out-Null; Write-Ok 'Kairo is no longer published on your tailnet' }
