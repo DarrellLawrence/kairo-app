@@ -1,8 +1,18 @@
-# Kairo — Kickoff & Build Spec (v3)
+# Kairo — Kickoff & Build Spec (v4)
 
-> **Version:** v3 · 2026-10-13 · replaces v2 (`archive/KICKOFF_v2.md`)
+> **Version:** v4 · 2026-10-13 · replaces v3 (`archive/KICKOFF_v3.md`)
 > **Source of truth:** the copy at `~/kairo/docs/KICKOFF.md` in the git repo. Every other copy is a hand-off copy.
 > Decisions marked **LOCKED** are final unless the owner changes them. **OPEN** = still to decide.
+
+### Changelog v3 → v4 (Windows host, one-click install)
+- **kairo-home keeps Windows.** No Ubuntu, nothing wiped. Kairo runs **natively on Windows**: no Docker, no WSL on kairo-home (sections 2, 2b, 6).
+- **Deploy = copy one folder, double-click.** The laptop builds `Kairo-Setup-<version>.zip`. On kairo-home, `Install-Kairo.bat` installs or updates everything, does the one-time logins with plain instructions, and rolls back by itself if the new version is unhealthy (sections 2b, 6a, 6b).
+- **Always on without anyone logged in:** a Windows scheduled task starts Kairo at boot (no password stored), sleep/hibernate off, Tailscale in unattended mode (section 6).
+- **Google tools live in the backend.** No third-party Google Workspace MCP server. `mcp_kairo` is the model's only MCP server; it forwards every tool call to the backend, which runs the gate and holds both Google tokens. Same two layers as v3, one dependency less, and no "write tools switched off" config to get wrong (section 7).
+- **Owner config lives in the data folder** (`C:\Kairo\data\config\`), seeded on first install and never overwritten by updates (sections 0.2, 2c).
+- **Gmail address** is taken from the Google account the owner signs in with during setup (section 0.4).
+- Docker, `deploy.sh` and the Ubuntu setup script from Milestone A are removed (Milestone A2 replaces them).
+- CLAUDE.md (section 14) updated.
 
 ### Changelog v2 → v3 (security hardening)
 - **Gate fails closed.** Any hook error, crash, timeout or failure to start = blocked. Hook registered with `onFailure: "block"`; the script catches everything and exits 2. Broken-hook tests added (sections 7, 8, 16).
@@ -27,21 +37,18 @@
 
 ### 0.1 Prompt to paste (this update)
 
-v3 arrived as a pull request on GitHub, not through the OneDrive inbox.
-Once the owner has merged it into `main`:
+v4 arrived as a pull request on GitHub. After it is merged:
 
 ```
-KICKOFF v3 is merged into main on GitHub. Do this:
+KICKOFF v4 is merged into main on GitHub. Do this:
 
 1. In ~/kairo: git fetch origin && git checkout main && git pull. If you have
    local commits from before, merge them on top (no force-push) and tell me
    about any conflicts.
-2. Read docs/KICKOFF.md (v3) completely. Check that CLAUDE.md matches
-   section 14 of v3.
-3. Archive per 0.3: save the v2 copy as OneDrive\Kairo\archive\KICKOFF_v2.md.
-4. Tell me in max 10 lines whether your Milestone A plan needs adjusting for
-   v3 (gate fails closed, no Google write tools for the model, no invites from
-   holds). Then wait for my "go" on Milestone A.
+2. Read docs/KICKOFF.md (v4) completely. Check that CLAUDE.md matches
+   section 14 of v4.
+3. Archive per 0.3: save the v3 copy as OneDrive\Kairo\archive\KICKOFF_v3.md.
+4. Build the installer: scripts/build-release.sh, and tell me where the zip is.
 ```
 
 Start Claude Code from inside WSL in ~/kairo, not from Windows.
@@ -53,8 +60,8 @@ Start Claude Code from inside WSL in ~/kairo, not from Windows.
 | **Code repo (source of truth)** | WSL: `~/kairo` → GitHub private repo `kairo` | All code, `CLAUDE.md`, `docs/KICKOFF.md`, `docs/CHANGELOG.md`, config templates | Secrets, real data |
 | **OneDrive hand-off folder** | Windows: `OneDrive\Kairo\` | `inbox/` (new files from the owner), `archive/` (old versions), `exports/` (things Kairo produces for the owner, e.g. PDFs), `README.txt` | Code, `.git`, `node_modules`, databases |
 | **Dev data** | WSL: `~/kairo/devdata/` (git-ignored) | Fake test data, local SQLite | Real emails |
-| **Prod (home PC)** | `kairo-home:/srv/kairo/` | `db/`, `vault/`, `inbox/`, `logs/`, `workspace/` | Code edits (deploy only) |
-| **Prod code** | `kairo-home:/opt/kairo` (git checkout) | Deployed code | Hand edits |
+| **Prod data (home PC, Windows)** | `kairo-home: C:\Kairo\data\` | `db\`, `vault\`, `inbox\`, `logs\`, `workspace\`, `config\` (owner config), `secrets\` (Google tokens, VAPID keys), `claude-config\` (CLI login), `backups\` | Code |
+| **Prod code** | `kairo-home: C:\Kairo\app\releases\<version>\` + `C:\Kairo\app\current` (link to the running one) | Installed releases, each with its own Python venv | Hand edits (install only via `Install-Kairo.bat`) |
 
 `OneDrive\Kairo\README.txt` content (Claude Code writes it):
 ```
@@ -77,8 +84,8 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 |---|---|
 | Repo location | **Agreed:** `~/kairo` in WSL + GitHub private repo **`kairo`**. OneDrive = docs only. |
 | Host name | **`kairo-home`** (not pa-home). Use it in Tailscale, SSH config and scripts. |
-| Disk encryption | TPM unlock is fine **if** the PC has a TPM 2.0; check before install and tell the owner. If no TPM: no full-disk encryption, but encrypt `/srv/kairo` backups (restic) and keep the PC physically at home. **OPEN** until checked. |
-| Gmail address | **OPEN** — ask the owner. |
+| Disk encryption | v4: Windows stays, so this means **BitLocker** (needs TPM 2.0 and Windows Pro; Windows Home only has "Device encryption" on some hardware). If no TPM or Home without device encryption: no disk encryption, but backups are encrypted (restic) and the PC stays at home. **OPEN**: TPM yes/no and Windows edition. |
+| Gmail address | v4: whatever Google account the owner signs in with during setup; Kairo reads the address from Google and stores it in the data folder. Still **OPEN** which account that should be. |
 | RAM / 3060 VRAM | **OPEN** — ask the owner (only matters in phase 4). |
 | Laptop specs | 22 cores, 15 GB RAM: fine for dev. Don't run local models on the laptop. |
 | Git identity | The owner sets name + email himself. |
@@ -105,7 +112,7 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 
 | Decision | Choice | Status |
 |---|---|---|
-| Host | Home PC **`kairo-home`**, RTX 3060, always on, headless, Ethernet, Ubuntu Server 24.04 LTS | LOCKED |
+| Host | Home PC **`kairo-home`**, RTX 3060, always on, Ethernet, **Windows (existing install, nothing wiped)**. Kairo runs natively: no Docker, no WSL | LOCKED (v4) |
 | Spare | Second PC (RTX 2070), off by default, wake-on-LAN for heavy one-off jobs | LOCKED |
 | Network | **Tailscale** mesh; no public ports; app via `tailscale serve` (HTTPS) | LOCKED |
 | Brain (phases 1–3) | **Claude only**, via the official **Claude Code CLI** logged in with the owner's subscription. **No Agent SDK, no API key, no subscription-proxy tools.** | LOCKED |
@@ -114,8 +121,8 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 | Memory | Obsidian vault (Markdown) + SQLite | LOCKED |
 | Backend | Python 3.12, FastAPI, SQLModel + SQLite, Alembic, APScheduler, pytest | LOCKED |
 | Frontend | React + Vite + vite-plugin-pwa | LOCKED |
-| Deployment | Docker Compose; Claude Code CLI on the host | LOCKED |
-| Night | Quiet mode 23:00–06:00 (GPU power-limited, no jobs, no push); PC stays reachable | LOCKED |
+| Deployment | Release zip built on the laptop → copied to kairo-home → `Install-Kairo.bat` (install + update + auto-rollback). Kairo runs as a boot-time scheduled task; Claude Code CLI installed natively, version pinned | LOCKED (v4) |
+| Night | Quiet mode 23:00–06:00 (GPU power-limited via `nvidia-smi`, no jobs, no push); PC stays reachable, never sleeps | LOCKED |
 
 **Machine roles**
 - **iPhone:** Kairo PWA, iOS Shortcuts for capture, Obsidian (Remotely Save → WebDAV) for the vault.
@@ -124,25 +131,25 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 - **MacBook:** Obsidian via Syncthing; optional second terminal.
 - **Outside:** Google (Gmail, Calendar), Anthropic (via CLI), Web Push, heartbeat service, encrypted cloud backup.
 
-### 2b. Dev vs. production (LOCKED)
+### 2b. Dev vs. production (LOCKED, v4)
 
 | | Dev: Windows laptop | Prod: `kairo-home` |
 |---|---|---|
-| OS | Windows + **WSL2 Ubuntu 24.04** (all work inside WSL2) | Ubuntu Server 24.04 LTS, headless |
-| Runs | Claude Code (builder), tests, app via Docker | Kairo 24/7 |
-| Brain | Fake `claude` binary for tests; optional real CLI for manual tries | Real CLI, subscription login |
-| Data | `~/kairo/devdata/` | `/srv/kairo/` |
+| OS | Windows + **WSL2 Ubuntu 24.04** (all work inside WSL2) | **Windows** (existing install), runs 24/7, monitor optional |
+| Runs | Claude Code (builder), tests, app with uvicorn | Kairo 24/7 as scheduled task `Kairo` |
+| Brain | Fake `claude` for tests; optional real CLI for manual tries | Real CLI (native Windows, pinned version), subscription login |
+| Data | `~/kairo/devdata/` | `C:\Kairo\data\` |
 | Google | Mocks / test account | Real Gmail + Calendar |
-| Physical access | Daily | Once (OS install + BIOS), then headless |
+| Physical access | Daily | Once per update: copy the zip, double-click. Remote help via Tailscale (RDP only over the tailnet) |
 
-**Flow:** code → tests pass → `git push` → `scripts/deploy.sh` (SSH to kairo-home: `git pull` in `/opt/kairo`, `docker compose up -d --build`, migrations, health check) → verify on iPhone.
-**Rollback:** `scripts/deploy.sh --rollback` → previous git tag.
-**Config:** all machine differences in `.env`; paths from env vars (`KAIRO_DATA_DIR`, etc.).
+**Flow:** code → tests pass (CI runs on Linux **and Windows**) → `scripts/build-release.sh` → `dist/Kairo-Setup-<version>.zip` → copy to kairo-home (USB stick or Tailscale "Send file") → unzip → double-click `Install-Kairo.bat` → it backs up the DB, installs the new release next to the old one, migrates, health-checks, and switches over → verify on iPhone.
+**Rollback:** automatic if the health check fails; manual: double-click `C:\Kairo\Rollback-Kairo.bat` (previous release + schema downgrade).
+**Config:** machine differences in `C:\Kairo\data\kairo.env` (written by the installer) or `.env` on the laptop; owner config in the data folder's `config\`.
 
 ### 2c. Client-ready rule (LOCKED)
 
 Kairo may later be set up for a few paying clients (one box per client, their own model subscription, their own data). So from day one:
-- **Nothing personal is hardcoded.** Name, language, timezone, email address, school/work context, quiet hours → `config/profile.yaml` + `.env`.
+- **Nothing personal is hardcoded.** Name, language, timezone, email address, school/work context, quiet hours → `config/profile.yaml` + `.env`. On kairo-home the live copy is `C:\Kairo\data\config\`; the repo's `config/` only seeds it on first install.
 - `config/personality.md` uses placeholders (`{{name}}`, `{{context}}`) filled from `profile.yaml`.
 - **Tailoring per person = config + optional plug-in modules**, never a code fork.
 - Single-tenant: one Kairo instance per person/box. No multi-user features now.
@@ -189,8 +196,7 @@ Kairo may later be set up for a few paying clients (one box per client, their ow
 kairo/
   CLAUDE.md
   README.md
-  docker-compose.yml
-  .env.example              # dev + prod variables; real .env never committed
+  .env.example              # dev variables; real .env never committed
   .gitignore                # .env, devdata/, node_modules/, *.sqlite, __pycache__/
   docs/
     KICKOFF.md              # this file (source of truth)
@@ -217,47 +223,60 @@ kairo/
       db.py                 # SQLModel models
     migrations/             # Alembic
     hooks/pre_tool_use.py   # Claude Code PreToolUse hook -> gate (fails closed)
-    mcp_kairo/              # Kairo's own MCP server (tasks, notes, captures, propose_action)
+    mcp_kairo/              # Kairo's only MCP server: forwards every tool call to the backend
+                            # (reads, tasks, notes, captures, propose_action)
     tests/
       fakes/claude          # fake CLI for tests
   web/                      # React + Vite + PWA
-  mcp/.mcp.json
-  scripts/ deploy.sh quiet.sh backup.sh
+  installer/                # Windows: Install-Kairo.bat/.ps1, Rollback-Kairo.bat, kairo-run.ps1
+  scripts/ build-release.sh quiet.ps1 backup.ps1
   devdata/                  # git-ignored
 ```
 
-**Prod data (`/srv/kairo/`):** `db/kairo.sqlite`, `vault/`, `inbox/`, `logs/`, `workspace/` (CLI runtime dir with `.claude/settings.json`).
+**Prod data (`C:\Kairo\data\`):** `db\kairo.sqlite`, `vault\`, `inbox\`, `logs\`, `workspace\` (CLI runtime dir with `.claude\settings.json` and `.mcp.json`, written by the backend at start), `config\`, `secrets\`, `claude-config\`, `backups\`. Folder access: the owner's account, SYSTEM and Administrators only.
 
-**Allowed dependencies (ask before others):** fastapi, uvicorn, sqlmodel, alembic, apscheduler, pydantic, pyyaml, httpx, pywebpush, python-multipart, pdfplumber (or pypdf), pytest; react, react-dom, vite, vite-plugin-pwa, a small router; system: restic, syncthing, rclone, tailscale; one maintained open-source Google Workspace MCP server (show choice first).
+**Allowed dependencies (ask before others):** fastapi, uvicorn, sqlmodel, alembic, apscheduler, pydantic, pyyaml, httpx, pywebpush, python-multipart, pdfplumber (or pypdf), pytest; react, react-dom, vite, vite-plugin-pwa, a small router; system: restic, syncthing, rclone, tailscale; on kairo-home via winget: Python 3.12, Tailscale; Claude Code via Anthropic's official installer. (v4: no third-party Google MCP server; no Docker.)
 
 ---
 
-## 6. kairo-home setup checklist
+## 6. kairo-home setup (Windows, v4)
 
-**By the owner (physically, once):**
-- BIOS: restore on AC power loss = On; Wake-on-LAN = On; RTC wake = On; quiet fan curve; check TPM 2.0 present.
-- Install Ubuntu Server 24.04 LTS, hostname `kairo-home`, OpenSSH on, wired Ethernet.
-- `curl -fsSL https://tailscale.com/install.sh | sh` then `sudo tailscale up --ssh`, sign in.
-- Later, once: `claude` login on kairo-home with the subscription.
+**By the owner, physically, once:**
+- BIOS/UEFI: restore on AC power loss = On (often called "AC Back" or "Power On after power failure"); Wake-on-LAN = On; check whether TPM 2.0 is present (needed for BitLocker, 0.4).
+- Ethernet cable plugged in.
+- Unzip `Kairo-Setup-<version>.zip` anywhere, double-click `Install-Kairo.bat`, follow the screen.
 
-**By Claude Code over SSH:**
-- Unattended security updates ON, automatic reboots OFF.
-- NVIDIA driver + NVIDIA container toolkit (for phase 3).
-- Docker + Compose; ufw deny incoming except tailscale0.
-- Node.js 22 + Claude Code CLI.
-- `/opt/kairo` checkout (deploy key), `/srv/kairo` dirs with correct owner.
+### 6a. What `Install-Kairo.bat` does (first install)
+1. Asks for admin rights (one Windows prompt: click **Yes**).
+2. Checks Windows version and that `winget` exists.
+3. Installs or updates, silently: Python 3.12 (winget), Tailscale (winget), Claude Code (Anthropic's official installer, pinned version, auto-update off: the installer controls the version).
+4. Creates `C:\Kairo\` with locked-down permissions; seeds `data\config\` from the release.
+5. Installs the release into `app\releases\<version>\` with its own Python venv; points `app\current` at it.
+6. Power: sleep and hibernate off on mains power; hibernate file off (also turns off Fast Startup); screen may still switch off.
+7. Scheduled task **Kairo**: starts at boot as the owner's account **without a stored password** (S4U: runs whether logged in or not, local resources only), restarts if it stops (re-check every 5 min), no time limit. The task runs `kairo-run.ps1`, which starts the API on `127.0.0.1:8000` only.
+8. Starts Kairo and waits for `/health`.
+9. **Walks through the one-time logins**, each with plain instructions on screen, each skippable and re-runnable (`Install-Kairo.bat -Logins`):
+   - **Tailscale:** `tailscale up --unattended`; a browser opens; sign in. Then `tailscale serve` publishes `https://kairo-home.<tailnet>.ts.net` → `127.0.0.1:8000`. If HTTPS isn't enabled in the tailnet yet, the screen says exactly where to click.
+   - **Claude:** a window opens with `claude`; type `/login`, sign in in the browser, then `/exit`. The installer then runs one tiny test message and shows the answer.
+   - **Google:** first the one-time Google Cloud setup (create project, enable Gmail + Calendar API, consent screen "In production", Desktop OAuth client, download the JSON), with every click written out; the installer asks for the JSON file. Then two sign-ins in the browser: one read-only, one for writes. Kairo shows which Gmail address it got.
+10. Prints a summary: what worked, what was skipped, the iPhone URL, and "restart the PC once to test auto-start".
+
+### 6b. Updates
+Same zip, same double-click. The installer detects the existing install, skips everything already done, never asks for logins again, never touches `data\config\` or `data\secrets\`, and: backs up the DB → installs the new release next to the old one → stops the task → migrates → starts → health check → on failure: schema downgrade, back to the previous release, restart, and a red message.
+
+### 6c. Later (phase 3, not in v4's installer)
 - restic nightly 03:00 → encrypted cloud copy via rclone; monthly restore test.
-- `scripts/quiet.sh on|off` (GPU power limit, CPU freq, stop GPU containers); cron 23:00/06:00; callable from app.
+- `quiet.ps1 on|off` (GPU power limit via `nvidia-smi`, stop GPU jobs) at 23:00/06:00; callable from the app.
 - Heartbeat every 5 min to a dead-man's-switch service; missed beat → alert on iPhone.
-- School cloud: test abraunegg/onedrive with the school account; if blocked → iPhone share sheet fallback.
+- School cloud: Windows already has OneDrive; test the school account there; fallback iPhone share sheet.
 
-**Laptop (the owner + Claude Code):** Tailscale for Windows; in WSL: Node 22, Claude Code CLI, pip, git identity, SSH key, `~/.ssh/config` entry `Host kairo-home`.
+**Laptop (the owner + Claude Code):** Tailscale for Windows; in WSL: Python 3.12, Node 22, Claude Code CLI, git identity, SSH key for GitHub.
 
 ---
 
 ## 7. Claude Code runtime integration (phase 2)
 
-- Backend never calls an Anthropic API; it runs the **Claude Code CLI as a subprocess** in `/srv/kairo/workspace` and reads streamed JSON. **Verify all flags with `claude --help` on the installed version.**
+- Backend never calls an Anthropic API; it runs the **Claude Code CLI as a subprocess** in `C:\Kairo\data\workspace` (dev: `devdata/workspace`) and reads streamed JSON. **Verify all flags with `claude --help` on the installed version.** CLI version pinned by the installer; `DISABLE_UPDATES=1` in the CLI's environment so it never updates itself.
 - **Chat:** thread stores the CLI session id; follow-ups resume it. New thread per day by default.
 - **Jobs:** fresh call per job with a fixed prompt file.
 - **Tools the model gets (complete list, v3):**
@@ -265,16 +284,16 @@ kairo/
   - Internal (tier 1): `mcp_kairo` tasks, notes (Kairo-owned files), captures.
   - `mcp_kairo.propose_action(action, args)`: the **only** way to ask for an external write.
   - Nothing else. No Google write tools, no Bash, no file-write, no web tools.
-- **Two layers of enforcement:**
-  1. **Layer 1, capability:** Google write tools do not exist for the model. The Google MCP server the CLI uses runs with a **separate OAuth token limited to read-only scopes** (`gmail.readonly`, `calendar.readonly`), and its write tools are disabled in its config. Even if it exposed a write tool, Google would refuse the call.
-  2. **Layer 2, gate:** workspace `.claude/settings.json` registers `server/hooks/pre_tool_use.py` (PreToolUse) for **all** tools → `gate.py` → `permissions.yaml`. The hook allows only the tool names listed above; everything else is denied. Backed by `permissions.deny` in the same settings file and the CLI's allowed/disallowed-tools flags (verify flag names with `claude --help`).
+- **Two layers of enforcement (v4):**
+  1. **Layer 1, capability:** the model's only MCP server is `mcp_kairo`. It has no Google credentials and no logic: each tool call is forwarded over `127.0.0.1` to the backend (with a per-start secret), and the backend runs `gate.py` before doing anything. Read tools use the backend's **read-only Google token**; external writes exist only as `propose_action`, executed by `executor.py` with the **write token**. Neither token is ever in the CLI's environment or workspace.
+  2. **Layer 2, gate hook:** workspace `.claude/settings.json` registers `server/hooks/pre_tool_use.py` (PreToolUse, matcher `*`, exec form: Python executable + script path, no shell, so it works the same on Windows and Linux) → `gate.py` → `permissions.yaml`. The hook allows only the tool names listed above; everything else is denied. Backed by `permissions.deny` in the same settings file and `--tools ""` (no built-in tools at all).
 - **Gate fails closed (LOCKED, v3).** Verified against the Claude Code hooks docs (Oct 2026): only exit code 2 (or a JSON `deny`) blocks; exit 1, any other non-zero, a timeout, or a hook that can't start are **non-blocking and the tool runs**. Therefore:
   - The hook script wraps everything in `try/except BaseException` → print reason to stderr → `exit 2`. Missing config, bad YAML, import error, DB error: all block.
   - Register the hook with `"onFailure": "block"` (needs Claude Code ≥ v2.1.295; check the installed version) and a short explicit `timeout`, so a crash before Python starts or a hang also blocks.
   - Allow is explicit: the hook prints a JSON `allow` only for listed tools; silence is not approval.
 - **Execution is the backend's job.** `propose_action` → gate → tier 2: `executor.py` runs it now with the backend's write-scoped Google token, logs it, adds it to the digest; tier 3–4: card; tier 5 or unknown: deny + log. Approved cards are executed by `executor.py` from stored action + args; result posted to the thread. The model never sees the write token.
-- **Google credentials:** two OAuth tokens from the same Google Cloud client: a read-only one for the MCP server, and a write-scoped one held only by the backend (`server/app/google/`). Both in `.env`/keyring, never in the workspace dir the CLI can read.
-- **MCP (phase 2):** Google Workspace (Gmail + Calendar, read-only token, write tools off), vault filesystem (read-only), `mcp_kairo`.
+- **Google credentials:** two OAuth tokens from the same Google Cloud client (Desktop app type, loopback redirect to `127.0.0.1:8000`, PKCE): read-only (`gmail.readonly`, `calendar.readonly`) for read tools, and write-scoped (`gmail.modify`, `gmail.compose`, `calendar.events`) used only by `executor.py`. Both in `C:\Kairo\data\secrets\`, never in the CLI's workspace or environment.
+- **MCP (phase 2, v4):** only `mcp_kairo` (its read tools cover Gmail, Calendar and the vault). No third-party MCP servers.
 - **Usage limits:** one brain call at a time (queue); count runs/day against a daily run budget in `schedule.yaml`; on limit → pause jobs, banner, no crash. Email triage hourly max. Terms and limits risk: section 18b.
 - **Google OAuth:** set the OAuth app to **"In production"** (unverified OK for one user); "Testing" tokens expire after 7 days.
 
@@ -470,7 +489,7 @@ One at a time from a queue; times in `config/schedule.yaml`; all runnable on dem
 ## 13. Capture pipeline
 
 1. **In:** iPhone Shortcut (Action button) → `POST /api/capture`; share sheet → PWA; chat attachment; email to `+pa` address (Gmail label `Kairo/Inbox`).
-2. **Store:** `/srv/kairo/inbox/<date>/` + `captures` row.
+2. **Store:** `<data>/inbox/<date>/` (kairo-home: `C:\Kairo\data\inbox\`) + `captures` row.
 3. **Extract:** text; PDF text; photos read by the brain; audio waits for phase 3.
 4. **Classify:** task / school event / note / person note / idea / question.
 5. **File** + link back + line in next brief. **Unclear → ask, never guess.**
@@ -491,15 +510,19 @@ start the next until its checks pass and the owner says go.
 - Code: ~/kairo in WSL2 on the owner's laptop -> GitHub private repo "kairo".
 - Never put code in OneDrive. OneDrive\Kairo\ is for documents only
   (inbox/, archive/, exports/).
-- Prod: kairo-home over Tailscale (`ssh kairo-home`). Code at /opt/kairo,
-  data at /srv/kairo. Deploy only via scripts/deploy.sh after tests pass.
-  Never edit code directly on kairo-home.
+- Prod: kairo-home is Windows (existing install). Kairo runs natively: code
+  in C:\Kairo\app\releases\<version>, data in C:\Kairo\data. Deploy only
+  via the release zip from scripts/build-release.sh + Install-Kairo.bat, after
+  tests pass. Never edit code directly on kairo-home.
 - Dev data: ~/kairo/devdata (git-ignored).
 
 ## Stack
 - Python 3.12, FastAPI, SQLModel + SQLite, Alembic, APScheduler. Tests: pytest.
 - Web: React + Vite + vite-plugin-pwa. No other UI framework.
-- Docker Compose on Ubuntu. Claude Code CLI on the host.
+- kairo-home: native Windows, scheduled task at boot, Claude Code CLI
+  installed natively with a pinned version. No Docker, no WSL there.
+- Every Python path, subprocess and script must work on Windows and Linux.
+  CI runs the tests on both.
 
 ## Non-negotiable rules
 - Every external action goes through server/app/gate.py. Google writes run
@@ -509,8 +532,10 @@ start the next until its checks pass and the owner says go.
 - The model never gets an external write tool. Its tools: read tools, internal
   Kairo tools (tasks, notes, captures) and mcp_kairo.propose_action. Nothing
   else, for every brain adapter.
-- The Google MCP server the model uses runs on a read-only OAuth token. The
-  write-scoped token is held only by the backend, outside the CLI workspace.
+- The model's only MCP server is mcp_kairo, which forwards every call to the
+  backend. Both Google tokens live only in the backend (read-only token for
+  reads, write token only in executor.py), never in the CLI's environment or
+  workspace. No third-party MCP servers.
 - The gate fails closed: any hook error, crash, timeout or failure to start
   blocks the call (catch-all + exit 2, onFailure: block). Never weaken this.
 - A tier-2 action that would notify another person (attendees, invites,
@@ -524,7 +549,8 @@ start the next until its checks pass and the owner says go.
 - The model is only reached through server/app/brain/ (adapters).
 - No Anthropic API key, no Agent SDK, no subscription-proxy tools.
 - Nothing personal hardcoded: use config/profile.yaml and .env.
-- Secrets only in .env (never committed) or the OS keyring.
+- Secrets only in .env (never committed), the data folder's secrets\, or the
+  OS keyring.
 - No public ports. The app is served only via tailscale serve.
 
 ## Plan updates
@@ -546,21 +572,27 @@ start the next until its checks pass and the owner says go.
 
 ## 15. Build order (Phase 2)
 
-**Milestone A — skeleton (week 2)** *(Claude Code's draft plan is approved in principle; adjust names to kairo)*
+**Milestone A — skeleton (week 2)** *(code done: PR #2)*
+- [x] Repo `~/kairo`: CLAUDE.md, docs/, `.env.example`, `.gitignore`, config/ (incl. profile.yaml)
+- [x] FastAPI `/health`; SQLModel models for section 9; Alembic; tests (health + fresh-DB migration)
+- [x] `brain/base.py` + `brain/claude_cli.py` (flags verified); tests with the fake CLI
+- [x] Web: Vite + React + PWA shell, six-tab bar, Chat over websocket
 - [ ] Laptop: Tailscale, Node 22, Claude Code CLI in WSL, git identity, SSH key
-- [ ] kairo-home: the owner's physical steps done; Claude Code finishes setup over SSH
-- [ ] Repo `~/kairo`: CLAUDE.md, docs/, docker-compose, `.env.example`, `.gitignore`, config/ (incl. profile.yaml)
-- [ ] FastAPI `/health`; SQLModel models for section 9; Alembic; tests (health + fresh-DB migration)
-- [ ] `brain/base.py` + `brain/claude_cli.py` (flags verified); tests with the fake CLI
-- [ ] Web: Vite + React + PWA shell, six-tab bar, Chat over websocket
-- [ ] `scripts/deploy.sh` (+ `--rollback`, health check)
-- [ ] On kairo-home: `tailscale serve`, Kairo installed on iPhone, one real chat end to end
+
+**Milestone A2 — Windows install (v4)**
+- [ ] Code runs on Windows: paths, subprocess env, CLI launch; CI runs the tests on Windows too
+- [ ] `scripts/build-release.sh` → `dist/Kairo-Setup-<version>.zip`
+- [ ] `Install-Kairo.bat` / `.ps1`: prerequisites, folders + permissions, release + venv, power settings, boot task, health check, update with auto-rollback; `Rollback-Kairo.bat`
+- [ ] Guided logins: Tailscale (+ `tailscale serve`), Claude, Google (Google part lands with Milestone B)
+- [ ] CI installs a release on a Windows runner, updates it, and forces a rollback
+- [ ] Remove Docker, `deploy.sh`, Ubuntu setup script
+- [ ] On kairo-home: install, restart once, Kairo reachable on the iPhone, one real chat end to end
 
 **Milestone B — the gate (week 3)**
 - [ ] permissions.yaml + gate.py (incl. `create_hold` field allow-list), tests for every tier
 - [ ] PreToolUse hook that fails closed (catch-all exit 2, `onFailure: block`, timeout); broken-hook tests (section 8)
 - [ ] Runtime tool list = read + internal + `propose_action` only; built-in Bash/write/web tools disabled; test that no Google write tool is reachable
-- [ ] Google OAuth (production mode): read-only token for the MCP server, write-scoped token for the backend only; Gmail + Calendar MCP with write tools off
+- [ ] Google OAuth (production mode, Desktop client, PKCE): read-only token for read tools, write token for `executor.py` only; guided setup in the installer; `mcp_kairo` bridge to the backend
 - [ ] `executor.py`: tier 2 auto-executed by the backend (logged, digest); approved tier 3–4 executed from stored args
 - [ ] Approvals table + screen, Web Push
 - [ ] Audit log + Activity screen; kill switch
@@ -595,7 +627,9 @@ start the next until its checks pass and the owner says go.
 | Approved = exact | Approve a draft, compare sent mail | Identical text + recipient |
 | Money impossible | Ask Kairo to pay a bill | Explains it can't; no tool exists |
 | Kill switch | Toggle during a job | Job stops |
-| Power cut | Pull plug, replug | Reachable within 5 min, no hands |
+| Power cut | Pull plug, replug | Reachable within 5 min, no hands, nobody logged in to Windows |
+| One-click update | Copy a new zip, double-click | New version running; nothing asked; data and config untouched |
+| Bad update | Install a release whose health check fails | Old release running again, red message, schema back |
 | Silent alarm | Stop API container | Heartbeat alert within 10 min |
 | Backup restore | Restore to temp | DB opens, vault complete |
 | Usage limit | Simulate limit | Jobs pause, banner, no crash |
@@ -622,9 +656,15 @@ start the next until its checks pass and the owner says go.
 
 - Which Gmail address does Kairo use?
 - RAM of kairo-home; is the 3060 the 12 GB version? (phase 4)
-- TPM 2.0 present? (disk encryption choice)
-- School cloud platform; does the Linux OneDrive client work with the school account?
-- **Which Claude plan does the owner have (Pro, Max 5x, Max 20x)?** Decides the usage budget and whether the monthly API credit applies (18b).
+- TPM 2.0 present, and Windows Home or Pro? (BitLocker choice, 0.4)
+- School cloud platform; does Windows OneDrive work with the school account?
+- ~~Which Claude plan?~~ Answered: **Max** (18b: monthly API credit applies).
+
+### 18a-2. Risks of the Windows host (v4)
+- **Boot task without a stored password (S4U)** is the Windows way to run when nobody is logged in. It has no network *credentials* (no file shares), which Kairo doesn't need; internet works. Verified only on a CI runner, not on kairo-home: acceptance check "Power cut" proves it.
+- **Windows Update restarts** the PC at its own times. The boot task brings Kairo back; jobs missed during the restart run when it's back (Milestone C).
+- **Claude login expiry:** the CLI refreshes its login itself and warns 3 days before it expires; Kairo shows `logged_out` on the More screen and the chat banner. Fix: `Install-Kairo.bat -Logins`.
+- **Antivirus** may slow or block `claude.exe` or Python the first time. The installer reports if the health check doesn't pass.
 
 ### 18b. Risk: Claude Code CLI headless 24/7 on the subscription (researched 2026-10-13)
 

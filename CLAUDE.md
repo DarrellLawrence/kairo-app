@@ -7,15 +7,19 @@ start the next until its checks pass and the owner says go.
 - Code: ~/kairo in WSL2 on the owner's laptop -> GitHub private repo "kairo".
 - Never put code in OneDrive. OneDrive\Kairo\ is for documents only
   (inbox/, archive/, exports/).
-- Prod: kairo-home over Tailscale (`ssh kairo-home`). Code at /opt/kairo,
-  data at /srv/kairo. Deploy only via scripts/deploy.sh after tests pass.
-  Never edit code directly on kairo-home.
+- Prod: kairo-home is Windows (existing install). Kairo runs natively: code
+  in C:\Kairo\app\releases\<version>, data in C:\Kairo\data. Deploy only
+  via the release zip from scripts/build-release.sh + Install-Kairo.bat, after
+  tests pass. Never edit code directly on kairo-home.
 - Dev data: ~/kairo/devdata (git-ignored).
 
 ## Stack
 - Python 3.12, FastAPI, SQLModel + SQLite, Alembic, APScheduler. Tests: pytest.
 - Web: React + Vite + vite-plugin-pwa. No other UI framework.
-- Docker Compose on Ubuntu. Claude Code CLI on the host.
+- kairo-home: native Windows, scheduled task at boot, Claude Code CLI
+  installed natively with a pinned version. No Docker, no WSL there.
+- Every Python path, subprocess and script must work on Windows and Linux.
+  CI runs the tests on both.
 
 ## Non-negotiable rules
 - Every external action goes through server/app/gate.py. Google writes run
@@ -25,8 +29,10 @@ start the next until its checks pass and the owner says go.
 - The model never gets an external write tool. Its tools: read tools, internal
   Kairo tools (tasks, notes, captures) and mcp_kairo.propose_action. Nothing
   else, for every brain adapter.
-- The Google MCP server the model uses runs on a read-only OAuth token. The
-  write-scoped token is held only by the backend, outside the CLI workspace.
+- The model's only MCP server is mcp_kairo, which forwards every call to the
+  backend. Both Google tokens live only in the backend (read-only token for
+  reads, write token only in executor.py), never in the CLI's environment or
+  workspace. No third-party MCP servers.
 - The gate fails closed: any hook error, crash, timeout or failure to start
   blocks the call (catch-all + exit 2, onFailure: block). Never weaken this.
 - A tier-2 action that would notify another person (attendees, invites,
@@ -40,7 +46,8 @@ start the next until its checks pass and the owner says go.
 - The model is only reached through server/app/brain/ (adapters).
 - No Anthropic API key, no Agent SDK, no subscription-proxy tools.
 - Nothing personal hardcoded: use config/profile.yaml and .env.
-- Secrets only in .env (never committed) or the OS keyring.
+- Secrets only in .env (never committed), the data folder's secrets\, or the
+  OS keyring.
 - No public ports. The app is served only via tailscale serve.
 
 ## Plan updates

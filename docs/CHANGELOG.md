@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-13 — docs: kickoff v4 (Windows host, one-click install)
+- kairo-home stays on Windows; Kairo runs natively (no Docker/WSL there).
+- Deploy = release zip + `Install-Kairo.bat` (install, update, auto-rollback, guided logins); boot task without stored password; no sleep.
+- Google tools live in the backend; `mcp_kairo` is the only MCP server and forwards to the backend. No third-party Google MCP server.
+- Owner config + secrets live in the data folder and survive updates.
+- Supersedes the Milestone A decision "CLI inside the container".
+
 ## 2026-10-13 — docs: kickoff v3 (security hardening)
 - Gate fails closed: any hook error, crash, timeout or failure to start blocks (catch-all exit 2 + `onFailure: block`). Broken-hook tests.
 - Model has no Google write tools: read + internal tools + `mcp_kairo.propose_action` only. Backend owns write credentials; `executor.py` runs tier 2 automatically and tier 3-4 after approval. Google MCP runs on a read-only token. Hook stays as second layer.
