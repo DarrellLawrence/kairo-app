@@ -52,8 +52,8 @@ class ClientConfig:
     client_secret: str
 
     @classmethod
-    def load(cls, secrets_dir: Path) -> "ClientConfig":
-        path = secrets_dir / "google-client.json"
+    def load(cls, secrets_dir: Path, name: str = "google-client.json") -> "ClientConfig":
+        path = secrets_dir / name
         if not path.is_file():
             raise GoogleNotConnected("Google is not set up yet (no OAuth client). Run Kairo Logins on the PC.")
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -97,18 +97,31 @@ class GoogleAPI:
             raise GoogleNotConnected(f"Google ({self.kind}) is not signed in yet. Run Kairo Logins on the PC.")
         if token.get("access_token") and token.get("expires_at", 0) > time.time() + 60:
             return token["access_token"]
-        client = ClientConfig.load(self.secrets_dir)
+        # A refresh token only works with the client that issued it (PC or phone client).
+        name = token.get("client_file")
+        name = name if name in ("google-client.json", "google-web-client.json") else "google-client.json"
+        client = ClientConfig.load(self.secrets_dir, name)
         r = self._http.post(TOKEN_URL, data={
             "client_id": client.client_id, "client_secret": client.client_secret,
             "refresh_token": token["refresh_token"], "grant_type": "refresh_token",
         })
+        if r.status_code in (400, 401):
+            raise GoogleNotConnected(f"Google ({self.kind}) sign-in expired or was revoked. Sign in again (More -> Google).")
         if r.status_code != 200:
-            raise GoogleNotConnected(f"Google ({self.kind}) sign-in expired or was revoked. Run Kairo Logins on the PC.")
+            raise GoogleError(r.status_code, "Google sign-in service did not answer")
         data = r.json()
         token["access_token"] = data["access_token"]
         token["expires_at"] = time.time() + int(data.get("expires_in", 3600))
         save_token(self.secrets_dir, self.kind, token)
         return token["access_token"]
+
+    def refresh(self) -> None:
+        """Ask Google for a new access token now (raises GoogleNotConnected if signed out)."""
+        token = load_token(self.secrets_dir, self.kind) or {}
+        token.pop("expires_at", None)
+        if token:
+            save_token(self.secrets_dir, self.kind, token)
+        self._access_token()
 
     # -- requests
 

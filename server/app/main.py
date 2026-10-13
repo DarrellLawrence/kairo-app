@@ -5,6 +5,7 @@ Run: uvicorn app.main:create_app --factory
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import secrets
@@ -22,10 +23,11 @@ from .audit import audit
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
 from .gate_context import read_context
+from .housekeeping import Housekeeping, run_forever
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
-from .google.oauth import GoogleOAuth, OAuthError
+from .google.oauth import WEB_CLIENT, GoogleOAuth, OAuthError
 from .mcp_tools import tool_list, tool_names
-from .push import Pusher
+from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
@@ -70,7 +72,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        task = asyncio.create_task(run_forever(Housekeeping(app)))
         yield
+        task.cancel()
         engine.dispose()
 
     app = FastAPI(title="Kairo", lifespan=lifespan)
@@ -82,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
     app.state.on_new_card = lambda card: app.state.pusher.notify(
         f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
+    app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
 
@@ -194,19 +199,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- Google sign-in (only on the PC itself)
 
-    def _page(title: str, text: str, ok: bool) -> HTMLResponse:
+    def _page(title: str, text: str, ok: bool, link: tuple[str, str] | None = None) -> HTMLResponse:
         colour = "#1a7f37" if ok else "#c62828"
         body = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
                 f"<title>Kairo</title><body style='font:18px system-ui;max-width:640px;margin:40px auto;padding:0 16px'>"
                 f"<h1 style='color:{colour}'>{_esc(title)}</h1><p>{_esc(text)}</p>")
+        if link:
+            body += (f"<p><a href='{_esc(link[0])}' style='display:inline-block;padding:14px 20px;background:#1a73e8;"
+                     f"color:#fff;border-radius:10px;text-decoration:none'>{_esc(link[1])}</a></p>")
         return HTMLResponse(body, status_code=200 if ok else 400)
+
+    def _phone_redirect(request: Request) -> str:
+        """Sign-in from the iPhone: only through Kairo's own tailnet name (tailscale serve)."""
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+        host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        if not host.endswith(".ts.net"):
+            raise HTTPException(403, "Google sign-in only on the PC or through Kairo's tailnet address")
+        return f"https://{host}/setup/google/callback"
 
     @app.get("/setup/google/start")
     def google_start(request: Request, kind: str):
-        if not is_local_request(request):
-            raise HTTPException(403, "Google sign-in only on the PC itself")
         try:
-            return RedirectResponse(app.state.oauth.start_url(kind), status_code=302)
+            if is_local_request(request):
+                return RedirectResponse(app.state.oauth.start_url(kind), status_code=302)
+            redirect = _phone_redirect(request)
+            if not app.state.oauth.has_web_client():
+                return _page("Not set up for the phone yet",
+                             "Signing in again from the iPhone needs a one-time step on the PC: run Kairo Logins "
+                             "(Google part). Until then, sign in again with Kairo Logins on the PC.", ok=False)
+            return RedirectResponse(app.state.oauth.start_url(kind, redirect_uri=redirect, client_file=WEB_CLIENT),
+                                    status_code=302)
         except GoogleNotConnected as exc:
             return _page("Google is not set up yet", str(exc), ok=False)
         except OAuthError as exc:
@@ -214,17 +236,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/setup/google/callback")
     def google_callback(request: Request, state: str = "", code: str = "", error: str = ""):
-        if not is_local_request(request):
-            raise HTTPException(403, "Google sign-in only on the PC itself")
+        phone = not is_local_request(request)
+        redirect = _phone_redirect(request) if phone else None
         if error:
-            return _page("Not signed in", f"Google said: {error}. Go back to the setup window and try again.", ok=False)
+            return _page("Not signed in", f"Google said: {error}. Start the sign-in again.", ok=False)
         try:
-            result = app.state.oauth.finish(state=state, code=code)
+            result = app.state.oauth.finish(state=state, code=code, redirect_uri=redirect)
         except (OAuthError, GoogleNotConnected) as exc:
             return _page("Not signed in", str(exc), ok=False)
         with session_for(engine) as s:
-            audit(s, actor="owner", action=f"google.signin.{result['kind']}", outcome=f"signed in as {result['email']}")
+            audit(s, actor="owner", action=f"google.signin.{result['kind']}",
+                  outcome=f"signed in as {result['email']}" + (" (from the phone)" if phone else ""))
         what = "reading" if result["kind"] == "read" else "drafts, labels and approved sends"
+        if phone and result["kind"] == "read":
+            return _page("Step 1 of 2 done", f"Kairo can read {result['email']} again. One more sign-in for the "
+                         "write permission (drafts, labels, approved sends):", ok=True,
+                         link=("/setup/google/start?kind=write", "Step 2 of 2: sign in for write"))
+        if phone:
+            return _page("Done", f"Kairo can use {result['email']} again for {what}. You can close this tab.", ok=True)
         return _page("Done", f"Kairo can now use {result['email']} for {what}. Close this tab and go back to the setup window.", ok=True)
 
     @app.get("/api/setup/google/status")
@@ -339,6 +368,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return
 
     async def _handle_message(ws: WebSocket, thread_id, text_in: str) -> None:
+        if time.time() < app.state.maintenance_until:
+            await ws.send_json({"type": "error", "status": "updating",
+                                "message": "Kairo is installing an update. Try again in a minute."})
+            return
         with session_for(engine) as s:
             if killswitch.is_paused(s):
                 await ws.send_json({"type": "error", "status": "paused",
@@ -406,6 +439,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": ok, "brain": status, "reply": reply.strip()[:200],
                 "error": error.text[:500] if error else None,
                 "seconds": round(time.monotonic() - started, 1)}
+
+    # ---------------------------------------------------------------- auto-update (installer/Kairo-AutoUpdate.ps1)
+
+    @app.post("/api/update/ready")
+    def update_ready(request: Request, body: dict | None = None):
+        """May the auto-updater restart Kairo now? Only when no chat or job is running, and not in
+        the quiet hours unless the update is urgent. A yes holds new chats off for 30 minutes.
+        Jobs (Milestone C) must check app.state.maintenance_until too."""
+        if not is_local_request(request):
+            raise HTTPException(403, "only from this PC")
+        urgent = bool((body or {}).get("urgent"))
+        if runner.busy:
+            return {"ready": False, "reason": "busy"}
+        if not urgent and in_quiet_hours(profile):
+            return {"ready": False, "reason": "quiet"}
+        app.state.maintenance_until = time.time() + 1800
+        return {"ready": True, "reason": "idle"}
+
+    @app.post("/api/update/release")
+    def update_release(request: Request):
+        if not is_local_request(request):
+            raise HTTPException(403, "only from this PC")
+        app.state.maintenance_until = 0.0
+        return {"ok": True}
 
     @app.get("/api/status")
     def status():

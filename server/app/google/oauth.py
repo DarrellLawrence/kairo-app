@@ -1,8 +1,11 @@
-"""Google sign-in for kairo-home (Desktop OAuth client, loopback redirect, PKCE).
+"""Google sign-in for kairo-home (PKCE).
 
-Two sign-ins, one per token kind (see client.SCOPES). Only reachable from the
-PC itself (127.0.0.1): the installer opens the browser there. The signed-in
-address must match profile.yaml's gmail, so a wrong account can't slip in.
+Two sign-ins, one per token kind (see client.SCOPES). On the PC: the Desktop
+client with the loopback redirect (the installer opens the browser there).
+From the iPhone (Google "Testing" mode signs out every 7 days): an optional
+"Web application" client whose redirect is Kairo's own tailnet address. The
+signed-in address must match profile.yaml's gmail, so a wrong account can't
+slip in, and a sign-in can only be finished where it was started.
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ import httpx
 from .client import AUTH_URL, SCOPES, TOKEN_URL, ClientConfig, Kind, load_token, save_token
 
 STATE_TTL_S = 900
+DESKTOP_CLIENT = "google-client.json"
+WEB_CLIENT = "google-web-client.json"     # optional: sign in again from the iPhone
 
 
 class OAuthError(Exception):
@@ -30,6 +35,8 @@ class OAuthError(Exception):
 class _Pending:
     kind: Kind
     verifier: str
+    redirect_uri: str
+    client_file: str
     created: float = field(default_factory=time.time)
 
 
@@ -46,21 +53,33 @@ class GoogleOAuth:
         def email(kind: Kind):
             t = load_token(self.secrets_dir, kind)
             return t.get("email") if t and t.get("refresh_token") else None
-        return {"client": (self.secrets_dir / "google-client.json").is_file(),
-                "read": email("read"), "write": email("write"), "expected": self.expected_email}
+        def ends(kind: Kind):
+            t = load_token(self.secrets_dir, kind)
+            if not t or not t.get("refresh_token") or not t.get("issued_at") or t.get("no_expiry"):
+                return None
+            return t["issued_at"] + 7 * 86400   # Google "Testing" mode
+        return {"client": (self.secrets_dir / DESKTOP_CLIENT).is_file(), "phone_client": self.has_web_client(),
+                "read": email("read"), "write": email("write"), "expected": self.expected_email,
+                "read_may_end": ends("read"), "write_may_end": ends("write"),
+                "signed_out": any(bool((load_token(self.secrets_dir, k) or {}).get("signed_out_notice"))
+                                  for k in ("read", "write"))}
 
-    def start_url(self, kind: Kind) -> str:
+    def has_web_client(self) -> bool:
+        return (self.secrets_dir / WEB_CLIENT).is_file()
+
+    def start_url(self, kind: Kind, *, redirect_uri: str | None = None, client_file: str = DESKTOP_CLIENT) -> str:
         if kind not in SCOPES:
             raise OAuthError("kind must be read or write")
-        client = ClientConfig.load(self.secrets_dir)
+        redirect_uri = redirect_uri or self.redirect_uri
+        client = ClientConfig.load(self.secrets_dir, client_file)
         verifier = secrets.token_urlsafe(64)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         state = secrets.token_urlsafe(24)
         now = time.time()
         self._pending = {k: v for k, v in self._pending.items() if now - v.created < STATE_TTL_S}
-        self._pending[state] = _Pending(kind=kind, verifier=verifier)
+        self._pending[state] = _Pending(kind=kind, verifier=verifier, redirect_uri=redirect_uri, client_file=client_file)
         params = {
-            "client_id": client.client_id, "redirect_uri": self.redirect_uri, "response_type": "code",
+            "client_id": client.client_id, "redirect_uri": redirect_uri, "response_type": "code",
             "scope": " ".join(SCOPES[kind]), "access_type": "offline", "prompt": "consent",
             "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
         }
@@ -68,15 +87,18 @@ class GoogleOAuth:
             params["login_hint"] = self.expected_email
         return AUTH_URL + "?" + urlencode(params)
 
-    def finish(self, *, state: str, code: str) -> dict:
-        pending = self._pending.pop(state, None)
+    def finish(self, *, state: str, code: str, redirect_uri: str | None = None) -> dict:
+        pending = self._pending.get(state)
         if pending is None or time.time() - pending.created > STATE_TTL_S:
             raise OAuthError("This sign-in link is old or unknown. Start the Google step again.")
-        client = ClientConfig.load(self.secrets_dir)
+        if pending.redirect_uri != (redirect_uri or self.redirect_uri):
+            raise OAuthError("This sign-in was started on another device. Start it again here.")
+        del self._pending[state]
+        client = ClientConfig.load(self.secrets_dir, pending.client_file)
         with httpx.Client(transport=self.transport, timeout=30.0) as http:
             r = http.post(TOKEN_URL, data={
                 "code": code, "client_id": client.client_id, "client_secret": client.client_secret,
-                "redirect_uri": self.redirect_uri, "grant_type": "authorization_code", "code_verifier": pending.verifier,
+                "redirect_uri": pending.redirect_uri, "grant_type": "authorization_code", "code_verifier": pending.verifier,
             })
             if r.status_code != 200:
                 raise OAuthError(f"Google refused the sign-in ({r.status_code}).")
@@ -98,5 +120,6 @@ class GoogleOAuth:
         save_token(self.secrets_dir, pending.kind, {
             "refresh_token": data["refresh_token"], "access_token": data["access_token"],
             "expires_at": time.time() + int(data.get("expires_in", 3600)), "scopes": sorted(granted), "email": email,
+            "issued_at": time.time(), "client_file": pending.client_file,
         })
         return {"kind": pending.kind, "email": email}
