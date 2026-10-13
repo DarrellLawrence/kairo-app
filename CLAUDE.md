@@ -16,7 +16,8 @@ start the next until its checks pass and the owner says go.
 ## Stack
 - Python 3.12, FastAPI, SQLModel + SQLite, Alembic, APScheduler. Tests: pytest.
 - Web: React + Vite + vite-plugin-pwa. No other UI framework.
-- kairo-home: native Windows, scheduled task at boot, Claude Code CLI
+- kairo-home: native Windows, scheduled task at boot as the limited account
+  kairo-svc (never admin, sees only C:\\Kairo), Claude Code CLI
   installed natively with a pinned version. No Docker, no WSL there.
 - Every Python path, subprocess and script must work on Windows and Linux.
   CI runs the tests on both.
