@@ -40,7 +40,7 @@ def load_settings() -> Settings:
     return Settings(
         data_dir=data_dir,
         config_dir=Path(_env("KAIRO_CONFIG_DIR", str(REPO_ROOT / "config"))),
-        db_url=_env("KAIRO_DB_URL", f"sqlite:///{data_dir / 'db' / 'kairo.sqlite'}"),
+        db_url=_env("KAIRO_DB_URL", f"sqlite:///{(data_dir / 'db' / 'kairo.sqlite').as_posix()}"),
         workspace_dir=Path(_env("KAIRO_WORKSPACE_DIR", str(data_dir / "workspace"))),
         brain=_env("KAIRO_BRAIN", "claude_cli"),
         claude_bin=_env("KAIRO_CLAUDE_BIN", "claude"),

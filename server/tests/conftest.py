@@ -9,7 +9,7 @@ from alembic.config import Config
 from app.settings import REPO_ROOT, Settings
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
-FAKE_CLAUDE = SERVER_DIR / "tests" / "fakes" / "claude"
+FAKE_CLAUDE = SERVER_DIR / "tests" / "fakes" / "fake_claude.py"
 
 
 def alembic_config(db_url: str) -> Config:
@@ -25,7 +25,7 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=data,
         config_dir=REPO_ROOT / "config",
-        db_url=f"sqlite:///{data / 'db' / 'kairo.sqlite'}",
+        db_url=f"sqlite:///{(data / 'db' / 'kairo.sqlite').as_posix()}",
         workspace_dir=data / "workspace",
         brain="claude_cli",
         claude_bin=str(FAKE_CLAUDE),

@@ -1,6 +1,9 @@
 """Claude Code CLI adapter: runs the official `claude` binary as a subprocess.
 
 Flags verified against Claude Code 2.1.296 (`claude --help` and real runs):
+- `--system-prompt-file <file>`: the system prompt goes in a file, not argv
+  (no Windows command-line quoting, no length limit). Works on 2.1.296
+  though `--help` only mentions it in passing.
 - `-p` with the prompt on **stdin**, never as an argument. A prompt starting
   with "-" would otherwise be parsed as a CLI flag, and variadic flags such as
   --allowedTools would swallow it.
@@ -23,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Iterator
@@ -44,7 +48,26 @@ ENV_ALLOWLIST = (
     "NO_PROXY",
     "NODE_EXTRA_CA_CERTS",
     "SSL_CERT_FILE",
+    # Windows: programs break without these (no SYSTEMROOT = no networking).
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "USERNAME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
 )
+# Always set for the CLI: Kairo's installer decides the CLI version.
+FIXED_ENV = {"DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1"}
 ENV_PREFIX_ALLOWLIST = ("KAIRO_HOOK_",)  # settings the gate hook needs
 
 _LOGGED_OUT_MARKERS = ("/login", "not logged in", "invalid api key", "authentication", "oauth token")
@@ -53,8 +76,10 @@ _USAGE_MARKERS = ("usage limit", "rate limit", "limit reached", "out of credits"
 
 def build_env(source: dict[str, str] | None = None) -> dict[str, str]:
     source = dict(os.environ if source is None else source)
-    env = {k: v for k, v in source.items() if k in ENV_ALLOWLIST}
-    env.update({k: v for k, v in source.items() if k.startswith(ENV_PREFIX_ALLOWLIST)})
+    # Windows env names are case-insensitive (SystemRoot vs SYSTEMROOT).
+    env = {k: v for k, v in source.items() if k.upper() in ENV_ALLOWLIST}
+    env.update({k: v for k, v in source.items() if k.upper().startswith(ENV_PREFIX_ALLOWLIST)})
+    env.update(FIXED_ENV)
     return env
 
 
@@ -93,7 +118,7 @@ class ClaudeCLIBrain:
 
     def build_command(self, *, session_id: str | None, system: str, tools: list[str]) -> list[str]:
         cmd = [
-            self.claude_bin,
+            *self._launcher(),
             "-p",
             "--output-format", "stream-json",
             "--verbose",
@@ -101,7 +126,7 @@ class ClaudeCLIBrain:
             "--strict-mcp-config",
             "--setting-sources", "project",
             "--permission-prompts", "none",
-            "--system-prompt", system,
+            "--system-prompt-file", str(self._system_prompt_file(system)),
         ]
         if self.mcp_config is not None:
             cmd += ["--mcp-config", str(self.mcp_config)]
@@ -113,6 +138,19 @@ class ClaudeCLIBrain:
         if session_id:
             cmd += ["--resume", session_id]
         return cmd
+
+    def _launcher(self) -> list[str]:
+        # A .py "binary" is the fake CLI used in tests; Windows can't exec it directly.
+        if self.claude_bin.endswith(".py"):
+            return [sys.executable, self.claude_bin]
+        return [self.claude_bin]
+
+    def _system_prompt_file(self, system: str) -> Path:
+        # One brain call at a time (BrainRunner), so one file is enough.
+        path = self.workspace_dir / ".kairo" / "system-prompt.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(system, encoding="utf-8")
+        return path
 
     # -- Brain protocol --------------------------------------------------
 
