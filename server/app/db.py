@@ -72,6 +72,8 @@ class Approval(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
     decided_at: datetime | None = None
     result_json: str | None = Field(default=None, sa_column=Column(Text))
+    thread_id: int | None = Field(default=None, foreign_key="chat_threads.id")
+    reason: str | None = Field(default=None, sa_column=Column(Text))  # the model's stated reason (shown, never trusted)
 
 
 class AuditLog(SQLModel, table=True):

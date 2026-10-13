@@ -14,6 +14,7 @@ actions:
   gmail.read:            0_read
   calendar.list:         0_read
   vault.read:            0_read
+  tasks.list:            0_read
   tasks.create:          1_internal
   tasks.update:          1_internal
   notes.write:           1_internal   # Kairo-owned files only

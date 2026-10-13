@@ -29,6 +29,18 @@ class Settings(BaseModel):
     def db_path(self) -> Path:
         return self.data_dir / "db" / "kairo.sqlite"
 
+    @property
+    def secrets_dir(self) -> Path:
+        return self.data_dir / "secrets"
+
+    @property
+    def vault_dir(self) -> Path:
+        return self.data_dir / "vault"
+
+    @property
+    def port(self) -> int:
+        return int(os.environ.get("KAIRO_PORT") or 8000)
+
 
 def _env(name: str, default: str) -> str:
     value = os.environ.get(name, "").strip()

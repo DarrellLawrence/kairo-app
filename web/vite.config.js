@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icon.svg', 'apple-touch-icon.png'],
+      includeAssets: ['icon.svg', 'apple-touch-icon.png', 'push-sw.js'],
       manifest: {
         name: 'Kairo',
         short_name: 'Kairo',
@@ -24,7 +24,8 @@ export default defineConfig({
       },
       workbox: {
         // App shell only. API and websocket traffic is never cached.
-        navigateFallbackDenylist: [/^\/api\//, /^\/ws\//, /^\/health/],
+        navigateFallbackDenylist: [/^\/api\//, /^\/ws\//, /^\/health/, /^\/setup\//, /^\/internal\//],
+        importScripts: ['push-sw.js'],
       },
     }),
   ],

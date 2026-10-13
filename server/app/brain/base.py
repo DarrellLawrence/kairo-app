@@ -42,6 +42,7 @@ class Brain(Protocol):
         session_id: str | None,
         system: str,
         tools: list[str],
+        origin: str = "owner_chat",   # owner_chat | job: jobs can never create approval cards
     ) -> Iterator[BrainEvent]: ...
 
     def health(self) -> BrainStatus: ...

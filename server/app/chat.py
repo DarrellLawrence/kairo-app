@@ -17,21 +17,28 @@ from .brain import Brain, BrainEvent, EventKind
 from .db import ChatMessage, ChatThread, utcnow
 from .profile import Profile
 
-# Milestone A: no tools yet. Milestone B adds read tools, internal Kairo tools
-# and mcp__kairo__propose_action (KICKOFF 7). Never Google write tools.
-CHAT_TOOLS: list[str] = []
 
 
 class BrainRunner:
     def __init__(self, brain: Brain) -> None:
         self.brain = brain
         self._lock = threading.Lock()
+        # The run in progress (one at a time): who started it and for which thread.
+        # Tool calls arriving through mcp_kairo belong to this run.
+        self.current_origin: str | None = None
+        self.current_thread_id: int | None = None
 
     @property
     def busy(self) -> bool:
         return self._lock.locked()
 
-    async def stream(self, prompt: str, *, session_id: str | None, system: str, tools: list[str]) -> AsyncIterator[BrainEvent]:
+    def cancel(self) -> None:
+        cancel = getattr(self.brain, "cancel", None)
+        if cancel is not None:
+            cancel()
+
+    async def stream(self, prompt: str, *, session_id: str | None, system: str, tools: list[str],
+                     origin: str = "owner_chat", thread_id: int | None = None) -> AsyncIterator[BrainEvent]:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[BrainEvent | None] = asyncio.Queue()
 
@@ -43,12 +50,14 @@ class BrainRunner:
 
         def work() -> None:
             with self._lock:
+                self.current_origin, self.current_thread_id = origin, thread_id
                 try:
-                    for event in self.brain.run(prompt, session_id=session_id, system=system, tools=tools):
+                    for event in self.brain.run(prompt, session_id=session_id, system=system, tools=tools, origin=origin):
                         post(event)
                 except Exception as exc:  # adapter bug: report, don't kill the server
                     post(BrainEvent(EventKind.error, text=f"Brain error: {exc}"))
                 finally:
+                    self.current_origin, self.current_thread_id = None, None
                     post(None)
 
         threading.Thread(target=work, name="brain-run", daemon=True).start()

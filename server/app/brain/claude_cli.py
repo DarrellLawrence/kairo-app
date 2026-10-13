@@ -104,6 +104,7 @@ class ClaudeCLIBrain:
         timeout_s: int = 300,
         model: str | None = None,
         env: dict[str, str] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.claude_bin = claude_bin
         self.workspace_dir = Path(workspace_dir)
@@ -111,8 +112,12 @@ class ClaudeCLIBrain:
         self.timeout_s = timeout_s
         self.model = model
         self._env = build_env(env)
+        # Settings the gate hook needs (KAIRO_HOOK_*), set by the backend.
+        self._env.update(extra_env or {})
         self._status = BrainStatus.ok
         self._run_limited = False
+        self._proc: subprocess.Popen | None = None
+        self._cancelled = threading.Event()
 
     # -- command ---------------------------------------------------------
 
@@ -152,6 +157,13 @@ class ClaudeCLIBrain:
         path.write_text(system, encoding="utf-8")
         return path
 
+    def cancel(self) -> None:
+        """Stop the running call (kill switch). Safe to call when idle."""
+        self._cancelled.set()
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
     # -- Brain protocol --------------------------------------------------
 
     def health(self) -> BrainStatus:
@@ -167,15 +179,18 @@ class ClaudeCLIBrain:
         session_id: str | None,
         system: str,
         tools: list[str],
+        origin: str = "owner_chat",
     ) -> Iterator[BrainEvent]:
         cmd = self.build_command(session_id=session_id, system=system, tools=tools)
+        run_env = {**self._env, "KAIRO_HOOK_ORIGIN": origin}
         self._run_limited = False
+        self._cancelled.clear()
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.Popen(
                 cmd,
                 cwd=self.workspace_dir,
-                env=self._env,
+                env=run_env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -195,6 +210,7 @@ class ClaudeCLIBrain:
             timed_out.set()
             proc.kill()
 
+        self._proc = proc
         timer = threading.Timer(self.timeout_s, on_timeout)
         timer.start()
         stderr_chunks: list[str] = []
@@ -219,9 +235,13 @@ class ClaudeCLIBrain:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+            self._proc = None
         stderr_reader.join(timeout=5)
         if not finished:
             stderr = "".join(stderr_chunks).strip()
+            if self._cancelled.is_set():
+                yield BrainEvent(EventKind.error, text="Stopped by the kill switch.", status=self._status, data={"cancelled": True})
+                return
             msg = "The Claude CLI timed out." if timed_out.is_set() else (stderr or f"The Claude CLI exited with code {proc.returncode}.")
             self._status = classify_error(msg, None)
             yield BrainEvent(EventKind.error, text=msg, status=self._status)
