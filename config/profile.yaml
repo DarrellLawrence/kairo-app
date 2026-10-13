@@ -1,0 +1,9 @@
+# Who the owner is. Everything personal lives here or in .env (KICKOFF 2c).
+name: Owner
+default_language: English
+languages: [English, German]
+timezone: Europe/Zurich
+context: "work, school, training, side projects"
+gmail: null            # OPEN: ask the owner
+quiet_hours: { start: "23:00", end: "06:00" }
+push_devices: [owner-phone]

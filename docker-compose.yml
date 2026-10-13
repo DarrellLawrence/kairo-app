@@ -1,0 +1,25 @@
+# Kairo on kairo-home. Reachable only through `tailscale serve` -> 127.0.0.1:8000.
+services:
+  api:
+    build:
+      context: .
+      args:
+        KAIRO_UID: ${KAIRO_UID:-1000}
+        KAIRO_GID: ${KAIRO_GID:-1000}
+    image: kairo-api:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      KAIRO_DATA_DIR: /srv/kairo
+      KAIRO_CONFIG_DIR: /app/config
+    volumes:
+      - ${KAIRO_HOST_DATA_DIR:-./devdata}:/srv/kairo
+      - ./config:/app/config:ro
+    ports:
+      - "127.0.0.1:8000:8000"   # never 0.0.0.0: no public ports (KICKOFF 2)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

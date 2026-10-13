@@ -1,0 +1,67 @@
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+
+
+def converse(ws, text, thread_id=None):
+    ws.send_json({"type": "message", "text": text, "thread_id": thread_id})
+    frames = []
+    while True:
+        f = ws.receive_json()
+        frames.append(f)
+        if f["type"] in ("done", "error"):
+            return frames
+
+
+def test_chat_streams_and_persists(migrated):
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        frames = converse(ws, "hello kairo")
+        assert frames[0]["type"] == "thread"
+        assert any(f["type"] == "delta" for f in frames)
+        assert frames[-1] == {"type": "done", "text": "echo: hello kairo", "message_id": frames[-1]["message_id"]}
+        tid = frames[0]["id"]
+        msgs = client.get(f"/api/threads/{tid}/messages").json()
+        assert [(m["role"], m["text"]) for m in msgs] == [("owner", "hello kairo"), ("kairo", "echo: hello kairo")]
+
+
+def test_follow_up_resumes_same_brain_session(migrated, tmp_path, monkeypatch):
+    import json
+
+    rec = tmp_path / "rec.json"
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        first = converse(ws, "one")
+        assert "--resume" not in json.loads(rec.read_text())["argv"]
+        second = converse(ws, "two", thread_id=first[0]["id"])
+        assert second[0]["id"] == first[0]["id"]
+        argv = json.loads(rec.read_text())["argv"]
+        assert "--resume" in argv
+
+
+def test_same_day_reuses_thread_new_thread_endpoint_starts_fresh(migrated):
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        a = converse(ws, "a")[0]["id"]
+        b = converse(ws, "b")[0]["id"]
+        assert a == b
+        new = client.post("/api/threads").json()["id"]
+        c = converse(ws, "c", thread_id=new)[0]["id"]
+        assert c == new != a
+
+
+def test_usage_limit_is_reported_not_crashed(migrated, monkeypatch):
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_MODE", "usage_limit")
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        frames = converse(ws, "hi")
+        assert frames[-1]["type"] == "error"
+        assert frames[-1]["status"] == "usage_limited"
+        assert client.get("/health").json()["brain"] == "usage_limited"
+
+
+def test_bad_input_is_rejected(migrated):
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"type": "message", "text": "   "})
+        assert ws.receive_json()["type"] == "error"
+        ws.send_json({"type": "nope"})
+        assert ws.receive_json()["type"] == "error"
+        ws.send_json({"type": "message", "text": "x" * 20_001})
+        assert ws.receive_json()["type"] == "error"

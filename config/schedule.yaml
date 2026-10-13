@@ -1,0 +1,12 @@
+# Job times (KICKOFF section 12). Used by the scheduler from Milestone C.
+timezone_from_profile: true
+quiet_window: { start: "23:00", end: "06:00" }
+brain:
+  max_runs_per_day: 60        # daily run budget; on limit jobs pause (KICKOFF 7, 18b)
+jobs:
+  email_triage:    { cron: "0 7-21 * * *" }
+  morning_brief:   { weekdays: "20 6 * * 1-5", weekends: "20 8 * * 6,0" }
+  capture_process: { every_minutes: 15, only_if_inbox_non_empty: true }
+  evening_checkin: { cron: "0 21 * * *" }
+  weekly_review:   { cron: "0 18 * * 0" }
+  lerndoku_prompt: { cron: "30 17 * * 5" }
