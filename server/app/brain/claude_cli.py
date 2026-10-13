@@ -187,7 +187,15 @@ class ClaudeCLIBrain:
             yield BrainEvent(EventKind.error, text=f"Could not start the Claude CLI: {exc}", status=self._status)
             return
 
-        timer = threading.Timer(self.timeout_s, proc.kill)
+        # Remember that WE killed it: on Windows a killed process exits with 1,
+        # not a negative signal number, so the exit code can't tell.
+        timed_out = threading.Event()
+
+        def on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(self.timeout_s, on_timeout)
         timer.start()
         stderr_chunks: list[str] = []
         stderr_reader = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
@@ -214,8 +222,7 @@ class ClaudeCLIBrain:
         stderr_reader.join(timeout=5)
         if not finished:
             stderr = "".join(stderr_chunks).strip()
-            timed_out = proc.returncode is not None and proc.returncode < 0
-            msg = "The Claude CLI timed out." if timed_out else (stderr or f"The Claude CLI exited with code {proc.returncode}.")
+            msg = "The Claude CLI timed out." if timed_out.is_set() else (stderr or f"The Claude CLI exited with code {proc.returncode}.")
             self._status = classify_error(msg, None)
             yield BrainEvent(EventKind.error, text=msg, status=self._status)
 
