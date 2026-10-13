@@ -253,7 +253,8 @@ kairo/
 4. Creates `C:\Kairo\` with locked-down permissions; seeds `data\config\` from the release.
 5. Installs the release into `app\releases\<version>\` with its own Python venv; points `app\current` at it.
 6. Power: sleep and hibernate off on mains power; hibernate file off (also turns off Fast Startup); screen may still switch off.
-7. Scheduled task **Kairo**: starts at boot as the owner's account **without a stored password** (S4U: runs whether logged in or not, local resources only), restarts if it stops (re-check every 5 min), no time limit. The task runs `kairo-run.ps1`, which starts the API on `127.0.0.1:8000` only.
+7. **Kairo's own Windows account `kairo-svc`** (added after v4 at the owner's request): standard user, not admin, hidden from the sign-in screen, new random password on every install that only Task Scheduler keeps. It can read/run `C:\Kairo` code and tools, change `C:\Kairo\data`, and see nothing of the owner's files. Scheduled task **Kairo** starts at boot as `kairo-svc` whether or not anyone is logged in, restarts if it stops (re-check every 5 min), no time limit, and runs `python -m app.serve` on `127.0.0.1:8000` only. Claude Code is the pinned official Windows binary in `C:\Kairo\tools` (SHA-512 checked), not in the owner's profile.
+7b. **Boot check** (task "Kairo Boot Check", SYSTEM, 3 min after every boot): Kairo answers, runs as `kairo-svc`, Claude replies (one tiny message), Tailscale is connected, `tailscale serve` still publishes Kairo, the HTTPS address answers. Result on the More screen; `Kairo Check.bat` runs it on demand.
 8. Starts Kairo and waits for `/health`.
 9. **Walks through the one-time logins**, each with plain instructions on screen, each skippable and re-runnable (`Install-Kairo.bat -Logins`):
    - **Tailscale:** `tailscale up --unattended`; a browser opens; sign in. Then `tailscale serve` publishes `https://kairo-home.<tailnet>.ts.net` → `127.0.0.1:8000`. If HTTPS isn't enabled in the tailnet yet, the screen says exactly where to click.
@@ -519,7 +520,8 @@ start the next until its checks pass and the owner says go.
 ## Stack
 - Python 3.12, FastAPI, SQLModel + SQLite, Alembic, APScheduler. Tests: pytest.
 - Web: React + Vite + vite-plugin-pwa. No other UI framework.
-- kairo-home: native Windows, scheduled task at boot, Claude Code CLI
+- kairo-home: native Windows, scheduled task at boot as the limited account
+  kairo-svc (never admin, sees only C:\\Kairo), Claude Code CLI
   installed natively with a pinned version. No Docker, no WSL there.
 - Every Python path, subprocess and script must work on Windows and Linux.
   CI runs the tests on both.
@@ -628,6 +630,9 @@ start the next until its checks pass and the owner says go.
 | Money impossible | Ask Kairo to pay a bill | Explains it can't; no tool exists |
 | Kill switch | Toggle during a job | Job stops |
 | Power cut | Pull plug, replug | Reachable within 5 min, no hands, nobody logged in to Windows |
+| Reboot: Claude still logged in | Restart the PC, don't log in, send a chat from the iPhone | Reply arrives; More → Last boot check: "Claude login" green |
+| Reboot: Tailscale + HTTPS back | Same restart | More → Last boot check: "Tailscale", "HTTPS publish", "HTTPS address" green; the iPhone reaches `https://kairo-home.<tailnet>.ts.net` |
+| Own limited account | Automatic (CI) + boot check | App and Claude CLI run as `kairo-svc`, no admin rights, can't read the installing user's files, can use its own data |
 | One-click update | Copy a new zip, double-click | New version running; nothing asked; data and config untouched |
 | Bad update | Install a release whose health check fails | Old release running again, red message, schema back |
 | Silent alarm | Stop API container | Heartbeat alert within 10 min |
@@ -661,7 +666,7 @@ start the next until its checks pass and the owner says go.
 - ~~Which Claude plan?~~ Answered: **Max** (18b: monthly API credit applies).
 
 ### 18a-2. Risks of the Windows host (v4)
-- **Boot task without a stored password (S4U)** is the Windows way to run when nobody is logged in. It has no network *credentials* (no file shares), which Kairo doesn't need; internet works. Verified only on a CI runner, not on kairo-home: acceptance check "Power cut" proves it.
+- **Boot task as `kairo-svc`**: Task Scheduler keeps that account's random password (Kairo never does). Verified on a Windows CI runner (account, rights, file access); a real reboot on kairo-home is proven by the boot check and the "Reboot" acceptance checks.
 - **Windows Update restarts** the PC at its own times. The boot task brings Kairo back; jobs missed during the restart run when it's back (Milestone C).
 - **Claude login expiry:** the CLI refreshes its login itself and warns 3 days before it expires; Kairo shows `logged_out` on the More screen and the chat banner. Fix: `Install-Kairo.bat -Logins`.
 - **Antivirus** may slow or block `claude.exe` or Python the first time. The installer reports if the health check doesn't pass.

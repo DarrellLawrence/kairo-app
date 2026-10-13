@@ -1,4 +1,6 @@
 {
   "claude_code": "2.1.296",
-  "python": "3.12"
+  "python": "3.12",
+  "claude_code_win_x64_sha512": "g2aYBzYM5YTDio0ulAoGIGgtGRMa08WAecer4wuOUrKPwVPRfyRdmoZI01BNS8jF9yupDmQycBMuBcVui/VGNw==",
+  "_note": "claude_code_win_x64_sha512 = npm \"integrity\" of @anthropic-ai/claude-code-win32-x64 at that version (npm view ... dist.integrity, without the sha512- prefix). Update both together."
 }

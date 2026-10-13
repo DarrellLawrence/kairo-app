@@ -25,34 +25,48 @@ function Install-WingetPackage([string]$Id, [string]$Name, [string[]]$Extra = @(
     Write-Ok "$Name installed"
 }
 
-function Install-Prerequisites([string]$ClaudeVersion) {
+function Install-Prerequisites {
     Write-Step 'Programs Kairo needs'
     Assert-Winget
-    if (Find-Python312) { Write-Ok 'Python 3.12 present' }
+    # Python must be installed for all users: Kairo's own account can't read your user folder.
+    if (Find-Python312 -MachineWide) { Write-Ok 'Python 3.12 (for all users) present' }
     else { Install-WingetPackage 'Python.Python.3.12' 'Python 3.12' @('--scope', 'machine') }
     if (Test-Path $script:TailscaleExe) { Write-Ok 'Tailscale present' }
     else { Install-WingetPackage 'Tailscale.Tailscale' 'Tailscale' }
-    Install-ClaudeCode $ClaudeVersion
-    $py = Find-Python312
+    $py = Find-Python312 -MachineWide
     if (-not $py) { throw 'Python 3.12 was installed but cannot be found. Restart the PC and run Install Kairo again.' }
     return $py
 }
 
-function Get-ClaudeExe { return Join-Path $env:USERPROFILE '.local\bin\claude.exe' }
-
-function Install-ClaudeCode([string]$Version) {
-    $exe = Get-ClaudeExe
+# Claude Code: Anthropic's unmodified Windows binary from its official npm
+# package, at the exact version this release was tested with, checked against
+# the SHA-512 pinned in versions.json. It lives in C:\Kairo\tools so Kairo's own
+# account can run it; your user folder is not involved. It never updates itself
+# (DISABLE_UPDATES); a new Kairo release brings the next version.
+function Install-ClaudeCode($P, [string]$Version, [string]$Sha512Base64) {
+    if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw "Kairo supports 64-bit Intel/AMD PCs only (this is $env:PROCESSOR_ARCHITECTURE)." }
+    $dir = Join-Path $P.Tools "claude\$Version"
+    $exe = Join-Path $dir 'claude.exe'
     if (Test-Path $exe) {
         $have = [string](& $exe --version)
         if ($have -like "$Version*") { Write-Ok "Claude Code $Version present"; return $exe }
-        Write-Note "Claude Code $have found; switching to the version this Kairo release was tested with ($Version)."
-    } else {
-        Write-Note "Installing Claude Code $Version (Anthropic's official installer)..."
     }
-    # Separate process: the official script may call `exit`, which would end this installer too.
-    $cmd = "& ([scriptblock]::Create((Invoke-RestMethod -UseBasicParsing https://claude.ai/install.ps1))) $Version"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $cmd | Out-Host
-    if (-not (Test-Path $exe)) { throw "Claude Code did not install to $exe" }
+    Write-Note "Downloading Claude Code $Version (about 100 MB)..."
+    $tmp = Join-Path $P.Downloads "claude-$Version"
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    [void](New-Item -ItemType Directory -Path $tmp)
+    $tgz = Join-Path $tmp 'claude.tgz'
+    $url = "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-$Version.tgz"
+    $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'   # 5.1 progress bar makes downloads very slow
+    try { Invoke-WebRequest -Uri $url -OutFile $tgz -UseBasicParsing } finally { $ProgressPreference = $old }
+    $expected = ([BitConverter]::ToString([Convert]::FromBase64String($Sha512Base64)) -replace '-', '').ToLower()
+    $actual = (Get-FileHash -Algorithm SHA512 $tgz).Hash.ToLower()
+    if ($actual -ne $expected) { throw 'The Claude Code download does not match the pinned checksum. Nothing was installed.' }
+    & tar.exe -xzf $tgz -C $tmp
+    if ($LASTEXITCODE -ne 0) { throw 'Unpacking Claude Code failed.' }
+    if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+    Move-Item -Force (Join-Path $tmp 'package\claude.exe') $exe
+    Remove-Item -Recurse -Force $tmp
     Write-Ok ("Claude Code installed: " + [string](& $exe --version))
     return $exe
 }
@@ -207,32 +221,47 @@ function Connect-Tailscale([int]$Port) {
 
 # ---------------------------------------------------------------- Claude
 
+function Open-ClaudeLogin($P, [string]$ClaudeExe) {
+    Write-Note 'A new window opens with Claude Code. In that window:'
+    Write-Note '  1. If asked, pick a colour theme (any) and press Enter.'
+    Write-Note '  2. Choose "Claude account with subscription". A browser opens: sign in, click Authorize.'
+    Write-Note '     (Already signed in but expired? Type  /login  and press Enter.)'
+    Write-Note '  3. Back in the window, press Enter when it says "Login successful".'
+    Write-Note '  4. Type  /exit  and press Enter. The window closes and setup continues here.'
+    Wait-Enter 'Press Enter to open the Claude window'
+    Start-Process -FilePath $ClaudeExe -WorkingDirectory $P.Workspace -Wait
+}
+
 function Connect-Claude($P, [string]$ClaudeExe) {
     Write-Step 'Login 2 of 3: Claude (your Max subscription)'
     $cred = Join-Path $P.ClaudeConfig '.credentials.json'
+    # The login is stored in C:\Kairo\data\claude-config, where Kairo's own account
+    # can use it after every reboot, with nobody logged in.
     [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $P.ClaudeConfig, 'Process')
     [Environment]::SetEnvironmentVariable('DISABLE_UPDATES', '1', 'Process')
-    if (-not (Test-Path $cred)) {
-        Write-Note 'A new window opens with Claude Code. In that window:'
-        Write-Note '  1. If asked, pick a colour theme (any) and press Enter.'
-        Write-Note '  2. Choose "Claude account with subscription". A browser opens: sign in, click Authorize.'
-        Write-Note '  3. Back in the window, press Enter when it says "Login successful".'
-        Write-Note '  4. Type  /exit  and press Enter. The window closes and setup continues here.'
-        Wait-Enter 'Press Enter to open the Claude window'
-        Start-Process -FilePath $ClaudeExe -WorkingDirectory $P.Workspace -Wait
-    } else {
-        Write-Ok 'Already signed in'
+    if (-not (Test-Path $cred)) { Open-ClaudeLogin $P $ClaudeExe }
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if (Test-Path $cred) {
+            # Prove it works for Kairo's own account, the way it will run after a reboot.
+            Write-Note "Sending one tiny test message as Kairo's own account..."
+            $r = Invoke-SelfTest
+            if ($r -and $r.ok) { Write-Ok "Claude answered for Kairo ($($r.seconds)s)"; return $true }
+            $why = if ($r) { "$($r.brain): $($r.error)" } else { 'Kairo did not answer' }
+            Write-Bad "Claude test failed ($why)."
+        } else {
+            Write-Bad 'No Claude login found.'
+        }
+        if ($attempt -eq 1 -and (Read-YesNo 'Sign in to Claude again now?' $true)) { Open-ClaudeLogin $P $ClaudeExe } else { break }
     }
-    if (-not (Test-Path $cred)) { Write-Bad 'No Claude login found. Run "Kairo Logins" later to try again.'; return $false }
-    Write-Note 'Sending one tiny test message...'
-    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try {
-        # '""' = an empty argument in Windows PowerShell 5.1 (it drops a bare '').
-        $answer = 'Reply with exactly: Kairo is connected.' | & $ClaudeExe -p --tools '""' --strict-mcp-config --permission-prompts none | Out-String
-    } finally { $ErrorActionPreference = $old }
-    if ($LASTEXITCODE -eq 0 -and $answer -match 'connected') { Write-Ok "Claude answered: $($answer.Trim())"; return $true }
-    Write-Bad "Claude did not answer as expected: $($answer.Trim())"
+    Write-Warn 'Claude is not working for Kairo yet. Run "Kairo Logins" later to try again.'
     return $false
+}
+
+function Invoke-SelfTest {
+    try {
+        $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/selftest' -Method Post -UseBasicParsing -TimeoutSec 180
+        return ($resp.Content | ConvertFrom-Json)
+    } catch { return $null }
 }
 
 # ---------------------------------------------------------------- GitHub (updates)

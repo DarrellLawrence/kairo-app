@@ -5,10 +5,12 @@ Run: uvicorn app.main:create_app --factory
 
 from __future__ import annotations
 
+import json
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import inspect, text
 from sqlmodel import select
@@ -200,8 +202,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             msg = chat.add_message(s, tid, "kairo", final_text or "")
         await ws.send_json({"type": "done", "text": final_text or "", "message_id": msg.id})
 
+    @app.post("/api/selftest")
+    async def selftest(request: Request):
+        """One tiny brain call, to prove the Claude login works for the account Kairo runs as.
+        Only from this PC (boot check, installer): not reachable through Tailscale."""
+        if not is_local_request(request):
+            raise HTTPException(403, "self-test only from this PC")
+        started = time.monotonic()
+        reply, error = "", None
+        async for event in runner.stream(
+            "Reply with exactly: OK", session_id=None,
+            system="You are a health check. Reply with exactly: OK", tools=[],
+        ):
+            if event.kind is EventKind.result:
+                reply = event.text
+            elif event.kind is EventKind.error:
+                error = event
+        status = runner.brain.health().value
+        ok = error is None and "OK" in reply.upper()
+        return {"ok": ok, "brain": status, "reply": reply.strip()[:200],
+                "error": error.text[:500] if error else None,
+                "seconds": round(time.monotonic() - started, 1)}
+
+    @app.get("/api/status")
+    def status():
+        """Last boot check (written by the boot-check task on kairo-home), for the More screen."""
+        path = settings.data_dir / "logs" / "boot-check.json"
+        boot = None
+        if path.is_file():
+            try:
+                boot = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                boot = {"error": "boot-check.json unreadable"}
+        return {"brain": runner.brain.health().value, "boot_check": boot}
+
     _mount_web(app, settings.web_dist_dir)
     return app
+
+
+LOCAL_HOSTS = {"127.0.0.1", "::1"}
+
+
+def is_local_request(request: Request) -> bool:
+    """Direct from this machine: loopback client, loopback Host, not proxied by
+    `tailscale serve` (which connects from loopback but sets the tailnet Host
+    and forwarding headers)."""
+    client = request.client.host if request.client else ""
+    host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
+    forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "tailscale-user-login"))
+    return client in LOCAL_HOSTS and host in {"127.0.0.1", "localhost", "::1"} and not forwarded
 
 
 def _mount_web(app: FastAPI, dist: Path) -> None:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-13 — build: Windows hardening (before Milestone B)
+- Kairo runs as its own limited Windows account `kairo-svc` (no admin, hidden, sees only C:\Kairo).
+- Claude Code: pinned official Windows binary from npm, SHA-512 checked, in C:\Kairo\tools.
+- Boot check after every reboot (Claude login, Tailscale, HTTPS) shown on the More screen; `Kairo Check.bat`.
+- `/api/selftest` (only from the PC itself). CI tests the account, the probe and the boot check on Windows.
+
 ## 2026-10-13 — docs: kickoff v4 (Windows host, one-click install)
 - kairo-home stays on Windows; Kairo runs natively (no Docker/WSL there).
 - Deploy = release zip + `Install-Kairo.bat` (install, update, auto-rollback, guided logins); boot task without stored password; no sleep.
