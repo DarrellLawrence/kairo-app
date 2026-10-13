@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-13 — build: Milestone A (skeleton)
+- Backend: `/health`, SQLModel models for section 9, Alembic initial migration, chat threads + websocket, one brain call at a time.
+- Brain: `brain/base.py` + `brain/claude_cli.py`. Flags verified on Claude Code 2.1.296 with real runs. Prompt via stdin (never argv). The CLI process gets an allow-listed environment, so backend secrets can't reach it.
+- Web: Vite 8 + React 19 + vite-plugin-pwa, six-tab bar, Chat over websocket.
+- Ops: Dockerfile + compose (port bound to 127.0.0.1 only), `scripts/deploy.sh` (+ `--rollback`, auto-rollback on failed health check, DB backup per deploy), `scripts/setup-kairo-home.sh`, CI.
+- Build decisions (not in KICKOFF, proposed for v4):
+  - **Claude Code CLI runs inside the API container** (pinned npm version), not on the host. The backend has to spawn it, and a container can't run a host binary. The login lives in `/srv/kairo/claude-config` and is done once with `docker compose run --rm -it api claude`.
+  - Extra table `chat_messages` (the Chat screen needs history to show).
+  - Extra brain status `unavailable` (binary missing or crashed).
+  - No `@vitejs/plugin-react`: Vite 8 handles JSX itself.
+
 ## 2026-10-13 — docs: kickoff v3 (security hardening)
 - Gate fails closed: any hook error, crash, timeout or failure to start blocks (catch-all exit 2 + `onFailure: block`). Broken-hook tests.
 - Model has no Google write tools: read + internal tools + `mcp_kairo.propose_action` only. Backend owns write credentials; `executor.py` runs tier 2 automatically and tier 3-4 after approval. Google MCP runs on a read-only token. Hook stays as second layer.
