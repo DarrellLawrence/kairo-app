@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-13 — docs: kickoff v4 (Windows host, one-click install)
+- kairo-home stays on Windows; Kairo runs natively (no Docker/WSL there).
+- Deploy = release zip + `Install-Kairo.bat` (install, update, auto-rollback, guided logins); boot task without stored password; no sleep.
+- Google tools live in the backend; `mcp_kairo` is the only MCP server and forwards to the backend. No third-party Google MCP server.
+- Owner config + secrets live in the data folder and survive updates.
+- Supersedes the Milestone A decision "CLI inside the container".
 ## 2026-10-13 — build: Milestone A (skeleton)
 - Backend: `/health`, SQLModel models for section 9, Alembic initial migration, chat threads + websocket, one brain call at a time.
 - Brain: `brain/base.py` + `brain/claude_cli.py`. Flags verified on Claude Code 2.1.296 with real runs. Prompt via stdin (never argv). The CLI process gets an allow-listed environment, so backend secrets can't reach it.
