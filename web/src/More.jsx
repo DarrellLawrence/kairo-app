@@ -75,8 +75,21 @@ function Google() {
   const [st, setSt] = useState(null)
   useEffect(() => { api('/api/setup/google/status').then(setSt).catch(() => {}) }, [])
   if (!st) return null
-  const ok = st.read && st.write
-  return <p className={ok ? 'small' : 'small bad'}>Google: {ok ? `connected (${st.read})` : 'not connected yet. On the PC: double-click C:\\Kairo\\Kairo Logins.bat'}</p>
+  const ok = st.read && st.write && !st.signed_out
+  const ends = [st.read_may_end, st.write_may_end].filter(Boolean)
+  const end = ends.length ? new Date(Math.min(...ends) * 1000) : null
+  return (
+    <div>
+      <p className={ok ? 'small' : 'small bad'}>
+        Google: {st.signed_out ? 'Google signed Kairo out. Sign in again below.'
+          : ok ? `connected (${st.read})` : 'not connected yet. On the PC: Start menu -> Kairo -> Kairo Logins'}
+      </p>
+      {ok && end && <p className="small muted">Google Testing mode: this sign-in may end {end.toLocaleDateString()}. You get a reminder the day before.</p>}
+      {(st.read || st.write) && (st.phone_client
+        ? <p><a className="action" href="/setup/google/start?kind=read">Sign in to Google again</a></p>
+        : <p className="small muted">To sign in again from the iPhone, run Kairo Logins on the PC once (Google step).</p>)}
+    </div>
+  )
 }
 
 function Activity({ refresh }) {

@@ -85,11 +85,15 @@ def test_state_is_single_use_and_must_be_known(setup):
     assert client.get("/setup/google/callback?state=forged&code=good-code").status_code == 400
 
 
-def test_sign_in_only_from_the_pc_itself(setup, migrated):
+def test_sign_in_from_elsewhere_only_via_the_tailnet_name(setup, migrated):
+    """Off the PC only through Kairo's tailnet address, and only with the phone client (test_google_relogin)."""
     _, _, _ = setup
     remote = TestClient(create_app(migrated), base_url="https://kairo-home.tail1234.ts.net", follow_redirects=False)
-    assert remote.get("/setup/google/start?kind=read").status_code == 403
-    assert remote.get("/setup/google/callback?state=x&code=y").status_code == 403
+    assert remote.get("/setup/google/start?kind=read").status_code == 400          # no phone client yet
+    assert remote.get("/setup/google/callback?state=x&code=y").status_code == 400  # unknown state
+    other = TestClient(create_app(migrated), base_url="http://192.168.1.20:8000", follow_redirects=False)
+    assert other.get("/setup/google/start?kind=read").status_code == 403
+    assert other.get("/setup/google/callback?state=x&code=y").status_code == 403
 
 
 def test_no_client_file_gives_a_plain_message(setup):

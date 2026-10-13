@@ -13,6 +13,7 @@ set "KAIRO_LOG=%KAIRO_ROOT%\install.log"
 set "KAIRO_UNBLOCK=%KAIRO_HERE%installer"
 set "KAIRO_PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 set "KAIRO_RC=1"
+set "KAIRO_ADMIN="
 title Kairo update
 
 if not exist "%KAIRO_PS%" goto no_powershell
@@ -29,6 +30,7 @@ if errorlevel 1 goto no_admin
 exit /b 0
 
 :admin
+set "KAIRO_ADMIN=1"
 if not exist "%KAIRO_ROOT%\" mkdir "%KAIRO_ROOT%" >nul 2>&1
 
 rem 2. Files downloaded from the internet carry a "blocked" mark. Remove it.
@@ -69,7 +71,7 @@ echo   Double-click the file again and click Yes when Windows asks.
 goto wait
 
 :failed
-if exist "%KAIRO_ROOT%\" >>"%KAIRO_LOG%" echo %DATE% %TIME% Update Kairo.bat: stopped with error code %KAIRO_RC%
+if defined KAIRO_ADMIN if exist "%KAIRO_ROOT%\" >>"%KAIRO_LOG%" echo %DATE% %TIME% Update Kairo.bat: stopped with error code %KAIRO_RC%
 echo.
 echo   -----------------------------------------------------------------
 echo   Kairo update did NOT finish (error code %KAIRO_RC%).
