@@ -35,12 +35,18 @@ def out(obj):
 
 def write_probe(report_path, paths):
     """CI: which account runs the CLI, is it admin, what can it read?"""
-    import getpass
     admin = None
     if os.name == "nt":
+        # Ask Windows, not the environment: USERNAME may not be passed through.
         import ctypes
+        buf = ctypes.create_unicode_buffer(257)
+        size = ctypes.c_uint32(257)
+        ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(size))
+        user = buf.value
         admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-    elif hasattr(os, "geteuid"):
+    else:
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
         admin = os.geteuid() == 0
     readable = {}
     for path in filter(None, paths.split(";")):
@@ -51,7 +57,7 @@ def write_probe(report_path, paths):
         except OSError:
             readable[path] = False
     with open(report_path, "w", encoding="utf-8") as fh:
-        json.dump({"user": getpass.getuser(), "admin": admin, "readable": readable}, fh)
+        json.dump({"user": user, "admin": admin, "readable": readable}, fh)
 
 
 def main():
