@@ -1,0 +1,39 @@
+# Permission table (KICKOFF section 8). Enforced by server/app/gate.py from Milestone B.
+default: deny
+
+tiers:
+  0_read:        { mode: auto }
+  1_internal:    { mode: auto }
+  2_reversible:  { mode: auto, digest: true }
+  3_outbound:    { mode: approve }
+  4_destructive: { mode: approve, confirm_twice: true }
+  5_money:       { mode: never }
+
+actions:
+  gmail.search:          0_read
+  gmail.read:            0_read
+  calendar.list:         0_read
+  vault.read:            0_read
+  tasks.create:          1_internal
+  tasks.update:          1_internal
+  notes.write:           1_internal   # Kairo-owned files only
+  # tier 2-4: reachable ONLY via mcp_kairo.propose_action; executed by the backend
+  gmail.label:           2_reversible
+  gmail.create_draft:    2_reversible
+  calendar.create_hold:  2_reversible # own calendar, marked [Kairo], no attendees (rule below)
+  gmail.send:            3_outbound
+  gmail.reply:           3_outbound
+  calendar.respond:      3_outbound
+  gmail.trash:           4_destructive
+  calendar.delete:       4_destructive
+
+rules:
+  calendar.create_hold:
+    calendar: primary
+    title_prefix: "[Kairo]"
+    deny_if_present: [attendees, guests, sendUpdates, sendNotifications, conferenceData, guestsCanInviteOthers, guestsCanModify]
+    allow_only_fields: [summary, description, start, end, location, reminders, colorId, transparency]
+
+limits:
+  approvals_open_max: 10
+  outbound_per_day_max: 20
