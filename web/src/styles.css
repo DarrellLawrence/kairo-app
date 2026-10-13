@@ -78,3 +78,9 @@ button:disabled { opacity: 0.5; }
 .more dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
 .more dt { color: var(--muted); }
 .more dd { margin: 0; }
+.more h2 { font-size: 16px; margin: 20px 0 8px; }
+.bootcheck ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.bootcheck .ok { color: inherit; }
+.bootcheck li.ok span[aria-hidden] { color: #2ecc71; }
+.bootcheck li.bad span[aria-hidden], .bootcheck p.bad { color: #e5534b; }
+.muted { color: var(--muted); }

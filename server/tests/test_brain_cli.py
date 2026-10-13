@@ -134,3 +134,13 @@ def test_classify_error():
     assert classify_error("Claude usage limit reached", None) is BrainStatus.usage_limited
     assert classify_error("x", 429) is BrainStatus.usage_limited
     assert classify_error("segfault", None) is BrainStatus.unavailable
+
+
+def test_fake_probe_reports_identity(tmp_path):
+    report = tmp_path / "probe.json"
+    secret = tmp_path / "readable.txt"
+    secret.write_text("x")
+    run(make(tmp_path, KAIRO_HOOK_FAKE_PROBE=report, KAIRO_HOOK_FAKE_PROBE_PATHS=f"{secret};{tmp_path / 'missing.txt'}"))
+    data = json.loads(report.read_text())
+    assert data["user"]
+    assert data["readable"] == {str(secret): True, str(tmp_path / "missing.txt"): False}

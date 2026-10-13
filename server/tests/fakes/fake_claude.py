@@ -10,6 +10,9 @@ because the adapter only passes allow-listed variables through):
   slow         sleep 30 s before answering (timeout tests)
   bad_flag     exit 1 like the real CLI does on a missing --verbose
 
+FAKE_CLAUDE_PROBE=<report.json> (+ FAKE_CLAUDE_PROBE_PATHS=a;b): write who ran
+the CLI, whether it is admin, and which of the paths it can read.
+
 If FAKE_CLAUDE_RECORD (or KAIRO_HOOK_FAKE_RECORD) is set, argv, stdin, cwd and
 the environment are written there as JSON.
 """
@@ -30,6 +33,27 @@ def out(obj):
     sys.stdout.flush()
 
 
+def write_probe(report_path, paths):
+    """CI: which account runs the CLI, is it admin, what can it read?"""
+    import getpass
+    admin = None
+    if os.name == "nt":
+        import ctypes
+        admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    elif hasattr(os, "geteuid"):
+        admin = os.geteuid() == 0
+    readable = {}
+    for path in filter(None, paths.split(";")):
+        try:
+            with open(path, "rb") as fh:
+                fh.read(1)
+            readable[path] = True
+        except OSError:
+            readable[path] = False
+    with open(report_path, "w", encoding="utf-8") as fh:
+        json.dump({"user": getpass.getuser(), "admin": admin, "readable": readable}, fh)
+
+
 def main():
     args = sys.argv[1:]
     if "--version" in args:
@@ -40,6 +64,10 @@ def main():
     if record:
         with open(record, "w", encoding="utf-8") as fh:
             json.dump({"argv": args, "stdin": prompt, "cwd": os.getcwd(), "env": dict(os.environ)}, fh)
+
+    probe = env("FAKE_CLAUDE_PROBE")
+    if probe:
+        write_probe(probe, env("FAKE_CLAUDE_PROBE_PATHS") or "")
 
     mode = env("FAKE_CLAUDE_MODE") or "ok"
     if "-p" in args and "stream-json" in args and "--verbose" not in args:
