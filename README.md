@@ -5,7 +5,8 @@ Single-user personal assistant. Spec: [docs/KICKOFF.md](docs/KICKOFF.md) (source
 - `server/` FastAPI backend, SQLModel + SQLite, Alembic, brain adapters (`server/app/brain/`)
 - `web/` React + Vite PWA (six tabs; Chat works, the rest arrive with later milestones)
 - `config/` who the owner is (`profile.yaml`), permissions, schedule, personality
-- `scripts/` deploy, rollback, kairo-home setup
+- `installer/` Windows installer, updater, rollback, uninstaller (kairo-home)
+- `scripts/build-release.sh` builds the setup zip
 
 ## Dev (laptop, inside WSL)
 
@@ -22,37 +23,25 @@ Leave out `KAIRO_CLAUDE_BIN=...` to chat with the real `claude` CLI (must be log
 cd ~/kairo/web && npm ci && npm run dev        # http://localhost:5173, proxies to :8000
 ```
 
-Whole stack in Docker: `cp .env.example .env && docker compose up -d --build` → http://127.0.0.1:8000.
+## kairo-home (Windows): install, update, rollback, uninstall
 
-## kairo-home first-time setup
+Everything on kairo-home is double-click. Nothing gets wiped, no Docker, no WSL.
 
-You do steps 1–3 by hand once; after that everything goes through `scripts/deploy.sh`.
+**First install**
+1. BIOS, once: set "Restore on AC power loss" (sometimes "AC Back" or "Power On after power failure") to **On**.
+2. Get the setup zip: on GitHub open the kairo repo → **Releases** (right side) → newest release → download `Kairo-Setup-….zip`. Or build one on the laptop: `scripts/build-release.sh` → `dist/`.
+3. On kairo-home: right-click the zip → **Extract All** → open the folder → double-click **Install Kairo.bat** → Windows asks for admin rights → **Yes**.
+4. Follow the screen. It installs Python, Tailscale and Claude Code, sets up the boot task, turns off sleep, sets Windows Update to Sundays 04:00, offers BitLocker if the PC has a TPM, then walks you through three logins (Tailscale, Claude, GitHub for updates).
+5. Restart the PC once and **don't log in**. After about 3 minutes Kairo should open on the iPhone.
 
-1. **Deploy key, so kairo-home can read the private repo.** On kairo-home:
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/kairo_deploy -N "" -C kairo-home
-   printf 'Host github.com\n  IdentityFile ~/.ssh/kairo_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
-   cat ~/.ssh/kairo_deploy.pub
-   ```
-   On GitHub: open the kairo repo → **Settings** → **Deploy keys** → **Add deploy key** → Title `kairo-home` → paste the key → leave **Allow write access** unticked → **Add key**.
-2. **Run the setup script.** From the laptop: `scp scripts/setup-kairo-home.sh kairo-home:` then on kairo-home:
-   `KAIRO_REPO_URL=git@github.com:<owner>/kairo.git bash setup-kairo-home.sh`, then log out and back in.
-3. **Start Kairo and log the CLI in (once):**
-   ```bash
-   cd /opt/kairo && docker compose up -d --build
-   docker compose run --rm -it api claude        # type /login, open the link, paste the code, then /exit
-   ```
-   The login is stored in `/srv/kairo/claude-config`, so it survives rebuilds.
-4. **iPhone:** Safari → `https://kairo-home.<your-tailnet>.ts.net` → **Share** → **Add to Home Screen** → **Add**. (The iPhone needs the Tailscale app, signed in and connected.)
+**Afterwards, in `C:\Kairo`:**
+- **Update Kairo.bat**: downloads the newest *tested* release from GitHub (CI publishes one only after all tests and the Windows install test pass), checks its checksum, installs it, and switches back by itself if the new version doesn't come up.
+- **Rollback Kairo.bat**: back to the previous version (database schema first).
+- **Kairo Logins.bat**: redo a login (e.g. Claude login expired).
+- **Uninstall Kairo.bat**: removes Kairo; your data stays unless you type DELETE.
 
-## Deploy and rollback (from the laptop)
-
-```bash
-scripts/deploy.sh             # only origin/main, only after tests + web build pass
-scripts/deploy.sh --rollback  # previous deploy, database schema downgraded first
-```
-Each deploy backs up the database to `/srv/kairo/db/backups/`, health-checks, tags `deploy-<timestamp>`, and rolls back by itself if the health check fails. Migrations must be named `<NNNN>_<slug>.py` (linear history), because rollback relies on it.
+Logs: `C:\Kairo\data\logs\` (`kairo.log` for the app, `install-*.log` for every install/update).
 
 ## Status
 
-Milestone A (skeleton) code is done. The gate (Milestone B) is **not** built yet: until then the brain runs with **no tools at all** (`--tools ""`, no MCP servers), so it can only talk.
+Milestone A (skeleton) and A2 (Windows install) code is done. The gate (Milestone B) is **not** built yet: until then the brain runs with **no tools at all** (`--tools ""`, no MCP servers), so it can only talk.

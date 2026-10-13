@@ -6,15 +6,18 @@ on:
 
 jobs:
   server:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r server/requirements-dev.txt
-      - run: git config --global user.email ci@example.com && git config --global user.name ci
-      - run: python -m pytest
+      - run: python -m pytest -o addopts=""
         working-directory: server
 
   web:
@@ -30,3 +33,59 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
+
+  # Builds the real setup zip and installs, updates, breaks, rolls back and
+  # uninstalls it on a Windows machine with Windows PowerShell 5.1.
+  windows-install:
+    needs: [server, web]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build setup zip
+        shell: bash
+        env:
+          PYTHON: python
+        run: scripts/build-release.sh
+      - name: Install / update / rollback / uninstall
+        shell: powershell
+        env:
+          KAIRO_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: |
+          $zip = (Get-ChildItem dist -Filter 'Kairo-Setup-*.zip' | Select-Object -First 1).FullName
+          & .\installer\ci\Test-Install.ps1 -Zip $zip -FakeClaude (Resolve-Path server\tests\fakes\fake_claude.py).Path
+      - name: Installer logs
+        if: failure()
+        shell: powershell
+        run: |
+          Get-ChildItem C:\KairoCI\data\logs -ErrorAction SilentlyContinue | ForEach-Object { "==== $($_.Name)"; Get-Content $_.FullName -Tail 200 }
+
+  # Only a version that passed everything above becomes "the latest tested
+  # version" that "Update Kairo" on kairo-home downloads.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [server, web, windows-install]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build setup zip
+        run: scripts/build-release.sh
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(cat dist/VERSION)
+          gh release create "v$v" dist/Kairo-Setup-*.zip dist/Kairo-Setup-*.zip.sha256 \
+            --title "Kairo $v" \
+            --notes "Tested on Linux and Windows (install, update, automatic rollback, uninstall). Commit ${GITHUB_SHA}."
