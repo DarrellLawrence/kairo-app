@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
@@ -20,6 +20,18 @@ from .profile import load_profile, render_personality
 from .settings import Settings, get_settings
 
 MAX_PROMPT_CHARS = 20_000
+
+
+def same_origin(origin: str | None, *hosts: str | None) -> bool:
+    """Browsers send Origin on websocket and cross-site requests; CORS does not
+    protect websockets. Only the app's own origin may talk to the API, so a
+    random web page open on the phone can't drive Kairo. No Origin header =
+    not a browser (curl, health checks): allowed.
+    """
+    if origin is None:
+        return True
+    netloc = origin.split("://", 1)[-1].rstrip("/")
+    return any(h and netloc == h for h in hosts)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -39,6 +51,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Kairo", lifespan=lifespan)
     app.state.settings = settings
     app.state.runner = runner
+
+    @app.middleware("http")
+    async def reject_cross_origin(request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not same_origin(
+            request.headers.get("origin"), request.headers.get("host"), request.headers.get("x-forwarded-host")
+        ):
+            return JSONResponse({"detail": "cross-origin request rejected"}, status_code=403)
+        return await call_next(request)
 
     @app.get("/health")
     def health():
@@ -91,6 +111,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                   {"type": "done", "text": "full reply", "message_id": 9}
                   {"type": "error", "message": "...", "status": "usage_limited" | ...}
         """
+        if not same_origin(ws.headers.get("origin"), ws.headers.get("host"), ws.headers.get("x-forwarded-host")):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         try:
             while True:
