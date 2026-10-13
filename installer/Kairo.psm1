@@ -268,7 +268,7 @@ function Stop-Kairo($P) {
         Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
     }
     for ($i = 0; $i -lt 20; $i++) {
-        if ((Get-KairoProcesses $P).Count -eq 0) { break }
+        if (@(Get-KairoProcesses $P).Count -eq 0) { break }  # @(): an empty result is $null under StrictMode
         Start-Sleep -Milliseconds 500
     }
 }
