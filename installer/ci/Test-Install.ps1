@@ -17,11 +17,6 @@ function Check([bool]$Cond, [string]$Msg) {
     if (-not $Cond) { Write-Host "FAIL: $Msg" -ForegroundColor Red; throw "FAIL: $Msg" }
     Write-Host "PASS: $Msg" -ForegroundColor Green
 }
-function Expand-Setup([string]$ZipFile, [string]$Name) {
-    $dest = Join-Path $work $Name
-    Expand-Archive -Path $ZipFile -DestinationPath $dest -Force
-    return (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
-}
 function Copy-Setup([string]$From, [string]$Name, [string]$Version) {
     $dest = Join-Path $work $Name
     Copy-Item -Recurse $From $dest
@@ -53,10 +48,78 @@ function Get-Tables {
     return @($out.Trim() -split ',')
 }
 
-# ---- first install
-$s1 = Expand-Setup $Zip 'v1'
+# Runs a .bat like a double-click would (cmd.exe, no PowerShell in between),
+# with an empty stdin so its "press any key" returns. Returns exit code + output.
+function Invoke-Bat([string]$Bat, [string]$BatArgs, [string]$KairoRoot) {
+    $in = Join-Path $work 'empty-stdin.txt'; Set-Content -Path $in -Value '' -Encoding ASCII
+    $out = Join-Path $work 'bat-out.txt'; $err = Join-Path $work 'bat-err.txt'
+    $env:KAIRO_ROOT = $KairoRoot
+    # A real double-click has no inherited execution policy; drop the one this CI shell may pass on.
+    $savedPolicy = $env:PSExecutionPolicyPreference
+    Remove-Item Env:\PSExecutionPolicyPreference -ErrorAction SilentlyContinue
+    try {
+        $p = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"`"$Bat`" $BatArgs`"" -NoNewWindow -Wait -PassThru `
+            -RedirectStandardInput $in -RedirectStandardOutput $out -RedirectStandardError $err
+    } finally {
+        Remove-Item Env:\KAIRO_ROOT
+        if ($savedPolicy) { $env:PSExecutionPolicyPreference = $savedPolicy }
+    }
+    $text = ((Get-Content -Raw $out -ErrorAction SilentlyContinue) + (Get-Content -Raw $err -ErrorAction SilentlyContinue))
+    Write-Host $text
+    return [pscustomobject]@{ Code = $p.ExitCode; Output = [string]$text }
+}
+function Set-Blocked([string]$Dir) {
+    # What a browser + "Extract All" does: every file marked as from the internet.
+    Get-ChildItem -LiteralPath $Dir -Recurse -File | ForEach-Object {
+        Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII
+    }
+}
+function Get-BlockedCount([string]$Dir) {
+    return @(Get-ChildItem -LiteralPath $Dir -Recurse -File | Where-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue }).Count
+}
+
+# ---- first install: double-click "Install Kairo.bat" from Downloads, in a
+# folder with spaces and parentheses, files blocked, strict execution policy.
+$downloads = Join-Path $env:USERPROFILE 'Downloads\Kairo Setup (1)'
+if (Test-Path -LiteralPath $downloads) { Remove-Item -LiteralPath $downloads -Recurse -Force }
+[void](New-Item -ItemType Directory -Force $downloads)
+Expand-Archive -LiteralPath $Zip -DestinationPath $downloads -Force
+$s1 = (Get-ChildItem -LiteralPath $downloads -Directory | Select-Object -First 1).FullName
 $v1 = (Get-Content -Raw (Join-Path $s1 'app\release.json') | ConvertFrom-Json).version
-Check ((Invoke-Install $s1) -eq 0) 'first install exits 0'
+Set-Blocked $s1
+Check ((Get-BlockedCount $s1) -gt 10) 'setup files are marked as downloaded from the internet'
+$oldPolicy = Get-ExecutionPolicy -Scope CurrentUser
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy AllSigned -Force -ErrorAction SilentlyContinue
+Check ((Get-ExecutionPolicy -Scope CurrentUser) -eq 'AllSigned') 'strict execution policy (AllSigned) for this user'
+try {
+    $r = Invoke-Bat (Join-Path $s1 'Install Kairo.bat') "-CI -ClaudeBin `"$FakeClaude`"" $Root
+} finally { Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy $oldPolicy -Force -ErrorAction SilentlyContinue }
+Check ($r.Code -eq 0) "first install via 'Install Kairo.bat' from '$s1' exits 0"
+Check ((Get-BlockedCount $s1) -eq 0) 'the .bat unblocked its own files'
+$log = Join-Path $Root 'install.log'
+Check ((Test-Path $log) -and ((Get-Content -Raw $log) -match 'Kairo setup')) "setup log written to $log"
+$logIds = @((Get-Acl $log).Access | ForEach-Object { $_.IdentityReference.Value })
+Check (@($logIds | Where-Object { $_ -match 'kairo-svc' }).Count -eq 0) "Kairo's own account cannot read the setup log"
+
+# ---- the .bat never closes on an error: it says why, logs it, waits for a key
+$broken = Join-Path $env:USERPROFILE 'Downloads\Kairo Setup broken (2)'
+$failRoot = 'C:\Kairo CI fail'
+foreach ($d in @($broken, $failRoot)) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
+Copy-Item -LiteralPath $s1 -Destination $broken -Recurse
+Remove-Item -LiteralPath (Join-Path $broken 'installer\KairoSetup.psm1')
+$r = Invoke-Bat (Join-Path $broken 'Install Kairo.bat') '-CI' $failRoot
+Check ($r.Code -ne 0) 'a broken setup reports failure'
+Check ($r.Output -match 'did NOT finish' -and $r.Output -match 'Press any key') 'a broken setup keeps the window open with a plain message'
+Check ($r.Output -match 'KairoSetup\.psm1') 'the message names what is wrong'
+$failLog = Join-Path $failRoot 'install.log'
+Check ((Test-Path -LiteralPath $failLog) -and ((Get-Content -Raw -LiteralPath $failLog) -match 'KairoSetup\.psm1')) 'the error is in install.log'
+$lonely = Join-Path $env:USERPROFILE 'Downloads\only the bat'
+if (Test-Path -LiteralPath $lonely) { Remove-Item -LiteralPath $lonely -Recurse -Force }
+[void](New-Item -ItemType Directory -Force $lonely)
+Copy-Item -LiteralPath (Join-Path $s1 'Install Kairo.bat') -Destination $lonely
+$r = Invoke-Bat (Join-Path $lonely 'Install Kairo.bat') '' $failRoot
+Check ($r.Code -ne 0 -and $r.Output -match 'Extract All') 'a .bat without its files says to extract the zip first'
+foreach ($d in @($broken, $failRoot, $lonely)) { Remove-Item -LiteralPath $d -Recurse -Force }
 Check ((Get-StateObj).current -eq $v1) "running version is $v1"
 $h = Get-HealthObj
 Check ($h -ne $null -and $h.status -eq 'ok') 'health: ok'

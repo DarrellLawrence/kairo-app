@@ -77,6 +77,6 @@ $report | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $P.Logs 'boot-c
 
 if ($Interactive) {
     if ($allOk) { Write-Ok 'Everything came back by itself.' } else { Write-Warn 'Something is not right; the lines marked XX say what.' }
-    if (-not $CI) { Wait-Enter 'Press Enter to close this window' }
+    if (-not $CI -and $allOk) { Wait-Enter 'Press Enter to close this window' }
 }
 exit $(if ($allOk) { 0 } else { 1 })

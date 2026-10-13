@@ -43,7 +43,8 @@ Everything on kairo-home is double-click. Nothing gets wiped, no Docker, no WSL.
 Kairo runs as its own Windows account **kairo-svc**: no admin rights, hidden from the sign-in screen, can only use `C:\Kairo`.
 - **Uninstall Kairo.bat**: removes Kairo; your data stays unless you type DELETE.
 
-Logs: `C:\Kairo\data\logs\` (`kairo.log` for the app, `install-*.log` for every install/update).
+Logs: `C:\Kairo\install.log` (every install, update and login run) and `C:\Kairo\data\logs\kairo.log` (the app).
+If a .bat fails it stays open, says why in red, and waits for a key.
 
 ## Tests
 

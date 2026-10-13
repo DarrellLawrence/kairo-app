@@ -16,28 +16,35 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force -DisableNameChecking
-Import-Module (Join-Path $PSScriptRoot 'KairoSetup.psm1') -Force -DisableNameChecking
-
-$passArgs = @('-Root', "`"$Root`"")
-if ($Logins) { $passArgs += '-Logins' }
-if ($Update) { $passArgs += '-Update' }
-if ($CI) { $passArgs += '-CI' }
-if ($Force) { $passArgs += '-Force' }
-if ($ClaudeBin) { $passArgs += @('-ClaudeBin', "`"$ClaudeBin`"") }
-Assert-Admin $PSCommandPath $passArgs
-
-$P = Get-KairoPaths $Root
-$interactive = -not ($CI -or $Update)
-$sourceApp = Join-Path (Split-Path $PSScriptRoot -Parent) 'app'
-$owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $exitCode = 0
+$logFile = Join-Path $Root 'install.log'
+$logging = $false
 
-Initialize-Folders $P
-$logFile = Join-Path $P.Logs ("install-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-Start-Transcript -Path $logFile -Append | Out-Null
-
+# Everything runs inside try/catch: any error is shown in plain words, written
+# to C:\Kairo\install.log and turned into exit code 1 ("Install Kairo.bat"
+# then keeps the window open).
 try {
+    Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force -DisableNameChecking
+    Import-Module (Join-Path $PSScriptRoot 'KairoSetup.psm1') -Force -DisableNameChecking
+
+    $passArgs = @('-Root', "`"$Root`"")
+    if ($Logins) { $passArgs += '-Logins' }
+    if ($Update) { $passArgs += '-Update' }
+    if ($CI) { $passArgs += '-CI' }
+    if ($Force) { $passArgs += '-Force' }
+    if ($ClaudeBin) { $passArgs += @('-ClaudeBin', "`"$ClaudeBin`"") }
+    Assert-Admin $PSCommandPath $passArgs
+
+    if (-not (Test-Path -LiteralPath $Root)) { [void](New-Item -ItemType Directory -Path $Root) }
+    Start-Transcript -Path $logFile -Append | Out-Null
+    $logging = $true
+
+    $P = Get-KairoPaths $Root
+    $interactive = -not ($CI -or $Update)
+    $sourceApp = Join-Path (Split-Path $PSScriptRoot -Parent) 'app'
+    $owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Initialize-Folders $P
+
     Write-Host ''
     Write-Host '  Kairo setup' -ForegroundColor Cyan
     Write-Host "  Folder: $Root    Windows account: $owner"
@@ -126,12 +133,28 @@ try {
         }
     }
 } catch {
-    Write-Bad $_.Exception.Message
-    Write-Note "Full log: $logFile"
+    Write-Host ''
+    Write-Host "    XX  $($_.Exception.Message)" -ForegroundColor Red
+    if ($_.InvocationInfo -and $_.InvocationInfo.ScriptName) {
+        Write-Host "        (in $(Split-Path $_.InvocationInfo.ScriptName -Leaf), line $($_.InvocationInfo.ScriptLineNumber))"
+    }
+    if (-not $logging) {
+        try {
+            if (-not (Test-Path -LiteralPath $Root)) { [void](New-Item -ItemType Directory -Path $Root) }
+            Add-Content -LiteralPath $logFile -Value ("{0} Install-Kairo.ps1: {1}`r`n{2}" -f (Get-Date -Format 's'), $_.Exception.Message, $_.ScriptStackTrace)
+        } catch { }
+    }
+    Write-Host "    Log: $logFile"
     $exitCode = 1
 } finally {
-    Stop-Transcript | Out-Null
+    if ($logging) {
+        Stop-Transcript | Out-Null
+        # The log can hold what was typed during setup: owner and admins only,
+        # not Kairo's own account.
+        try { & icacls.exe $logFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):R" /Q | Out-Null } catch { }
+    }
 }
 
-if (-not $CI -and -not $Update) { Wait-Enter 'Press Enter to close this window' }
+# Success: wait so the owner can read the address. Failure: the .bat waits.
+if ($exitCode -eq 0 -and -not $CI -and -not $Update) { [void](Read-Host '    Press Enter to close this window') }
 exit $exitCode
