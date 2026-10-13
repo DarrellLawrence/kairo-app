@@ -1,31 +1,32 @@
-import { useEffect, useState } from 'react'
-import Chat from './Chat.jsx'
-import More from './More.jsx'
-import Approvals from './Approvals.jsx'
+import { AnimatePresence, MotionConfig, motion } from 'motion/react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
+import { spring, tabVariants } from './design/motion.js'
+import { Badge, IconChat, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
+import Today from './screens/Today.jsx'
+import Chat from './screens/Chat.jsx'
+import Approvals from './screens/Approvals.jsx'
+import More from './screens/More.jsx'
 
+const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
+
+// Board and Reviews join the tab bar when they are built (Milestone D).
 const TABS = [
-  { id: 'today', label: 'Today', icon: '☀' },
-  { id: 'chat', label: 'Chat', icon: '💬' },
-  { id: 'approvals', label: 'Approvals', icon: '✓' },
-  { id: 'board', label: 'Board', icon: '▦' },
-  { id: 'reviews', label: 'Reviews', icon: '↻' },
-  { id: 'more', label: 'More', icon: '⋯' },
+  { id: 'today', label: 'Today', Icon: IconToday },
+  { id: 'chat', label: 'Chat', Icon: IconChat },
+  { id: 'approvals', label: 'Approvals', Icon: IconShield },
+  { id: 'more', label: 'More', Icon: IconMore },
 ]
 
-const COMING = {
-  today: 'Brief, top 3, calendar and deadlines arrive with Milestone C.',
-  board: 'Goals, projects and tasks arrive with Milestone D.',
-  reviews: 'Check-ins and weekly reviews arrive with Milestone D.',
-}
-
-function readTab() {
-  const id = window.location.hash.replace('#', '')
-  return TABS.some((t) => t.id === id) ? id : 'chat'
+function readRoute() {
+  const hash = window.location.hash.replace(/^#\/?/, '')
+  if (hash === 'dev/components' || window.location.pathname === '/dev/components') return 'dev'
+  return TABS.some((t) => t.id === hash) ? hash : 'today'
 }
 
 export default function App() {
-  const [tab, setTab] = useState(readTab)
+  const [route, setRoute] = useState(readRoute)
+  const [dir, setDir] = useState(1)
   const [openCards, setOpenCards] = useState(0)
 
   useEffect(() => {
@@ -36,30 +37,55 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const onHash = () => setTab(readTab())
+    const onHash = () => setRoute(readRoute())
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
-  const current = TABS.find((t) => t.id === tab)
+  const go = useCallback((id) => {
+    const from = TABS.findIndex((t) => t.id === route)
+    const to = TABS.findIndex((t) => t.id === id)
+    setDir(to >= from ? 1 : -1)
+    window.history.replaceState(null, '', `#${id}`)
+    setRoute(id)
+  }, [route])
+
+  const tabs = TABS.map((t) => ({
+    id: t.id, label: t.label, icon: <t.Icon />,
+    badge: t.id === 'approvals' && openCards > 0 ? <Badge tone="count">{openCards}</Badge> : null,
+  }))
+
+  const screen = {
+    today: <Today openCards={openCards} go={go} />,
+    chat: <Chat />,
+    approvals: <Approvals onCount={setOpenCards} />,
+    more: <More />,
+    dev: <Suspense fallback={null}><DevComponents /></Suspense>,
+  }[route]
+
   return (
-    <div className="app">
-      <header className="topbar">{current.label}</header>
-      <main className="screen">
-        {tab === 'chat' && <Chat />}
-        {tab === 'more' && <More />}
-        {tab === 'approvals' && <Approvals onCount={setOpenCards} />}
-        {COMING[tab] && <p className="placeholder">{COMING[tab]}</p>}
-      </main>
-      <nav className="tabbar">
-        {TABS.map((t) => (
-          <a key={t.id} href={`#${t.id}`} className={t.id === tab ? 'tab active' : 'tab'}>
-            <span className="tab-icon" aria-hidden="true">{t.icon}</span>
-            {t.id === 'approvals' && openCards > 0 && <span className="count">{openCards}</span>}
-            <span className="tab-label">{t.label}</span>
-          </a>
-        ))}
-      </nav>
-    </div>
+    <MotionConfig reducedMotion="user">
+      <ToastProvider>
+        <div className="k-app">
+          <main className="k-screen">
+            <AnimatePresence initial={false} custom={dir} mode="popLayout">
+              <motion.div
+                key={route}
+                className="k-layer"
+                custom={dir}
+                variants={tabVariants}
+                initial="enter"
+                animate="center"
+                exit="exit"
+                transition={{ ...spring.smooth, opacity: { duration: 0.18 } }}
+              >
+                {screen}
+              </motion.div>
+            </AnimatePresence>
+          </main>
+          {route !== 'dev' && <TabBar tabs={tabs} active={route} onSelect={go} />}
+        </div>
+      </ToastProvider>
+    </MotionConfig>
   )
 }

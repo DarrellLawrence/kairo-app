@@ -1,0 +1,115 @@
+/* Kairo design tokens. Every component and screen uses these; no raw colours,
+   sizes or durations anywhere else. Dark first; light follows the iPhone
+   setting. One accent: violet. Glass = translucent fill + blur + hairline. */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- colour: surfaces */
+  --bg: #07070c;
+  --bg-glow-1: rgba(124, 77, 255, 0.22);
+  --bg-glow-2: rgba(56, 189, 248, 0.08);
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-strong: rgba(255, 255, 255, 0.08);
+  --surface-pressed: rgba(255, 255, 255, 0.12);
+  --glass: rgba(18, 18, 28, 0.62);
+  --glass-strong: rgba(22, 22, 34, 0.82);
+  --glass-blur: saturate(180%) blur(24px);
+  --hairline: rgba(255, 255, 255, 0.09);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  --edge-light: rgba(255, 255, 255, 0.10);   /* top highlight on glass */
+
+  /* ---- colour: text */
+  --text: #f4f3fa;
+  --text-2: rgba(235, 233, 250, 0.64);
+  --text-3: rgba(235, 233, 250, 0.40);
+  --on-accent: #ffffff;
+
+  /* ---- colour: accent (the only brand colour) */
+  --accent: #8b5cf6;
+  --accent-2: #a78bfa;
+  --accent-soft: rgba(139, 92, 246, 0.16);
+  --accent-line: rgba(167, 139, 250, 0.45);
+  --accent-glow: 0 0 0 1px rgba(167, 139, 250, 0.35), 0 8px 32px rgba(124, 77, 255, 0.35);
+  --accent-gradient: linear-gradient(135deg, #a78bfa 0%, #7c3aed 55%, #5b21b6 100%);
+
+  /* ---- colour: status */
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.16);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.14);
+  --danger: #fb7185;
+  --danger-soft: rgba(251, 113, 133, 0.16);
+
+  /* ---- spacing (4 / 8 / 12 / 16 / 24 / 32) */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+
+  /* ---- radii */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-pill: 999px;
+
+  /* ---- shadows */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+  /* ---- type: the iPhone's own font (SF Pro) */
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --t-large: 700 34px/1.12 var(--font);      /* large title */
+  --t-title: 700 22px/1.2 var(--font);
+  --t-headline: 600 17px/1.3 var(--font);
+  --t-body: 400 17px/1.4 var(--font);
+  --t-callout: 400 16px/1.38 var(--font);
+  --t-sub: 400 15px/1.35 var(--font);
+  --t-caption: 500 12px/1.3 var(--font);
+  --tracking-large: -0.02em;
+
+  /* ---- motion (CSS side; springs live in motion.js) */
+  --d-fast: 120ms;
+  --d-base: 220ms;
+  --d-slow: 380ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ---- layout */
+  --tabbar-h: 56px;
+  --topbar-h: 44px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --app-h: 100dvh;   /* set from visualViewport, so the input bar sits above the keyboard */
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f4f3f8;
+    --bg-glow-1: rgba(139, 92, 246, 0.16);
+    --bg-glow-2: rgba(56, 189, 248, 0.08);
+    --surface: rgba(255, 255, 255, 0.7);
+    --surface-strong: rgba(255, 255, 255, 0.9);
+    --surface-pressed: rgba(0, 0, 0, 0.06);
+    --glass: rgba(250, 250, 253, 0.66);
+    --glass-strong: rgba(252, 252, 255, 0.86);
+    --hairline: rgba(20, 16, 40, 0.08);
+    --hairline-strong: rgba(20, 16, 40, 0.14);
+    --edge-light: rgba(255, 255, 255, 0.8);
+    --text: #14121c;
+    --text-2: rgba(20, 18, 28, 0.62);
+    --text-3: rgba(20, 18, 28, 0.38);
+    --accent: #7c3aed;
+    --accent-2: #8b5cf6;
+    --accent-soft: rgba(124, 58, 237, 0.12);
+    --accent-line: rgba(124, 58, 237, 0.35);
+    --accent-glow: 0 0 0 1px rgba(124, 58, 237, 0.25), 0 8px 24px rgba(124, 58, 237, 0.22);
+    --shadow-2: 0 8px 24px rgba(30, 20, 60, 0.10);
+    --shadow-3: 0 24px 64px rgba(30, 20, 60, 0.18);
+  }
+}

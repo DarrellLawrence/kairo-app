@@ -1,0 +1,50 @@
+/* App-wide base: feels like a native app, not a web page. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;              /* the page never scrolls; only lists inside do */
+  overscroll-behavior: none;     /* no rubber band on the whole page */
+  background: var(--bg);
+  color: var(--text);
+  font: var(--t-body);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;             /* chrome is not selectable; text content opts back in */
+  -webkit-user-select: none;
+  touch-action: manipulation;    /* no double-tap zoom */
+}
+
+#root { height: 100%; }
+
+/* Ambient violet light behind everything. Fixed and painted once. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -20% -20% auto -20%;
+  height: 70%;
+  background:
+    radial-gradient(60% 60% at 20% 20%, var(--bg-glow-1), transparent 70%),
+    radial-gradient(50% 50% at 90% 10%, var(--bg-glow-2), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.selectable, .selectable * { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
+
+/* 16px or more: iOS does not zoom into focused fields. */
+input, textarea, select, button { font: inherit; font-size: 17px; color: inherit; }
+input, textarea, select { user-select: text; -webkit-user-select: text; }
+button { -webkit-appearance: none; appearance: none; }
+a { color: var(--accent-2); text-decoration: none; }
+
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+}
