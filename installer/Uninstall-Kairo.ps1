@@ -51,5 +51,5 @@ try {
     Write-Bad $_.Exception.Message
     $exitCode = 1
 }
-if (-not $CI) { Wait-Enter 'Press Enter to close this window' }
+if (-not $CI -and $exitCode -eq 0) { Wait-Enter 'Press Enter to close this window' }
 exit $exitCode
