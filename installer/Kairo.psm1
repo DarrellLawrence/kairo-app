@@ -139,7 +139,7 @@ function Initialize-ServiceAccount {
         Enable-LocalUser -Name $name
     } else {
         [void](New-LocalUser -Name $name -Password $secure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires `
-            -FullName 'Kairo' -Description 'Runs Kairo in the background. Not for signing in.')
+            -FullName 'Kairo' -Description 'Runs Kairo in the background. No sign-in.')
     }
     $usersGroup = (Get-LocalGroup -SID 'S-1-5-32-545').Name
     $adminsGroup = (Get-LocalGroup -SID 'S-1-5-32-544').Name
