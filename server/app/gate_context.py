@@ -19,7 +19,8 @@ ORIGINS = ("owner_chat", "job")
 def read_context(engine: Engine, origin: str) -> GateContext:
     if origin not in ORIGINS:
         raise ValueError(f"unknown origin {origin!r}")
-    since = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
+    # Same text format SQLAlchemy stores datetimes in on SQLite (avoids the deprecated sqlite3 adapter).
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S.%f")
     with engine.connect() as conn:
         paused = conn.execute(text("SELECT value FROM settings WHERE key = 'paused'")).scalar()
         open_cards = conn.execute(text("SELECT COUNT(*) FROM approvals WHERE status = 'open'")).scalar_one()

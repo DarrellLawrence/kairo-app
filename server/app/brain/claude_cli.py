@@ -104,6 +104,7 @@ class ClaudeCLIBrain:
         timeout_s: int = 300,
         model: str | None = None,
         env: dict[str, str] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.claude_bin = claude_bin
         self.workspace_dir = Path(workspace_dir)
@@ -111,6 +112,8 @@ class ClaudeCLIBrain:
         self.timeout_s = timeout_s
         self.model = model
         self._env = build_env(env)
+        # Settings the gate hook needs (KAIRO_HOOK_*), set by the backend.
+        self._env.update(extra_env or {})
         self._status = BrainStatus.ok
         self._run_limited = False
         self._proc: subprocess.Popen | None = None
@@ -176,8 +179,10 @@ class ClaudeCLIBrain:
         session_id: str | None,
         system: str,
         tools: list[str],
+        origin: str = "owner_chat",
     ) -> Iterator[BrainEvent]:
         cmd = self.build_command(session_id=session_id, system=system, tools=tools)
+        run_env = {**self._env, "KAIRO_HOOK_ORIGIN": origin}
         self._run_limited = False
         self._cancelled.clear()
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -185,7 +190,7 @@ class ClaudeCLIBrain:
             proc = subprocess.Popen(
                 cmd,
                 cwd=self.workspace_dir,
-                env=self._env,
+                env=run_env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

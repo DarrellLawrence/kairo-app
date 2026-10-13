@@ -132,3 +132,20 @@ def test_job_origin_cannot_propose_outbound(migrated):
     ev = event(P + "propose_action", {"action": "gmail.reply", "args": {"message_id": "abc", "body": "hi"}})
     assert run_hook(json.dumps(ev), hook_env(migrated, KAIRO_HOOK_ORIGIN="job")).returncode == 2
     assert run_hook(json.dumps(ev), hook_env(migrated)).returncode == 0
+
+
+def test_outbound_count_reads_recent_done_cards(migrated):
+    from datetime import datetime, timedelta, timezone
+
+    from app.db import Approval
+    from app.gate_context import read_context
+
+    engine = make_engine(migrated.db_url)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as s:
+        s.add(Approval(tool="gmail.send", args_json="{}", summary="x", tier=3, status="done", decided_at=now - timedelta(hours=1)))
+        s.add(Approval(tool="gmail.send", args_json="{}", summary="x", tier=3, status="done", decided_at=now - timedelta(hours=30)))
+        s.add(Approval(tool="gmail.send", args_json="{}", summary="x", tier=3, status="open"))
+        s.commit()
+    ctx = read_context(engine, "owner_chat")
+    assert ctx.outbound_last_24h == 1 and ctx.open_approvals == 1
