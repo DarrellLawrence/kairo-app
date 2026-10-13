@@ -389,6 +389,19 @@ function Unregister-KairoTask {
     }
 }
 
+# Why didn't Kairo start? Task result + the end of its log, in plain view.
+function Show-StartProblem($P) {
+    $info = Get-ScheduledTaskInfo -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
+    if ($info) { Write-Note ("Task 'Kairo': last result 0x{0:X8}, last run {1}" -f $info.LastTaskResult, $info.LastRunTime) }
+    $log = Join-Path $P.Logs 'kairo.log'
+    if (Test-Path $log) {
+        Write-Note 'Last lines of kairo.log:'
+        Get-Content $log -Tail 15 | ForEach-Object { Write-Note "  $_" }
+    } else {
+        Write-Note 'kairo.log was never written: Python did not start (check that Kairo''s account can read Python and C:\Kairo).'
+    }
+}
+
 # ---------------------------------------------------------------- deploy with auto-rollback
 
 # Installs $SourceApp as the running release. On any failure after the switch:
@@ -438,6 +451,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     }
 
     Write-Bad "Kairo $version did not start correctly."
+    Show-StartProblem $P
     if (-not $prev) {
         Stop-Kairo $P
         Write-Bad 'There is no earlier version to go back to. See C:\Kairo\data\logs\kairo.log'
