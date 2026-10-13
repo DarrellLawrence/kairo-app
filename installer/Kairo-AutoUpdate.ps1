@@ -124,11 +124,18 @@ try {
     $held = [bool]$ready   # Kairo now holds new chats off; released below if we stop early
 
     Write-Log "Installing Kairo $latest (running: $installed$(if ($urgent) { ', urgent' }))."
-    $updArgs = @{ Root = $Root; Auto = $true }
-    if ($zip) { $updArgs['ZipPath'] = $zip }
-    if ($CI) { $updArgs['CI'] = $true }
-    & (Join-Path $PSScriptRoot 'Update-Kairo.ps1') @updArgs *>&1 | ForEach-Object { Write-Log "  $_" }
-    $code = $LASTEXITCODE
+    # A separate process with its output in files: in PowerShell 5.1, redirecting the
+    # output of a script in-process turns any program's stderr line (a pip warning)
+    # into a fatal error.
+    $argLine = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'Update-Kairo.ps1')`" -Root `"$Root`" -Auto"
+    if ($zip) { $argLine += " -ZipPath `"$zip`"" }
+    if ($CI) { $argLine += ' -CI' }
+    $out = Join-Path $P.Updater 'last-run.out.txt'
+    $err = Join-Path $P.Updater 'last-run.err.txt'
+    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    $code = $proc.ExitCode
+    foreach ($f in @($out, $err)) { if (Test-Path $f) { Get-Content $f | ForEach-Object { Write-Log "  $_" } } }
     $now = (Read-State $P).current
     $s.waiting = ''
     if ($code -eq 0 -and $now -eq $latest) {

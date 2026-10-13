@@ -70,6 +70,7 @@ jobs:
         shell: powershell
         run: |
           Get-ChildItem C:\KairoCI\data\logs -ErrorAction SilentlyContinue | ForEach-Object { "==== $($_.Name)"; Get-Content $_.FullName -Tail 200 }
+          foreach ($f in @('C:\KairoCI\updater\auto-update.log', 'C:\KairoCI\install.log')) { if (Test-Path $f) { "==== $f"; Get-Content $f -Tail 200 } }
 
   # Only a version that passed everything above becomes "the latest tested
   # version" that "Update Kairo" on kairo-home downloads.
