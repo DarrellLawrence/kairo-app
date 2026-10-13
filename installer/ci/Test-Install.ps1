@@ -124,7 +124,7 @@ $apiUp = Wait-SyncApi $KPs 60
 Check ($null -ne $apiUp -and $apiUp.myID) 'sync API answers on 127.0.0.1'
 $other = Join-Path $work 'st-other'
 $ErrorActionPreference = 'Continue'   # Windows PowerShell 5.1: redirected stderr would throw
-& $env:KAIRO_SYNCTHING generate "--home=$other" --no-default-folder 2>&1 | Out-Null
+& $env:KAIRO_SYNCTHING generate "--home=$other" 2>&1 | Out-Null
 $ErrorActionPreference = 'Stop'
 [xml]$oc = Get-Content -Raw (Join-Path $other 'config.xml')
 $otherId = $oc.configuration.SelectSingleNode('device').GetAttribute('id')

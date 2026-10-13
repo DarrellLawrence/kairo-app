@@ -82,7 +82,7 @@ function Initialize-SyncConfig($P) {
     if (-not (Test-Path $cfg)) {
         [void](New-Item -ItemType Directory -Force $S.Home)
         $pw = New-RandomPassword
-        $r = Invoke-Native $S.Exe @('generate', "--home=$($S.Home)", '--gui-user=kairo', "--gui-password=$pw", '--no-default-folder')
+        $r = Invoke-Native $S.Exe @('generate', "--home=$($S.Home)", '--gui-user=kairo', "--gui-password=$pw")
         if ($r.Code -ne 0 -or -not (Test-Path $cfg)) { throw "Syncthing could not create its settings: $($r.Out.Trim())" }
         Set-Content -Path (Join-Path $P.Secrets 'syncthing-gui.txt') -Value "user: kairo`r`npassword: $pw" -Encoding ASCII
     }
@@ -97,6 +97,8 @@ function Initialize-SyncConfig($P) {
         Set-XmlChild $doc $opts $kv[0] $kv[1]
     }
     Set-ListenAddresses $doc (Get-TailscaleIPv4)
+    # Only the vault is shared (Syncthing 1.x made a 'default' folder on first run).
+    foreach ($f in @($c.SelectNodes('folder'))) { if ($f.GetAttribute('id') -ne $script:SyncFolderId) { [void]$c.RemoveChild($f) } }
     $folder = $c.SelectSingleNode("folder[@id='$script:SyncFolderId']")
     if (-not $folder) {
         $folder = $doc.CreateElement('folder')
