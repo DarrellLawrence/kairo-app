@@ -4,6 +4,11 @@ param([Parameter(Mandatory)][string]$Zip, [Parameter(Mandatory)][string]$FakeCla
 
 $ErrorActionPreference = 'Stop'
 $Root = 'C:\KairoCI'
+Import-Module (Join-Path $PSScriptRoot '..\Kairo.psm1') -Force -DisableNameChecking
+# The fake CLI must live where Kairo's own account can read it (like the real one, in tools\).
+[void](New-Item -ItemType Directory -Force (Join-Path $Root 'tools'))
+Copy-Item -Force $FakeClaude (Join-Path $Root 'tools\fake_claude.py')
+$FakeClaude = Join-Path $Root 'tools\fake_claude.py'
 $work = Join-Path $env:RUNNER_TEMP 'kairo-ci'
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 [void](New-Item -ItemType Directory $work)
@@ -57,8 +62,18 @@ $h = Get-HealthObj
 Check ($h -ne $null -and $h.status -eq 'ok') 'health: ok'
 Check ($h.brain -eq 'ok') 'health: brain ok (fake CLI found)'
 $task = Get-ScheduledTask -TaskName 'Kairo' -TaskPath '\Kairo\'
-Check ($task.Principal.LogonType -eq 'S4U') 'boot task runs without a stored password (S4U)'
+Check ($task.Principal.UserId -match 'kairo-svc$') "boot task runs as Kairo's own account (kairo-svc)"
+Check ($task.Principal.LogonType -eq 'Password') 'boot task runs whether or not anyone is logged in'
 Check ($task.Principal.RunLevel -eq 'Limited') 'boot task runs without admin rights'
+$svcUser = Get-LocalUser -Name 'kairo-svc'
+Check ($svcUser.Enabled) 'kairo-svc account exists'
+$admins = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+Check (-not (Get-LocalGroupMember -Group $admins -Member 'kairo-svc' -ErrorAction SilentlyContinue)) 'kairo-svc is not an administrator'
+$owners = @(Get-KairoProcesses (Get-KairoPaths $Root) | ForEach-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User })
+Check ($owners.Count -ge 1 -and @($owners | Where-Object { $_ -ne 'kairo-svc' }).Count -eq 0) "the running app belongs to kairo-svc ($($owners -join ','))"
+$boot = Get-ScheduledTask -TaskName 'Kairo Boot Check' -TaskPath '\Kairo\'
+Check ($boot.Principal.UserId -eq 'SYSTEM' -or $boot.Principal.UserId -eq 'S-1-5-18') 'boot check task runs as SYSTEM'
+Check ([string]$boot.Triggers[0].Delay -eq 'PT3M') 'boot check runs 3 minutes after boot'
 Check (@($task.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskBootTrigger' }).Count -eq 1) 'boot trigger present'
 Check ($task.Settings.ExecutionTimeLimit -eq 'PT0S') 'no time limit on the task'
 Check ($task.State -eq 'Running') 'task is running'
@@ -68,8 +83,38 @@ $ids = @((Get-Acl (Join-Path $Root 'data')).Access | ForEach-Object { $_.Identit
 Check (@($ids | Where-Object { $_ -match '\\Users$|^Everyone$|Authenticated Users' }).Count -eq 0) 'data folder: no access for other users'
 $codeAcl = (Get-Acl (Join-Path $Root 'app')).Access | Where-Object { $_.IdentityReference.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name }
 Check (@($codeAcl | Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl' }).Count -eq 0) 'code folder: owner cannot modify (read/run only)'
-Check (Test-Path (Join-Path $Root 'Update Kairo.bat')) 'Update/Rollback/Uninstall .bat files placed in the Kairo folder'
+Check ((Test-Path (Join-Path $Root 'Update Kairo.bat')) -and (Test-Path (Join-Path $Root 'Kairo Check.bat'))) 'Update/Rollback/Uninstall/Check .bat files placed in the Kairo folder'
 Check ((Invoke-Install $s1) -eq 0) 'running the same version again is harmless'
+
+# ---- what can Kairo's account see? (fake CLI probe, run by the app as kairo-svc)
+$canary = Join-Path $env:USERPROFILE 'kairo-canary.txt'
+Set-Content -Path $canary -Value 'private'
+$probe = Join-Path $Root 'data\workspace\probe.json'
+$envFile = Join-Path $Root 'data\kairo.env'
+Add-Content -Path $envFile -Value "KAIRO_HOOK_FAKE_PROBE=$probe"
+Add-Content -Path $envFile -Value "KAIRO_HOOK_FAKE_PROBE_PATHS=$canary;$envFile"
+$KP = Get-KairoPaths $Root
+Stop-Kairo $KP; Start-Kairo
+Check ($null -ne (Wait-Healthy 90)) 'restarted with the probe on'
+$st = (Invoke-WebRequest 'http://127.0.0.1:8000/api/selftest' -Method Post -UseBasicParsing -TimeoutSec 60).Content | ConvertFrom-Json
+Check ($st.ok) 'self-test: the CLI runs and answers for kairo-svc'
+$pr = Get-Content -Raw $probe | ConvertFrom-Json
+Check ($pr.user -eq 'kairo-svc') "the CLI runs as kairo-svc ($($pr.user))"
+Check ($pr.admin -eq $false) 'the CLI has no admin rights'
+Check (-not $pr.readable.$canary) "kairo-svc cannot read a file in the installer user's profile"
+Check ($pr.readable.$envFile) 'kairo-svc can read its own data folder'
+$lines = Get-Content $envFile | Where-Object { $_ -notmatch '^KAIRO_HOOK_FAKE_PROBE' }
+Set-Content -Path $envFile -Value $lines -Encoding UTF8
+Stop-Kairo $KP; Start-Kairo
+Check ($null -ne (Wait-Healthy 90)) 'restarted without the probe'
+
+# ---- the boot check (what runs after every reboot), minus the Tailscale parts
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Kairo-BootCheck.ps1') -Root $Root -CI | Out-Host
+Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, Claude answers)'
+$bc = Get-Content -Raw (Join-Path $Root 'data\logs\boot-check.json') | ConvertFrom-Json
+Check ($bc.all_ok -and @($bc.checks).Count -eq 3) 'boot-check.json written with 3 green checks'
+$status = (Invoke-WebRequest 'http://127.0.0.1:8000/api/status' -UseBasicParsing).Content | ConvertFrom-Json
+Check ($status.boot_check.all_ok) 'the app shows the boot check result (More screen)'
 
 # ---- update keeps owner config
 Add-Content (Join-Path $Root 'data\config\profile.yaml') '# ci-marker'
@@ -123,6 +168,8 @@ Check ((Get-StateObj).current -eq $v2) 'Update Kairo installed v2'
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Uninstall-Kairo.ps1') -CI -Root $Root | Out-Host
 Check ($LASTEXITCODE -eq 0) 'uninstall exits 0'
 Check (-not (Get-ScheduledTask -TaskName 'Kairo' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue)) 'boot task removed'
+Check (-not (Get-ScheduledTask -TaskName 'Kairo Boot Check' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue)) 'boot check task removed'
+Check (-not (Get-LocalUser -Name 'kairo-svc' -ErrorAction SilentlyContinue)) 'kairo-svc account removed'
 Check (-not (Test-Path (Join-Path $Root 'app'))) 'program files removed'
 Check (Test-Path (Join-Path $Root 'data\db\kairo.sqlite')) 'data kept'
 Check ($null -eq (Get-HealthObj)) 'nothing listening any more'
