@@ -112,7 +112,7 @@ export default function Chat() {
         }
         right={<Button variant="ghost" size="sm" icon={<IconPlus />} onClick={newThread} aria-label="New chat" />}
       />
-      <ScrollArea tabbar={false} innerRef={scrollRef}>
+      <ScrollArea tabbar={false} innerRef={scrollRef} onRefresh={async () => { await loadThreads(); await loadMessages(threadId) }}>
         {error && <div className="k-banner" style={{ marginTop: 8 }}>{error}</div>}
         {messages.length === 0 && !busy && (
           <EmptyState icon={<IconChat />} title="Ask Kairo anything" text="Mail, calendar, tasks and notes. Anything that sends or deletes waits for your approval." />

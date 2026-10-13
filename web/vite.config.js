@@ -6,7 +6,8 @@ const api = process.env.KAIRO_API ?? 'http://127.0.0.1:8000'
 export default defineConfig({
   plugins: [
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',     // applied on the next app open: src/design/update.js
+      injectRegister: false,
       includeAssets: ['icon.svg', 'apple-touch-icon.png', 'icon-*.png', 'push-sw.js'],
       manifest: {
         name: 'Kairo',

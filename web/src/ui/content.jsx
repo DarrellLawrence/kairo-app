@@ -1,6 +1,6 @@
 // Chat pieces (ChatBubble, TypingDots, InputBar), ApprovalCard and SuccessCheck.
 import { motion } from 'motion/react'
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef } from 'react'
 import { spring } from '../design/motion.js'
 import { Badge, Button, Swipeable } from './basics.jsx'
 import { IconSend } from './icons.jsx'
@@ -11,19 +11,19 @@ export function TypingDots() {
 
 /* role: owner | kairo | system. While streaming, pass `chunks` (the pieces as
    they arrive): each new piece fades in instead of popping. */
-export function ChatBubble({ role, text, chunks, typing }) {
+// memo: while a reply streams in, only the streaming bubble re-renders, not the whole history.
+export const ChatBubble = memo(function ChatBubble({ role, text, chunks, typing }) {
   return (
     <motion.div
       className={`k-bubble ${role} selectable`}
       initial={{ opacity: 0, scale: 0.86, y: 10 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       transition={spring.bouncy}
-      layout="position"
     >
       {typing ? <TypingDots /> : chunks ? chunks.map((c, i) => <span key={i} className="k-chunk">{c}</span>) : text}
     </motion.div>
   )
-}
+})
 
 /* Grows with the text (up to ~5 lines). Enter sends, Shift+Enter is a new line. */
 export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Message' }) {
