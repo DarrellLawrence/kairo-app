@@ -93,4 +93,4 @@ jobs:
           v=$(cat dist/VERSION)
           gh release create "v$v" dist/Kairo-Setup-*.zip dist/Kairo-Setup-*.zip.sha256 \
             --title "Kairo $v" \
-            --notes "Tested on Linux and Windows (install, update, automatic rollback, uninstall). Commit ${GITHUB_SHA}."
+            --notes "To install: under Assets download Kairo-Setup-$v.zip (NOT Source code), right-click it, Extract All, then double-click Install Kairo.bat. Tested on Linux and Windows (install, update, automatic rollback, uninstall). Commit ${GITHUB_SHA}."

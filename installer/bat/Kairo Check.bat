@@ -16,6 +16,7 @@ set "KAIRO_RC=1"
 title Kairo check
 
 if not exist "%KAIRO_PS%" goto no_powershell
+if exist "%KAIRO_HERE%Install-Kairo.ps1" goto source_code
 if not exist "%KAIRO_HERE%installer\Kairo-BootCheck.ps1" goto incomplete
 
 rem 1. Administrator rights
@@ -44,9 +45,19 @@ echo.
 echo   Windows PowerShell is missing on this PC, so Kairo cannot run.
 goto failed
 
+:source_code
+echo.
+echo   This is the "Source code" download. It cannot be installed.
+echo   On the GitHub release page, under "Assets", download the file
+echo   that starts with Kairo-Setup- and ends with .zip, right-click it,
+echo   choose "Extract All...", open the extracted folder and
+echo   double-click "Kairo Check.bat" there.
+goto failed
+
 :incomplete
 echo.
-echo   Some Kairo files are missing next to this file.
+echo   Some Kairo files are missing next to this file:
+echo   "%KAIRO_HERE%installer\Kairo-BootCheck.ps1"
 echo   Right-click the downloaded zip, choose "Extract All...", open the
 echo   extracted folder and double-click "Kairo Check.bat" there.
 goto failed
