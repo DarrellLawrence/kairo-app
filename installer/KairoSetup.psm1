@@ -103,7 +103,7 @@ function Remove-WindowsUpdatePolicy {
 
 # Only with a TPM 2.0 and only with the TPM-only protector (no PIN), so the PC
 # still boots by itself after a power cut. The recovery key is shown and saved
-# to a USB stick if one is plugged in, and the owner must confirm he saved it
+# to a USB stick if one is plugged in, and the owner must confirm it was saved
 # BEFORE encryption starts. Never written to C: (it would be locked inside).
 function Enable-BitLockerIfPossible {
     Write-Step 'Disk encryption (BitLocker)'
