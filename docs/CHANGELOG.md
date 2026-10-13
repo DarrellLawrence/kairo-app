@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-13 — fix: the GitHub "Source code" zip
+- Running `Install Kairo.bat` from GitHub's automatic "Source code" zip (where it sits one folder too deep) now says to download `Kairo-Setup-….zip` instead. This was the likely cause of the original "window flashes and closes": PowerShell's negative exit code for a missing file skipped the old .bat's `if errorlevel 1` pause.
+- Release notes say which file to download. CI checks the message.
+
 ## 2026-10-13 — fix: "Install Kairo.bat" closed instantly on a real PC
 - All .bat files now ask for admin rights themselves (no more elevation from inside PowerShell, whose window closed without a message on an early error), find their files from their own folder, use the full path to Windows PowerShell, and unblock files Windows marked as downloaded.
 - They never close on an error: plain message, error code, log path, wait for a key. The scripts catch every error (also module-load errors) and log to `C:\Kairo\install.log` (owner + admins only).

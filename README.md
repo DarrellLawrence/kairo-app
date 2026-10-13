@@ -30,7 +30,7 @@ Everything on kairo-home is double-click. Nothing gets wiped, no Docker, no WSL.
 **First install**
 1. BIOS, once: set "Restore on AC power loss" (sometimes "AC Back" or "Power On after power failure") to **On**.
 2. Get the setup zip: on GitHub open the kairo repo → **Releases** (right side) → newest release → download `Kairo-Setup-….zip`. Or build one on the laptop: `scripts/build-release.sh` → `dist/`.
-3. On kairo-home: right-click the zip → **Extract All** → open the folder → double-click **Install Kairo.bat** → Windows asks for admin rights → **Yes**.
+3. On kairo-home: download **Kairo-Setup-….zip** under Assets (not "Source code"), right-click the zip → **Extract All** → open the folder → double-click **Install Kairo.bat** → Windows asks for admin rights → **Yes**.
 4. Follow the screen. It installs Python, Tailscale and Claude Code, sets up the boot task, turns off sleep, sets Windows Update to Sundays 04:00, offers BitLocker if the PC has a TPM, then walks you through three logins (Tailscale, Claude, GitHub for updates).
 5. Restart the PC once and **don't log in**. After about 5 minutes, on the iPhone: Kairo → **More** → "Last boot check" should be all green (Claude, Tailscale, HTTPS). Then send a chat message.
 

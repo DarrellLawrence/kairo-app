@@ -119,6 +119,9 @@ if (Test-Path -LiteralPath $lonely) { Remove-Item -LiteralPath $lonely -Recurse 
 Copy-Item -LiteralPath (Join-Path $s1 'Install Kairo.bat') -Destination $lonely
 $r = Invoke-Bat (Join-Path $lonely 'Install Kairo.bat') '' $failRoot
 Check ($r.Code -ne 0 -and $r.Output -match 'Extract All') 'a .bat without its files says to extract the zip first'
+# The GitHub "Source code" zip has the .bat one folder too deep; it must say so.
+$r = Invoke-Bat (Join-Path $PSScriptRoot '..\Install Kairo.bat') '' $failRoot
+Check ($r.Code -ne 0 -and $r.Output -match 'Source code' -and $r.Output -match 'Kairo-Setup-') 'the Source code download says to get the Kairo-Setup zip instead'
 foreach ($d in @($broken, $failRoot, $lonely)) { Remove-Item -LiteralPath $d -Recurse -Force }
 Check ((Get-StateObj).current -eq $v1) "running version is $v1"
 $h = Get-HealthObj
