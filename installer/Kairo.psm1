@@ -148,7 +148,51 @@ function Initialize-ServiceAccount {
     $hide = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
     if (-not (Test-Path $hide)) { [void](New-Item -Path $hide -Force) }
     Set-ItemProperty -Path $hide -Name $name -Value 0 -Type DWord
-    return [pscustomobject]@{ Name = "$env:COMPUTERNAME\$name"; Password = $plain }
+    $full = "$env:COMPUTERNAME\$name"
+    # May run as a background task at boot; may NOT sign in at the PC or over Remote Desktop.
+    Grant-UserRight $full 'SeBatchLogonRight'
+    Grant-UserRight $full 'SeDenyInteractiveLogonRight'
+    Grant-UserRight $full 'SeDenyRemoteInteractiveLogonRight'
+    return [pscustomobject]@{ Name = $full; Password = $plain }
+}
+
+# User rights via the LSA API (no secedit export/import round trip).
+$script:LsaCode = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class KairoLsa {
+    [StructLayout(LayoutKind.Sequential)] struct LSA_UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+    [StructLayout(LayoutKind.Sequential)] struct LSA_OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+    [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr systemName, ref LSA_OBJECT_ATTRIBUTES attrs, uint access, out IntPtr handle);
+    [DllImport("advapi32.dll")] static extern uint LsaAddAccountRights(IntPtr handle, byte[] sid, LSA_UNICODE_STRING[] rights, uint count);
+    [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr handle);
+    [DllImport("advapi32.dll")] static extern int LsaNtStatusToWinError(uint status);
+    public static void Grant(string account, string right) {
+        var sid = (SecurityIdentifier)new NTAccount(account).Translate(typeof(SecurityIdentifier));
+        var bytes = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(bytes, 0);
+        var attrs = new LSA_OBJECT_ATTRIBUTES();
+        IntPtr handle;
+        uint r = LsaOpenPolicy(IntPtr.Zero, ref attrs, 0x000F0FFF, out handle);
+        if (r != 0) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(r));
+        try {
+            var s = new LSA_UNICODE_STRING();
+            s.Buffer = Marshal.StringToHGlobalUni(right);
+            s.Length = (ushort)(right.Length * 2);
+            s.MaximumLength = (ushort)((right.Length + 1) * 2);
+            try {
+                r = LsaAddAccountRights(handle, bytes, new[] { s }, 1);
+                if (r != 0) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(r));
+            } finally { Marshal.FreeHGlobal(s.Buffer); }
+        } finally { LsaClose(handle); }
+    }
+}
+'@
+
+function Grant-UserRight([string]$Account, [string]$Right) {
+    if (-not ('KairoLsa' -as [type])) { Add-Type -TypeDefinition $script:LsaCode }
+    [KairoLsa]::Grant($Account, $Right)
 }
 
 function Remove-ServiceAccount {
@@ -353,6 +397,9 @@ function Wait-Healthy([int]$Seconds = 90) {
 # "log on as a batch job" right). A second trigger re-checks every 5 minutes;
 # IgnoreNew means it only starts Kairo if it isn't running. No time limit.
 function Register-KairoTask($P, $Svc) {
+    # Task Scheduler history on, so "why didn't Kairo start?" has an answer.
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & wevtutil.exe sl Microsoft-Windows-TaskScheduler/Operational /e:true | Out-Null } catch { } finally { $ErrorActionPreference = $old }
     $py = Join-Path $P.Current 'venv\Scripts\python.exe'
     $taskArgs = "-m app.serve --env-file `"$($P.EnvFile)`""
     $action = New-ScheduledTaskAction -Execute $py -Argument $taskArgs -WorkingDirectory (Join-Path $P.Current 'server')
@@ -393,6 +440,11 @@ function Unregister-KairoTask {
 function Show-StartProblem($P) {
     $info = Get-ScheduledTaskInfo -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
     if ($info) { Write-Note ("Task 'Kairo': last result 0x{0:X8}, last run {1}" -f $info.LastTaskResult, $info.LastRunTime) }
+    try {
+        $events = Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 200 -ErrorAction Stop |
+            Where-Object { $_.Message -like "*\Kairo\Kairo*" } | Select-Object -First 5
+        foreach ($e in $events) { Write-Note ("Task Scheduler {0:HH:mm:ss}: {1}" -f $e.TimeCreated, ($e.Message -split "`r?`n")[0]) }
+    } catch { }
     $log = Join-Path $P.Logs 'kairo.log'
     if (Test-Path $log) {
         Write-Note 'Last lines of kairo.log:'
