@@ -1,10 +1,12 @@
 # "Update Kairo": download the newest tested release from GitHub (or use a zip
 # you give it), verify its checksum, and install it with the installer that
 # comes inside it (backup, switch, health check, automatic rollback).
+#   -Auto   called by Kairo-AutoUpdate.ps1 (SYSTEM): no questions, no waiting
 param(
     [string]$Root = 'C:\Kairo',
     [string]$ZipPath = '',
-    [switch]$CI
+    [switch]$CI,
+    [switch]$Auto
 )
 
 Set-StrictMode -Version 2.0
@@ -15,6 +17,7 @@ Import-Module (Join-Path $PSScriptRoot 'KairoSetup.psm1') -Force -DisableNameChe
 $passArgs = @('-Root', "`"$Root`"")
 if ($ZipPath) { $passArgs += @('-ZipPath', "`"$ZipPath`"") }
 if ($CI) { $passArgs += '-CI' }
+if ($Auto) { $passArgs += '-Auto' }
 Assert-Admin $PSCommandPath $passArgs
 
 $P = Get-KairoPaths $Root
@@ -53,6 +56,7 @@ try {
         $token = Get-GitHubToken $P
         if (-not $token -or -not (Test-GitHubToken $token $repo)) {
             Write-Warn 'Update access is missing or expired.'
+            if ($Auto) { throw 'No update access (GitHub token missing or expired). Nothing was changed.' }
             if (-not (Connect-GitHub $P $repo)) { throw 'No update access. Nothing was changed.' }
             $token = Get-GitHubToken $P
         }
@@ -93,5 +97,5 @@ try {
     Write-Bad $_.Exception.Message
     $exitCode = 1
 }
-if (-not $CI -and $exitCode -eq 0) { Wait-Enter 'Press Enter to close this window' }
+if (-not $CI -and -not $Auto -and $exitCode -eq 0) { Wait-Enter 'Press Enter to close this window' }
 exit $exitCode

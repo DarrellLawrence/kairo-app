@@ -230,6 +230,46 @@ Compress-Archive -Path $s2 -DestinationPath $zip2
 Check ($LASTEXITCODE -eq 0) 'Update Kairo with a zip exits 0'
 Check ((Get-StateObj).current -eq $v2) 'Update Kairo installed v2'
 
+# ---- Start menu, auto-update task, updater folder
+$menu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kairo'
+foreach ($n in @('Kairo Logins', 'Kairo Check', 'Update Kairo')) {
+    $lnk = Join-Path $menu "$n.lnk"
+    $target = if (Test-Path $lnk) { (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath } else { '' }
+    Check ($target -eq (Join-Path $Root "$n.bat") -and (Test-Path $target)) "Start menu -> Kairo -> $n opens $Root\$n.bat"
+}
+Check (-not (Test-Path (Join-Path $Root 'installer\bat'))) 'no confusing .bat copies in installer\bat'
+$au = Get-ScheduledTask -TaskName 'Kairo Auto-Update' -TaskPath '\Kairo\'
+Check ($au.Principal.UserId -eq 'SYSTEM' -or $au.Principal.UserId -eq 'S-1-5-18') 'auto-update task runs as SYSTEM'
+Check ([string]$au.Triggers[0].Repetition.Interval -eq 'PT1M') 'auto-update checks every minute'
+$updIds = @((Get-Acl (Join-Path $Root 'updater')).Access | ForEach-Object { $_.IdentityReference.Value })
+Check (@($updIds | Where-Object { $_ -match 'kairo-svc|\\Users$|runneradmin' }).Count -eq 0) "updater folder: only Windows and admins ($($updIds -join ', '))"
+
+# ---- auto-update: installs a new release by itself, notes it for the push, never retries a broken one
+function Invoke-AutoUpdate([string]$Tag, [string]$Body, [string]$ZipFile) {
+    $feed = Join-Path $work 'test-release.json'
+    @{ tag_name = $Tag; body = $Body; zip = $ZipFile } | ConvertTo-Json | Set-Content -Path $feed -Encoding ASCII
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Kairo-AutoUpdate.ps1') -Root $Root -TestRelease $feed -CI | Out-Host
+    return $LASTEXITCODE
+}
+$v4 = "$v1-ci4"
+$s4 = Copy-Setup $s1 'v4' $v4
+$zip4 = Join-Path $work "Kairo-Setup-$v4.zip"
+Compress-Archive -Path $s4 -DestinationPath $zip4
+# [urgent] so the test does not depend on the time of day (quiet hours).
+Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0) 'auto-update exits 0'
+Check ((Get-StateObj).current -eq $v4) "auto-update installed $v4"
+$note = Get-Content -Raw (Join-Path $Root 'data\updates\last-update.json') | ConvertFrom-Json
+Check ($note.message -eq "Kairo updated to $v4." -and -not $note.notified) 'one-line update note left for the iPhone push'
+Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0 -and (Get-StateObj).current -eq $v4) 'already up to date: nothing happens'
+$zip3 = Join-Path $work "Kairo-Setup-$v3.zip"
+Compress-Archive -Path $s3 -DestinationPath $zip3
+Check ((Invoke-AutoUpdate "v$v3" '[urgent] CI' $zip3) -ne 0) 'a broken release fails'
+Check ((Get-StateObj).current -eq $v4) "still on $v4 after the broken auto-update"
+$note = Get-Content -Raw (Join-Path $Root 'data\updates\last-update.json') | ConvertFrom-Json
+Check ($note.message -match 'failed and was undone') 'the failure is noted for the iPhone push'
+$logLines = @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count
+Check ((Invoke-AutoUpdate "v$v3" '[urgent] CI' $zip3) -eq 0 -and @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count -eq $logLines) 'a failed version is not tried again'
+
 # ---- uninstall keeps data
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Uninstall-Kairo.ps1') -CI -Root $Root | Out-Host
 Check ($LASTEXITCODE -eq 0) 'uninstall exits 0'

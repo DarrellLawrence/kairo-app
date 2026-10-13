@@ -91,6 +91,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v=$(cat dist/VERSION)
+          # "[urgent]" in the merged PR's title: kairo-home installs it even in the quiet hours.
+          urgent=""
+          if git log -1 --format=%B | grep -qi '\[urgent\]'; then urgent="[urgent] "; fi
           gh release create "v$v" dist/Kairo-Setup-*.zip dist/Kairo-Setup-*.zip.sha256 \
             --title "Kairo $v" \
-            --notes "To install: under Assets download Kairo-Setup-$v.zip (NOT Source code), right-click it, Extract All, then double-click Install Kairo.bat. Tested on Linux and Windows (install, update, automatic rollback, uninstall). Commit ${GITHUB_SHA}."
+            --notes "${urgent}To install: under Assets download Kairo-Setup-$v.zip (NOT Source code), right-click it, Extract All, then double-click Install Kairo.bat. Tested on Linux and Windows (install, update, automatic rollback, uninstall). Commit ${GITHUB_SHA}."

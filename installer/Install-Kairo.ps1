@@ -42,7 +42,11 @@ try {
     $P = Get-KairoPaths $Root
     $interactive = -not ($CI -or $Update)
     $sourceApp = Join-Path (Split-Path $PSScriptRoot -Parent) 'app'
+    # The owner's Windows account. The auto-updater runs as SYSTEM: it uses the
+    # owner remembered from the last interactive install.
+    $state0 = Read-State $P
     $owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if (Test-RunningAsSystem) { $owner = $state0.owner }
     Initialize-Folders $P
 
     Write-Host ''
@@ -59,7 +63,10 @@ try {
         # 1. Kairo's own limited Windows account + folders it may use
         Write-Step "Kairo's own Windows account and folders"
         $svc = Initialize-ServiceAccount
-        Set-KairoAcl $P $owner $svc.Name
+        if ($owner) {
+            Set-KairoAcl $P $owner $svc.Name
+            if (-not (Test-RunningAsSystem)) { $state0.owner = $owner; Save-State $P $state0 }
+        }
         Write-Ok "account kairo-svc ready (no admin rights, hidden from the sign-in screen)"
         Write-Ok "$Root ready (code: read-only for Kairo; data: Kairo and you; nobody else)"
 
@@ -101,7 +108,12 @@ try {
         foreach ($bat in @('Update Kairo.bat', 'Rollback Kairo.bat', 'Uninstall Kairo.bat', 'Kairo Logins.bat', 'Kairo Check.bat')) {
             Copy-Item -Force (Join-Path $PSScriptRoot "bat\$bat") (Join-Path $Root $bat)
         }
+        # The .bat files only work from C:\Kairo; copies in installer\bat only confused.
+        $batCopies = Join-Path $P.Installer 'bat'
+        if (Test-Path $batCopies) { Remove-Item -Recurse -Force $batCopies }
+        Install-StartMenu $P
         Register-BootCheckTask $P
+        Register-AutoUpdateTask $P
     }
 
     # 7. One-time logins
@@ -116,7 +128,7 @@ try {
 
         Write-Step 'Summary'
         foreach ($k in $results.Keys) {
-            if ($results[$k]) { Write-Ok $k } else { Write-Warn "$k not done. Double-click C:\Kairo\Kairo Logins.bat to finish it." }
+            if ($results[$k]) { Write-Ok $k } else { Write-Warn "$k not done. Start menu -> Kairo -> Kairo Logins finishes it." }
         }
     }
 
@@ -151,7 +163,11 @@ try {
         Stop-Transcript | Out-Null
         # The log can hold what was typed during setup: owner and admins only,
         # not Kairo's own account.
-        try { & icacls.exe $logFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "$([Security.Principal.WindowsIdentity]::GetCurrent().Name):R" /Q | Out-Null } catch { }
+        try {
+            $grants = @('*S-1-5-18:F', '*S-1-5-32-544:F')
+            if ($owner -and -not (Test-RunningAsSystem)) { $grants += "${owner}:R" }
+            & icacls.exe $logFile /inheritance:r /grant:r @grants /Q | Out-Null
+        } catch { }
     }
 }
 

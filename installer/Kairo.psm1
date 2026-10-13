@@ -6,6 +6,8 @@ $ErrorActionPreference = 'Stop'
 
 $script:TaskName = 'Kairo'
 $script:BootCheckTaskName = 'Kairo Boot Check'
+$script:AutoUpdateTaskName = 'Kairo Auto-Update'
+$script:StartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kairo'
 $script:TaskPath = '\Kairo\'
 $script:Port = 8000
 $script:ServiceUser = 'kairo-svc'   # Kairo's own limited Windows account
@@ -68,6 +70,7 @@ function Get-KairoPaths([string]$Root) {
         Current      = Join-Path $app 'current'
         State        = Join-Path $app 'state.json'
         Installer    = Join-Path $Root 'installer'
+        Updater      = Join-Path $Root 'updater'
         Tools        = Join-Path $Root 'tools'
         Downloads    = Join-Path $Root 'downloads'
         Data         = $data
@@ -85,9 +88,10 @@ function Get-KairoPaths([string]$Root) {
 function Read-State($P) {
     if (Test-Path $P.State) {
         $s = Get-Content -Raw -Path $P.State | ConvertFrom-Json
-        return [pscustomobject]@{ current = $s.current; previous = $s.previous; history = @($s.history | Where-Object { $_ }) }
+        $owner = if ($s.PSObject.Properties['owner']) { $s.owner } else { $null }
+        return [pscustomobject]@{ current = $s.current; previous = $s.previous; history = @($s.history | Where-Object { $_ }); owner = $owner }
     }
-    return [pscustomobject]@{ current = $null; previous = $null; history = @() }
+    return [pscustomobject]@{ current = $null; previous = $null; history = @(); owner = $null }
 }
 
 function Save-State($P, $State) {
@@ -111,13 +115,24 @@ function Initialize-Folders($P) {
 # change them (nothing Kairo runs, the model included, can rewrite its own
 # code). Data: Kairo's account and the owner can change it. Everyone else:
 # nothing.
+# C:\Kairo\updater: the update token and the updater's state. Windows itself
+# (SYSTEM) and admins only; not the owner's normal rights, not Kairo's account.
+function Protect-UpdaterFolder($P) {
+    if (-not (Test-Path $P.Updater)) { [void](New-Item -ItemType Directory -Path $P.Updater) }
+    & icacls.exe $P.Updater /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.Updater)" }
+}
+
 function Set-KairoAcl($P, [string]$Owner, [string]$Service) {
     $sys = '*S-1-5-18'; $admins = '*S-1-5-32-544'
     & icacls.exe $P.Root /inheritance:r /grant:r "${sys}:(OI)(CI)F" "${admins}:(OI)(CI)F" "${Owner}:(OI)(CI)RX" "${Service}:(OI)(CI)RX" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.Root)" }
     & icacls.exe $P.Data /grant:r "${Owner}:(OI)(CI)M" "${Service}:(OI)(CI)M" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.Data)" }
+    Protect-UpdaterFolder $P
 }
+
+function Test-RunningAsSystem { return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18' }
 
 # ---------------------------------------------------------------- Kairo's own Windows account
 
@@ -432,8 +447,40 @@ function Register-BootCheckTask($P) {
         -Description 'Checks after every boot that Kairo, Claude, Tailscale and HTTPS came back.')
 }
 
+# Auto-update: every minute, as SYSTEM (it installs programs and restarts
+# Kairo). Asks Kairo first; only installs when nothing is running and, unless
+# the release is marked [urgent], not in the quiet hours.
+function Register-AutoUpdateTask($P) {
+    $script = Join-Path $P.Installer 'Kairo-AutoUpdate.ps1'
+    $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Root `"$($P.Root)`""
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 45) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $script:AutoUpdateTaskName -TaskPath $script:TaskPath -Action $action `
+        -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Installs new tested Kairo versions from GitHub when Kairo is idle. Rolls back by itself.')
+}
+
+# Start menu -> Kairo: the everyday double-click files.
+function Install-StartMenu($P) {
+    if (-not (Test-Path $script:StartMenu)) { [void](New-Item -ItemType Directory -Path $script:StartMenu) }
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($name in @('Kairo Logins', 'Kairo Check', 'Update Kairo', 'Rollback Kairo', 'Uninstall Kairo')) {
+        $lnk = $shell.CreateShortcut((Join-Path $script:StartMenu "$name.lnk"))
+        $lnk.TargetPath = Join-Path $P.Root "$name.bat"
+        $lnk.WorkingDirectory = $P.Root
+        $lnk.Save()
+    }
+}
+
+function Remove-StartMenu {
+    if (Test-Path $script:StartMenu) { Remove-Item -Recurse -Force $script:StartMenu }
+}
+
 function Unregister-KairoTask {
-    foreach ($n in @($script:TaskName, $script:BootCheckTaskName)) {
+    foreach ($n in @($script:TaskName, $script:BootCheckTaskName, $script:AutoUpdateTaskName)) {
         $task = Get-ScheduledTask -TaskName $n -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
         if ($task) { Unregister-ScheduledTask -TaskName $n -TaskPath $script:TaskPath -Confirm:$false }
     }
@@ -532,4 +579,4 @@ function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [st
     else { Write-Bad "Kairo $Version did not come back either. See C:\Kairo\data\logs\kairo.log" }
 }
 
-Export-ModuleMember -Function * -Variable TaskName, TaskPath, Port
+Export-ModuleMember -Function * -Variable TaskName, TaskPath, Port, AutoUpdateTaskName, StartMenu

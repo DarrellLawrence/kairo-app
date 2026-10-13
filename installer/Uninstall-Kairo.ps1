@@ -28,6 +28,8 @@ try {
     Stop-Kairo $P
     Unregister-KairoTask
     Remove-ServiceAccount
+    Remove-StartMenu
+    if (Test-Path $P.Updater) { & cmd.exe /c rmdir /s /q "$($P.Updater)" | Out-Null }
     Write-Ok 'Kairo stopped; it will no longer start at boot; its Windows account kairo-svc is removed'
     if (-not $CI) {
         $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'

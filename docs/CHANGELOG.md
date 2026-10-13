@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-14 — build: auto-update, Start menu, Google reminders (owner's requests after the first real install)
+- **Auto-update.**
+  - The task `\Kairo\Kairo Auto-Update` runs as SYSTEM every minute and checks GitHub's latest release (ETag, so an unchanged answer is free).
+  - It installs only after `POST /api/update/ready` says yes: no chat or job running, and not in the quiet hours unless the release notes say `[urgent]` (put `[urgent]` in the PR title).
+  - Rollback stays automatic. A failed version is never retried automatically.
+  - `data/updates/last-update.json` leads to one push on the iPhone (held until morning in quiet hours).
+  - If Kairo itself has not answered for 30 minutes, it installs anyway.
+- **Update token.** Moved to `C:\Kairo\updater` (SYSTEM + admins only), encrypted with machine DPAPI so the SYSTEM task can read it. The old per-user file is migrated on the next interactive run.
+- **Token prompt.** Ctrl+V, Shift+Insert and right-click paste work. Shows how many characters arrived.
+- **Kairo Logins.**
+  - The Claude check is shown line by line (login file, test message as Kairo's account) with a plain reason when it fails.
+  - The Google steps now include the Branding page and explain that "Publish app" needs no privacy policy or domain (only verification does). Published = no 7-day logout.
+- **Google "Testing" mode.**
+  - Push a reminder the day before the 7 days end, and once if Google has signed Kairo out.
+  - Optional "Web application" client lets the iPhone sign in again through Kairo's tailnet address (More → Google). It can only be finished on the device where it started; the account must still match profile.yaml.
+- **Start menu → Kairo:** Kairo Logins, Kairo Check, Update Kairo, Rollback, Uninstall. The broken copies in `installer\bat` are removed. A .bat no longer prints "Access is denied" when it is not admin yet.
+- **BitLocker:** never an error. Windows Home is detected and gets a note about Device encryption.
+
 ## 2026-10-13 — fix: the GitHub "Source code" zip
 - Running `Install Kairo.bat` from GitHub's automatic "Source code" zip (where it sits one folder too deep) now says to download `Kairo-Setup-….zip` instead. This was the likely cause of the original "window flashes and closes": PowerShell's negative exit code for a missing file skipped the old .bat's `if errorlevel 1` pause.
 - Release notes say which file to download. CI checks the message.

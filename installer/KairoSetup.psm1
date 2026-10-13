@@ -27,12 +27,12 @@ function Install-WingetPackage([string]$Id, [string]$Name, [string[]]$Extra = @(
 
 function Install-Prerequisites {
     Write-Step 'Programs Kairo needs'
-    Assert-Winget
+    # winget only when something is missing: the auto-updater runs as SYSTEM, where winget is not available.
     # Python must be installed for all users: Kairo's own account can't read your user folder.
     if (Find-Python312 -MachineWide) { Write-Ok 'Python 3.12 (for all users) present' }
-    else { Install-WingetPackage 'Python.Python.3.12' 'Python 3.12' @('--scope', 'machine') }
+    else { Assert-Winget; Install-WingetPackage 'Python.Python.3.12' 'Python 3.12' @('--scope', 'machine') }
     if (Test-Path $script:TailscaleExe) { Write-Ok 'Tailscale present' }
-    else { Install-WingetPackage 'Tailscale.Tailscale' 'Tailscale' }
+    else { Assert-Winget; Install-WingetPackage 'Tailscale.Tailscale' 'Tailscale' }
     $py = Find-Python312 -MachineWide
     if (-not $py) { throw 'Python 3.12 was installed but cannot be found. Restart the PC and run Install Kairo again.' }
     return $py
@@ -119,10 +119,23 @@ function Remove-WindowsUpdatePolicy {
 # still boots by itself after a power cut. The recovery key is shown and saved
 # to a USB stick if one is plugged in, and the owner must confirm it was saved
 # BEFORE encryption starts. Never written to C: (it would be locked inside).
+# Encryption is nice to have, never a reason for setup to fail: every problem
+# here is a warning.
 function Enable-BitLockerIfPossible {
     Write-Step 'Disk encryption (BitLocker)'
-    if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
-        Write-Warn 'BitLocker is not available on this Windows edition (Home). Skipped. Backups will be encrypted instead (phase 3).'
+    try { Enable-BitLockerSteps }
+    catch {
+        Write-Warn "Disk encryption was not turned on ($($_.Exception.Message.Trim()))."
+        Write-Note 'Kairo works without it. Nothing else was changed.'
+    }
+}
+
+function Enable-BitLockerSteps {
+    $edition = ''
+    try { $edition = [string](Get-CimInstance Win32_OperatingSystem).Caption } catch { }
+    if ($edition -match 'Home' -or -not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
+        Write-Warn "BitLocker is not part of $(if ($edition) { $edition } else { 'this Windows edition' }). Skipped."
+        Write-Note 'If Settings -> Privacy & security has "Device encryption", you can turn that on there instead.'
         return
     }
     $tpm = $null
@@ -232,28 +245,41 @@ function Open-ClaudeLogin($P, [string]$ClaudeExe) {
     Start-Process -FilePath $ClaudeExe -WorkingDirectory $P.Workspace -Wait
 }
 
+# Plain-words reason for a failed Claude check.
+function Get-ClaudeProblem($R) {
+    if (-not $R) { return 'Kairo itself is not answering on this PC, so Claude could not be tested. Run Kairo Check.' }
+    switch ([string]$R.brain) {
+        'logged_out'    { return 'Claude says this login is missing or expired. Sign in again.' }
+        'usage_limited' { return 'The login works, but your Claude usage limit is reached right now. Nothing to fix; it resets by itself.' }
+        'unavailable'   { return "Claude Code could not run for Kairo's account ($([string]$R.error))." }
+        default         { return "Claude did not answer as expected ($([string]$R.brain): $([string]$R.error))." }
+    }
+}
+
+# Shows each check on its own line, so it is clear what works and what not.
+function Test-ClaudeForKairo($P) {
+    $cred = Join-Path $P.ClaudeConfig '.credentials.json'
+    if (Test-Path $cred) { Write-Ok "Login file found ($cred)" } else { Write-Bad 'Login file: missing (not signed in yet)'; return $false }
+    Write-Note "Test: one tiny message, sent as Kairo's own account (like after a reboot)..."
+    $r = Invoke-SelfTest
+    if ($r -and $r.ok) { Write-Ok "Test message: Claude answered in $($r.seconds)s. Claude works for Kairo."; return $true }
+    if ($r -and [string]$r.brain -eq 'usage_limited') { Write-Warn (Get-ClaudeProblem $r); return $true }
+    Write-Bad ('Test message failed: ' + (Get-ClaudeProblem $r))
+    return $false
+}
+
 function Connect-Claude($P, [string]$ClaudeExe) {
     Write-Step 'Login 2 of 4: Claude (your Max subscription)'
-    $cred = Join-Path $P.ClaudeConfig '.credentials.json'
     # The login is stored in C:\Kairo\data\claude-config, where Kairo's own account
     # can use it after every reboot, with nobody logged in.
     [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $P.ClaudeConfig, 'Process')
     [Environment]::SetEnvironmentVariable('DISABLE_UPDATES', '1', 'Process')
-    if (-not (Test-Path $cred)) { Open-ClaudeLogin $P $ClaudeExe }
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-        if (Test-Path $cred) {
-            # Prove it works for Kairo's own account, the way it will run after a reboot.
-            Write-Note "Sending one tiny test message as Kairo's own account..."
-            $r = Invoke-SelfTest
-            if ($r -and $r.ok) { Write-Ok "Claude answered for Kairo ($($r.seconds)s)"; return $true }
-            $why = if ($r) { "$($r.brain): $($r.error)" } else { 'Kairo did not answer' }
-            Write-Bad "Claude test failed ($why)."
-        } else {
-            Write-Bad 'No Claude login found.'
-        }
-        if ($attempt -eq 1 -and (Read-YesNo 'Sign in to Claude again now?' $true)) { Open-ClaudeLogin $P $ClaudeExe } else { break }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (Test-ClaudeForKairo $P) { return $true }
+        if ($attempt -eq 3 -or -not (Read-YesNo 'Sign in to Claude now?' $true)) { break }
+        Open-ClaudeLogin $P $ClaudeExe
     }
-    Write-Warn 'Claude is not working for Kairo yet. Run "Kairo Logins" later to try again.'
+    Write-Warn 'Claude is not working for Kairo yet. Start menu -> Kairo -> Kairo Logins tries again.'
     return $false
 }
 
@@ -271,10 +297,10 @@ function Get-GoogleStatus {
     catch { return $null }
 }
 
-function Select-JsonFile {
+function Select-JsonFile([string]$Title = 'Choose the Google client file you downloaded (client_secret_....json)') {
     Add-Type -AssemblyName System.Windows.Forms
     $dlg = New-Object System.Windows.Forms.OpenFileDialog
-    $dlg.Title = 'Choose the Google client file you downloaded (client_secret_....json)'
+    $dlg.Title = $Title
     $dlg.Filter = 'Google client file (*.json)|*.json'
     $dlg.InitialDirectory = Join-Path $env:USERPROFILE 'Downloads'
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $dlg.FileName }
@@ -291,27 +317,87 @@ function Wait-GoogleKind([string]$Kind, [int]$Seconds = 600) {
     return $null
 }
 
+function Write-GoogleConsoleSteps([string]$Account) {
+    Write-Note 'First, a one-time Google Cloud setup (about 5 minutes). Use a browser on this PC,'
+    Write-Note "signed in as $Account. Each step is one page:"
+    Write-Note '  1. Open  https://console.cloud.google.com/projectcreate'
+    Write-Note '     Project name: Kairo  -> Create.  (Top bar: make sure project "Kairo" is selected.)'
+    Write-Note '  2. Open  https://console.cloud.google.com/apis/library/gmail.googleapis.com  -> Enable'
+    Write-Note '     Open  https://console.cloud.google.com/apis/library/calendar-json.googleapis.com  -> Enable'
+    Write-Note '  3. Open  https://console.cloud.google.com/auth/overview  -> Get started'
+    Write-Note "     App name: Kairo. Support email: $Account. Audience: External. Contact email: $Account."
+    Write-Note '     Agree -> Create.'
+    Write-Note '  4. Left menu "Branding": App name Kairo, User support email and Developer contact email:'
+    Write-Note "     $Account. Leave logo, home page, privacy policy and domains EMPTY (they are only for"
+    Write-Note '     asking Google to verify the app, which a personal app does not need) -> Save.'
+    Write-Note '  5. Left menu "Audience" -> Publish app -> Confirm. Status: "In production".'
+    Write-Note '     No privacy policy or domain is needed for this. A personal app stays unverified, which is'
+    Write-Note '     fine: at sign-in you click Advanced -> Go to Kairo. Published = no logout every 7 days.'
+    Write-Note "     (If you keep it in Testing instead: under Test users add $Account. Kairo then reminds"
+    Write-Note '     you on the iPhone the day before Google signs it out.)'
+    Write-Note '  6. Left menu "Clients" -> Create client -> Application type: Desktop app -> Name: Kairo'
+    Write-Note '     -> Create -> Download JSON.'
+}
+
+# Optional second client ("Web application") so Google can be signed in again
+# from the iPhone, through Kairo's own tailnet address.
+function Connect-GooglePhone($P) {
+    $url = Get-KairoUrl
+    if (-not $url) { Write-Warn 'Tailscale is not connected, so the iPhone sign-in can not be set up now.'; return $false }
+    $redirect = "$url/setup/google/callback"
+    Write-Note 'Sign in again from the iPhone (only needed while the app is in "Testing"):'
+    Write-Note '  1. Open  https://console.cloud.google.com/auth/clients  -> Create client'
+    Write-Note '  2. Application type: Web application. Name: Kairo phone'
+    Write-Note '  3. Authorized redirect URIs -> Add URI, paste exactly:'
+    Write-Host "       $redirect" -ForegroundColor Cyan
+    Write-Note '  4. Create -> Download JSON.'
+    Wait-Enter 'When the JSON file is downloaded, press Enter to choose it'
+    $file = Select-JsonFile 'Choose the "Kairo phone" client file (client_secret_....json)'
+    if (-not $file) { Write-Warn 'No file chosen. Skipped.'; return $false }
+    try {
+        $json = Get-Content -Raw $file | ConvertFrom-Json
+        if (-not $json.web -or -not $json.web.client_id -or -not $json.web.client_secret) { throw 'wrong type' }
+    } catch {
+        Write-Bad 'That is not a Web-application client file. In step 2, pick "Web application".'
+        return $false
+    }
+    $uris = @()
+    if ($json.web.PSObject.Properties['redirect_uris']) { $uris = @($json.web.redirect_uris) }
+    if ($uris -notcontains $redirect) {
+        Write-Bad "The file does not list $redirect as a redirect URI. Fix step 3 and download it again."
+        return $false
+    }
+    Copy-Item -Force $file (Join-Path $P.Secrets 'google-web-client.json')
+    Write-Ok 'iPhone sign-in ready: Kairo app -> More -> Google -> Sign in to Google again'
+    return $true
+}
+
 function Connect-Google($P) {
     Write-Step 'Login 4 of 4: Google (Gmail + Calendar)'
     $st = Get-GoogleStatus
     if (-not $st) { Write-Bad 'Kairo is not answering, so Google can''t be set up now. Run "Kairo Logins" later.'; return $false }
-    if ($st.read -and $st.write) { Write-Ok "Already connected: $($st.read)"; return $true }
     $account = if ($st.expected) { $st.expected } else { 'your Gmail account' }
 
+    if ($st.read -and $st.write -and -not $st.signed_out) {
+        Write-Ok "Connected: $($st.read)"
+        if ($st.read_may_end) {
+            $end = [DateTimeOffset]::FromUnixTimeSeconds([long]$st.read_may_end).LocalDateTime
+            Write-Note "Google 'Testing' mode: this sign-in may end on $($end.ToString('ddd d MMM HH:mm'))."
+            Write-Note 'Fix for good: console.cloud.google.com/auth/audience -> Publish app, then sign in again once.'
+        }
+        if (Read-YesNo 'Sign in to Google again now? (needed once after you publish the app)' $false) {
+            foreach ($k in @('read', 'write')) { $f = Join-Path $P.Secrets "google-$k.json"; if (Test-Path $f) { Remove-Item -Force $f } }
+            $st = Get-GoogleStatus
+        } else {
+            if (-not $st.phone_client -and (Read-YesNo 'Set up signing in again from the iPhone? (only needed in Testing mode)' $false)) {
+                [void](Connect-GooglePhone $P)
+            }
+            return $true
+        }
+    }
+
     if (-not $st.client) {
-        Write-Note 'First, a one-time Google Cloud setup (about 5 minutes). Use a browser on this PC,'
-        Write-Note "signed in as $account. Each step is one page:"
-        Write-Note '  1. Open  https://console.cloud.google.com/projectcreate'
-        Write-Note '     Project name: Kairo  -> Create.  (Top bar: make sure project "Kairo" is selected.)'
-        Write-Note '  2. Open  https://console.cloud.google.com/apis/library/gmail.googleapis.com  -> Enable'
-        Write-Note '     Open  https://console.cloud.google.com/apis/library/calendar-json.googleapis.com  -> Enable'
-        Write-Note '  3. Open  https://console.cloud.google.com/auth/overview  -> Get started'
-        Write-Note "     App name: Kairo. Support email: $account. Audience: External. Contact email: $account."
-        Write-Note '     Agree -> Create.'
-        Write-Note '  4. Left menu "Audience" -> Publish app -> Confirm.  (Status must say "In production".'
-        Write-Note '     In "Testing" Google logs Kairo out every 7 days.)'
-        Write-Note '  5. Left menu "Clients" -> Create client -> Application type: Desktop app -> Name: Kairo'
-        Write-Note '     -> Create -> Download JSON.'
+        Write-GoogleConsoleSteps $account
         Wait-Enter 'When the JSON file is downloaded, press Enter to choose it'
         $file = Select-JsonFile
         if (-not $file) { Write-Warn 'No file chosen. Run "Kairo Logins" later to finish Google.'; return $false }
@@ -319,7 +405,7 @@ function Connect-Google($P) {
             $json = Get-Content -Raw $file | ConvertFrom-Json
             if (-not $json.installed -or -not $json.installed.client_id -or -not $json.installed.client_secret) { throw 'wrong type' }
         } catch {
-            Write-Bad 'That is not a Desktop-app client file. In step 5, pick "Desktop app" and download its JSON.'
+            Write-Bad 'That is not a Desktop-app client file. In step 6, pick "Desktop app" and download its JSON.'
             return $false
         }
         Copy-Item -Force $file (Join-Path $P.Secrets 'google-client.json')
@@ -331,31 +417,93 @@ function Connect-Google($P) {
     foreach ($s in $steps) {
         $n++
         $now = Get-GoogleStatus
-        if ($now -and $now.$($s.kind)) { Write-Ok "Sign-in $n of 2 already done"; continue }
+        if ($now -and $now.$($s.kind) -and -not $now.signed_out) { Write-Ok "Sign-in $n of 2 already done"; continue }
         Write-Note "Sign-in $n of 2: lets Kairo $($s.what). A browser opens:"
         Write-Note "  - choose $account"
         Write-Note '  - "Google hasn''t verified this app": click Advanced -> Go to Kairo (unsafe). It is your own app.'
         Write-Note '  - tick every box -> Continue. The page then says "Done".'
         Wait-Enter 'Press Enter to open the browser'
+        $kindFile = Join-Path $P.Secrets "google-$($s.kind).json"
+        if (Test-Path $kindFile) { Remove-Item -Force $kindFile }
         Start-Process "http://127.0.0.1:8000/setup/google/start?kind=$($s.kind)"
         $email = Wait-GoogleKind $s.kind
         if (-not $email) { Write-Bad 'No sign-in seen within 10 minutes. Run "Kairo Logins" later to finish Google.'; return $false }
         Write-Ok "Sign-in $n of 2 done: $email"
+    }
+    $final = Get-GoogleStatus
+    if ($final -and -not $final.phone_client -and $final.read_may_end) {
+        if (Read-YesNo 'Is the app still in "Testing"? Then set up signing in again from the iPhone now?' $false) { [void](Connect-GooglePhone $P) }
     }
     return $true
 }
 
 # ---------------------------------------------------------------- GitHub (updates)
 
-function Get-TokenPath($P) { return Join-Path $P.Secrets 'github-token.dpapi' }
+# Old place (until the auto-updater): DPAPI for the installing user only, so
+# the updater task (SYSTEM) could not read it. Moved on the next interactive run.
+function Get-LegacyTokenPath($P) { return Join-Path $P.Secrets 'github-token.dpapi' }
 
-# Stored with Windows DPAPI: only this Windows account on this PC can read it.
+# The token lives in C:\Kairo\updater (SYSTEM and admins only, not Kairo's own
+# account and not the data folder), encrypted with this PC's DPAPI key.
+function Get-TokenPath($P) { return Join-Path $P.Updater 'github-token.bin' }
+
+function Save-GitHubToken($P, [string]$Token) {
+    Add-Type -AssemblyName System.Security
+    if (-not (Test-Path $P.Updater)) { [void](New-Item -ItemType Directory -Path $P.Updater) }
+    Protect-UpdaterFolder $P
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Token)
+    $enc = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+    Set-Content -Path (Get-TokenPath $P) -Value ([Convert]::ToBase64String($enc)) -Encoding ASCII
+    $legacy = Get-LegacyTokenPath $P
+    if (Test-Path $legacy) { Remove-Item -Force $legacy }
+}
+
 function Get-GitHubToken($P) {
     $path = Get-TokenPath $P
-    if (-not (Test-Path $path)) { return $null }
-    $secure = Get-Content -Raw -Path $path | ConvertTo-SecureString
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    if (Test-Path $path) {
+        Add-Type -AssemblyName System.Security
+        $enc = [Convert]::FromBase64String((Get-Content -Raw -Path $path).Trim())
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [Text.Encoding]::UTF8.GetString($bytes)
+    }
+    $legacy = Get-LegacyTokenPath $P
+    if (-not (Test-Path $legacy)) { return $null }
+    try {
+        $secure = Get-Content -Raw -Path $legacy | ConvertTo-SecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    } catch { return $null }   # another Windows account saved it (e.g. read by the SYSTEM updater)
+    Save-GitHubToken $P $plain
+    return $plain
+}
+
+# Hidden input that accepts Ctrl+V, Shift+Insert and right-click paste, shows
+# one * per character, and returns the text without spaces or line breaks.
+function Read-Secret([string]$Prompt) {
+    if ([Console]::IsInputRedirected) { return ([string](Read-Host "    $Prompt")).Trim() }
+    Write-Host -NoNewline "    $Prompt "
+    $sb = New-Object System.Text.StringBuilder
+    while ($true) {
+        $k = [Console]::ReadKey($true)
+        if ($k.Key -eq [ConsoleKey]::Enter) { break }
+        $ctrl = ($k.Modifiers -band [ConsoleModifiers]::Control) -ne 0
+        $shift = ($k.Modifiers -band [ConsoleModifiers]::Shift) -ne 0
+        if (($ctrl -and $k.Key -eq [ConsoleKey]::V) -or [int]$k.KeyChar -eq 22 -or ($shift -and $k.Key -eq [ConsoleKey]::Insert)) {
+            $clip = ''
+            try { $clip = [string](Get-Clipboard -Raw) } catch { }
+            $clip = $clip -replace '\s', ''
+            [void]$sb.Append($clip)
+            Write-Host -NoNewline ('*' * $clip.Length)
+            continue
+        }
+        if ($k.Key -eq [ConsoleKey]::Backspace) {
+            if ($sb.Length -gt 0) { $sb.Length = $sb.Length - 1; Write-Host -NoNewline "`b `b" }
+            continue
+        }
+        if ([int]$k.KeyChar -gt 32) { [void]$sb.Append($k.KeyChar); Write-Host -NoNewline '*' }
+    }
+    Write-Host ''
+    return $sb.ToString().Trim()
 }
 
 function Test-GitHubToken([string]$Token, [string]$Repo) {
@@ -377,17 +525,19 @@ function Connect-GitHub($P, [string]$Repo) {
     Write-Note "  4. Repository access: Only select repositories -> $Repo"
     Write-Note '  5. Permissions -> Repository permissions -> Contents: Read-only (nothing else)'
     Write-Note '  6. Generate token, copy it (starts with github_pat_)'
+    Write-Note 'Paste with Ctrl+V or a right-click. You see one * per character.'
     while ($true) {
-        $secure = Read-Host '    Paste the token here (hidden; or press Enter to skip)' -AsSecureString
-        if ($secure.Length -eq 0) { Write-Warn 'Skipped. "Update Kairo" will ask again.'; return $false }
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-        if (Test-GitHubToken $plain.Trim() $Repo) {
-            $secure | ConvertFrom-SecureString | Set-Content -Path (Get-TokenPath $P)
-            Write-Ok 'Token works and is stored encrypted for this Windows account.'
+        $plain = Read-Secret 'Paste the token here, then press Enter (or just Enter to skip):'
+        if ($plain.Length -eq 0) { Write-Warn 'Skipped. Automatic updates stay off until this is done.'; return $false }
+        $looks = $plain.StartsWith('github_pat_') -or $plain.StartsWith('ghp_')
+        $msg = "Received $($plain.Length) characters, starting with $($plain.Substring(0, [Math]::Min(11, $plain.Length)))"
+        if ($looks) { Write-Ok "$msg (a fine-grained token is about 93 characters)" } else { Write-Warn "$msg. A GitHub token starts with github_pat_." }
+        if (Test-GitHubToken $plain $Repo) {
+            Save-GitHubToken $P $plain
+            Write-Ok 'GitHub accepted it. Stored encrypted, readable only by Windows itself and admins.'
             return $true
         }
-        Write-Warn "GitHub refused that token for $Repo. Check step 4 and 5 and paste again."
+        Write-Warn "GitHub refused that token for $Repo. Check steps 4 and 5 and paste again."
     }
 }
 
