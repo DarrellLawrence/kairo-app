@@ -2,7 +2,7 @@
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force -DisableNameChecking
 
 $script:TailscaleExe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
 

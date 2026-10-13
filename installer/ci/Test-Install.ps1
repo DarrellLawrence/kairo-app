@@ -35,9 +35,17 @@ function Get-HealthObj {
     try { return ((Invoke-WebRequest 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json) } catch { return $null }
 }
 function Get-Tables {
+    # Script file, not -c: PowerShell 5.1 strips embedded double quotes from native arguments.
     $py = Join-Path $Root 'app\current\venv\Scripts\python.exe'
-    $code = "import sqlite3,sys; print(','.join(r[0] for r in sqlite3.connect(sys.argv[1]).execute(""select name from sqlite_master where type='table'"")))"
-    return [string](& $py -c $code (Join-Path $Root 'data\db\kairo.sqlite'))
+    $script = Join-Path $work 'tables.py'
+    Set-Content -Path $script -Encoding ASCII -Value @(
+        'import sqlite3, sys',
+        'rows = sqlite3.connect(sys.argv[1]).execute("select name from sqlite_master where type = ''table''")',
+        'print(",".join(r[0] for r in rows))'
+    )
+    $out = [string](& $py $script (Join-Path $Root 'data\db\kairo.sqlite'))
+    if ($LASTEXITCODE -ne 0) { throw "table probe failed: $out" }
+    return @($out.Trim() -split ',')
 }
 
 # ---- first install
@@ -93,7 +101,10 @@ Check ((Invoke-Install $s3) -ne 0) 'broken update reports failure'
 Check ((Get-StateObj).current -eq $v2) 'still on v2 after the failed update'
 $h = Get-HealthObj
 Check ($h -ne $null -and $h.status -eq 'ok') 'v2 answers again after the automatic rollback'
-Check (-not ((Get-Tables) -split ',' -contains 'ci_probe')) 'schema change of the broken release was undone'
+$tables = Get-Tables
+Check ($tables -contains 'tasks') 'table probe works (sees the tasks table)'
+Check (-not ($tables -contains 'ci_probe')) 'schema change of the broken release was undone'
+
 
 # ---- manual rollback
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Rollback-Kairo.ps1') -CI -Root $Root | Out-Host
