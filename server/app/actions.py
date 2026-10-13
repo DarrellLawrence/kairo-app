@@ -19,7 +19,13 @@ KAIRO_LABEL_PREFIX = "Kairo/"
 
 
 class Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid")  # no stripping: bodies and notes must stay exactly as written
+
+
+def _one_line(value: str) -> str:
+    if "\r" in value or "\n" in value:
+        raise ValueError("must be a single line")
+    return value
 
 
 def _check_emails(values: list[str]) -> list[str]:
@@ -102,6 +108,7 @@ class GmailCreateDraft(Strict):
     reply_to_message_id: str | None = Field(default=None, pattern=_GOOGLE_ID)
 
     _emails = field_validator("to", "cc")(_check_emails)
+    _subject = field_validator("subject")(_one_line)
 
 
 class CalendarCreateHold(Strict):
@@ -135,6 +142,7 @@ class GmailSend(Strict):
     body: str = Field(max_length=50_000)
 
     _emails = field_validator("to", "cc")(_check_emails)
+    _subject = field_validator("subject")(_one_line)
 
 
 class GmailReply(Strict):
