@@ -47,11 +47,11 @@ function Assert-Admin([string]$ScriptPath, [string[]]$ScriptArgs) {
     Write-Host 'Kairo needs administrator rights. Windows will ask: click Yes.' -ForegroundColor Cyan
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ScriptPath`"") + $ScriptArgs
     try {
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -PassThru
-        $null = $p.Handle   # without the cached handle, ExitCode can come back empty (= success)
-        $p.WaitForExit()
-        if ($null -eq $p.ExitCode) { exit 1 }
-        exit $p.ExitCode
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -PassThru
+        $null = $proc.Handle   # without the cached handle, ExitCode can come back empty (= success)
+        $proc.WaitForExit()
+        if ($null -eq $proc.ExitCode) { exit 1 }
+        exit $proc.ExitCode
     } catch {
         Write-Bad 'Administrator rights were not granted. Nothing was changed.'
         exit 1

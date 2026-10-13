@@ -10,6 +10,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force -DisableNameChecking
 
+$script:TaskPath = '\Kairo\'   # same folder as Kairo.psm1's tasks (module variables are not shared)
 $script:SyncTaskName = 'Kairo Sync'
 $script:SyncFolderId = 'kairo-vault'
 $script:SyncGui = 'http://127.0.0.1:8384'
@@ -112,7 +113,7 @@ function Initialize-SyncConfig($P) {
         [void]$folder.AppendChild($me)
         $ver = $doc.CreateElement('versioning')
         $ver.SetAttribute('type', 'staggered')
-        $p = $doc.CreateElement('param'); $p.SetAttribute('key', 'maxAge'); $p.SetAttribute('val', '2592000'); [void]$ver.AppendChild($p)
+        $prm = $doc.CreateElement('param'); $prm.SetAttribute('key', 'maxAge'); $prm.SetAttribute('val', '2592000'); [void]$ver.AppendChild($prm)
         [void]$folder.AppendChild($ver)
         [void]$c.InsertBefore($folder, $c.SelectSingleNode('device'))
     }

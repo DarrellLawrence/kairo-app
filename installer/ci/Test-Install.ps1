@@ -58,7 +58,7 @@ function Invoke-Bat([string]$Bat, [string]$BatArgs, [string]$KairoRoot) {
     $savedPolicy = $env:PSExecutionPolicyPreference
     Remove-Item Env:\PSExecutionPolicyPreference -ErrorAction SilentlyContinue
     try {
-        $p = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"`"$Bat`" $BatArgs`"" -NoNewWindow -Wait -PassThru `
+        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"`"$Bat`" $BatArgs`"" -NoNewWindow -Wait -PassThru `
             -RedirectStandardInput $in -RedirectStandardOutput $out -RedirectStandardError $err
     } finally {
         Remove-Item Env:\KAIRO_ROOT
@@ -66,7 +66,7 @@ function Invoke-Bat([string]$Bat, [string]$BatArgs, [string]$KairoRoot) {
     }
     $text = ((Get-Content -Raw $out -ErrorAction SilentlyContinue) + (Get-Content -Raw $err -ErrorAction SilentlyContinue))
     Write-Host $text
-    return [pscustomobject]@{ Code = $p.ExitCode; Output = [string]$text }
+    return [pscustomobject]@{ Code = $proc.ExitCode; Output = [string]$text }
 }
 function Set-Blocked([string]$Dir) {
     # What a browser + "Extract All" does: every file marked as from the internet.
