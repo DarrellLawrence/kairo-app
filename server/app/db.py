@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Text
+from sqlalchemy import Column, Text, UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine
 
 
@@ -109,11 +109,27 @@ class Checkin(SQLModel, table=True):
 
 class Review(SQLModel, table=True):
     __tablename__ = "reviews"
+    __table_args__ = (UniqueConstraint("kind", "period_start", name="uq_reviews_kind_period"),)
     id: int | None = Field(default=None, primary_key=True)
-    kind: str = Field(index=True)  # daily/weekly/monthly/quarterly/yearly
+    kind: str = Field(index=True)  # daily/weekly/monthly/quarterly/half_year/yearly
     period_start: dt.date
+    period_end: dt.date | None = None
     vault_path: str | None = None
     commitments_json: str | None = None
+    status: str = Field(default="open", index=True)  # open / done / skipped
+    prefill_json: str | None = Field(default=None, sa_column=Column(Text))   # what Kairo gathered
+    answers_json: str | None = Field(default=None, sa_column=Column(Text))   # the owner's answers
+    created_at: datetime | None = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+
+class OnboardingAnswer(SQLModel, table=True):
+    """The owner's onboarding answers (source of truth; the vault files are rendered from them)."""
+
+    __tablename__ = "onboarding_answers"
+    question_id: str = Field(primary_key=True)
+    value: str = Field(sa_column=Column(Text, nullable=False))
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class SchoolEvent(SQLModel, table=True):

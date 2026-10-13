@@ -6,7 +6,9 @@ Run: uvicorn app.main:create_app --factory
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hmac
+import os
 import json
 import secrets
 import time
@@ -18,7 +20,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, chat, killswitch
+from . import approvals, chat, killswitch, onboarding, reviews, vault
+from .scheduler import Jobs
 from .audit import audit
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
@@ -31,7 +34,7 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, ChatMessage, ChatThread, make_engine, session_for
+from .db import Approval, AuditLog, ChatMessage, ChatThread, Review, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import Settings, get_settings
 
@@ -53,7 +56,13 @@ def same_origin(origin: str | None, *hosts: str | None) -> bool:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     profile = load_profile(settings.config_dir)
-    system_prompt = render_personality(settings.config_dir, profile)
+    base_prompt = render_personality(settings.config_dir, profile)
+    vault.ensure_structure(settings.vault_dir)
+
+    def system_prompt() -> str:
+        """Personality + the vault's Profile and Goals, read fresh for every chat message."""
+        return base_prompt + "\n\n" + vault.context(settings.vault_dir)
+
     if settings.db_url.startswith("sqlite:///"):
         Path(settings.db_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
     engine = make_engine(settings.db_url)
@@ -73,19 +82,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = asyncio.create_task(run_forever(Housekeeping(app)))
+        if os.environ.get("KAIRO_SCHEDULER", "1") != "0":   # tests switch it off
+            app.state.jobs.start()
         yield
+        app.state.jobs.stop()
         task.cancel()
         engine.dispose()
 
     app = FastAPI(title="Kairo", lifespan=lifespan)
     app.state.settings = settings
     app.state.runner = runner
+    app.state.system_prompt = system_prompt
     app.state.gate = gate
     app.state.tool_token = tool_token
     app.state.executor = Executor(secrets_dir=settings.secrets_dir)
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
     app.state.on_new_card = lambda card: app.state.pusher.notify(
         f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
+    app.state.jobs = Jobs(engine=engine, pusher=app.state.pusher, profile=profile, schedule=_load_schedule(settings.config_dir))
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
@@ -390,7 +404,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        async for event in runner.stream(text_in, session_id=session_id, system=system_prompt, tools=model_tools,
+        async for event in runner.stream(text_in, session_id=session_id, system=system_prompt(), tools=model_tools,
                                          origin="owner_chat", thread_id=tid):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
@@ -464,6 +478,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.maintenance_until = 0.0
         return {"ok": True}
 
+    # ---------------------------------------------------------------- onboarding interview (v5)
+
+    @app.get("/api/onboarding")
+    def onboarding_state():
+        with session_for(engine) as s:
+            return onboarding.state(s)
+
+    @app.put("/api/onboarding/{question_id}")
+    def onboarding_answer(question_id: str, body: dict):
+        with session_for(engine) as s:
+            try:
+                return onboarding.save(s, settings.vault_dir, question_id, str(body.get("value") or ""))
+            except (onboarding.OnboardingError, vault.VaultError) as exc:
+                raise HTTPException(400, str(exc))
+
+    @app.post("/api/onboarding/reset")
+    def onboarding_reset():
+        with session_for(engine) as s:
+            return onboarding.reset(s, settings.vault_dir)
+
+    # ---------------------------------------------------------------- reviews (v5)
+
+    @app.get("/api/reviews")
+    def list_reviews(status: str = "open", limit: int = 30):
+        with session_for(engine) as s:
+            q = select(Review).order_by(Review.period_start.desc(), Review.id.desc()).limit(min(limit, 200))
+            if status != "all":
+                q = q.where(Review.status == status)
+            return [reviews.as_dict(r) for r in s.exec(q).all()]
+
+    @app.get("/api/reviews/{review_id}")
+    def get_review(review_id: int):
+        with session_for(engine) as s:
+            r = s.get(Review, review_id)
+            if r is None:
+                raise HTTPException(404, "no such review")
+            return reviews.as_dict(r)
+
+    @app.post("/api/reviews/{review_id}/complete")
+    def complete_review(review_id: int, body: dict):
+        with session_for(engine) as s:
+            try:
+                r = reviews.complete(s, settings.vault_dir, review_id, dict(body.get("answers") or {}))
+            except (reviews.ReviewError, vault.VaultError) as exc:
+                raise HTTPException(400, str(exc))
+            audit(s, actor="owner", action=f"review.{r.kind}", outcome=f"done; note {r.vault_path}")
+            return reviews.as_dict(r)
+
+    @app.post("/api/reviews/{review_id}/skip")
+    def skip_review(review_id: int):
+        with session_for(engine) as s:
+            try:
+                return reviews.as_dict(reviews.skip(s, review_id))
+            except reviews.ReviewError as exc:
+                raise HTTPException(400, str(exc))
+
+    @app.post("/api/reviews/start")
+    def start_review(body: dict):
+        """Any review on demand (KICKOFF 12: every job runnable on demand)."""
+        kind = str(body.get("kind") or "")
+        with session_for(engine) as s:
+            try:
+                r, _ = reviews.create(s, kind, dt.datetime.now(profile.tz).date())
+            except reviews.ReviewError as exc:
+                raise HTTPException(400, str(exc))
+            return reviews.as_dict(r)
+
     @app.get("/api/status")
     def status():
         """Last boot check (written by the boot-check task on kairo-home), for the More screen."""
@@ -481,6 +562,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 LOCAL_HOSTS = {"127.0.0.1", "::1"}
+
+
+def _load_schedule(config_dir: Path) -> dict:
+    import yaml
+    path = config_dir / "schedule.yaml"
+    try:
+        return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.is_file() else {}
+    except (OSError, yaml.YAMLError):
+        return {}
 
 
 def _esc(text: str) -> str:
