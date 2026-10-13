@@ -1,9 +1,0 @@
-.git
-.github
-.env
-devdata
-**/node_modules
-**/__pycache__
-**/.pytest_cache
-server/.venv
-web/dist

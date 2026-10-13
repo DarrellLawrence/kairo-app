@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -8,7 +10,7 @@ from tests.conftest import FAKE_CLAUDE
 
 
 def make(tmp_path, **env):
-    base = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    base = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
     base.update({k: str(v) for k, v in env.items()})
     return ClaudeCLIBrain(claude_bin=str(FAKE_CLAUDE), workspace_dir=tmp_path / "ws", timeout_s=10, env=base)
 
@@ -49,6 +51,8 @@ def test_command_flags(tmp_path):
     assert argv[argv.index("--setting-sources") + 1] == "project"
     assert argv[argv.index("--permission-prompts") + 1] == "none"
     assert argv[argv.index("--allowedTools") + 1] == "mcp__kairo__tasks_create,mcp__kairo__propose_action"
+    assert "--system-prompt" not in argv  # file, not argv
+    assert Path(argv[argv.index("--system-prompt-file") + 1]).read_text(encoding="utf-8") == "You are Kairo."
     assert "--dangerously-skip-permissions" not in argv
     assert "bypassPermissions" not in argv
 
@@ -56,7 +60,7 @@ def test_command_flags(tmp_path):
 def test_runs_in_workspace_dir(tmp_path):
     rec = tmp_path / "rec.json"
     run(make(tmp_path, KAIRO_HOOK_FAKE_RECORD=rec))
-    assert json.loads(rec.read_text())["cwd"] == str(tmp_path / "ws")
+    assert os.path.samefile(json.loads(rec.read_text())["cwd"], tmp_path / "ws")
 
 
 def test_resume_passes_session_id(tmp_path):
@@ -78,7 +82,13 @@ def test_backend_secrets_never_reach_the_cli(tmp_path):
 
 def test_build_env_is_an_allowlist():
     env = build_env({"PATH": "/bin", "SECRET": "x", "KAIRO_HOOK_DB": "y", "KAIRO_DB_URL": "z"})
-    assert env == {"PATH": "/bin", "KAIRO_HOOK_DB": "y"}
+    assert env == {"PATH": "/bin", "KAIRO_HOOK_DB": "y", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1"}
+
+
+def test_build_env_keeps_windows_essentials_case_insensitively():
+    env = build_env({"SystemRoot": "C:\\Windows", "Path": "C:\\x", "GOOGLE_TOKEN": "s"})
+    assert env["SystemRoot"] == "C:\\Windows" and env["Path"] == "C:\\x"
+    assert "GOOGLE_TOKEN" not in env
 
 
 @pytest.mark.parametrize(
@@ -112,7 +122,7 @@ def test_timeout_kills_the_process(tmp_path):
 
 
 def test_missing_binary_is_unavailable(tmp_path):
-    brain = ClaudeCLIBrain(claude_bin=str(tmp_path / "nope"), workspace_dir=tmp_path, env={"PATH": "/bin"})
+    brain = ClaudeCLIBrain(claude_bin=str(tmp_path / "nope"), workspace_dir=tmp_path, env={"PATH": ""})
     assert brain.health() is BrainStatus.unavailable
     events = run(brain)
     assert events[-1].kind is EventKind.error and events[-1].status is BrainStatus.unavailable

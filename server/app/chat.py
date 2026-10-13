@@ -35,15 +35,21 @@ class BrainRunner:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[BrainEvent | None] = asyncio.Queue()
 
+        def post(item: BrainEvent | None) -> None:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+            except RuntimeError:
+                pass  # the caller's event loop is gone (shutdown); finish the run anyway
+
         def work() -> None:
             with self._lock:
                 try:
                     for event in self.brain.run(prompt, session_id=session_id, system=system, tools=tools):
-                        loop.call_soon_threadsafe(queue.put_nowait, event)
+                        post(event)
                 except Exception as exc:  # adapter bug: report, don't kill the server
-                    loop.call_soon_threadsafe(queue.put_nowait, BrainEvent(EventKind.error, text=f"Brain error: {exc}"))
+                    post(BrainEvent(EventKind.error, text=f"Brain error: {exc}"))
                 finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                    post(None)
 
         threading.Thread(target=work, name="brain-run", daemon=True).start()
         while (event := await queue.get()) is not None:
