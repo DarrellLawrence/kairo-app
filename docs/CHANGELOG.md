@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-10-14 — build: iPhone app design pass (before Milestone C)
+- **Design system.**
+  - Tokens in `web/src/design/tokens.css`: dark first plus light, one violet accent, glass, spacing 4/8/12/16/24/32, radii, shadows, SF Pro type.
+  - Springs in `motion.js`: snappy, smooth, bouncy.
+- **Component library** in `web/src/ui`: Button, Card, ListRow (swipe actions), Sheet (drag to dismiss), TabBar, Segmented, Badge, Toast (with Undo), EmptyState, Skeleton, ApprovalCard, ChatBubble, InputBar, SuccessCheck, Page, Stack (push/pop, edge swipe back) and Expandable (shared element). Screens use only these.
+- **Motion.**
+  - New dependency: the `motion` library, 13.4.6, approved by the owner.
+  - Rubber-band lists and pull to refresh. Tab crossfade and slide. Bubbles spring in, streamed text fades in, typing dots.
+  - Only transform and opacity are animated. Reduce Motion is respected.
+- **Approvals.**
+  - Swipe right to approve, left to reject, with resistance.
+  - Approve and reject wait 4 s with Undo before anything is sent: a swipe can be a mistake.
+  - Tier 4 always asks a second time in a sheet.
+- **Standalone feel.**
+  - Safe areas, no page bounce, no zoom on inputs, and the input bar sits on the keyboard (visualViewport).
+  - Placeholder icon in all iOS sizes, plus splash screens for ten iPhone sizes.
+- **Tabs.** The tab bar shows only what exists: Today, Chat, Approvals, More. Board and Reviews come with Milestone D.
+- **Developer page.** Hidden at `#/dev/components` (More → Developer → Components).
+
 ## 2026-10-14 — build: auto-update, Start menu, Google reminders (owner's requests after the first real install)
 - **Auto-update.**
   - The task `\Kairo\Kairo Auto-Update` runs as SYSTEM every minute and checks GitHub's latest release (ETag, so an unchanged answer is free).
