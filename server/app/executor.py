@@ -20,9 +20,12 @@ KAIRO_HOLD_PREFIX = "[Kairo] "
 
 
 class Executor:
-    def __init__(self, *, secrets_dir: Path, transport: httpx.BaseTransport | None = None):
+    def __init__(self, *, secrets_dir: Path, transport: httpx.BaseTransport | None = None,
+                 owner_email: str | None = None, event_type: Callable[[str], str] | None = None):
         self.secrets_dir = Path(secrets_dir)
         self._transport = transport
+        self.owner_email = owner_email   # profile.gmail: the only address gmail.send_self can reach
+        self.event_type = event_type or (lambda event_id: "FIXED")   # Kairo's calendar tags (v7)
 
     def _write_api(self) -> GoogleAPI:
         return GoogleAPI(self.secrets_dir, "write", transport=self._transport)
@@ -76,6 +79,27 @@ class Executor:
         created = g.request("POST", "/calendar/v3/calendars/primary/events", params={"sendUpdates": "none"}, json_body=event)
         return {"event_id": created.get("id"), "summary": event["summary"]}
 
+    def _gmail_send_self(self, g: GoogleAPI, a: dict) -> dict:
+        # The recipient comes from the profile, never from the args (there is no field for it).
+        if not self.owner_email:
+            raise ValueError("no own address in config/profile.yaml (gmail:)")
+        sent = g.request("POST", "/gmail/v1/users/me/messages/send",
+                         json_body={"raw": _raw(to=[self.owner_email], cc=[], subject=a["subject"], body=a["body"])})
+        if a.get("label"):
+            self._gmail_label(g, {"message_id": sent["id"], "add": [a["label"]], "remove": []})
+        return {"sent_id": sent.get("id"), "to": "owner"}
+
+    def _calendar_move(self, g: GoogleAPI, a: dict) -> dict:
+        kind = self.event_type(a["event_id"])
+        if kind != "FLEXIBLE":
+            raise ValueError(f"this event is {kind}: Kairo only moves FLEXIBLE events")
+        event = g.get(f"/calendar/v3/calendars/primary/events/{a['event_id']}")
+        if event.get("attendees"):
+            raise ValueError("this event has guests: moving it would notify them (propose a message instead)")
+        g.request("PATCH", f"/calendar/v3/calendars/primary/events/{a['event_id']}", params={"sendUpdates": "none"},
+                  json_body={"start": {"dateTime": a["start"]}, "end": {"dateTime": a["end"]}})
+        return {"moved": a["event_id"], "start": a["start"], "end": a["end"]}
+
     # ---------------------------------------------------------------- tier 3
 
     def _gmail_send(self, g: GoogleAPI, a: dict) -> dict:
@@ -102,11 +126,13 @@ class Executor:
                   params={"sendUpdates": "all"}, json_body={"attendees": attendees})
         return {"event_id": a["event_id"], "response": a["response"]}
 
-    # ---------------------------------------------------------------- tier 4
+    # ---------------------------------------------------------------- trash (tier 2 since v7: 30 days to undo)
 
     def _gmail_trash(self, g: GoogleAPI, a: dict) -> dict:
         g.request("POST", f"/gmail/v1/users/me/messages/{a['message_id']}/trash")
         return {"trashed": a["message_id"]}
+
+    # ---------------------------------------------------------------- tier 4
 
     def _calendar_delete(self, g: GoogleAPI, a: dict) -> dict:
         g.request("DELETE", f"/calendar/v3/calendars/primary/events/{a['event_id']}",

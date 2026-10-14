@@ -37,7 +37,7 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
+from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import Settings, get_settings
 
@@ -100,7 +100,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.system_prompt = system_prompt
     app.state.gate = gate
     app.state.tool_token = tool_token
-    app.state.executor = Executor(secrets_dir=settings.secrets_dir)
+    def _event_type(event_id: str) -> str:
+        with session_for(engine) as s_:
+            row = s_.get(CalendarTag, event_id)
+            return row.type if row else "FIXED"
+
+    app.state.executor = Executor(secrets_dir=settings.secrets_dir, owner_email=profile.gmail, event_type=_event_type)
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
     app.state.on_new_card = lambda card: app.state.pusher.notify(
         f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")

@@ -93,7 +93,9 @@ class FakeGoogle:
             return httpx.Response(200, json={"messages": ids[: int(params.get("maxResults", 10))]})
         if path == f"{g}/messages/send" and m == "POST":
             self.sent.append(body)
-            return httpx.Response(200, json={"id": f"sent{len(self.sent)}", "threadId": body.get("threadId", "t")})
+            sid = f"sent{len(self.sent)}"
+            self.messages[sid] = {"id": sid, "threadId": body.get("threadId", "t"), "labelIds": ["SENT"], "payload": {"headers": []}}
+            return httpx.Response(200, json={"id": sid, "threadId": body.get("threadId", "t")})
         if path.startswith(f"{g}/messages/"):
             rest = path[len(f"{g}/messages/"):]
             mid, _, action = rest.partition("/")

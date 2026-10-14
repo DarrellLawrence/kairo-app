@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
-from .db import Task, utcnow
+from .db import CalendarTag, Task, utcnow
 from .gate import Decision
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
 
@@ -99,11 +99,24 @@ class ToolRunner:
                          singleEvents="true", orderBy="startTime", maxResults=a["max_results"])
         finally:
             g.close()
+        items = data.get("items", []) or []
+        with Session(self.engine) as s:
+            tags = {t.event_id: t.type for t in s.exec(select(CalendarTag).where(
+                CalendarTag.event_id.in_([e.get("id") for e in items if e.get("id")]))).all()}
         events = [{"id": e.get("id"), "summary": e.get("summary"), "start": (e.get("start") or {}),
                    "end": (e.get("end") or {}), "location": e.get("location"),
-                   "attendees": len(e.get("attendees") or []), "organizer": (e.get("organizer") or {}).get("email")}
-                  for e in data.get("items", []) or []]
+                   "attendees": len(e.get("attendees") or []), "organizer": (e.get("organizer") or {}).get("email"),
+                   "kairo_type": tags.get(e.get("id"), "FIXED")}
+                  for e in items]
         return untrusted("Google Calendar", events)
+
+    def _calendar_tag(self, a: dict) -> str:
+        with Session(self.engine) as s:
+            row = s.get(CalendarTag, a["event_id"]) or CalendarTag(event_id=a["event_id"], type=a["type"])
+            row.type, row.updated_at = a["type"], utcnow()
+            s.add(row)
+            s.commit()
+        return f"Event {a['event_id']} is now {a['type']}."
 
     # ---------------------------------------------------------------- Vault
 

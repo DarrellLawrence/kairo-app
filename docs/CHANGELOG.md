@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14 — build: chief of staff (v7 items 3, 4, 6)
+- Kairo acts alone on what only touches the owner: trash (30-day undo), mail to his own address (locked to profile.gmail, no recipient field), moving FLEXIBLE events without guests. Sending anything to other people stays an approval card.
+- Calendar types FIXED / SOCIAL / FLEXIBLE (untagged = FIXED); set by voice or chat ("gym is flexible").
+- Personality: chief of staff, statements not questions, asks by importance.
+
 ## 2026-10-14 — build: voice first (v7 item 7)
 - **Voice note** Shortcut: record, send, done. The PC writes it down, Kairo does it in today's chat and answers there; push only if urgent. Own-only things just happen; anything for other people waits in the app (voice notes can't make approval cards).
 - **Call Kairo** Shortcut opens a live call with the mic on. Hanging up mid-sentence or while Kairo thinks no longer loses anything.
