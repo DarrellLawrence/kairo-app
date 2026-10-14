@@ -212,7 +212,8 @@ def test_model_load_failure_is_a_clear_error_not_a_crash(tmp_path, monkeypatch):
 
 def test_downloaded_model_loads_offline_from_its_folder(tmp_path, monkeypatch):
     """No Hugging Face lookups (network, lock files) at run time when Update Kairo already fetched the model."""
-    snap = tmp_path / "whisper" / "models--Systran--faster-whisper-small" / "snapshots" / "abc"
+    from app.voice import WHISPER_CPU
+    snap = tmp_path / "whisper" / f"models--Systran--faster-whisper-{WHISPER_CPU}" / "snapshots" / "abc"
     snap.mkdir(parents=True)
     (snap / "model.bin").write_bytes(b"x")
     made = _fake_whisper(monkeypatch, tmp_path, lambda d, p, kw: (_ for _ in ()).throw(RuntimeError("no CUDA")) if d == "cuda" else None)

@@ -99,6 +99,19 @@ class TriagedEmail(SQLModel, table=True):
     task_id: int | None = None
     done: bool = Field(default=False, index=True)  # the owner dealt with it
     triaged_at: datetime = Field(default_factory=utcnow)
+    # Does a real person wait on the owner's own answer? None = not checked yet (rules, learned senders, Haiku).
+    personal_reply: bool | None = None
+    reply_why: str | None = None
+
+
+class ReplySender(SQLModel, table=True):
+    """What the owner taught Kairo about a sender by closing loops: 'person' (answers them) or 'muted'."""
+
+    __tablename__ = "reply_senders"
+    address: str = Field(primary_key=True)
+    verdict: str = Field(index=True)   # person / muted
+    drops: int = 0
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Brief(SQLModel, table=True):
