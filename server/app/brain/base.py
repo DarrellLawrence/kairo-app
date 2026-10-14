@@ -44,6 +44,7 @@ class Brain(Protocol):
         tools: list[str],
         origin: str = "owner_chat",   # owner_chat | job: jobs can never create approval cards
         images: list[tuple[bytes, str]] | None = None,   # (bytes, media type), e.g. a photo of a letter
+        model: str | None = None,                         # haiku / sonnet / opus: cheapest that does the job
     ) -> Iterator[BrainEvent]: ...
 
     def health(self) -> BrainStatus: ...

@@ -111,6 +111,34 @@ function CapturePage() {
   )
 }
 
+function UsagePage() {
+  const [days, setDays] = useState(7)
+  const [u, setU] = useState(null)
+  useEffect(() => { api(`/api/usage?days=${days}`).then(setU).catch(() => setU(null)) }, [days])
+  const row = ([k, v]) => (
+    <ListRow key={k} title={k} wrap subtitle={`${v.runs} runs · ${v.minutes} min · ${(v.tokens / 1000).toFixed(0)}k tokens${v.failed ? ` · ${v.failed} failed` : ''}`}
+      value={<span className="k-muted k-small">${v.usd.toFixed(2)}</span>} />
+  )
+  return (
+    <Page title="Usage">
+      <div className="k-pad" style={{ marginBottom: 8 }}>
+        <Segmented id="usagedays" value={days} onChange={setDays} options={[{ value: 1, label: 'Today' }, { value: 7, label: '7 days' }, { value: 30, label: '30 days' }]} />
+      </div>
+      {!u && <SkeletonCard />}
+      {u && (
+        <>
+          <SectionTitle>By model</SectionTitle>
+          <List>{['haiku', 'sonnet', 'opus'].filter((m) => u.by_model[m]).map((m) => row([m[0].toUpperCase() + m.slice(1), u.by_model[m]]))}
+            {u.total_runs === 0 && <ListRow title="No runs yet" />}</List>
+          <SectionTitle>By job</SectionTitle>
+          <List>{Object.entries(u.by_purpose).map(row)}</List>
+          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it. Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews.</p>
+        </>
+      )}
+    </Page>
+  )
+}
+
 function VoicePage() {
   const toast = useToast()
   const [st, setSt] = useState(null)
@@ -497,6 +525,8 @@ function Root() {
               onClick={() => { window.location.hash = '#reviews' }} />
             <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron
               onClick={() => stack.push('Jobs', () => <JobsPage />)} />
+            <ListRow icon={<IconPulse />} title="Usage" subtitle="Claude runs per model and job" chevron
+              onClick={() => stack.push('Usage', () => <UsagePage />)} />
             <ListRow icon={<IconInbox />} title="Capture" subtitle="Action button and share sheet setup" chevron
               onClick={() => stack.push('Capture', () => <CapturePage />)} />
             <ListRow icon={<IconSparkle />} title="Voice" subtitle="Talk to Kairo, calls, test" chevron

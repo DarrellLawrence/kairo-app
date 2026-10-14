@@ -1,4 +1,21 @@
-# Kairo — Kickoff & Build Spec (v6)
+# Kairo — Kickoff & Build Spec (v7)
+
+### Changelog v6 → v7 (chief of staff; owner's request 2026-10-14)
+- **Auto-merge.** Claude merges its own PRs (plan changes included) as soon as every CI check is green; never with red CI. Two-line note to the owner after each merge.
+- **Models per job.** Cheapest model that does the job, via the CLI's `--model`: Haiku for triage, classification, summaries, reminders, simple replies; Sonnet for writing, drafts, documents and self-check loops; Opus only for big planning and weekly-or-longer reviews. More → Usage shows runs and time per model.
+- **Autonomy (section 4 updated).** Kairo just does everything that only touches the owner: his calendar, tasks, notes, drafts, documents, study material, reminders, labels, mail to his own address. Approval cards stay for anything that reaches another person (mail, invites, messages). Money stays read-only, no tools. Deleting only where it can be undone (Gmail trash, 30 days). Asking by importance: low = do it (maybe tell), medium = do it + one undoable line, high/irreversible/other people = ask with a recommendation. After 3 approvals in a row of the same kind, Kairo suggests making that kind automatic.
+- **Calendar types.** FIXED (training, work, school, appointments) is never moved. SOCIAL may be suggested to move; the message to the friend is outbound → card. FLEXIBLE (study blocks, tasks, projects) is moved freely. The owner can retag anything by voice ("training is fixed").
+- **Proactive engine.** Kairo watches calendar, location, school dates, mail, sleep/health and tasks and decides when to speak up: max ~6 proactive pushes a day, quiet hours respected. Cases: skipped training (check sleep, say if it was right, reschedule), test tomorrow (drop flexible items, block study time, prepare material), deadline near with nothing done (first draft, saved, told), leaving home on a training day (checklist), train delay (adjust), Friday Lerndoku, birthdays, patterns, weekly re-planning.
+- **Personality.** Chief of staff, not a chatbot: statements and actions, short, direct, some attitude; questions only when it really can't decide.
+- **Voice first.** `POST /api/voice-note` (Shortcut records → sends → done; Kairo transcribes, decides, acts, tells the owner next time, push only if urgent). A "Call Kairo" Shortcut opens a live call with the mic on. Lock-screen control (iOS 18) and Back Tap steps (iPhone 15, no Action button). In a call the owner can say something and hang up; handled the same way.
+- **The owner's voice.** `vault/10 Profile/voice.md` (given text) + exported chats in `vault/10 Profile/chats/`; never learn style from Gmail. Levels casual / improved / professional, in English and German (B1 natural → clean → formal Sie). Sonnet self-check before anything is final, max 2 rewrite rounds.
+- **How the owner works.** `vault/10 Profile/how-i-work.md` kept up to date (learning formats that work, rhythm, focus hours). Every nudge/action can get a quick reaction (good/wrong); a weekly 1-minute "what I learned about you" to correct.
+- **Files to the owner's own Gmail.** Everything Kairo creates goes to `profile.gmail` only (a separate, locked action that can't take another address), labels Kairo/School, Kairo/Work, Kairo/Recap; no approval needed. Short evening recap mail.
+- **Gauntlet loop for documents.** No first drafts: create → render every page/slide to an image → Claude critiques the images (layout, readability, consistency, "looks AI-made?") → fix, max 3 rounds on Sonnet. No generic AI look. Final file to Gmail + vault.
+- **Done for you today.** A list in the app of what Kairo created, moved, drafted, sent to the owner.
+- **Privacy.** Notes about other people stay in the vault; never in mails or recaps unless the owner asks.
+- **Web browsing.** Kairo's own headless browser (Playwright) under kairo-svc, read-only, logged in nowhere; page content is untrusted. Logins only per site with the owner's explicit OK.
+- **Order:** merge #11 → auto-merge, models → voice first → autonomy, calendar types, personality → voice.md, mail to self, gauntlet → proactive engine, location → how-i-work, done-for-you, privacy → browser. Bugs from daily use come first.
 
 ### Changelog v5 → v6 (owner's queue and location; owner's request 2026-10-14)
 - **Order after C:** location → design check + recordings → Milestone D → check all six reviews → phase 3 voice → phase 3 rest → later (phase 4 local LLM, backlog WhatsApp). The owner moved phase 3 forward; the phase-2 gate (section 3) still applies before relying on it daily.
@@ -192,9 +209,9 @@ Kairo may later be set up for a few paying clients (one box per client, their ow
 |---|---|---|
 | 0 Read | Email, calendar, vault, web | Auto, logged |
 | 1 Internal write | Tasks, notes (Kairo-owned files), summaries | Auto, logged, undoable |
-| 2 Reversible external | Gmail labels, drafts, holds on own calendar (marked [Kairo]) | Auto, logged, in daily digest |
-| 3 Outbound | Send/reply email, respond to invites, share files | Approval card |
-| 4 Destructive | Trash email, delete events | Approval card + second confirmation |
+| 2 Reversible external | Gmail labels, drafts, trash (30-day undo), mail to the owner's own address, own calendar: holds, moving/changing FLEXIBLE events without guests (v7) | Auto, logged, in "Done for you" |
+| 3 Outbound | Send/reply email, respond to invites, share files, anything that reaches another person | Approval card |
+| 4 Destructive | Delete events with guests, anything that can't be undone | Approval card + second confirmation |
 | 5 Money | Payments, transfers | **Never. No tool exists.** |
 
 - Default deny. Voice approval (later) only with card number + exactly one match.
@@ -592,8 +609,9 @@ start the next until its checks pass and the owner says go.
 ## Plan updates
 - New plan versions arrive in OneDrive\Kairo\inbox\ or as a GitHub pull
   request. Follow KICKOFF section 0.3: summarise the diff, wait for OK, copy to
-  docs/KICKOFF.md, log in docs/CHANGELOG.md, archive the old version. A plan PR
-  becomes the source of truth only when the owner merges it.
+  docs/KICKOFF.md, log in docs/CHANGELOG.md, archive the old version. Claude
+  merges its own PRs (plan changes included) once every CI check is green
+  (v7), never with red CI, and tells the owner in two lines.
 - Never change KICKOFF.md on your own (typos excepted); propose changes.
 
 ## Working style

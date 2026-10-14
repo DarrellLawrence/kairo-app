@@ -123,7 +123,8 @@ class ClaudeCLIBrain:
 
     # -- command ---------------------------------------------------------
 
-    def build_command(self, *, session_id: str | None, system: str, tools: list[str], images: bool = False) -> list[str]:
+    def build_command(self, *, session_id: str | None, system: str, tools: list[str], images: bool = False,
+                      model: str | None = None) -> list[str]:
         cmd = [
             *self._launcher(),
             "-p",
@@ -140,8 +141,8 @@ class ClaudeCLIBrain:
         if tools:
             # One comma-separated argument, so the variadic flag can't swallow anything else.
             cmd += ["--allowedTools", ",".join(tools)]
-        if self.model:
-            cmd += ["--model", self.model]
+        if model or self.model:
+            cmd += ["--model", model or self.model]   # alias: haiku / sonnet / opus (verified with CLI 2.1.299)
         if session_id:
             cmd += ["--resume", session_id]
         if images:
@@ -186,8 +187,9 @@ class ClaudeCLIBrain:
         tools: list[str],
         origin: str = "owner_chat",
         images: list[tuple[bytes, str]] | None = None,
+        model: str | None = None,
     ) -> Iterator[BrainEvent]:
-        cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images))
+        cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images), model=model)
         if images:
             content = [{"type": "document" if mt == "application/pdf" else "image",
                         "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}
@@ -284,10 +286,24 @@ class ClaudeCLIBrain:
             yield BrainEvent(EventKind.usage, data=info)
         elif kind == "result":
             sid = msg.get("session_id")
+            usage = _usage(msg)
             if msg.get("is_error") or msg.get("subtype") != "success":
                 text = str(msg.get("result") or msg.get("subtype") or "error")
                 self._status = classify_error(text, msg.get("api_error_status"))
-                yield BrainEvent(EventKind.error, text=text, session_id=sid, status=self._status)
+                yield BrainEvent(EventKind.error, text=text, session_id=sid, status=self._status, data={"usage": usage})
             else:
                 self._status = BrainStatus.usage_limited if self._run_limited else BrainStatus.ok
-                yield BrainEvent(EventKind.result, text=str(msg.get("result") or ""), session_id=sid, status=self._status)
+                yield BrainEvent(EventKind.result, text=str(msg.get("result") or ""), session_id=sid, status=self._status,
+                                 data={"usage": usage})
+
+
+def _usage(msg: dict) -> dict:
+    """Which model ran and what it took, from the CLI's result line (modelUsage per model id)."""
+    per_model = msg.get("modelUsage") or {}
+    main = max(per_model.items(), key=lambda kv: (kv[1] or {}).get("outputTokens", 0), default=(None, {}))
+    totals = {"input_tokens": 0, "output_tokens": 0}
+    for u in per_model.values():
+        u = u or {}
+        totals["input_tokens"] += int(u.get("inputTokens") or 0) + int(u.get("cacheReadInputTokens") or 0) + int(u.get("cacheCreationInputTokens") or 0)
+        totals["output_tokens"] += int(u.get("outputTokens") or 0)
+    return {"model": main[0], "duration_ms": msg.get("duration_ms"), "cost_usd": msg.get("total_cost_usd"), **totals}

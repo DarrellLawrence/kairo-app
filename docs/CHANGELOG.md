@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-14 — build: model per task + usage
+- Haiku for triage, sorting, summaries, reminders and calls; Sonnet for chat, writing, drafts and checks; Opus only for big planning and long reviews. Every run is counted per model; More → Usage shows it.
+
+## 2026-10-14 — docs: kickoff v7 (chief of staff)
+- Owner's 15 points added with build order: auto-merge on green CI, model per task, voice first, act alone unless it reaches another person or money, calendar types, proactive engine, personality, own voice, files to own Gmail, document gauntlet, "Done for you", privacy, read-only browsing. Tier table updated (section 4).
+
 ## 2026-10-14 — build: Milestone C, location, Milestone D
 - **Jobs.** One at a time, quiet window, kill switch, daily model budget, pause on usage limit, run now from More → Jobs.
 - **Email triage** (hourly 07–21). Claude sorts, the backend labels through the gate; suspicious mail is flagged and nothing else. Real-model test on the owner's three mails passed.
