@@ -66,8 +66,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     vault.ensure_structure(settings.vault_dir)
 
     def system_prompt() -> str:
-        """Personality + the vault's Profile and Goals, read fresh for every chat message."""
-        return base_prompt + "\n\n" + vault.context(settings.vault_dir)
+        """Personality + the vault's Profile and Goals + "Right now", fresh for every chat message."""
+        return base_prompt + "\n\n" + right_now() + "\n\n" + vault.context(settings.vault_dir)
+
+    _cal_cache = {"at": 0.0, "events": []}
+
+    def right_now() -> str:
+        """When to hold extras (answer-first rule): time of day, a running calendar event, a test soon."""
+        now = dt.datetime.now(profile.tz)
+        bits = [f"Right now: {now:%A %H:%M}."]
+        if now.hour >= 21 or now.hour < 6:
+            bits.append("Late: answer only, hold extras for the brief.")
+        try:
+            if time.time() - _cal_cache["at"] > 300 and hasattr(app.state, "brief"):
+                events, _ = app.state.brief.calendar(now.date())
+                _cal_cache.update(at=time.time(), events=events)
+            for e in _cal_cache["events"]:
+                if e.get("all_day") or not e.get("end"):
+                    continue
+                if dt.datetime.fromisoformat(e["start"]) <= now < dt.datetime.fromisoformat(e["end"]):
+                    bits.append(f"Busy: in \"{e['summary']}\" until {dt.datetime.fromisoformat(e['end']).astimezone(profile.tz):%H:%M}. Keep it short.")
+        except Exception:   # no calendar: the rule still works on the rest
+            pass
+        try:
+            from .db import SchoolEvent as _SE
+            with session_for(engine) as s_:
+                soon = s_.exec(select(_SE).where(_SE.kind == "test").where(_SE.date >= dt.datetime.now(dt.timezone.utc))
+                               .where(_SE.date <= dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24))).first()
+            if soon:
+                bits.append(f"Test within 24 h ({soon.subject}): no extras unless urgent.")
+        except Exception:
+            pass
+        return " ".join(bits)
 
     if settings.db_url.startswith("sqlite:///"):
         Path(settings.db_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
