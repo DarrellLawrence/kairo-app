@@ -39,7 +39,7 @@ function LoopCard({ loop, focus, onChanged }) {
   const snooze = (body) => act('later', async () => {
     setLater(false)
     const r = await api(`/api/loops/${loop.id}/later`, { method: 'POST', body })
-    toast.show({ text: `OK. Back ${backAt(r.next_at)}.` })
+    toast.show({ text: r.message || `OK. Back ${backAt(r.next_at)}.`, duration: r.message?.includes('But') ? 6000 : 3500 })
     onChanged()
   })
   const close = (reason) => act('close', async () => {

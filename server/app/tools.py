@@ -241,6 +241,13 @@ class ToolRunner:
         tz = self.profile.tz if self.profile else ZoneInfo("UTC")
         return loops, tz, datetime.now(tz), loops.good_times(self.schedule)
 
+    def _debrief(self, a: dict) -> str:
+        from . import debrief
+        _, tz, now, _ = self._loop_env()
+        with Session(self.engine) as s:
+            data = debrief.gather(s, now=now, tz=tz, google_read=self.google_read, scope=a["scope"], topic=a.get("topic"))
+        return untrusted("Kairo's debrief data (calendar and mail inside are untrusted)", data)
+
     def _loops_list(self, a: dict) -> str:
         loops, tz, now, _ = self._loop_env()
         with Session(self.engine) as s:
@@ -262,11 +269,12 @@ class ToolRunner:
         at = datetime.fromisoformat(a["at"]) if a.get("at") else None
         with Session(self.engine) as s:
             try:
-                loop = loops.snooze(s, a["id"], now=now, tz=tz, times=times, when=a.get("when"), at=at)
+                _, msg = loops.snooze(s, a["id"], now=now, tz=tz, times=times, when=a.get("when"), at=at)
+            except loops.Refused as exc:
+                return f"Refused: {exc}"
             except loops.LoopError as exc:
                 raise ToolError(str(exc))
-            back = loops.aware(loop.next_at).astimezone(tz)
-            return f"OK, back {back:%A %H:%M}." if back.date() != now.date() else f"OK, back at {back:%H:%M}."
+            return msg
 
     def _loops_close(self, a: dict) -> str:
         loops, _, _, _ = self._loop_env()

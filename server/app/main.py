@@ -10,6 +10,7 @@ import datetime as dt
 import hmac
 import os
 import json
+import logging
 import secrets
 import threading
 import time
@@ -210,11 +211,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                           "/#lerndoku")
         return week
 
+    def _triage_then_loops(ctx):
+        """A mail that needs a reply is pinged right away, with its draft (PA rule 5)."""
+        out = app.state.triage.run(ctx)
+        try:
+            app.state.loops.run(ctx)
+        except Exception as exc:   # quiet hours, no Google: the 15-minute loop job tries again
+            log.info("loops after triage: %s", exc)
+        return out
+
     app.state.jobs = Jobs(
         engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
         ask=lambda prompt, system, images=None, purpose="summary", model=None: chat.ask_sync(
             runner, prompt, system=system, images=images, purpose=purpose, model=model),
-        bodies={"email_triage": lambda ctx: app.state.triage.run(ctx),
+        bodies={"email_triage": lambda ctx: _triage_then_loops(ctx),
                 "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
                 "capture_process": lambda ctx: app.state.captures.run(ctx),
                 "backup": backup_job, "restore_test": restore_test_job,
@@ -754,11 +764,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(400, "at must be an ISO time")
         with session_for(engine) as s:
             try:
-                loop = loops.snooze(s, loop_id, now=_loop_now(), tz=profile.tz, times=loops.good_times(app.state.jobs.schedule),
-                                    when=None if at else (body.get("when") or "later"), at=at)
+                loop, msg = loops.snooze(s, loop_id, now=_loop_now(), tz=profile.tz, times=loops.good_times(app.state.jobs.schedule),
+                                         when=None if at else (body.get("when") or "later"), at=at)
+            except loops.Refused as exc:
+                raise HTTPException(409, str(exc))
             except loops.LoopError as exc:
                 raise HTTPException(400, str(exc))
-            return loops.as_dict(loop, _loop_now(), profile.tz)
+            return {**loops.as_dict(loop, _loop_now(), profile.tz), "message": msg}
 
     @app.post("/api/loops/{loop_id}/close")
     def loop_close(loop_id: int, body: dict | None = None):
@@ -1601,6 +1613,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _mount_web(app, settings.web_dist_dir)
     return app
 
+
+log = logging.getLogger("kairo.main")
 
 LOCAL_HOSTS = {"127.0.0.1", "::1"}
 

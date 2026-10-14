@@ -228,8 +228,10 @@ def _get_open(s: Session, loop_id: int) -> OpenLoop:
 
 
 def _first_due(loop: OpenLoop, now: dt.datetime, tz, times: dict) -> dt.datetime:
-    if loop.urgency == "urgent":
+    if loop.urgency == "urgent" or loop.kind == "reply":   # mails needing a reply: ping at once (PA rule 5)
         return now
+    if loop.kind == "promise":                             # remind the next day (PA rule 10)
+        return next_good_time(now, tz, times, days=1, morning=True)
     if loop.urgency == "low":
         return next_good_time(now, tz, times, days=3)
     return next_good_time(now, tz, times, days=0)
@@ -269,10 +271,33 @@ def add(s: Session, *, kind: str, what: str, who: str | None, due: dt.date | Non
     return loop
 
 
+CRITICAL_WINDOW = dt.timedelta(hours=3)     # due this soon: it can't move any more
+IMPORTANT_WINDOW = dt.timedelta(hours=24)   # due this soon and pushed away twice: pushback
+
+
+class Refused(LoopError):
+    """A critical loop the owner tried to push away: Kairo says no, with the reason."""
+
+
+def _hhmm(t: dt.datetime, now: dt.datetime, tz) -> str:
+    t, n = t.astimezone(tz), now.astimezone(tz)
+    if t.date() == n.date():
+        return f"at {t:%H:%M}"
+    if t.date() == n.date() + dt.timedelta(days=1):
+        return f"tomorrow {t:%H:%M}"
+    return f"{t:%A %H:%M}"
+
+
 def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when: str | None = None,
-           at: dt.datetime | None = None) -> OpenLoop:
-    """'Later' never means forgotten: it comes back by the urgency rules, or at the time asked."""
+           at: dt.datetime | None = None) -> tuple[OpenLoop, str]:
+    """'Later' never means forgotten: it comes back by the urgency rules, or at the time asked.
+    Important things get pushback with the preparation; critical ones can't move (Refused)."""
     loop = _get_open(s, loop_id)
+    due = aware(loop.due)
+    ready = " It's ready: just check it." if draft_of(loop) else ""
+    if due is not None and due - now <= CRITICAL_WINDOW:
+        raise Refused(f"No, this one can't move: {loop.what} is due {_hhmm(due, now, tz)}.{ready} Do it now.")
+    counted = True
     if at is not None:
         nxt = aware(at)
         if nxt <= now:
@@ -286,15 +311,22 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
         just_raised = loop.last_raised_at and now - aware(loop.last_raised_at) < dt.timedelta(hours=2) and loop.snoozed > 0
         step = loop.snoozed - 1 if just_raised else loop.snoozed
         nxt = schedule_after(loop.urgency, step, now, tz, times)
-        if not just_raised:
-            loop.snoozed += 1
+        counted = not just_raised
     else:
         raise LoopError("when must be later, in_1h or tomorrow")
+    if due is not None and nxt > due - dt.timedelta(minutes=30):
+        nxt = max(now + dt.timedelta(minutes=15), due - dt.timedelta(hours=1))   # never past the deadline
+    pushed = loop.snoozed
+    if counted:
+        loop.snoozed += 1
     loop.next_at = nxt
     s.add(loop)
     s.commit()
     s.refresh(loop)
-    return loop
+    msg = f"OK, back {_hhmm(nxt, now, tz)}."
+    if due is not None and due - now <= IMPORTANT_WINDOW and pushed >= 2:
+        msg += f" But it's due {_hhmm(due, now, tz)}.{ready or ' Do it before then.'}"
+    return loop, msg
 
 
 def close(s: Session, loop_id: int, reason: str, *, now: dt.datetime | None = None) -> OpenLoop:
@@ -496,10 +528,13 @@ class LoopEngine:
         from .push import in_quiet_hours
         if in_quiet_hours(self.profile, now):
             raise Skipped("quiet hours")
-        if pings_today(s, now, tz) >= max_pings(self.schedule):
+        fresh_replies = [l for l in due if l.kind == "reply" and l.raised == 0]   # always pinged at once (PA rule 5)
+        if pings_today(s, now, tz) >= max_pings(self.schedule) and not fresh_replies:
             return json.dumps({**counts, "raised": None, "why": "daily ping limit"})
+        if pings_today(s, now, tz) >= max_pings(self.schedule):
+            due = fresh_replies
         busy = self._busy(now)
-        pick = next((l for l in due if l.urgency == "urgent" or not busy), None)
+        pick = next((l for l in due if l.urgency == "urgent" or l in fresh_replies or not busy), None)
         if pick is None:
             return json.dumps({**counts, "raised": None, "why": "in a calendar event"})
         if pick.kind in ("reply", "waiting", "promise") and draft_of(pick) is None:
