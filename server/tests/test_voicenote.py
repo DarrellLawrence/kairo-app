@@ -61,7 +61,7 @@ def test_voice_note_is_handled_like_a_chat_message(client, tmp_path):
     cap = wait_for(client, r.json()["id"])
     assert cap["status"] == "filed" and cap["filed_as"] == "voice_note"
     assert cap["result"]["reply"] == "echo: (voice note) Remind me to call the dentist tomorrow"
-    msgs = client.get(f"/api/threads/{cap['result']['thread_id']}/messages").json()
+    msgs = client.get("/api/chat/messages").json()["messages"]
     assert [(m["role"], m["text"]) for m in msgs] == [
         ("owner", "(voice note) Remind me to call the dentist tomorrow"),
         ("kairo", "echo: (voice note) Remind me to call the dentist tomorrow")]
@@ -112,7 +112,7 @@ def test_urgent_notes_push(migrated):
     app.state.voice = FakeVoice()
     runner = StubRunner("URGENT: Your train leaves in 20 minutes, go now.")
     vn = VoiceNotes(engine=app.state.voice_notes.engine, inbox_dir=app.state.voice_notes.inbox_dir,
-                    profile=app.state.voice_notes.profile, runner=runner, state=app.state, system=lambda: "sys",
+                    profile=app.state.voice_notes.profile, runner=runner, state=app.state, system=lambda **k: "sys",
                     tools=["t"], pick_model=lambda p: "sonnet", paused=lambda: False)
     cap = vn.accept(b"m4a bytes", "audio/mp4", "voice_note")
     asyncio.run(vn.process(cap.id))

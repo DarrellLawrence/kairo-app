@@ -31,8 +31,8 @@ def test_same_origin_websocket_works(migrated):
 
 def test_cross_origin_post_is_refused(migrated):
     with TestClient(create_app(migrated)) as client:
-        assert client.post("/api/threads", headers={"origin": "https://evil.example"}).status_code == 403
-        assert client.post("/api/threads", headers={"origin": "http://testserver"}).status_code == 200
+        assert client.post("/api/loops", json={"kind": "task", "what": "x"}, headers={"origin": "https://evil.example"}).status_code == 403
+        assert client.post("/api/loops", json={"kind": "task", "what": "x"}, headers={"origin": "http://testserver"}).status_code == 200
 
 
 def test_forwarded_host_from_tailscale_serve_is_accepted():
