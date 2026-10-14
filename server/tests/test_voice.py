@@ -172,3 +172,82 @@ def test_owner_calls_kairo(client):
     c = client.post("/api/voice/calls", json={"outgoing": True}).json()
     assert c["status"] == "answered" and c["reason"] == "You called Kairo"
     assert client.pushes == []
+
+
+def _fake_whisper(monkeypatch, tmp_path, behave):
+    """A stand-in faster_whisper module: behave(device, path) builds or raises."""
+    import sys
+    import types
+    mod = types.ModuleType("faster_whisper")
+    made = []
+
+    class WhisperModel:
+        def __init__(self, path, device="cpu", compute_type="int8", **kw):
+            made.append((device, str(path), kw))
+            behave(device, str(path), kw)
+            self.device = device
+
+        def transcribe(self, audio, **kw):
+            if getattr(self, "fail", None):
+                raise RuntimeError(self.fail)
+            info = types.SimpleNamespace(language="en", duration=1.0)
+            return iter([types.SimpleNamespace(text=" hello")]), info
+
+    mod.WhisperModel = WhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", mod)
+    monkeypatch.setattr(Voice, "installed", staticmethod(lambda: {"stt": True, "en": False, "de": False}))
+    return made
+
+
+def test_model_load_failure_is_a_clear_error_not_a_crash(tmp_path, monkeypatch):
+    """Real use: 'speech recognition failed (500)'. A broken model load must say why (503), never crash."""
+    def behave(device, path, kw):
+        raise PermissionError("[WinError 5] Access is denied: 'whisper\\.locks'")
+    _fake_whisper(monkeypatch, tmp_path, behave)
+    v = Voice(tmp_path)
+    with pytest.raises(NotInstalled) as e:
+        v.transcribe(b"audio")
+    assert "Access is denied" in str(e.value) and "Access is denied" in v.status()["last_error"]
+
+
+def test_downloaded_model_loads_offline_from_its_folder(tmp_path, monkeypatch):
+    """No Hugging Face lookups (network, lock files) at run time when Update Kairo already fetched the model."""
+    snap = tmp_path / "whisper" / "models--Systran--faster-whisper-small" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "model.bin").write_bytes(b"x")
+    made = _fake_whisper(monkeypatch, tmp_path, lambda d, p, kw: (_ for _ in ()).throw(RuntimeError("no CUDA")) if d == "cuda" else None)
+    v = Voice(tmp_path)
+    assert v.transcribe(b"audio").text == "hello"
+    assert made[-1][0] == "cpu" and made[-1][1] == str(snap)
+
+
+def test_gpu_that_fails_at_run_time_falls_back_to_cpu(tmp_path, monkeypatch):
+    """CUDA can load the model but fail on first use (missing cuBLAS DLL): switch to the CPU and retry once."""
+    made = _fake_whisper(monkeypatch, tmp_path, lambda d, p, kw: None)
+    v = Voice(tmp_path)
+    v._load_stt().fail = "Library cublas64_12.dll is not found or cannot be loaded"
+    assert v.transcribe(b"audio").text == "hello"
+    assert v.status()["stt_device"] == "cpu" and made[-1][0] == "cpu"
+
+
+def test_failed_load_is_not_retried_on_every_word(tmp_path, monkeypatch):
+    """A broken install answers fast instead of trying (and failing) slowly for each sentence."""
+    calls_ = []
+    def behave(device, path, kw):
+        calls_.append(device)
+        raise OSError("model.bin missing")
+    _fake_whisper(monkeypatch, tmp_path, behave)
+    v = Voice(tmp_path)
+    for _ in range(3):
+        with pytest.raises(NotInstalled):
+            v.transcribe(b"audio")
+    assert len(calls_) == 2   # GPU try + CPU try, once
+
+
+def test_unexpected_voice_error_is_never_a_bare_500(client):
+    class Boom(FakeVoice):
+        def transcribe(self, audio, language=None):
+            raise RuntimeError("something odd")
+    client.app_.state.voice = Boom()
+    r = client.post("/api/voice/transcribe", content=b"m4a", headers={"Content-Type": "audio/mp4"})
+    assert r.status_code == 503 and "something odd" in r.json()["detail"]

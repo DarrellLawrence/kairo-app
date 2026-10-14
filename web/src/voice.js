@@ -91,21 +91,73 @@ function pickType() {
   return ''
 }
 
+/* One microphone, opened once and reused. iPhone asks for permission each time a
+   page opens the mic anew, so a call keeps it open (holdMic) until hang-up, and
+   the chat mic keeps it for a minute after you stop talking. */
+let mic = null
+let held = false
+let releaseTimer = null
+const KEEP_MIC_MS = 60000
+
+async function openMic() {
+  clearTimeout(releaseTimer)
+  if (mic && mic.stream.getAudioTracks().some((t) => t.readyState === 'live')) {
+    if (mic.ctx.state === 'suspended') await mic.ctx.resume().catch(() => {})
+    return mic
+  }
+  closeMic()
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+  const ctx = new (window.AudioContext || window.webkitAudioContext)()
+  const analyser = ctx.createAnalyser()
+  analyser.fftSize = 1024
+  ctx.createMediaStreamSource(stream).connect(analyser)
+  mic = { stream, ctx, analyser, buf: new Float32Array(analyser.fftSize) }
+  return mic
+}
+
+function closeMic() {
+  clearTimeout(releaseTimer)
+  if (!mic) return
+  mic.stream.getTracks().forEach((t) => t.stop())
+  mic.ctx.close().catch(() => {})
+  mic = null
+}
+
+function idleMic() {
+  clearTimeout(releaseTimer)
+  if (!held) releaseTimer = setTimeout(closeMic, KEEP_MIC_MS)
+}
+
+/* A call holds the mic for its whole length; releaseMic() at hang-up turns it off. */
+export async function holdMic() { held = true; await openMic() }
+export function releaseMic() { held = false; closeMic() }
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (document.hidden && !held) closeMic() })
+}
+
+function levelOf(m) {
+  m.analyser.getFloatTimeDomainData(m.buf)
+  let sum = 0
+  for (let i = 0; i < m.buf.length; i++) sum += m.buf[i] * m.buf[i]
+  return Math.min(1, Math.sqrt(sum / m.buf.length) * 8)
+}
+
+/* Just the loudness, no recording (to hear you talk over Kairo). */
+export async function listenLevel() {
+  const m = await openMic()
+  return { level: () => (mic === m ? levelOf(m) : 0), cancel: idleMic }
+}
+
 /* Starts recording. Returns { stop(): Promise<Blob>, cancel(), level(): 0..1, heard(): speech so far? }.
    With autoStop, it stops by itself after `silenceMs` of quiet once speech was heard,
    or after maxMs, and calls onAutoStop(blob). */
 export async function startRecording({ autoStop = false, silenceMs = 1300, maxMs = 45000, onAutoStop } = {}) {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+  const m = await openMic()
   const type = pickType()
-  const rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined)
+  const rec = new MediaRecorder(m.stream, type ? { mimeType: type } : undefined)
   const chunks = []
   rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
-  const ctx = new (window.AudioContext || window.webkitAudioContext)()
-  const src = ctx.createMediaStreamSource(stream)
-  const analyser = ctx.createAnalyser()
-  analyser.fftSize = 1024
-  src.connect(analyser)
-  const buf = new Float32Array(analyser.fftSize)
   let current = 0
   let heard = false
   let quietSince = null
@@ -117,18 +169,14 @@ export async function startRecording({ autoStop = false, silenceMs = 1300, maxMs
     finished = true
     clearInterval(timer)
     rec.onstop = () => {
-      stream.getTracks().forEach((t) => t.stop())
-      ctx.close().catch(() => {})
+      idleMic()
       resolve(new Blob(chunks, { type: rec.mimeType || type || 'audio/mp4' }))
     }
     if (rec.state !== 'inactive') rec.stop(); else rec.onstop()
   })
 
   const timer = setInterval(() => {
-    analyser.getFloatTimeDomainData(buf)
-    let sum = 0
-    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
-    current = Math.min(1, Math.sqrt(sum / buf.length) * 8)
+    current = mic === m ? levelOf(m) : 0
     if (!autoStop) return
     const now = performance.now()
     if (current > 0.12) { heard = true; quietSince = null } else if (heard && quietSince === null) quietSince = now

@@ -31,6 +31,8 @@ KOKORO_FILES = {
 }
 KOKORO_VOICE = os.environ.get("KAIRO_KOKORO_VOICE", "af_heart")
 PIPER_DE = os.environ.get("KAIRO_PIPER_VOICE", "de_DE-thorsten-medium")
+RETRY_LOAD_AFTER = 600   # seconds before a failed model load is tried again
+GPU_RUNTIME = re.compile(r"cuda|cublas|cudnn|\.dll|library", re.I)
 MAX_AUDIO = 15 * 1024 * 1024
 MAX_SPEAK = 3000
 
@@ -102,6 +104,7 @@ class Voice:
         use_site(Path(os.environ["KAIRO_VOICE_SITE"]) if os.environ.get("KAIRO_VOICE_SITE") else site_dir)
         self._stt = None
         self._stt_device = None
+        self._stt_failed = 0.0
         self._kokoro = None
         self._piper = None
         self._lock = threading.Lock()   # one model load at a time
@@ -124,22 +127,49 @@ class Voice:
 
     # ---------------------------------------------------------------- speech to text
 
+    def _local_model(self, name: str) -> str:
+        """The downloaded model folder, so loading needs no Hugging Face lookup (network, lock files);
+        the plain name only when Update Kairo hasn't fetched it yet."""
+        found = sorted((self.models_dir / "whisper").glob(f"models--*--faster-whisper-{name}/snapshots/*/model.bin"))
+        return str(found[-1].parent) if found else name
+
+    def _make_stt(self, device: str):
+        from faster_whisper import WhisperModel
+        root = str(self.models_dir / "whisper")
+        if device == "cuda":
+            _add_cuda_dlls()
+            return WhisperModel(self._local_model(WHISPER_GPU), device="cuda", compute_type="float16", download_root=root)
+        return WhisperModel(self._local_model(WHISPER_CPU), device="cpu", compute_type="int8", download_root=root)
+
     def _load_stt(self):
         if self._stt is not None:
             return self._stt
         if not self.installed()["stt"]:
             raise NotInstalled("Speech recognition is not installed on the PC (run Update Kairo).")
-        from faster_whisper import WhisperModel
-        root = str(self.models_dir / "whisper")
+        if self._stt_failed and time.monotonic() - self._stt_failed < RETRY_LOAD_AFTER:
+            raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}")
         try:
-            _add_cuda_dlls()
-            self._stt = WhisperModel(WHISPER_GPU, device="cuda", compute_type="float16", download_root=root)
-            self._stt_device = "cuda"
+            self._stt, self._stt_device = self._make_stt("cuda"), "cuda"
         except Exception as exc:   # no GPU / CUDA DLLs missing: CPU, smaller model
             log.warning("Whisper on GPU failed (%s); using the CPU", exc)
-            self._stt = WhisperModel(WHISPER_CPU, device="cpu", compute_type="int8", download_root=root)
-            self._stt_device = "cpu"
+            try:
+                self._stt, self._stt_device = self._make_stt("cpu"), "cpu"
+            except Exception as exc2:   # never a bare crash: say why, and don't retry slowly on every sentence
+                self._stt_failed = time.monotonic()
+                self.last_error = f"load: {type(exc2).__name__}: {exc2}"
+                log.error("Whisper could not load: %s", self.last_error)
+                raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
+        self._stt_failed = 0.0
         return self._stt
+
+    def warm(self) -> None:
+        """Load the models ahead of the first word (called at start, in the background)."""
+        for load in (self._load_stt, self._load_kokoro):
+            try:
+                with self._lock:
+                    load()
+            except Exception as exc:   # reported by status(); the request itself will say why
+                log.info("voice warm-up: %s", exc)
 
     def transcribe(self, audio: bytes, language: str | None = None) -> Transcript:
         if not audio:
@@ -153,6 +183,16 @@ class Voice:
             segments, info = model.transcribe(io.BytesIO(audio), language=language, vad_filter=True, beam_size=5)
             text = " ".join(s.text.strip() for s in segments).strip()
         except Exception as exc:
+            if self._stt_device == "cuda" and GPU_RUNTIME.search(str(exc)):
+                # CUDA loaded the model but can't run it (cuBLAS/cuDNN DLL missing): CPU from now on
+                log.warning("Whisper on GPU failed at run time (%s); switching to the CPU", exc)
+                with self._lock:
+                    try:
+                        self._stt, self._stt_device = self._make_stt("cpu"), "cpu"
+                    except Exception as exc2:
+                        self._stt, self.last_error = None, f"load: {type(exc2).__name__}: {exc2}"
+                        raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
+                return self.transcribe(audio, language)
             self.last_error = f"transcribe: {exc}"
             raise VoiceError(f"could not understand the audio ({type(exc).__name__})") from exc
         return Transcript(text=text, language=info.language, seconds=round(info.duration, 1), took=round(time.monotonic() - t, 2))

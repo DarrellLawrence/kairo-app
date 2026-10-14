@@ -140,6 +140,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = asyncio.create_task(run_forever(Housekeeping(app)))
         if os.environ.get("KAIRO_SCHEDULER", "1") != "0":   # tests switch it off
             app.state.jobs.start()
+            if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
+                asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
         yield
         app.state.jobs.stop()
         task.cancel()
@@ -1423,6 +1425,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(503, str(exc))
         except VoiceError as exc:
             raise HTTPException(400, str(exc))
+        except Exception as exc:   # never a bare 500: the app shows this text
+            log.exception("voice transcribe")
+            raise HTTPException(503, f"Speech recognition failed on the PC: {type(exc).__name__}: {exc}")
         return {"text": t.text, "language": t.language, "seconds": t.seconds, "took": t.took}
 
     @app.post("/api/voice/speak")
@@ -1435,6 +1440,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(503, str(exc))
         except VoiceError as exc:
             raise HTTPException(400, str(exc))
+        except Exception as exc:
+            log.exception("voice speak")
+            raise HTTPException(503, f"Kairo's voice failed on the PC: {type(exc).__name__}: {exc}")
         return Response(content=wav, media_type="audio/wav", headers={"X-Kairo-Language": used, "Cache-Control": "no-store"})
 
     @app.post("/api/voice/calls")
