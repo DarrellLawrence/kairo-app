@@ -18,6 +18,13 @@ actions:
   tasks.create:          1_internal
   tasks.update:          1_internal
   notes.write:           1_internal   # Kairo-owned files only
+  # phase 3: Kairo's own life data (read, or add to Kairo's own tables)
+  shopping.list:         0_read
+  people.list:           0_read
+  finance.list:          0_read       # read only; money actions don't exist (tier 5)
+  health.list:           0_read
+  shopping.add:          1_internal
+  people.note:           1_internal
   # tier 2-4: reachable ONLY via mcp_kairo.propose_action; executed by the backend
   gmail.label:           2_reversible
   gmail.create_draft:    2_reversible

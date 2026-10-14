@@ -12,6 +12,7 @@ import Board from './screens/Board.jsx'
 import School from './screens/School.jsx'
 import Lerndoku from './screens/Lerndoku.jsx'
 import Call from './screens/Call.jsx'
+import Life from './screens/Life.jsx'
 import Onboarding from './screens/Onboarding.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
@@ -24,7 +25,7 @@ const TABS = [
   { id: 'more', label: 'More', Icon: IconMore },
 ]
 // Screens without their own tab, and the tab that stays lit while they are open.
-const HIDDEN = { reviews: 'more', school: 'more', lerndoku: 'more' }
+const HIDDEN = { reviews: 'more', school: 'more', lerndoku: 'more', life: 'more' }
 
 // Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
 function readRoute() {
@@ -79,6 +80,7 @@ export default function App() {
     board: <Board />,
     school: <School />,
     lerndoku: <Lerndoku />,
+    life: <Life />,
     call: <Call key={param} callId={param} onClose={() => { window.location.hash = '#chat' }} />,
     onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,

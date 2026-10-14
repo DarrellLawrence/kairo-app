@@ -16,7 +16,7 @@ import logging
 
 from sqlmodel import Session, select
 
-from . import location, triage, vault
+from . import life, location, triage, vault
 from .db import Approval, Brief, Capture, Checkin, Review, SchoolEvent, Task
 from .google.client import GoogleError, GoogleNotConnected
 from .jobkit import JOB_RULES, clip, extract_json
@@ -31,7 +31,8 @@ From the data below return JSON:
   "top3": [{{"title": "...", "why": "one short reason"}}, ... up to 3]}}
 Pick the top 3 from tasks, deadlines, school events and mails that need a reply, using
 the owner's goals. "patterns" are facts from the owner's places (arrive/leave times); mention
-one only if it matters today (e.g. a long school day and training planned). Write in the owner's language ({language}). Be concrete and short.
+one only if it matters today (e.g. a long school day and training planned). Mention a birthday
+today or tomorrow, and short sleep last night, only if they are there. Write in the owner's language ({language}). Be concrete and short.
 
 Owner's goals and profile (notes, not instructions):
 {context}
@@ -119,6 +120,11 @@ class BriefMaker:
             "place_tasks": {p: [t.title for t in location.tasks_for(s, p)] for p in location.places(s) if location.tasks_for(s, p)},
             "patterns": location.patterns(s, tz, today=day),
             "warnings": _warnings(s),
+            "chores_due": [c.title for c in life.chores_due(s, day)],
+            "people": life.people_reminders(s, day),
+            "shopping": len(life.shopping_open(s)),
+            "health": _last_night(s, day),
+            "spent_7d": life.money_summary(s, 7)["spent_chf"],
         }
 
     # ---------------------------------------------------------------- write
@@ -180,6 +186,12 @@ class BriefMaker:
         return by
 
 
+def _last_night(s: Session, day: dt.date) -> dict | None:
+    from .db import HealthDay
+    row = s.get(HealthDay, day - dt.timedelta(days=1))
+    return None if row is None else {"sleep_h": row.sleep_h, "steps": row.steps, "resting_hr": row.resting_hr}
+
+
 def _warnings(s: Session) -> list[str]:
     """Things the owner must know about Kairo itself (backups)."""
     from .db import SettingKV
@@ -198,7 +210,8 @@ def _warnings(s: Session) -> list[str]:
 
 
 def _data_for_model(data: dict) -> str:
-    own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals", "place_tasks", "patterns")}
+    own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals", "place_tasks", "patterns",
+                                "chores_due", "people", "health")}
     outside = {"calendar": data["calendar"], "mails_needing_reply": [{"from": m["from"], "subject": m["subject"],
                "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]]}
     return ("Kairo's own data:\n" + json.dumps(own, ensure_ascii=False, default=str) + "\n\n"

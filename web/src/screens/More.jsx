@@ -487,6 +487,8 @@ function Root() {
 
           <SectionTitle>Work</SectionTitle>
           <List>
+            <ListRow icon={<IconList />} title="Life" subtitle="Shopping, chores, people, money, health" chevron
+              onClick={() => { window.location.hash = '#life' }} />
             <ListRow icon={<IconSparkle />} title="School" subtitle="Dates, grades, flashcards, study guides" chevron
               onClick={() => { window.location.hash = '#school' }} />
             <ListRow icon={<IconList />} title="Lerndokumentation" subtitle="Weekly entry, German draft by Kairo" chevron

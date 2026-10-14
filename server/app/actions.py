@@ -88,6 +88,44 @@ class NotesWrite(Strict):
     mode: Literal["overwrite", "append"] = "overwrite"
 
 
+# ---------------------------------------------------------------- phase 3: life data (Kairo's own tables)
+
+class ShoppingList(Strict):
+    pass
+
+
+class ShoppingAdd(Strict):
+    items: list[str] = Field(min_length=1, max_length=30)
+
+    @field_validator("items")
+    @classmethod
+    def short_lines(cls, v: list[str]) -> list[str]:
+        for item in v:
+            if not item.strip() or len(item) > 200 or "\n" in item:
+                raise ValueError("each item: one line, 1-200 characters")
+        return [i.strip() for i in v]
+
+
+class PeopleList(Strict):
+    name: str | None = Field(default=None, max_length=80)
+
+
+class PeopleNote(Strict):
+    name: str = Field(min_length=1, max_length=80)
+    note: str = Field(default="", max_length=2000)
+    contacted: bool = False
+    relation: str | None = Field(default=None, max_length=60)
+
+
+class FinanceList(Strict):
+    days: int = Field(default=30, ge=1, le=366)
+    category: str | None = Field(default=None, max_length=40)
+
+
+class HealthList(Strict):
+    days: int = Field(default=14, ge=1, le=366)
+
+
 # ---------------------------------------------------------------- tier 2: reversible, nobody notified
 
 class GmailLabel(Strict):
@@ -179,6 +217,12 @@ SCHEMAS: dict[str, type[Strict]] = {
     "tasks.create": TasksCreate,
     "tasks.update": TasksUpdate,
     "notes.write": NotesWrite,
+    "shopping.list": ShoppingList,
+    "shopping.add": ShoppingAdd,
+    "people.list": PeopleList,
+    "people.note": PeopleNote,
+    "finance.list": FinanceList,
+    "health.list": HealthList,
     "gmail.label": GmailLabel,
     "gmail.create_draft": GmailCreateDraft,
     "calendar.create_hold": CalendarCreateHold,
@@ -194,6 +238,8 @@ SCHEMAS: dict[str, type[Strict]] = {
 MIN_TIER: dict[str, int] = {
     "gmail.search": 0, "gmail.read": 0, "calendar.list": 0, "vault.read": 0, "tasks.list": 0,
     "tasks.create": 1, "tasks.update": 1, "notes.write": 1,
+    "shopping.list": 0, "people.list": 0, "finance.list": 0, "health.list": 0,
+    "shopping.add": 1, "people.note": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
     "gmail.trash": 4, "calendar.delete": 4,
@@ -210,6 +256,12 @@ DIRECT_TOOLS: dict[str, str] = {
     "tasks_create": "tasks.create",
     "tasks_update": "tasks.update",
     "notes_write": "notes.write",
+    "shopping_list": "shopping.list",
+    "shopping_add": "shopping.add",
+    "people_list": "people.list",
+    "people_note": "people.note",
+    "finance_list": "finance.list",
+    "health_list": "health.list",
 }
 
 # Fields that would let a tier-2 action reach other people. Never allowed on

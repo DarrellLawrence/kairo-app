@@ -56,7 +56,7 @@ Owner's note with it: {note}"""
 PROMPT = """The owner captured these items quickly on the phone. For each one decide what it is
 and return a JSON array, one object per item:
 {{"id": <item id>,
-  "type": "task" | "school_event" | "note" | "person" | "idea" | "question" | "unclear",
+  "type": "task" | "school_event" | "note" | "person" | "idea" | "question" | "shopping" | "unclear",
   "title": "short title in the owner's words (keep their language)",
   "due": "YYYY-MM-DD" or null            (tasks: only if a date is given or obvious),
   "subject": "school subject" or null    (school_event),
@@ -64,6 +64,7 @@ and return a JSON array, one object per item:
   "date": "YYYY-MM-DD" or null           (school_event),
   "person": "name" or null               (person),
   "note": "the content to keep, cleaned up, nothing invented",
+  "items": ["..."] or null              (shopping: the things to buy, one per entry),
   "ask": "one short question to the owner" or null (only for unclear)}}
 Use "unclear" whenever you would have to guess. Today is {today}.
 Earlier answers from the owner are included where Kairo asked before.
@@ -333,6 +334,10 @@ class Processor:
             s.commit()
             s.refresh(ev)
             result["school_event_id"] = ev.id
+        elif kind == "shopping" and isinstance(row.get("items"), list) and row["items"]:
+            from . import life
+            added = life.shopping_add(s, [str(i) for i in row["items"]][:30], source="capture")
+            result["shopping"] = [i.text for i in added]
         elif kind in ("note", "idea", "person", "question"):
             folder = {"note": "00 Inbox", "idea": "Ideas", "person": "60 People", "question": "00 Inbox"}[kind]
             name = _filename(row.get("person") if kind == "person" else title) or f"Capture {cap.id}"

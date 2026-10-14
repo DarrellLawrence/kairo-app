@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, board, brief, capture, lerndoku, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
+from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError
 from .voice import calls as voice_calls
@@ -1124,6 +1124,189 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return voice_calls.set_option(s, key, bool(body.get("on")))
             except KeyError:
                 raise HTTPException(404, "unknown option")
+
+    # ---------------------------------------------------------------- phase 3: life (lists, people, money, health)
+
+    from .db import Chore, Person, Transaction
+
+    def _shortcut_auth(request: Request) -> None:
+        if not capture.check_token(settings.secrets_dir, request.headers.get("authorization")):
+            raise HTTPException(401, "wrong or missing Shortcut key")
+
+    @app.get("/api/shopping")
+    def shopping_get():
+        with session_for(engine) as s:
+            rows = s.exec(select(life.ShoppingItem).order_by(life.ShoppingItem.done, life.ShoppingItem.id)).all()
+            return [{"id": r.id, "text": r.text, "done": r.done, "source": r.source} for r in rows]
+
+    @app.post("/api/shopping")
+    def shopping_post(body: dict):
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            raise HTTPException(400, "items: a list of things to buy")
+        with session_for(engine) as s:
+            return [{"id": r.id, "text": r.text} for r in life.shopping_add(s, [str(i) for i in items][:30])]
+
+    @app.post("/api/shopping/{item_id}/toggle")
+    def shopping_toggle(item_id: int):
+        with session_for(engine) as s:
+            try:
+                r = life.shopping_toggle(s, item_id)
+            except KeyError:
+                raise HTTPException(404, "no such item")
+            return {"id": r.id, "text": r.text, "done": r.done}
+
+    @app.post("/api/shopping/clear-done")
+    def shopping_clear():
+        with session_for(engine) as s:
+            return {"removed": life.shopping_clear_done(s)}
+
+    @app.get("/api/chores")
+    def chores_get():
+        today = _today()
+        with session_for(engine) as s:
+            return [life.chore_dict(c, today) for c in s.exec(select(Chore).order_by(Chore.title)).all()]
+
+    @app.post("/api/chores")
+    def chores_post(body: dict):
+        title = str(body.get("title") or "").strip()[:120]
+        try:
+            every = int(body.get("every_days") or 7)
+        except (TypeError, ValueError):
+            every = 0
+        if not title or not 1 <= every <= 365:
+            raise HTTPException(400, "title and every_days (1-365)")
+        with session_for(engine) as s:
+            c = Chore(title=title, every_days=every)
+            s.add(c)
+            s.commit()
+            s.refresh(c)
+            return life.chore_dict(c, _today())
+
+    @app.post("/api/chores/{chore_id}/done")
+    def chores_done(chore_id: int):
+        with session_for(engine) as s:
+            try:
+                return life.chore_dict(life.chore_done(s, chore_id, _today()), _today())
+            except KeyError:
+                raise HTTPException(404, "no such chore")
+
+    @app.delete("/api/chores/{chore_id}")
+    def chores_delete(chore_id: int):
+        with session_for(engine) as s:
+            c = s.get(Chore, chore_id)
+            if c is None:
+                raise HTTPException(404, "no such chore")
+            s.delete(c)
+            s.commit()
+            return {"deleted": 1}
+
+    @app.get("/api/people")
+    def people_get():
+        today = _today()
+        with session_for(engine) as s:
+            return {"people": [life.person_dict(p, today) for p in life.people_list(s)], **life.people_reminders(s, today)}
+
+    @app.post("/api/people")
+    def people_post(body: dict):
+        name = str(body.get("name") or "").strip()
+        if not name or len(name) > 80:
+            raise HTTPException(400, "name (1-80 characters)")
+        with session_for(engine) as s:
+            p = life.person_find(s, name) or Person(name=name)
+            if "relation" in body:
+                p.relation = (str(body["relation"] or "").strip()[:60]) or None
+            if "birthday" in body:
+                try:
+                    p.birthday = dt.date.fromisoformat(body["birthday"]) if body["birthday"] else None
+                except ValueError:
+                    raise HTTPException(400, "birthday: YYYY-MM-DD")
+            if "contact_every_days" in body:
+                v = body["contact_every_days"]
+                p.contact_every_days = int(v) if v not in (None, "", 0) and 1 <= int(v) <= 365 else None
+            if "notes" in body:
+                p.notes = (str(body["notes"] or "")[:20_000]) or None
+            if body.get("contacted"):
+                p.last_contact = _today()
+            s.add(p)
+            s.commit()
+            s.refresh(p)
+            return life.person_dict(p, _today())
+
+    @app.delete("/api/people/{person_id}")
+    def people_delete(person_id: int):
+        with session_for(engine) as s:
+            p = s.get(Person, person_id)
+            if p is None:
+                raise HTTPException(404, "no such person")
+            s.delete(p)
+            s.commit()
+            return {"deleted": 1}
+
+    @app.post("/api/finance/transaction")
+    def finance_transaction(request: Request, body: dict):
+        """Apple Pay Wallet 'Transaction' automation (Shortcut key). Spending is stored as a negative amount."""
+        _shortcut_auth(request)
+        try:
+            amount = -abs(life.parse_amount(body.get("amount")))
+        except ValueError:
+            raise HTTPException(400, "amount missing")
+        with session_for(engine) as s:
+            t = life.add_transaction(s, ts=dt.datetime.now(dt.timezone.utc), amount=amount,
+                                     currency=str(body.get("currency") or "CHF"), merchant=str(body.get("merchant") or "") or None,
+                                     card=str(body.get("card") or "") or None, source="wallet")
+            return {"ok": True, "stored": t is not None, "category": t.category if t else None}
+
+    @app.post("/api/finance/import")
+    async def finance_import(request: Request):
+        """UBS e-banking export (camt.053 XML), uploaded from the app."""
+        body = await request.body()
+        with session_for(engine) as s:
+            try:
+                r = life.import_camt053(s, body)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            audit(s, actor="owner", action="finance.import", outcome=f"added {r['added']}, skipped {r['skipped']}")
+            return r
+
+    @app.get("/api/finance")
+    def finance_get(days: int = 30):
+        with session_for(engine) as s:
+            return life.money_summary(s, max(1, min(days, 366)))
+
+    @app.post("/api/finance/{tx_id}/category")
+    def finance_category(tx_id: int, body: dict):
+        cat = str(body.get("category") or "").strip().lower()[:40]
+        if not cat:
+            raise HTTPException(400, "category")
+        with session_for(engine) as s:
+            t = s.get(Transaction, tx_id)
+            if t is None:
+                raise HTTPException(404, "no such payment")
+            t.category = cat
+            s.add(t)
+            s.commit()
+            return {"id": t.id, "category": t.category}
+
+    @app.post("/api/health")
+    def health_post(request: Request, body: dict):
+        """Daily Apple Health export from a Shortcut (Shortcut key)."""
+        _shortcut_auth(request)
+        try:
+            day = dt.date.fromisoformat(str(body["date"])[:10]) if body.get("date") else _today() - dt.timedelta(days=1)
+        except ValueError:
+            raise HTTPException(400, "date: YYYY-MM-DD")
+        with session_for(engine) as s:
+            try:
+                row = life.health_put(s, day, body)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            return {"ok": True, "date": row.date.isoformat()}
+
+    @app.get("/api/health/summary")
+    def health_get(days: int = 30):
+        with session_for(engine) as s:
+            return life.health_summary(s, max(1, min(days, 366)), _today())
 
     @app.get("/api/backups")
     def backups_list():

@@ -235,6 +235,63 @@ class Call(SQLModel, table=True):
     ended_at: datetime | None = None
 
 
+class Transaction(SQLModel, table=True):
+    """Spending (phase 3): Apple Pay Wallet trigger, UBS camt.053 import, later Finch. Read only."""
+
+    __tablename__ = "transactions"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(index=True)
+    amount: float                       # negative = money out
+    currency: str = "CHF"
+    merchant: str | None = None
+    category: str = Field(default="other", index=True)
+    source: str = "wallet"              # wallet / camt / manual / finch
+    card: str | None = None
+    note: str | None = None
+    dedupe: str = Field(unique=True)
+
+
+class HealthDay(SQLModel, table=True):
+    __tablename__ = "health_days"
+    date: dt.date = Field(primary_key=True)
+    steps: int | None = None
+    sleep_h: float | None = None
+    resting_hr: int | None = None
+    active_kcal: int | None = None
+    workout_min: int | None = None
+    weight_kg: float | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Person(SQLModel, table=True):
+    __tablename__ = "people"
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    relation: str | None = None
+    birthday: dt.date | None = None
+    notes: str | None = Field(default=None, sa_column=Column(Text))
+    last_contact: dt.date | None = None
+    contact_every_days: int | None = None
+
+
+class Chore(SQLModel, table=True):
+    __tablename__ = "chores"
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    every_days: int = 7
+    last_done: dt.date | None = None
+
+
+class ShoppingItem(SQLModel, table=True):
+    __tablename__ = "shopping_items"
+    id: int | None = Field(default=None, primary_key=True)
+    text: str
+    done: bool = Field(default=False, index=True)
+    added_at: datetime = Field(default_factory=utcnow)
+    done_at: datetime | None = None
+    source: str = "app"
+
+
 class ChatThread(SQLModel, table=True):
     __tablename__ = "chat_threads"
     id: int | None = Field(default=None, primary_key=True)

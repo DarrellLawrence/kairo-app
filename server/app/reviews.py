@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 
 from sqlmodel import Session, select
 
-from . import location, vault
+from . import life, location, vault
 from .db import Approval, Checkin, OnboardingAnswer, Review, Task, utcnow
 
 BIG = ["weekly", "monthly", "quarterly", "half_year", "yearly"]   # smallest -> biggest
@@ -158,6 +158,15 @@ def prefill(session: Session, kind: str, start: dt.date, end: dt.date, tz=None) 
     if open_tasks:
         facts.append(f"{len(open_tasks)} open tasks")
     if kind != "daily":
+        h = life.health_summary(session, (end - start).days + 1, end)["avg"]
+        if h["sleep_h"] is not None:
+            facts.append(f"Sleep {h['sleep_h']} h on average" + (f", {int(h['steps'])} steps a day" if h["steps"] else ""))
+        if kind != "weekly":
+            m = life.money_summary(session, (end - start).days + 1,
+                                   now=dt.datetime.combine(end + dt.timedelta(days=1), dt.time.min, tzinfo=dt.timezone.utc))
+            if m["spent_chf"]:
+                top = ", ".join(f"{k} {v:.0f}" for k, v in list(m["by_category"].items())[:3])
+                facts.append(f"Spent CHF {m['spent_chf']:.0f} ({top})")
         facts += location.patterns(session, tz or dt.timezone.utc, weeks=max(1, (end - start).days // 7 + 1), today=end)
     return {
         "facts": facts,

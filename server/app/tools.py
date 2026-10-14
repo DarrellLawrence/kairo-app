@@ -181,6 +181,43 @@ class ToolRunner:
             return json.dumps(_task(task), default=str)
 
 
+    # ---------------------------------------------------------------- phase 3: life data
+
+    def _shopping_list(self, a: dict) -> str:
+        from . import life
+        with Session(self.engine) as s:
+            return json.dumps([i.text for i in life.shopping_open(s)])
+
+    def _shopping_add(self, a: dict) -> str:
+        from . import life
+        with Session(self.engine) as s:
+            added = life.shopping_add(s, a["items"], source="chat")
+            return json.dumps({"added": [i.text for i in added], "list": [i.text for i in life.shopping_open(s)]})
+
+    def _people_list(self, a: dict) -> str:
+        from . import life
+        today = datetime.now().date()
+        with Session(self.engine) as s:
+            return json.dumps([life.person_dict(p, today) for p in life.people_list(s, a.get("name"))][:50], default=str)
+
+    def _people_note(self, a: dict) -> str:
+        from . import life
+        with Session(self.engine) as s:
+            p = life.people_note(s, name=a["name"], note=a.get("note", ""), contacted=a.get("contacted", False),
+                                 relation=a.get("relation"), today=datetime.now().date())
+            return json.dumps(life.person_dict(p, datetime.now().date()), default=str)
+
+    def _finance_list(self, a: dict) -> str:
+        from . import life
+        with Session(self.engine) as s:
+            return json.dumps(life.money_summary(s, a["days"], a.get("category")), default=str)
+
+    def _health_list(self, a: dict) -> str:
+        from . import life
+        with Session(self.engine) as s:
+            return json.dumps(life.health_summary(s, a["days"], datetime.now().date()), default=str)
+
+
 def _task(t: Task) -> dict:
     return {"id": t.id, "title": t.title, "due": t.due, "priority": t.priority, "status": t.status, "project_id": t.project_id,
             "place": t.place}
