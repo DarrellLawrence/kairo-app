@@ -6,11 +6,13 @@ Run: uvicorn app.main:create_app --factory
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import hmac
 import os
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -23,6 +25,7 @@ from sqlalchemy import inspect, text
 from sqlmodel import select
 
 from . import config_layers
+from . import loop_send as loop_send_mod
 from . import selftest as selftest_mod
 from . import tool_sites
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
@@ -1048,8 +1051,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/loops/{loop_id}/send")
     def loop_send(loop_id: int, body: dict | None = None):
-        """The owner tapped Send on the ready answer: that tap is the approval. The card stores the
-        exact text; the backend sends it (gate, outbound limit and kill switch as for any card)."""
+        """The owner tapped Send on the ready answer (fix P1.6/7, app/loop_send.py).
+        preview=true: what would happen (the full address, verified or not, tier-4 confirm);
+        nothing is created. The send must name the address that was shown ("to"); an address
+        Kairo only noted needs "confirm_address" once. The card goes the usual way (gate, kill
+        switch, limits, confirm), owner as actor, and is decided at once: it never stays open."""
         body = body or {}
         with session_for(engine) as s:
             loop = _loop_or_404(s, loop_id)
@@ -1059,24 +1065,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             text_ = str(body.get("text") or d.get("text") or "").strip()
             if not text_:
                 raise HTTPException(400, "nothing to send yet")
-            if loop.source == "email" and loop.kind in ("reply", "waiting") and loop.source_ref:
-                proposal = {"action": "gmail.reply", "args": {"message_id": loop.source_ref, "body": text_}}
-            elif loop.who_email:
-                subject = str(body.get("subject") or d.get("subject") or loop.what)[:200].replace("\n", " ")
-                proposal = {"action": "gmail.send", "args": {"to": [loop.who_email], "subject": subject, "body": text_}}
-            else:
-                raise HTTPException(400, "Kairo doesn't know where to send this. Do it yourself and tap Done.")
-            decision = gate.decide(TOOL_PREFIX + "propose_action", {**proposal, "reason": f"Open loop #{loop.id}"},
-                                   read_context(engine, "owner_chat"))
+            try:
+                p = loop_send_mod.plan(s, loop, google_read=google_read, text=text_, owner_email=profile.gmail,
+                                       subject=str(body.get("subject") or d.get("subject") or "") or None)
+            except loop_send_mod.SendRefused as exc:
+                raise HTTPException(400, str(exc))
+            except (GoogleNotConnected, GoogleError) as exc:
+                raise HTTPException(400, f"Gmail: {exc}")
+            # The open-cards limit stops the model piling up cards; this one is decided right away.
+            ctx = dataclasses.replace(read_context(engine, "owner_chat"), open_approvals=0)
+            decision = gate.decide(TOOL_PREFIX + "propose_action",
+                                   {"action": p["action"], "args": p["args"], "reason": f"Open loop #{loop.id}"}, ctx)
             if decision.verdict != "approve":
                 raise HTTPException(400, decision.reason)
+            if body.get("preview"):
+                return {"to": p["to"], "verified": p["verified"], "how": p["how"], "action": p["action"],
+                        "subject": p["args"].get("subject"), "text": text_, "tier": decision.tier,
+                        "confirm_twice": decision.tier >= 4}
+            if str(body.get("to") or "").strip().lower() != p["to"]:
+                raise HTTPException(409, "Check the address first: tap Send again to see it.")
+            if not p["verified"]:
+                if str(body.get("confirm_address") or "").strip().lower() != p["to"]:
+                    raise HTTPException(409, f"New address {p['to']}: confirm it once before the first mail.")
+                loop_send_mod.mark_verified(s, p["to"], f"confirmed when sending loop #{loop.id}")
+            confirm = bool(body.get("confirm"))
+            try:
+                approvals.check_approvable(s, decision.tier, gate=gate, confirm=confirm)
+            except approvals.ApprovalError as exc:
+                raise HTTPException(409, str(exc))
             try:
                 card = approvals.create_card(s, decision, executor=app.state.executor, google_read=google_read,
-                                             thread_id=None, reason=f"Open loop #{loop.id}: {loop.what}")
-                audit(s, actor="owner", action="loop.send", outcome=f"loop #{loop.id} -> card #{card.id}")
-                card = approvals.approve(s, card.id, executor=app.state.executor, gate=gate)
+                                             thread_id=None, reason=f"Open loop #{loop.id}: {loop.what}", actor="owner")
             except (approvals.ApprovalError, GoogleNotConnected, GoogleError) as exc:
                 raise HTTPException(400, str(exc))
+            audit(s, actor="owner", action="loop.send", outcome=f"loop #{loop.id} -> card #{card.id} to {p['to']}")
+            try:
+                card = approvals.approve(s, card.id, executor=app.state.executor, gate=gate, confirm=confirm)
+            except approvals.ApprovalError as exc:
+                approvals.withdraw(s, card.id, str(exc))
+                raise HTTPException(409, str(exc))
             if card.status == "done":
                 loops.close(s, loop.id, "sent")
             s.refresh(loop)
@@ -1757,7 +1784,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def people_get():
         today = _today()
         with session_for(engine) as s:
-            return {"people": [life.person_dict(p, today) for p in life.people_list(s)], **life.people_reminders(s, today)}
+            ok = loop_send_mod.verified_addresses(s)
+            return {"people": [{**life.person_dict(p, today), "email_verified": bool(p.email) and p.email.lower() in ok}
+                               for p in life.people_list(s)], **life.people_reminders(s, today)}
 
     @app.post("/api/people")
     def people_post(body: dict):
@@ -1778,12 +1807,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 p.contact_every_days = int(v) if v not in (None, "", 0) and 1 <= int(v) <= 365 else None
             if "notes" in body:
                 p.notes = (str(body["notes"] or "")[:20_000]) or None
+            if "email" in body:
+                email = str(body["email"] or "").strip().lower()[:200]
+                if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                    raise HTTPException(400, "email: not an address")
+                p.email = email or None
             if body.get("contacted"):
                 p.last_contact = _today()
             s.add(p)
             s.commit()
             s.refresh(p)
-            return life.person_dict(p, _today())
+            if p.email and "email" in body:   # typed (or confirmed) by the owner in the app: verified (fix P1.6)
+                loop_send_mod.mark_verified(s, p.email, f"set for {p.name} in the app")
+            return {**life.person_dict(p, _today()), "email_verified": loop_send_mod.is_verified(s, p.email)}
 
     @app.delete("/api/people/{person_id}")
     def people_delete(person_id: int):

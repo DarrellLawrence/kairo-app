@@ -44,12 +44,15 @@ class FakeGoogle:
     # ---- seed
 
     def add_message(self, mid: str, *, sender: str, subject: str, body: str, thread: str | None = None,
-                    reply_to: str | None = None, message_id_header: str | None = None) -> None:
-        headers = [{"name": "From", "value": sender}, {"name": "To", "value": self.owner},
+                    reply_to: str | None = None, message_id_header: str | None = None, to: str | None = None,
+                    cc: str | None = None) -> None:
+        headers = [{"name": "From", "value": sender}, {"name": "To", "value": to or self.owner},
                    {"name": "Subject", "value": subject}, {"name": "Date", "value": "Mon, 12 Oct 2026 09:00:00 +0200"},
                    {"name": "Message-ID", "value": message_id_header or f"<{mid}@mail.example>"}]
         if reply_to:
             headers.append({"name": "Reply-To", "value": reply_to})
+        if cc:
+            headers.append({"name": "Cc", "value": cc})
         self.messages[mid] = {"id": mid, "threadId": thread or f"t-{mid}", "labelIds": ["INBOX"], "snippet": body[:80],
                               "internalDate": "1760252400000",   # 2026-10-12
                               "payload": {"mimeType": "text/plain", "headers": headers, "body": {"data": b64(body)}}}

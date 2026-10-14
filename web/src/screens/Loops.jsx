@@ -33,9 +33,20 @@ function LoopCard({ loop, focus, onChanged }) {
     setBusy(what)
     try { await fn() } catch (e) { toast.show({ text: e.message, duration: 5000 }) } finally { setBusy('') }
   }
+  // Send: first the full address (and whether you confirmed it before), then the mail goes (fix P1.6).
+  const [shown, setShown] = useState(null)
+  const [sure, setSure] = useState(false)
+  const preview = () => act('send', async () => {
+    setSure(false)
+    setShown(await api(`/api/loops/${loop.id}/send`, { method: 'POST', body: { text, preview: true } }))
+  })
   const send = () => act('send', async () => {
-    const r = await api(`/api/loops/${loop.id}/send`, { method: 'POST', body: { text } })
-    toast.show({ text: r.card.status === 'done' ? `Sent to ${loop.who || 'them'}.` : `Not sent: ${r.card.result?.error || r.card.status}`, icon: <IconCheck style={{ color: 'var(--ok)' }} /> })
+    if (shown.confirm_twice && !sure) { setSure(true); return }
+    const body = { text, to: shown.to, confirm: shown.confirm_twice }
+    if (!shown.verified) body.confirm_address = shown.to
+    const r = await api(`/api/loops/${loop.id}/send`, { method: 'POST', body })
+    setShown(null)
+    toast.show({ text: r.card.status === 'done' ? `Sent to ${shown.to}.` : `Not sent: ${r.card.result?.error || r.card.status}`, icon: <IconCheck style={{ color: 'var(--ok)' }} /> })
     onChanged()
   })
   const snooze = (body) => act('later', async () => {
@@ -84,7 +95,7 @@ function LoopCard({ loop, focus, onChanged }) {
       <div className="k-approval-actions">
         {loop.can_send && text ? (
           <>
-            <Button variant="primary" breathe loading={busy === 'send'} disabled={!!busy || !text.trim()} onClick={send}>Send</Button>
+            <Button variant="primary" breathe loading={busy === 'send' && !shown} disabled={!!busy || !text.trim()} onClick={preview}>Send…</Button>
             <Button variant="secondary" disabled={!!busy} onClick={() => setEditing(!editing)}>{editing ? 'Done editing' : 'Edit'}</Button>
           </>
         ) : (
@@ -97,6 +108,22 @@ function LoopCard({ loop, focus, onChanged }) {
       {loop.source === 'email' && loop.who_email && (
         <button type="button" className="k-loop-link" onClick={() => close('not_for_me')}>Not a real reply · never from this sender</button>
       )}
+
+      <Sheet open={!!shown} onClose={() => setShown(null)} title={shown?.action === 'gmail.reply' ? 'Reply' : 'Send mail'}>
+        {shown && (
+          <>
+            <p className="k-card-sub">To</p>
+            <p className="k-loop-phrase selectable" style={{ wordBreak: 'break-all' }}>{shown.to}</p>
+            <p className="k-approval-reason">{shown.verified ? shown.how : 'New address: Kairo noted it, you never confirmed it. Check every letter.'}</p>
+            {shown.subject && <p className="k-card-sub">Subject: {shown.subject}</p>}
+            <p className="k-approval-preview selectable">{shown.text}</p>
+            <Button variant="primary" block loading={busy === 'send'} disabled={!!busy} onClick={send}>
+              {sure ? `Yes, really send to ${shown.to}` : shown.verified ? `Send to ${shown.to}` : `Address is right: send to ${shown.to}`}
+            </Button>
+            <Button variant="secondary" block style={{ marginTop: 8 }} disabled={!!busy} onClick={() => setShown(null)}>Cancel</Button>
+          </>
+        )}
+      </Sheet>
 
       <Sheet open={later} onClose={() => setLater(false)} title="When should it come back?">
         <Button variant="primary" block onClick={() => snooze({ when: 'later' })}>
