@@ -11,10 +11,10 @@ import threading
 from datetime import datetime
 from typing import AsyncIterator
 
-from sqlmodel import Session, select
+from sqlmodel import Session, select, update
 
 from .brain import Brain, BrainEvent, EventKind
-from .db import ChatMessage, ChatThread, utcnow
+from .db import Approval, ChatMessage, ChatThread, SettingKV, utcnow
 from .profile import Profile
 
 
@@ -119,24 +119,44 @@ def local_day(ts: datetime, profile: Profile):
     return ts.astimezone(profile.tz).date()
 
 
-def today_thread(session: Session, *, brain_name: str, profile: Profile) -> ChatThread:
-    """New thread per day by default (KICKOFF 7)."""
-    latest = session.exec(select(ChatThread).order_by(ChatThread.started_at.desc(), ChatThread.id.desc())).first()
-    now = utcnow()
-    if latest is not None:
-        started = latest.started_at if latest.started_at.tzinfo else latest.started_at.replace(tzinfo=now.tzinfo)
-        if local_day(started, profile) == local_day(now, profile):
-            return latest
-    return new_thread(session, brain_name=brain_name, profile=profile)
+MAIN_KEY = "chat.main_thread"
 
 
-def new_thread(session: Session, *, brain_name: str, profile: Profile) -> ChatThread:
-    now = utcnow()
-    thread = ChatThread(brain=brain_name, started_at=now, title=local_day(now, profile).isoformat())
-    session.add(thread)
-    session.commit()
-    session.refresh(thread)
+def main_thread(session: Session, *, brain_name: str) -> ChatThread:
+    """The one conversation with Kairo (owner's request 2026-10-14): chat, calls and voice notes.
+    There is no other thread and no "new chat"; app/memory.py keeps what's older."""
+    row = session.get(SettingKV, MAIN_KEY)
+    thread = session.get(ChatThread, int(row.value)) if row and row.value and row.value.isdigit() else None
+    if thread is None:
+        thread = session.exec(select(ChatThread).order_by(ChatThread.id)).first()
+        if thread is None:
+            thread = ChatThread(brain=brain_name, started_at=utcnow(), title="Kairo")
+            session.add(thread)
+            session.commit()
+            session.refresh(thread)
+        row = row or SettingKV(key=MAIN_KEY)
+        row.value = str(thread.id)
+        session.add(row)
+        session.commit()
     return thread
+
+
+def consolidate(session: Session, *, brain_name: str) -> int:
+    """The day threads from before become the one conversation (messages and card links keep
+    their order: ids grow with time). Returns how many threads were merged."""
+    main = main_thread(session, brain_name=brain_name)
+    others = [t.id for t in session.exec(select(ChatThread).where(ChatThread.id != main.id)).all()]
+    if not others:
+        return 0
+    session.exec(update(ChatMessage).where(ChatMessage.thread_id.in_(others)).values(thread_id=main.id))
+    session.exec(update(Approval).where(Approval.thread_id.in_(others)).values(thread_id=main.id))
+    for tid in others:
+        session.delete(session.get(ChatThread, tid))
+    main.brain_session_id = None          # the next turn starts fresh, with the memory and recent messages
+    main.title = "Kairo"
+    session.add(main)
+    session.commit()
+    return len(others)
 
 
 def add_message(session: Session, thread_id: int, role: str, text: str) -> ChatMessage:

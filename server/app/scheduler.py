@@ -68,6 +68,7 @@ JOB_TITLES = {
     "promises": "Find promises in sent mail",
     "pa": "PA: birthdays, people, money, tests, patterns",
     "olat": "School portal (OLAT, read-only)",
+    "chat_memory": "Conversation memory",
 }
 
 
