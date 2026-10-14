@@ -23,6 +23,7 @@ DAYS = 14
 LOG_PATTERNS = ["quiet hours: no push for", "push failed", "gave up waiting", "maximum number of running instances",
                 "Whisper", "usage_limited", "logged_out", "GoogleNotConnected", "Traceback"]
 LOG_TAIL = 15
+PHONE_TAIL = 25
 
 # Order matters: specific token shapes first, then key=value secrets, then anything long and opaque.
 _SECRETS = [
@@ -244,6 +245,8 @@ def _logs(r: _Report, log_dir: Path) -> None:
     levels: dict[str, int] = {}
     first = last = None
     tail: list[str] = []
+    phone: list[str] = []                  # what the iPhone reported (web/src/clientlog.js)
+    phone_counts: dict[str, int] = {}
     for f in files:
         try:
             with f.open(encoding="utf-8", errors="replace") as fh:
@@ -259,6 +262,11 @@ def _logs(r: _Report, log_dir: Path) -> None:
                     for p in LOG_PATTERNS:
                         if p in line:
                             counts[p] += 1
+                    if " kairo.client: " in line:
+                        msg = line.split(" kairo.client: ", 1)[1].rstrip()
+                        name = msg.split(" ", 1)[0]
+                        phone_counts[name] = phone_counts.get(name, 0) + 1
+                        phone = (phone + [f"{line[:19]} {msg[:400]}"])[-PHONE_TAIL:]
         except OSError as e:
             r.add(f"  {f.name}: unreadable ({e.__class__.__name__})")
     r.add(f"  span: {first or '-'} .. {last or '-'}")
@@ -266,6 +274,10 @@ def _logs(r: _Report, log_dir: Path) -> None:
     r.add("  pattern counts:", ", ".join(f"'{k}' {v}" for k, v in counts.items()))
     r.add(f"  last {LOG_TAIL} warnings/errors:")
     for line in tail:
+        r.add("    " + line)
+    r.h("Phone events (sound, from the iPhone)")
+    r.add("  counts:", ", ".join(f"{k} {v}" for k, v in sorted(phone_counts.items())) or "none yet")
+    for line in phone:
         r.add("    " + line)
 
 

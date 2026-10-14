@@ -34,7 +34,7 @@ from . import selftest as selftest_mod
 from . import tool_sites
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
-from .voice import NotInstalled, Voice, VoiceError
+from .voice import NotInstalled, Voice, VoiceError, wav_problems
 from .voice import calls as voice_calls
 from pydantic import ValidationError
 
@@ -1754,15 +1754,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """More -> Voice -> Test: speak a sentence, then recognise it again, on the PC."""
         def run():
             wav, lang = app.state.voice.speak("Kairo voice test. Please call the dentist tomorrow.", "en")
+            wav_bad = wav_problems(wav)              # the phone can only play a valid, non-silent WAV
             t = app.state.voice.transcribe(wav, "en")
-            return {"ok": "dentist" in t.text.lower(), "heard": t.text, "took": t.took,
-                    "device": app.state.voice.status()["stt_device"]}
+            return {"ok": "dentist" in t.text.lower() and not wav_bad, "heard": t.text, "took": t.took,
+                    "wav": wav_bad, "device": app.state.voice.status()["stt_device"]}
         try:
             return await asyncio.to_thread(run)
         except NotInstalled as exc:
             raise HTTPException(503, str(exc))
         except VoiceError as exc:
             return {"ok": False, "heard": "", "error": str(exc)}
+
+    client_budget = {"minute": 0, "n": 0}
+
+    @app.post("/api/client-log")
+    def client_log(body: dict):
+        """What the phone saw (web/src/clientlog.js), e.g. every step of playing Kairo's voice: bugs
+        only the iPhone has. Written as kairo.client lines (Run diagnosis shows them); max 20 events
+        per call and 120 a minute; owner only like every route."""
+        events = body.get("events")
+        if not isinstance(events, list):
+            raise HTTPException(400, "events must be a list")
+        minute = int(time.time() // 60)
+        if client_budget["minute"] != minute:
+            client_budget.update(minute=minute, n=0)
+        kept = 0
+        for event in events[:20]:
+            if client_budget["n"] >= 120 or not isinstance(event, dict):
+                continue
+            name = re.sub(r"[^\w.]", "", str(event.get("event") or "event"))[:40] or "event"
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            client_log_.info("%s %s", name, json.dumps(data, separators=(",", ":"), default=str)[:600])
+            client_budget["n"] += 1
+            kept += 1
+        return {"kept": kept}
 
     @app.get("/api/voice/calls")
     def voice_calls_list():
@@ -2050,6 +2075,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 log = logging.getLogger("kairo.main")
+client_log_ = logging.getLogger("kairo.client")
 
 
 def _memory_job(ctx) -> str:

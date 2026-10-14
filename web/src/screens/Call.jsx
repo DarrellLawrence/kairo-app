@@ -8,7 +8,9 @@ import { api } from '../api.js'
 import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
-import { holdMic, listenLevel, releaseMic, speak, speakingLevel, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
+import {
+  holdMic, listenLevel, playLastAgain, releaseMic, releaseWhileSpeaking, speak, speakingLevel, startRecording, stopSpeaking, transcribe, unlockAudio,
+} from '../voice.js'
 
 const BYE = /^(bye|goodbye|that'?s all|thanks,? bye|tsch(ü|ue)ss|ciao|adieu|auf wiederh|das war'?s|danke,? das war'?s)\b/i
 const LABEL = {
@@ -16,7 +18,7 @@ const LABEL = {
   speaking: 'Speaking', paused: 'Paused', muted: 'Muted', ended: 'Call ended', missed: 'Missed call', error: 'Something went wrong',
 }
 const HINT = {
-  listening: 'Just talk. Pause when you are done.', thinking: '', speaking: 'Talk to interrupt',
+  listening: 'Just talk. Pause when you are done.', thinking: '', speaking: 'Talk or tap to interrupt',
   paused: 'Tap the orb to go on', muted: 'Kairo can’t hear you',
 }
 const BARGE_LEVEL = 0.35   // louder than Kairo's echo through the speaker
@@ -41,6 +43,7 @@ export default function Call({ callId: initialId, onClose }) {
   const [phase, setPhase] = useState(outgoing ? 'connecting' : 'ringing')
   const [log, setLog] = useState([])
   const [err, setErr] = useState('')
+  const [needTap, setNeedTap] = useState(false)   // iOS didn't play Kairo's voice: "Tap to play"
   const [secs, setSecs] = useState(0)
   const [captions, setCaptions] = useState(() => { try { return localStorage.getItem('call.captions') !== '0' } catch { return true } })
   const live = useRef({ on: false, ringing: false, rec: null, monitor: null, ws: null, empty: 0, abort: null, phase: 'connecting', started: 0 })
@@ -106,9 +109,31 @@ export default function Call({ callId: initialId, onClose }) {
     const abort = new AbortController()
     live.current.abort = abort
     live.current.interrupted = false
-    watchForBargeIn(abort)
-    try { await speak(text, { signal: abort.signal }) } catch (e) { if (e.name !== 'AbortError') setErr(e.message) }
+    if (!releaseWhileSpeaking()) watchForBargeIn(abort)   // mic paused while Kairo talks: tap the orb instead
+    try {
+      await speak(text, { signal: abort.signal, call: true })
+    } catch (e) {
+      if (e.name === 'NeedTap') {
+        stopMonitor()
+        setNeedTap(true)
+        await new Promise((resolve) => { live.current.afterTap = resolve })   // tapToPlay() plays it, then the call goes on
+      } else if (e.name !== 'AbortError') setErr(e.message)
+    }
+    while (live.current.replay) await live.current.replay   // tapped "No sound?": let the replay finish first
     stopMonitor()
+  }
+
+  // "No sound? Tap to play": inside the tap, through the speaker (voice.js remembers it for calls).
+  const tapToPlay = () => {
+    setNeedTap(false)
+    const l = live.current
+    l.monitor?.cancel()
+    const abort = new AbortController()
+    l.abort = abort
+    const goOn = () => { const go = l.afterTap; l.afterTap = null; go?.() }
+    l.replay = playLastAgain({ signal: abort.signal })
+      .then(goOn, (e) => { if (e.name === 'NeedTap') setNeedTap(true); else goOn() })
+      .finally(() => { l.replay = null })
   }
 
   const ask = (text) => new Promise((resolve) => {
@@ -187,6 +212,7 @@ export default function Call({ callId: initialId, onClose }) {
     else { l.rec?.cancel(); releaseMic() }
     l.monitor?.cancel()
     l.abort?.abort()
+    l.afterTap?.()
     stopSpeaking()
     l.ws?.close()
     if (wasLive && idRef.current) api(`/api/voice/calls/${idRef.current}/end`, { method: 'POST', body: {} }).catch(() => {})
@@ -241,6 +267,11 @@ export default function Call({ callId: initialId, onClose }) {
         </AnimatePresence>
         <p className="k-call-sub">{phase === 'error' ? err : ringing && call ? call.reason : HINT[phase] || ''}</p>
         {err && phase !== 'error' && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{err}</p>}
+        {(needTap || phase === 'speaking') && (
+          <button type="button" className={needTap ? 'k-btn primary sm' : 'k-btn ghost sm'} style={{ marginTop: 10 }} onClick={tapToPlay}>
+            {needTap ? 'Tap to play Kairo' : 'No sound? Tap to play'}
+          </button>
+        )}
         {captions && log.length > 0 && (
           <div className="k-call-caption selectable" aria-live="polite">
             {log.slice(-3).map((m, i) => <p key={log.length - 3 + i} className={m.who === 'me' ? 'me' : ''}>{m.text}</p>)}

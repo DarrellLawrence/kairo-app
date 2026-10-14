@@ -6,7 +6,7 @@ import {
   Button, ChatBubble, GlowChip, IconInbox, IconSpeaker, InputBar, List, ListRow, NavBar, ScrollArea, Sheet, useStickToBottom,
   useToast,
 } from '../ui/index.js'
-import { speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
+import { playLastAgain, speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
 
 const STATUS_TEXT = {
   usage_limited: 'Usage limit reached. Kairo pauses until it resets.',
@@ -42,6 +42,7 @@ export default function Chat() {
   const [speakOn, setSpeakOn] = useState(() => { try { return localStorage.getItem('chat.speak') === '1' } catch { return false } })
   const speakRef = useRef(speakOn)
   speakRef.current = speakOn
+  const spokenRef = useRef(false)   // the last message was spoken: Kairo answers out loud too
 
   const loadMessages = useCallback(async () => {
     const res = await fetch('/api/chat/messages?limit=60')
@@ -82,7 +83,8 @@ export default function Chat() {
         } else if (msg.type === 'done') {
           setChunks(null)
           setMessages((m) => [...m, { id: msg.message_id, role: 'kairo', text: msg.text }])
-          if (speakRef.current) speak(msg.text).catch(() => {})
+          if (speakRef.current || spokenRef.current) say(msg.text)
+          spokenRef.current = false
         } else if (msg.type === 'error') {
           setChunks(null)
           setError(STATUS_TEXT[msg.status] ?? msg.message)
@@ -99,6 +101,10 @@ export default function Chat() {
   useStickToBottom(scrollRef, [messages, chunks])
 
   const busy = chunks !== null
+  const say = (text) => speak(text).catch((e) => {
+    if (e.name === 'NeedTap') toast.show({ text: 'No sound?', duration: 8000, action: { label: 'Tap to play', onAction: () => playLastAgain().catch(() => {}) } })
+    else toast.show({ text: e.message })
+  })
   const send = (spoken) => {
     const text = (typeof spoken === 'string' ? spoken : draft).trim()
     if (!text || !connected || busy) return
@@ -143,7 +149,7 @@ export default function Chat() {
       try {
         const blob = await recRef.current.stop()
         const { text } = await transcribe(blob)
-        if (text) send(text); else toast.show({ text: 'Did not catch that.' })
+        if (text) { spokenRef.current = true; send(text) } else toast.show({ text: 'Did not catch that.' })
       } catch (e) { toast.show({ text: e.message, duration: 5000 }) } finally { setMic('idle') }
     }
   }
