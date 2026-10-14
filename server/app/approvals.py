@@ -19,6 +19,7 @@ from typing import Callable
 
 from sqlmodel import Session, select
 
+from . import killswitch
 from .audit import audit
 from .db import Approval, ChatMessage, utcnow
 from .executor import Executor, first_address
@@ -164,6 +165,8 @@ def _outbound_last_24h(session: Session) -> int:
 def approve(session: Session, card_id: int, *, executor: Executor, gate: Gate, confirm: bool = False,
             edited_args: dict | None = None) -> Approval:
     card = _open_card(session, card_id)
+    if killswitch.is_paused(session):     # fix P1.5: nothing runs while paused, approved by hand or not
+        raise ApprovalError("Kairo is paused (kill switch): nothing is executed. Resume it under More, then approve.")
     if card.tier >= 4 and not confirm:
         raise ApprovalError(f"card #{card_id} deletes something: confirm a second time")
     if card.tier == 3 and _outbound_last_24h(session) >= gate.outbound_per_day_max:
@@ -177,7 +180,7 @@ def approve(session: Session, card_id: int, *, executor: Executor, gate: Gate, c
             raise ApprovalError(f"can't change {', '.join(bad)} on this card")
         candidate = {k: v for k, v in args.items() if k in _schema_fields(card.tool)}
         candidate.update(edited_args)
-        ctx = GateContext(paused=False, origin="owner_chat", open_approvals=0, outbound_last_24h=0)
+        ctx = GateContext(paused=killswitch.is_paused(session), origin="owner_chat", open_approvals=0, outbound_last_24h=0)
         d = gate.decide("mcp__kairo__propose_action", {"action": card.tool, "args": candidate}, ctx)
         if d.verdict != "approve":
             raise ApprovalError(f"the edit isn't allowed: {d.reason}")
