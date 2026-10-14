@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_mod
 from app import housekeeping
+from app.google.client import load_token, save_token
 from app.main import create_app
 from app.profile import load_profile
 from app.settings import REPO_ROOT
@@ -55,7 +56,7 @@ def test_phone_sign_in_uses_the_tailnet_address(app_and_fake):
         assert q["redirect_uri"] == [f"{TS}/setup/google/callback"] and q["client_id"] == ["web-cid"]
         done = c.get(f"/setup/google/callback?state={q['state'][0]}&code=good-code")
     assert done.status_code == 200 and "write" in done.text   # offers step 2 of 2
-    token = json.loads((secrets / "google-read.json").read_text())
+    token = load_token(secrets, "read")
     assert token["email"] == OWNER and token["issued_at"] > time.time() - 60
     exchange = [c for c in fake.calls if c["path"] == "/token" and c["body"].get("grant_type") == ["authorization_code"]][-1]
     assert exchange["body"]["redirect_uri"] == [f"{TS}/setup/google/callback"] and exchange["body"]["client_id"] == ["web-cid"]
@@ -83,10 +84,9 @@ def test_a_pc_sign_in_cannot_be_finished_from_the_phone(app_and_fake, monkeypatc
 # ---------------------------------------------------------------- reminders
 
 def _age(secrets, kind, seconds):
-    p = secrets / f"google-{kind}.json"
-    t = json.loads(p.read_text())
+    t = load_token(secrets, kind)
     t["issued_at"] = time.time() - seconds
-    p.write_text(json.dumps(t))
+    save_token(secrets, kind, t)
 
 
 def test_reminder_a_day_before_the_7_days_end(app_and_fake, monkeypatch):
@@ -131,7 +131,7 @@ def test_no_reminder_once_tokens_outlive_7_days(app_and_fake, monkeypatch):
     hk = housekeeping.Housekeeping(app)
     hk.google_reminder()
     assert sent == []
-    assert json.loads((secrets / "google-read.json").read_text())["no_expiry"] is True
+    assert load_token(secrets, "read")["no_expiry"] is True
 
 
 @pytest.fixture(autouse=True)

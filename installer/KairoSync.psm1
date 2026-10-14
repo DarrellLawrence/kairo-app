@@ -85,7 +85,13 @@ function Initialize-SyncConfig($P) {
         $pw = New-RandomPassword
         $r = Invoke-Native $S.Exe @('generate', "--home=$($S.Home)", '--gui-user=kairo', "--gui-password=$pw")
         if ($r.Code -ne 0 -or -not (Test-Path $cfg)) { throw "Syncthing could not create its settings: $($r.Out.Trim())" }
-        Set-Content -Path (Join-Path $P.Secrets 'syncthing-gui.txt') -Value "user: kairo`r`npassword: $pw" -Encoding ASCII
+        # Machine-encrypted, Windows and admins only (fix P1.10); it was a plain file in data\secrets.
+        Save-MachineSecret $P 'syncthing-gui.bin' "user: kairo`r`npassword: $pw"
+    }
+    $legacy = Join-Path $P.Secrets 'syncthing-gui.txt'
+    if (Test-Path $legacy) {
+        Save-MachineSecret $P 'syncthing-gui.bin' ((Get-Content -Raw $legacy).Trim())
+        Remove-Item -Force $legacy
     }
     [xml]$doc = Get-Content -Raw $cfg
     $c = $doc.configuration

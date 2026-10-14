@@ -13,6 +13,8 @@ from urllib.parse import parse_qs
 
 import httpx
 
+from app.google.client import save_token
+
 
 def b64(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
@@ -166,4 +168,4 @@ def connect(secrets_dir, fake: FakeGoogle | None = None) -> None:
     (secrets_dir / "google-client.json").write_text(json.dumps({"installed": {"client_id": "cid", "client_secret": "cs"}}))
     owner = fake.owner if fake else "owner@example.com"
     for kind in ("read", "write"):
-        (secrets_dir / f"google-{kind}.json").write_text(json.dumps({"refresh_token": f"rt-{kind}", "email": owner}))
+        save_token(secrets_dir, kind, {"refresh_token": f"rt-{kind}", "email": owner})

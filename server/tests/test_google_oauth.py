@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
+from app.google.client import load_token
 from app.main import create_app
 from app.profile import load_profile
 from app.settings import REPO_ROOT
@@ -54,7 +55,7 @@ def test_full_sign_in_saves_token_for_that_kind_only(setup):
     state = start(client, "read")["state"][0]
     r = client.get(f"/setup/google/callback?state={state}&code=good-code")
     assert r.status_code == 200 and OWNER in r.text
-    token = json.loads((secrets / "google-read.json").read_text())
+    token = load_token(secrets, "read")
     assert token["refresh_token"] == "rt-new" and token["email"] == OWNER
     assert not (secrets / "google-write.json").exists()
     assert client.get("/api/setup/google/status").json()["read"] == OWNER
