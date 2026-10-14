@@ -1,7 +1,8 @@
 """Small background duties, once a minute (Milestone C brings the job scheduler).
 
 - After an automatic update (installer/Kairo-AutoUpdate.ps1 writes
-  data/updates/last-update.json): one push to the owner's devices.
+  data/updates/last-update.json) and when an update brought new actions
+  (data/updates/config-update.json): one push to the owner's devices.
 - Google "Testing" mode ends sign-ins after 7 days: push a reminder a day
   before, and once if Google has signed Kairo out. Tokens that outlive 7 days
   belong to a published app; they get no more reminders.
@@ -56,15 +57,22 @@ class Housekeeping:
     # ---------------------------------------------------------------- updates
 
     def update_notice(self) -> None:
-        path = self.settings.data_dir / "updates" / "last-update.json"
-        if not path.is_file() or self._quiet():
+        """One push for the update note and the config note (new actions, fix P0.4) together."""
+        if self._quiet():
             return
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-        if data.get("notified"):
+        pending = []
+        for name in ("last-update.json", "config-update.json"):
+            path = self.settings.data_dir / "updates" / name
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+                if not data.get("notified"):
+                    pending.append((path, data))
+        if not pending:
             return
-        self._push(str(data.get("message") or "Kairo was updated.")[:200])
-        data["notified"] = True
-        path.write_text(json.dumps(data), encoding="utf-8")
+        self._push(" ".join(str(d.get("message") or "Kairo was updated.") for _, d in pending)[:200])
+        for path, data in pending:
+            data["notified"] = True
+            path.write_text(json.dumps(data), encoding="utf-8")
 
     # ---------------------------------------------------------------- Google
 

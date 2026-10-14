@@ -75,7 +75,8 @@ function Get-KairoPaths([string]$Root) {
         Tools        = Join-Path $Root 'tools'
         Downloads    = Join-Path $Root 'downloads'
         Data         = $data
-        Config       = Join-Path $data 'config'
+        Config       = Join-Path $data 'config'          # only what the owner changed (since 2026-10-14)
+        ConfigLegacy = Join-Path $data 'config-legacy'   # full copy for releases from before that (rollback)
         Secrets      = Join-Path $data 'secrets'
         Logs         = Join-Path $data 'logs'
         Backups      = Join-Path $data 'backups'
@@ -231,12 +232,16 @@ function Copy-Tree([string]$From, [string]$To) {
     $global:LASTEXITCODE = 0
 }
 
-# Owner config: copied on first install only, never overwritten by updates.
-function Initialize-Config($P, [string]$AppDir) {
-    $src = Join-Path $AppDir 'config'
-    Get-ChildItem -Path $src -File | ForEach-Object {
-        $dest = Join-Path $P.Config $_.Name
-        if (-not (Test-Path $dest)) { Copy-Item $_.FullName $dest; Write-Ok "config $($_.Name) created" }
+# Config in layers (2026-10-14): the defaults come with every release, data\config holds only
+# what the owner changed, and Kairo builds data\config-effective at every start (it turns the
+# old full copies into "only your changes" once, with a backup). Releases from before that read
+# KAIRO_CONFIG_DIR; it points to a frozen full copy, so a rollback to one of them still starts.
+function Save-LegacyConfig($P) {
+    $migrated = Test-Path (Join-Path $P.Config '.overrides-v1')
+    $full = Test-Path (Join-Path $P.Config 'permissions.yaml')
+    if ($full -and -not $migrated -and -not (Test-Path $P.ConfigLegacy)) {
+        Copy-Tree $P.Config $P.ConfigLegacy
+        Write-Ok 'config: full copy kept in data\config-legacy for older versions'
     }
 }
 
@@ -641,7 +646,6 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     Repair-LegacyToolSites $P
     Install-Voice $P $newDir
     Install-Browser $P $newDir
-    Initialize-Config $P $SourceApp
     $backup = Backup-Database $P "before-$version" $Python
 
     Write-Step 'Switching to the new version'

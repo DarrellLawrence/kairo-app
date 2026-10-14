@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
+from . import config_layers
 from . import selftest as selftest_mod
 from . import tool_sites
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
@@ -46,7 +47,7 @@ from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
 from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
 from .profile import load_profile, render_personality
-from .settings import Settings, get_settings
+from .settings import REPO_ROOT, Settings, get_settings
 
 MAX_PROMPT_CHARS = 20_000
 
@@ -65,6 +66,8 @@ def same_origin(origin: str | None, *hosts: str | None) -> bool:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    if settings.config_overrides is not None:
+        _build_config(settings)
     profile = load_profile(settings.config_dir)
     base_prompt = render_personality(settings.config_dir, profile)
     vault.ensure_structure(settings.vault_dir)
@@ -199,7 +202,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def backup_job(ctx):
         try:
-            path = backup.make(db_path=settings.db_path, data_dir=settings.data_dir, config_dir=settings.config_dir,
+            path = backup.make(db_path=settings.db_path, data_dir=settings.data_dir,
+                               config_dir=settings.config_overrides or settings.config_dir,   # the owner's changes
                                dest_dir=backup_dir)
         except Exception as exc:
             _backup_status(ctx.session, last_error=f"{dt.datetime.now(profile.tz):%Y-%m-%d %H:%M}: {exc}")
@@ -1908,6 +1912,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 log = logging.getLogger("kairo.main")
+
+
+def _build_config(settings: Settings) -> None:
+    """The config Kairo runs with: this release's defaults + the owner's changes (fix P0.4).
+    New actions are announced once (housekeeping pushes data/updates/config-update.json)."""
+    report = config_layers.build(REPO_ROOT / "config", settings.config_overrides, settings.config_dir,
+                                 backup_root=settings.data_dir / "backups")
+    for note in report["ignored"]:
+        log.warning("config: ignored %s", note)
+    n = len(report["new_actions"])
+    if not n and not report["migrated"]:
+        return
+    msg = f"Config updated: {n} new action{'s' if n != 1 else ''}." if n else "Config updated."
+    if report["migrated"]:
+        msg += " Your settings were kept; data/config now holds only your changes."
+    if report["ignored"]:
+        msg += f" {len(report['ignored'])} of them would loosen the rules and are ignored (see kairo.log)."
+    path = settings.data_dir / "updates" / "config-update.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"message": msg, "new_actions": report["new_actions"], "ignored": report["ignored"],
+                                "at": dt.datetime.now(dt.timezone.utc).isoformat(), "notified": False}), encoding="utf-8")
+    log.info("config: %s %s", msg, ", ".join(report["new_actions"]))
 
 LOCAL_HOSTS = {"127.0.0.1", "::1"}
 

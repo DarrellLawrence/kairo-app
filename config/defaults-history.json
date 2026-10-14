@@ -1,0 +1,254 @@
+{
+ "text": {
+  "personality.md": [
+   "487d2e4ae4a0f5067a26b6a7068bd8cfef0af4d9d23afeb468da00eec1a668cd",
+   "3f52fb3ed2bec83315f7901a3dc6f7adf4567a3e3f03722cc5dfbd58a57548ea",
+   "8abc5ea01bae2641de9b524ff6dd7ad882a56ccf70f15f8fc9e3cd25a4355967",
+   "772dbc48e6841586dd473132406fb04eb84011eaf21da48a744f29686e2ae467",
+   "6c39b3b2e9a9c743fae9f8c8fa50c0be393d4bac6fca1c025c6ecdaf74fa0e9c"
+  ],
+  "voice.md": [
+   "53d0a0389b9b2a3b02b670b23a53598e54bbe9a50a8ad917a4855c06999c1847"
+  ]
+ },
+ "version": 1,
+ "yaml": {
+  "permissions.yaml": {
+   "[\"actions\", \"calendar.create_hold\"]": [
+    "56c12e5a5186eab60ce2808d"
+   ],
+   "[\"actions\", \"calendar.delete\"]": [
+    "f3923a65e97fc64aabe5d42a"
+   ],
+   "[\"actions\", \"calendar.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"calendar.move\"]": [
+    "56c12e5a5186eab60ce2808d"
+   ],
+   "[\"actions\", \"calendar.respond\"]": [
+    "7f2bd1218eecfd347b34f475"
+   ],
+   "[\"actions\", \"calendar.tag\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"debrief\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"finance.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"gmail.create_draft\"]": [
+    "56c12e5a5186eab60ce2808d"
+   ],
+   "[\"actions\", \"gmail.label\"]": [
+    "56c12e5a5186eab60ce2808d"
+   ],
+   "[\"actions\", \"gmail.read\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"gmail.reply\"]": [
+    "7f2bd1218eecfd347b34f475"
+   ],
+   "[\"actions\", \"gmail.search\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"gmail.send\"]": [
+    "7f2bd1218eecfd347b34f475"
+   ],
+   "[\"actions\", \"gmail.send_self\"]": [
+    "56c12e5a5186eab60ce2808d"
+   ],
+   "[\"actions\", \"gmail.trash\"]": [
+    "f3923a65e97fc64aabe5d42a",
+    "56c12e5a5186eab60ce2808d"
+   ],
+   "[\"actions\", \"health.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"loops.add\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"loops.close\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"loops.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"loops.snooze\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"notes.write\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"people.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"people.note\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"place.remove\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"place.set\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"settings.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"settings.set\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"shopping.add\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"shopping.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"tasks.create\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"tasks.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"tasks.update\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"vault.read\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"default\"]": [
+    "d2a00b488ac374247aa72cf8"
+   ],
+   "[\"limits\", \"approvals_open_max\"]": [
+    "4a44dc15364204a80fe80e90"
+   ],
+   "[\"limits\", \"outbound_per_day_max\"]": [
+    "f5ca38f748a1d6eaf726b8a4"
+   ],
+   "[\"rules\", \"calendar.create_hold\", \"allow_only_fields\"]": [
+    "e9eccff91bc79ac0959caed0",
+    "734d5e4afe6cb12e898ff8a9"
+   ],
+   "[\"rules\", \"calendar.create_hold\", \"calendar\"]": [
+    "b93122022a0dba2193631728"
+   ],
+   "[\"rules\", \"calendar.create_hold\", \"deny_if_present\"]": [
+    "9e4ce64a2c8ef53adf87ab61"
+   ],
+   "[\"rules\", \"calendar.create_hold\", \"title_prefix\"]": [
+    "479f94ceb57813214c914e9b"
+   ],
+   "[\"tiers\", \"0_read\", \"mode\"]": [
+    "634635a2166efa2ae765abd3"
+   ],
+   "[\"tiers\", \"1_internal\", \"mode\"]": [
+    "634635a2166efa2ae765abd3"
+   ],
+   "[\"tiers\", \"2_reversible\", \"digest\"]": [
+    "b5bea41b6c623f7c09f1bf24"
+   ],
+   "[\"tiers\", \"2_reversible\", \"mode\"]": [
+    "634635a2166efa2ae765abd3"
+   ],
+   "[\"tiers\", \"3_outbound\", \"mode\"]": [
+    "6ef4cbc4f3f0a1af3187e96c"
+   ],
+   "[\"tiers\", \"4_destructive\", \"confirm_twice\"]": [
+    "b5bea41b6c623f7c09f1bf24"
+   ],
+   "[\"tiers\", \"4_destructive\", \"mode\"]": [
+    "6ef4cbc4f3f0a1af3187e96c"
+   ],
+   "[\"tiers\", \"5_money\", \"mode\"]": [
+    "48c4ee8f1739566a5ab22826"
+   ]
+  },
+  "profile.yaml": {
+   "[\"context\"]": [
+    "cd517e2c4f64f5b6ae2d96e5"
+   ],
+   "[\"default_language\"]": [
+    "32889a931b08ba01dadfc309"
+   ],
+   "[\"gmail\"]": [
+    "74234e98afe7498fb5daf1f3",
+    "d377deba574b15dfce723a21"
+   ],
+   "[\"languages\"]": [
+    "b5fe2006b018dc94c93f5e3e"
+   ],
+   "[\"name\"]": [
+    "e05b9a91d584b7f6ac7ede4a"
+   ],
+   "[\"places\"]": [
+    "761b6959449c86521d4af435"
+   ],
+   "[\"push_devices\"]": [
+    "f3b3956f457bbae7256d2e67"
+   ],
+   "[\"quiet_hours\", \"end\"]": [
+    "8d2fc1259d29722da6cc88d1"
+   ],
+   "[\"quiet_hours\", \"start\"]": [
+    "59d811673dd998f488e3f045"
+   ],
+   "[\"school_portal\", \"class\"]": [
+    "32b9a4e85781d851e8f5dcdf"
+   ],
+   "[\"school_portal\", \"kind\"]": [
+    "cda2dc22b93838cbe7cff641"
+   ],
+   "[\"school_portal\", \"url\"]": [
+    "2c6ca9cb4df661560d5c419c"
+   ],
+   "[\"timezone\"]": [
+    "8d23c1c74fe773f6292f253f"
+   ]
+  },
+  "schedule.yaml": {
+   "[\"brain\", \"max_runs_per_day\"]": [
+    "39fa9ec190eee7b6f4dff110"
+   ],
+   "[\"jobs\", \"capture_process\", \"every_minutes\"]": [
+    "e629fa6598d732768f7c726b"
+   ],
+   "[\"jobs\", \"capture_process\", \"only_if_inbox_non_empty\"]": [
+    "b5bea41b6c623f7c09f1bf24"
+   ],
+   "[\"jobs\", \"email_triage\", \"cron\"]": [
+    "d94c24d04afffc47bac29046"
+   ],
+   "[\"jobs\", \"evening_checkin\", \"cron\"]": [
+    "b25b7b5f1a7e2f2eb5cb2b50"
+   ],
+   "[\"jobs\", \"lerndoku_prompt\", \"cron\"]": [
+    "fb7ec8fa32ec9838527af6d2"
+   ],
+   "[\"jobs\", \"morning_brief\", \"weekdays\"]": [
+    "bd9f0dc01e6b1c39f17dff26"
+   ],
+   "[\"jobs\", \"morning_brief\", \"weekends\"]": [
+    "46cd2f28853f962604e9b39b"
+   ],
+   "[\"jobs\", \"weekly_review\", \"cron\"]": [
+    "cd0cb03638d0f3098a2d44de"
+   ],
+   "[\"quiet_window\", \"end\"]": [
+    "8d2fc1259d29722da6cc88d1"
+   ],
+   "[\"quiet_window\", \"start\"]": [
+    "59d811673dd998f488e3f045"
+   ],
+   "[\"reviews\", \"big\"]": [
+    "185a1c16c1059c74e515834b"
+   ],
+   "[\"reviews\", \"daily\"]": [
+    "16e0d98c7b87ad134bd0c011"
+   ],
+   "[\"timezone_from_profile\"]": [
+    "b5bea41b6c623f7c09f1bf24"
+   ]
+  }
+ }
+}
