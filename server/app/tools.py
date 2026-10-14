@@ -322,7 +322,8 @@ class ToolRunner:
                 loops.close(s, a["id"], a["reason"])
             except loops.LoopError as exc:
                 raise ToolError(str(exc))
-        return "Closed." if a["reason"] == "done" else "Dropped. It won't come back."
+        return {"done": "Closed.", "not_for_me": "Dropped. Mails from them won't become loops again."}.get(
+            a["reason"], "Dropped. It won't come back.")
 
 
 def _task(t: Task) -> dict:

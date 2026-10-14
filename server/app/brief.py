@@ -30,7 +30,8 @@ From the data below return JSON:
 {{"headline": "one sentence: what matters most today",
   "top3": [{{"title": "...", "why": "one short reason"}}, ... up to 3]}}
 Pick the top 3 from tasks, deadlines, school events and mails that need a reply, using
-the owner's goals. "patterns" are facts from the owner's places (arrive/leave times); mention
+the owner's goals. "mails_maybe_needing_reply": Kairo couldn't tell if someone waits on these; never in the
+top 3, at most one short mention ("not sure if X needs an answer"). "patterns" are facts from the owner's places (arrive/leave times); mention
 one only if it matters today (e.g. a long school day and training planned). "open_loops" are
 people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3.
 If "health" shows under 6 h sleep last night: plan a lighter day (move study and hard tasks later)
@@ -111,6 +112,7 @@ class BriefMaker:
             "other_tasks": [task(t) for t in undated],
             "school": [{"subject": e.subject, "kind": e.kind, "date": e.date.isoformat()} for e in school],
             "needs_reply": [triage.as_dict(m) for m in triage.needs_reply(s)],
+            "maybe_reply": [triage.as_dict(m) for m in triage.maybe_reply(s)],
             "flagged": [triage.as_dict(m) for m in triage.flagged(s)],
             "checkin": None if yesterday is None else {"energy": yesterday.energy_1_5,
                                                        "planned": json.loads(yesterday.top3_json or "[]")},
@@ -237,7 +239,8 @@ def _data_for_model(data: dict) -> str:
     own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals", "place_tasks", "patterns",
                                 "chores_due", "people", "health")}
     outside = {"calendar": data["calendar"], "mails_needing_reply": [{"from": m["from"], "subject": m["subject"],
-               "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]]}
+               "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]],
+               "mails_maybe_needing_reply": [{"from": m["from"], "subject": m["subject"]} for m in data.get("maybe_reply") or []]}
     return ("Kairo's own data:\n" + json.dumps(own, ensure_ascii=False, default=str) + "\n\n"
             + untrusted("calendar and mail", outside))
 
@@ -252,6 +255,8 @@ def render_markdown(c: dict) -> str:
         lines += ["## Calendar", *[f"- {(e['start'] or '')[11:16] or 'all day'} {e['summary']}" for e in c["calendar"]], ""]
     if c.get("needs_reply"):
         lines += ["## Needs a reply", *[f"- {m['from']}: {m['subject']} ({m['summary']})" for m in c["needs_reply"]], ""]
+    if c.get("maybe_reply"):
+        lines += ["## Not sure these need you", *[f"- {m['from']}: {m['subject']}" for m in c["maybe_reply"]], ""]
     if c.get("next7"):
         lines += ["## Next 7 days", *[f"- {t['due'][:10]} {t['title']}" for t in c["next7"]], ""]
     if c.get("approvals"):

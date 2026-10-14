@@ -31,7 +31,7 @@ from sqlmodel import Session, select
 
 from . import vault
 from .audit import audit
-from .db import AuditLog, OpenLoop, Person, SchoolEvent, Task, TriagedEmail, utcnow
+from .db import AuditLog, OpenLoop, Person, ReplySender, SchoolEvent, Task, TriagedEmail, utcnow
 from .jobkit import JOB_RULES, clip, extract_json
 from .scheduler import JobContext, Skipped
 from .tools import _body_text, _headers, untrusted
@@ -46,6 +46,17 @@ DEFAULT_MAX_PINGS = 6
 WAITING_URGENT_DAYS = 3
 VOICE_FILE = "10 Profile/voice.md"
 SEEN_KEY = "loops.sent_seen"
+
+REPLY_CHECK_PROMPT = """For each email decide: does a real person wait for {owner}'s own personal answer?
+"yes": a real person (school, teacher, work, colleague, friend, family) wrote to {owner} personally and expects a reply or decision.
+"no": verification or login codes, security alerts, notifications, newsletters, promos, receipts, orders, shipping,
+automated or no-reply mail, mass mail, test mails, anything a company system sent.
+"unsure": you can't tell.
+People {owner} answers: {people}
+
+Return one JSON object mapping each email id to "yes", "no" or "unsure". Nothing else.
+
+{mails}"""
 
 DRAFT_PROMPT = """Write the owner's answer to this open loop, ready to send.
 Loop: {kind} · {who} · "{what}" · open since {since}.
@@ -336,17 +347,44 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
     return loop, msg
 
 
+OWNER_CLOSE = ("done", "dropped", "not_for_me")   # what the owner may say; "automated" is the backend's call
+MUTE_AFTER_DROPS = 2
+
+
 def close(s: Session, loop_id: int, reason: str, *, now: dt.datetime | None = None) -> OpenLoop:
     loop = _get_open(s, loop_id)
     _close(loop, reason, now or utcnow())
     s.add(loop)
     s.commit()
     s.refresh(loop)
+    if loop.source == "email" and loop.who_email:
+        learn_sender(s, loop.who_email, reason)
     return loop
 
 
+def learn_sender(s: Session, address: str, reason: str) -> None:
+    """The owner's taps teach Kairo who really waits on an answer: done -> a person,
+    'not for me' -> muted at once, dropped twice -> muted."""
+    address = address.lower()
+    row = s.get(ReplySender, address) or ReplySender(address=address, verdict="")
+    if reason in ("done", "sent", "answered"):
+        row.verdict = "person"
+    elif reason == "not_for_me":
+        row.verdict = "muted"
+    elif reason == "dropped":
+        row.drops += 1
+        if row.drops >= MUTE_AFTER_DROPS and row.verdict != "person":
+            row.verdict = "muted"
+    else:
+        return
+    row.updated_at = utcnow()
+    s.add(row)
+    s.commit()
+
+
 def _close(loop: OpenLoop, reason: str, now: dt.datetime) -> None:
-    loop.status = {"done": "done", "sent": "done", "answered": "done", "dropped": "dropped"}.get(reason, "stale")   # automated -> stale
+    loop.status = {"done": "done", "sent": "done", "answered": "done", "dropped": "dropped",
+                   "not_for_me": "dropped"}.get(reason, "stale")   # automated -> stale
     loop.close_reason = reason
     loop.closed_at = now
     loop.next_at = None
@@ -390,6 +428,35 @@ def automated_sender(sender: str | None) -> bool:
     return bool(AUTOMATED_LOCAL.match(local) or AUTOMATED_DOMAIN.search(domain))
 
 
+NOT_A_REPLY = re.compile(
+    r"\b(codes?|bestätigungscode|verification|verify|verifizier\w*|bestätig\w*|confirm (your|the) (email|e-mail|account|address)|"
+    r"security (alert|code|notice)|sicherheits\w*|passwor[dt]|reset|sign-?in|log-?in|anmelde\w*|one-time|otp|2fa|"
+    r"receipts?|quittung|rechnung|invoice|order|bestellung|shipped|versand\w*|tracking|delivery|lieferung|"
+    r"subscription|abonnement|newsletter|unsubscribe|abmelden|webinar|deals?|sale|rabatt|gutschein|coupon|"
+    r"test ?mail|testnachricht|^test$)\b", re.I)
+ACCOUNT_LOCAL = re.compile(r"(no-?reply|kundenservice|customer-?service|support|account|security|billing|receipts?|orders?|"
+                           r"shop|store|service|info|hello|team|events?|news)", re.I)
+PERSONAL_MAILBOX = re.compile(r"^(gmail|googlemail|outlook|hotmail|live|yahoo|icloud|me|gmx|bluewin|proton|protonmail|web|hispeed)\.", re.I)
+MARKETING_SUBDOMAIN = re.compile(r"(^|\.)(e?mail|news|info|mailing|mkt|marketing|em|e)\.[^.]+\.[a-z]+$", re.I)
+
+
+def not_personal(sender: str | None, subject: str | None, summary: str | None) -> bool:
+    """Codes, alerts, receipts, shop mail, newsletters, tests: nobody waits on the owner's own answer.
+    Cheap rules first; what they can't tell goes to the model."""
+    if automated_sender(sender):
+        return True
+    email = _email(sender) or ""
+    local, _, domain = email.partition("@")
+    if MARKETING_SUBDOMAIN.search(domain) or ACCOUNT_LOCAL.fullmatch(local) or re.match(r".*no-?reply", local, re.I):
+        return True
+    if local and domain and local == domain.split(".")[0]:   # sbb@sbb.ch, apple@apple.com: a company, not a person
+        return True
+    if PERSONAL_MAILBOX.search(domain):
+        return False   # a person's own mailbox: words like "code" or "test" alone don't decide, the model does
+    text = f"{subject or ''}\n{summary or ''}"
+    return bool(NOT_A_REPLY.search(text))
+
+
 def automated_headers(headers: dict[str, str]) -> bool:
     if any(h in headers for h in BULK_HEADERS):
         return True
@@ -405,7 +472,7 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dic
     since_cut = utcnow() - dt.timedelta(days=30)
     for m in s.exec(select(TriagedEmail).where(TriagedEmail.category == "reply")
                     .where(TriagedEmail.triaged_at >= since_cut)).all():
-        if m.suspicious or automated_sender(m.sender):
+        if m.suspicious or m.personal_reply is not True:   # only real people waiting on the owner (reply check)
             continue
         due = dt.datetime.combine(m.deadline, dt.time(18), tzinfo=tz) if m.deadline else None
         if m.done:
@@ -447,6 +514,8 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dic
             e = s.get(SchoolEvent, int(loop.source_ref)) if (loop.source_ref or "").isdigit() else None
             if e is None or aware(e.date) < now - dt.timedelta(hours=12):
                 reason = "stale"
+        elif loop.source == "email" and (m0 := s.get(TriagedEmail, loop.source_ref)) is not None and m0.personal_reply is False:
+            reason = "automated"   # noise from before the reply check, or the owner muted the sender
         elif loop.source == "email" and answered is not None:
             m = s.get(TriagedEmail, loop.source_ref)
             try:
@@ -550,6 +619,7 @@ class LoopEngine:
         tz = self.profile.tz
         now = (now or dt.datetime.now(tz)).astimezone(tz)
         s = ctx.session
+        self.check_replies(ctx)
         counts = sync(s, now=now, tz=tz, times=self.times, answered=self.answered)
         due = [l for l in open_loops(s) if l.next_at is None or aware(l.next_at) <= now]
         if not due:
@@ -586,6 +656,61 @@ class LoopEngine:
         audit(s, actor="backend", action="proactive.ping", outcome=f"loop #{pick.id}: {clip(body, 160)}")
         mark_raised(s, pick, now, tz, self.times)
         return json.dumps({**counts, "raised": pick.id})
+
+    def check_replies(self, ctx: JobContext) -> dict:
+        """Decide per mail whether a real person waits on the owner's own answer. Rules and the owner's
+        own choices first, then one Haiku call for the rest. Unsure means no loop (the brief mentions it).
+        Model down: decide nothing, ask again next run."""
+        s = ctx.session
+        since = utcnow() - dt.timedelta(days=30)
+        todo = list(s.exec(select(TriagedEmail).where(TriagedEmail.category == "reply").where(TriagedEmail.done == False)  # noqa: E712
+                           .where(TriagedEmail.personal_reply == None).where(TriagedEmail.triaged_at >= since)).all())  # noqa: E711
+        # Old loops from before this check (any age) get checked too, so the junk among them is cleaned out.
+        refs = [l.source_ref for l in open_loops(s) if l.source == "email" and l.source_ref]
+        seen = {m.message_id for m in todo}
+        for m in (s.exec(select(TriagedEmail).where(TriagedEmail.message_id.in_(refs))).all() if refs else []):
+            if m.personal_reply is None and m.message_id not in seen:
+                todo.append(m)
+        out = {"person": 0, "not": 0, "unsure": 0}
+        ask = []
+        for m in todo:
+            verdict = s.get(ReplySender, _email(m.sender) or "")
+            if m.suspicious:
+                m.personal_reply, m.reply_why = False, "suspicious"
+            elif verdict and verdict.verdict == "muted":
+                m.personal_reply, m.reply_why = False, "you muted this sender"
+            elif verdict and verdict.verdict == "person":
+                m.personal_reply, m.reply_why = True, "you answer them"
+            elif not_personal(m.sender, m.subject, m.summary):
+                m.personal_reply, m.reply_why = False, "automated (rules)"
+            elif self._is_bulk_ref(m.message_id):
+                m.personal_reply, m.reply_why = False, "automated (bulk mail headers)"
+            else:
+                ask.append(m)
+                continue
+            s.add(m)
+        s.commit()
+        if ask:
+            people = [r.address for r in s.exec(select(ReplySender).where(ReplySender.verdict == "person")).all()][:40]
+            mails = [{"id": m.message_id, "from": m.sender, "subject": m.subject, "summary": m.summary} for m in ask]
+            prompt = REPLY_CHECK_PROMPT.format(people=", ".join(people) or "(none yet)", owner=self.profile.name,
+                                               mails=untrusted("new emails", mails))
+            answer = ctx.ask(prompt, JOB_RULES, purpose="reply_check")
+            verdicts = extract_json(answer.text) if answer.ok else None
+            if not isinstance(verdicts, dict):
+                return out   # no guessing: these stay unchecked until the model answers
+            for m in ask:
+                v = str(verdicts.get(m.message_id, "unsure")).lower()
+                m.personal_reply = v == "yes"
+                m.reply_why = {"yes": "a person waits on you", "no": "no reply needed"}.get(v, "unsure")
+                s.add(m)
+            s.commit()
+        for m in todo:
+            out["person" if m.personal_reply else "unsure" if m.reply_why == "unsure" else "not"] += 1
+        return out
+
+    def _is_bulk_ref(self, message_id: str) -> bool:
+        return self._is_bulk(OpenLoop(kind="reply", source="email", source_ref=message_id, what=""))
 
     def _is_bulk(self, loop: OpenLoop) -> bool:
         try:

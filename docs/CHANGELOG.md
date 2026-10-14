@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14 — fix from real use: open loops only for real people
+- A mail becomes a loop only when a real person waits on your own answer. Codes, security alerts, receipts, orders, newsletters, promos, no-reply and test mails never do (rules first, then one Haiku call for the rest; unsure = no loop, one line in the brief).
+- Kairo learns from your taps: Done = a person, "Not a real reply" = never from that sender again, dropped twice = muted.
+- Existing junk loops are checked on the next run and closed.
+
 ## 2026-10-14 — build: PA behaviour rules (KICKOFF 13d)
 - Debrief by time of day (learns when you usually ask), topic only when asked, known routine left out.
 - Pushback when something important is pushed away; critical things can't be snoozed. Reply mails ping at once with a draft; promises come back next morning.

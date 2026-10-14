@@ -851,8 +851,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/loops/{loop_id}/close")
     def loop_close(loop_id: int, body: dict | None = None):
         reason = (body or {}).get("reason") or "done"
-        if reason not in ("done", "dropped"):
-            raise HTTPException(400, "reason must be done or dropped")
+        if reason not in loops.OWNER_CLOSE:
+            raise HTTPException(400, "reason must be done, dropped or not_for_me")
         with session_for(engine) as s:
             try:
                 return loops.as_dict(loops.close(s, loop_id, reason), _loop_now(), profile.tz)

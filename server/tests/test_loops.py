@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,11 +28,19 @@ SAT = dt.datetime(2026, 10, 17, 10, 0, tzinfo=TZ)
 
 
 class Ctx:
-    def __init__(self, s, *answers):
+    """Fake model. The reply check (Haiku) answers from `verdicts` (default: yes, a real person)."""
+
+    def __init__(self, s, *answers, verdicts=None, down=False):
         self.session, self.answers, self.prompts = s, list(answers), []
+        self.verdicts, self.down = verdicts or {}, down
 
     def ask(self, prompt, system, images=None, purpose=None):
         self.prompts.append((purpose, prompt))
+        if purpose == "reply_check":
+            if self.down:
+                return AskResult("", status="error", error="model unavailable")
+            ids = re.findall(r'"id": "([^"]+)"', prompt)
+            return AskResult(json.dumps({i: self.verdicts.get(i, "yes") for i in ids}))
         a = self.answers.pop(0) if self.answers else {}
         return AskResult(json.dumps(a))
 
@@ -60,7 +69,8 @@ def triaged(s, mid="m1", days_ago=8, done=False, suspicious=False, deadline=None
     when = WED.astimezone(dt.timezone.utc) - dt.timedelta(days=days_ago)
     s.add(TriagedEmail(message_id=mid, thread_id="t1", sender="Anna Meier <anna@example.com>", subject="Project review",
                        summary="if Thursday 14:00 works for the project review", category="reply", received_at=when,
-                       triaged_at=dt.datetime.now(dt.timezone.utc), done=done, suspicious=suspicious, deadline=deadline))
+                       triaged_at=dt.datetime.now(dt.timezone.utc), done=done, suspicious=suspicious, deadline=deadline,
+                       personal_reply=True))
     s.commit()
 
 
@@ -359,5 +369,106 @@ def test_automated_mail_never_becomes_a_ping(env):
         s.commit()
         out = json.loads(engine_for(env, pushes).run(Ctx(s, DRAFT), now=WED))
         assert pushes.sent == [] and out["raised"] is None
-        assert [l.source_ref for l in s.exec(select(OpenLoop)).all()] == ["promo"]        # newsletter never tracked
-        assert s.exec(select(OpenLoop)).one().close_reason == "automated"                  # bulk header found when drafting
+        assert s.exec(select(OpenLoop)).all() == []                                         # neither is ever tracked
+        assert s.get(TriagedEmail, "promo").personal_reply is False                         # bulk header found by the check
+
+
+# ---------------------------------------------------------------- only real people waiting on a real answer
+
+def mail(s, mid, sender, subject, summary="", personal=None):
+    s.add(TriagedEmail(message_id=mid, thread_id=f"t-{mid}", sender=sender, subject=subject, summary=summary,
+                       category="reply", received_at=WED.astimezone(dt.timezone.utc) - dt.timedelta(hours=2),
+                       triaged_at=dt.datetime.now(dt.timezone.utc), personal_reply=personal))
+    s.commit()
+
+
+@pytest.mark.parametrize("sender,subject,summary", [
+    ("Google <no-reply@accounts.google.com>", "Security alert", "New sign-in on Windows"),
+    ("Swisscom <kundenservice@swisscom.ch>", "Ihr Bestätigungscode", "Code 482913"),
+    ("Microsoft account team <account-security-noreply@accountprotection.microsoft.com>", "Microsoft account security code", ""),
+    ("Digitec <info@digitec.ch>", "Your order 1234 has shipped", "Tracking number inside"),
+    ("SBB <sbb@sbb.ch>", "Ihre Quittung", "Billett Zürich - Schooltown"),
+    ("Apple <apple@email.apple.com>", "Your receipt from Apple", ""),
+    ("Lisa from Notion <team@mail.notion.so>", "Verify your email", "Click to confirm your email address"),
+    ("Anna <anna@example.com>", "Your login code", "Use 123456 to log in"),
+    ("Galaxus <newsletter@galaxus.ch>", "Deals", ""),
+    ("Bank <noreply@ubs.com>", "Password reset", ""),
+])
+def test_codes_alerts_receipts_never_count_as_a_reply(sender, subject, summary):
+    assert loops.not_personal(sender, subject, summary)
+
+
+@pytest.mark.parametrize("sender,subject,summary", [
+    ("Anna Meier <anna@example.com>", "Project review", "Asks if Thursday 14:00 works"),
+    ("Mr. Keller <keller@school.example>", "Lerndokumentation", "Wants your draft by Friday"),
+    ("Lea <lea@gmail.com>", "Re: notes", "Can you send me the ABU notes?"),
+])
+def test_real_people_pass_the_rules(sender, subject, summary):
+    assert not loops.not_personal(sender, subject, summary)
+
+
+def test_only_real_people_become_loops_and_old_noise_is_cleaned_out(env):
+    pushes = Pushes()
+    with Session(env["engine"]) as s:
+        mail(s, "anna", "Anna Meier <anna@example.com>", "Project review", "Asks if Thursday works")
+        mail(s, "code", "Swisscom <kundenservice@swisscom.ch>", "Ihr Bestätigungscode", "Code 482913")
+        mail(s, "shop", "Lisa <lisa@shop.example>", "We miss you", "Come back to your cart")
+        mail(s, "old", "Webinar Team <events@vendor.example>", "Join our webinar", "")
+        s.add(OpenLoop(kind="reply", source="email", source_ref="old", what="Join our webinar",       # noise from before
+                       since=WED - dt.timedelta(days=1), next_at=WED + dt.timedelta(days=1)))
+        s.commit()
+        ctx = Ctx(s, DRAFT, verdicts={"shop": "no", "old": "no"})
+        engine_for(env, pushes).run(ctx, now=WED)
+        checks = [p for purpose, p in ctx.prompts if purpose == "reply_check"]
+        assert len(checks) == 1                                                  # one Haiku call for the batch
+        assert "Bestätigungscode" not in checks[0]                               # rules first, no model needed
+        tracked = {l.source_ref: l for l in s.exec(select(OpenLoop)).all()}
+        assert tracked["anna"].status == "open"
+        assert "code" not in tracked and "shop" not in tracked
+        assert tracked["old"].status != "open" and tracked["old"].close_reason == "automated"
+        assert s.get(TriagedEmail, "shop").personal_reply is False
+
+
+def test_model_down_means_wait_not_guess(env):
+    with Session(env["engine"]) as s:
+        mail(s, "anna", "Anna Meier <anna@example.com>", "Project review")
+        engine_for(env, Pushes()).run(Ctx(s, down=True), now=WED)
+        assert s.get(TriagedEmail, "anna").personal_reply is None               # asked again next run
+        assert s.exec(select(OpenLoop)).all() == []
+
+
+def test_learns_from_what_the_owner_closes(env):
+    with Session(env["engine"]) as s:
+        mail(s, "a1", "Vereinsbot <club@verein.example>", "Training plan", personal=True)
+        mail(s, "b1", "Coach Marco <marco@gym.example>", "Sparring Saturday?", personal=True)
+        mail(s, "c1", "Promo Person <sales@tool.example>", "Quick question", personal=True)
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        by = {l.source_ref: l for l in s.exec(select(OpenLoop)).all()}
+        loops.close(s, by["a1"].id, "not_for_me")                               # one tap: never again from them
+        loops.close(s, by["b1"].id, "done")                                     # a real person
+        loops.close(s, by["c1"].id, "dropped")
+        mail(s, "c2", "Promo Person <sales@tool.example>", "Following up", personal=True)
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        loops.close(s, s.exec(select(OpenLoop).where(OpenLoop.source_ref == "c2")).one().id, "dropped")   # dropped twice: muted
+
+        mail(s, "a2", "Vereinsbot <club@verein.example>", "New training plan")
+        mail(s, "b2", "Coach Marco <marco@gym.example>", "Sparring Sunday?")
+        mail(s, "c3", "Promo Person <sales@tool.example>", "Last chance")
+        mail(s, "d1", "Someone New <new@example.com>", "Hello")
+        ctx = Ctx(s)
+        engine_for(env, Pushes()).run(ctx, now=WED)
+        check = "".join(p for purpose, p in ctx.prompts if purpose == "reply_check")
+        assert '"id": "d1"' in check and '"id": "a2"' not in check and '"id": "b2"' not in check and '"id": "c3"' not in check
+        assert s.get(TriagedEmail, "a2").personal_reply is False and s.get(TriagedEmail, "c3").personal_reply is False
+        assert s.get(TriagedEmail, "b2").personal_reply is True
+        assert "marco@gym.example" in check or "you answer" in check.lower()    # the model learns from your choices too
+
+
+def test_not_for_me_from_the_app(client, env):
+    with Session(env["engine"]) as s:
+        mail(s, "x", "Vereinsbot <club@verein.example>", "Training plan", personal=True)
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        lid = s.exec(select(OpenLoop)).one().id
+    r = client.post(f"/api/loops/{lid}/close", json={"reason": "not_for_me"})
+    assert r.status_code == 200 and r.json()["status"] == "dropped"
+    assert client.post(f"/api/loops/{lid}/close", json={"reason": "automated"}).status_code == 400

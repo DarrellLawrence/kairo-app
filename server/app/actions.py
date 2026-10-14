@@ -208,7 +208,7 @@ class LoopsSnooze(Strict):
 
 class LoopsClose(Strict):
     id: int = Field(ge=1)
-    reason: Literal["done", "dropped"]
+    reason: Literal["done", "dropped", "not_for_me"]   # not_for_me: never a loop from this sender again
 
 
 # ---------------------------------------------------------------- tier 2: reversible, nobody notified
