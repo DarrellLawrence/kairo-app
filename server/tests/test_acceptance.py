@@ -183,7 +183,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 33))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 36))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable
@@ -329,3 +329,102 @@ def test_graph_fails_without_the_linker(migrated):
     vault.LINKERS.pop(ctx.vault_dir.resolve(), None)
     r = run(acceptance.t_graph(ctx))
     assert not r["ok"] and r["checks"]["the note links the person"] is False
+
+
+# ---------------------------------------------------------------- 33 Knowledge call, 34 Recap, 35 Document (PR #18)
+
+TIMES = {"after_work": "17:30", "weekend": "10:00"}
+
+
+def _knowledge_ctx(migrated, schedule=None):
+    from app import knowledge
+    ctx = ctx_for(migrated)
+    ctx.schedule = schedule or {}
+    ctx.knowledge = knowledge.Caller(engine=ctx.engine, tz=TZ, times=lambda: TIMES, pusher=None,
+                                     busy=lambda now: False, place_kind=lambda: None)
+    return ctx
+
+
+def test_knowledge_call_passes_and_cleans_up(migrated):
+    from app.db import Call, KnowledgeItem
+    ctx = _knowledge_ctx(migrated)
+    r = run(acceptance.t_knowledge_call(ctx))
+    assert r["ok"], r
+    with Session(ctx.engine) as s:
+        assert s.exec(select(Call)).all() == []
+        assert s.exec(select(KnowledgeItem)).all() == []
+
+
+def test_knowledge_call_fails_off_haiku_or_outside_the_one_call_budget(migrated, monkeypatch):
+    r = run(acceptance.t_knowledge_call(_knowledge_ctx(migrated, {"models": {"learn_call": "sonnet"}})))
+    assert not r["ok"] and r["checks"]["learning calls on Haiku"] is False
+    from app.voice import calls
+    monkeypatch.setattr(calls, "MAX_KAIRO_CALLS_A_DAY", 2)
+    r = run(acceptance.t_knowledge_call(_knowledge_ctx(migrated)))
+    assert not r["ok"] and r["checks"]["no learning call once Kairo called that day"] is False
+
+
+def _recap_ctx(migrated, schedule=None):
+    from app import recap
+    ctx = ctx_for(migrated)
+    ctx.schedule = schedule if schedule is not None else {}
+    ctx.recap = recap.Recap(engine=ctx.engine, gate=ctx.gate, executor=None, tz=TZ, calendar=lambda day: ([], None))
+    return ctx
+
+
+def test_recap_passes_and_cleans_up(migrated):
+    from app.db import OpenLoop
+    ctx = _recap_ctx(migrated)
+    r = run(acceptance.t_recap(ctx))
+    assert r["ok"], r
+    with Session(ctx.engine) as s:
+        assert s.exec(select(Task)).all() == [] and s.exec(select(OpenLoop)).all() == []
+
+
+def test_recap_fails_when_planned_without_a_time(migrated):
+    r = run(acceptance.t_recap(_recap_ctx(migrated, {"jobs": {"evening_recap": {"cron": "30 20 * * *"}}})))
+    assert not r["ok"] and r["checks"]["planned only when a time is set"] is False
+
+
+class _Renderer:
+    def render(self, html, kind):
+        n = html.count('class="page"')
+        return {"pages": [b"\x89PNG page"] * n, "pdf": b"%PDF-1.7 fake", "overflow": []}
+
+
+def _gauntlet_ctx(migrated, *, html=True):
+    from app import gauntlet
+    from app.chat import AskResult
+    ctx = ctx_for(migrated)
+    ctx.vault_dir = migrated.vault_dir
+    ctx.vault_dir.mkdir(parents=True, exist_ok=True)
+    ctx.gauntlet = gauntlet.Gauntlet(engine=ctx.engine, gate=ctx.gate, executor=None, vault_dir=ctx.vault_dir,
+                                     renderer=_Renderer(), language="English")
+    page = '<section class="page"><h1>KAIRO-TEST</h1><p>Three points.</p></section>'
+
+    def ask(prompt, system, purpose="summary", images=None):
+        if purpose == "gauntlet":
+            return AskResult(json.dumps({"verdict": "good", "issues": []}))
+        return AskResult(json.dumps({"title": f"{MARK} summary", "html": page}) if html else "no idea")
+    ctx.ask = ask
+    return ctx
+
+
+def test_document_passes_sends_nothing_and_cleans_up(migrated):
+    from app.db import Document
+    ctx = _gauntlet_ctx(migrated)
+    r = run(acceptance.t_document(ctx))
+    assert r["ok"], r
+    assert not list(ctx.vault_dir.rglob(f"*{MARK}*"))
+    with Session(ctx.engine) as s:
+        assert s.exec(select(Document)).all() == []
+
+
+def test_document_fails_without_a_pdf(migrated):
+    from app.db import Document
+    ctx = _gauntlet_ctx(migrated, html=False)
+    r = run(acceptance.t_document(ctx))
+    assert not r["ok"]
+    assert not list(ctx.vault_dir.rglob(f"*{MARK}*"))
+    with Session(ctx.engine) as s:
+        assert s.exec(select(Document)).all() == []

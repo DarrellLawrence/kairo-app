@@ -11,7 +11,7 @@ import base64
 import html
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -223,8 +223,12 @@ class ToolRunner:
     def _people_note(self, a: dict) -> str:
         from . import life
         with Session(self.engine) as s:
+            bday = a.get("birthday")
+            if isinstance(bday, str):
+                bday = date.fromisoformat(bday)
             p = life.people_note(s, name=a["name"], note=a.get("note", ""), contacted=a.get("contacted", False),
-                                 relation=a.get("relation"), today=datetime.now().date(), email=a.get("email"))
+                                 relation=a.get("relation"), today=datetime.now().date(), email=a.get("email"),
+                                 birthday=bday, vault_dir=self.vault_dir)
             return json.dumps(life.person_dict(p, datetime.now().date(), s), default=str)
 
     def _captures_answer(self, a: dict) -> str:
@@ -247,6 +251,48 @@ class ToolRunner:
             p = s.get(life.Person, w.person_id)
             return json.dumps({"added": life.wish_dict(w), "person": p.name,
                                "wishlist": [life.wish_dict(x) for x in life.wishlist(s, p.id)]})
+
+    def _knowledge_ask_later(self, a: dict) -> str:
+        from . import knowledge
+        with Session(self.engine) as s:
+            try:
+                q = knowledge.ask_later(s, a["question"], a.get("about"))
+            except knowledge.KnowledgeError as exc:
+                raise ToolError(str(exc))
+            return f"Saved as question #{q.id} for the next getting-to-know-you call."
+
+    def _knowledge_answered(self, a: dict) -> str:
+        from . import knowledge
+        with Session(self.engine) as s:
+            try:
+                knowledge.answered(s, a["id"], a["summary"])
+            except knowledge.KnowledgeError as exc:
+                raise ToolError(str(exc))
+        return "Noted."
+
+    on_document = None   # (doc_id) -> None: starts the gauntlet in the background (main.py)
+
+    def _document_create(self, a: dict) -> str:
+        from .db import Document
+        with Session(self.engine) as s:
+            doc = Document(kind=a["kind"], title=a["title"], brief=a["brief"], sources_json=json.dumps(a.get("sources") or []),
+                           label=a.get("label"))
+            s.add(doc)
+            s.commit()
+            s.refresh(doc)
+            did = doc.id
+        if self.on_document is not None:
+            self.on_document(did)
+        return f"Started document #{did}. It takes a few minutes (written, checked, fixed); the owner gets a push and the PDF by mail."
+
+    def _profile_learn(self, a: dict) -> str:
+        from . import knowledge
+        with Session(self.engine) as s:
+            try:
+                knowledge.learn_fact(s, self.vault_dir, a["fact"])
+            except knowledge.KnowledgeError as exc:
+                raise ToolError(str(exc))
+        return "Saved to your profile."
 
     def _finance_list(self, a: dict) -> str:
         from . import life

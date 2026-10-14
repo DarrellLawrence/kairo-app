@@ -31,6 +31,7 @@ log = logging.getLogger("kairo.acceptance")
 MARK = "KAIRO-TEST"
 KEY = "acceptance.results"
 TEST_TIMEOUT_S = 300
+TIMEOUTS = {35: 900}     # the document: up to 3 rounds of writing, rendering and looking at the pages
 NEVER_SAY = ("in this session", "in dieser sitzung", "i can't access", "i cannot access", "i don't have access",
              "i do not have access", "i can’t access", "i don’t have access", "keinen zugriff")
 
@@ -101,6 +102,14 @@ SPECS = [
                                        "with [[wikilinks]]; a missing one gets its own note with aliases.", "C7"),
     Spec(32, "Data lock", "ci", "An update removes links planted in Kairo's data folder, writes nothing where they point and "
                                 "turns Kairo's account back on; a lock a power cut left is undone at the next boot.", "F24"),
+    Spec(33, "Knowledge call", "auto", "Questions Kairo wants to ask become one short call with 3-4 of them, on Haiku, in a call "
+                                       "window and only if Kairo hasn't called that day (one call budget). Then answer one "
+                                       "on the iPhone: one line in the chat afterwards.", "#18"),
+    Spec(34, "Evening recap", "auto", "Off until you set a time in Settings; when on, the mail to your own address has what you "
+                                      "did and what's open, and no notes about other people.", "#18"),
+    Spec(35, "Document", "auto", "With the real Claude and Kairo's browser: a one-page document is written, rendered, checked "
+                                 "and fixed (max 3 rounds), saved as a PDF in the vault and would go only to your own Gmail.",
+         "#18"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -135,6 +144,9 @@ class Context:
     coach: object = None                                   # coach.Coacher
     pa: object = None                                      # pa.PA
     share: Callable[[bytes, str, str], int] | None = None  # share a file like the + sheet does: (data, name, type) -> capture id
+    knowledge: object = None                               # knowledge.Caller (its times follow Settings)
+    recap: object = None                                   # recap.Recap
+    gauntlet: object = None                                # gauntlet.Gauntlet (its renderer is Kairo's browser)
     runner: object = None                                  # chat.BrainRunner (fix plan 26-30: lag)
     health: object = None                                  # health.HealthWatch (fix plan 32)
     data_dir: Path | None = None
@@ -794,11 +806,173 @@ async def t_graph(ctx: Context) -> dict:
             linker.invalidate()
 
 
+class _Pushes:
+    """A pusher that only notes what it would have sent."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple] = []
+
+    def notify(self, title, body, url="/", **kw):
+        self.sent.append((title, body, url, kw.get("source")))
+        return "recorded"
+
+
+def _learn_moment(ctx: Context, times: dict) -> dt.datetime | None:
+    """A moment next week inside a call window that is also a good moment: no call was ever made on that day."""
+    from . import knowledge
+    from .voice import calls
+    with Session(ctx.engine) as s:
+        wins = calls.windows(s)
+    today = dt.datetime.now(ctx.tz).date()
+    for days in range(7, 14):
+        for w in wins:
+            h, m = (int(x) for x in w["start"].split(":"))
+            t = dt.datetime.combine(today + dt.timedelta(days=days), dt.time(h, m), tzinfo=ctx.tz) + dt.timedelta(minutes=15)
+            if calls.in_window(wins, t) and knowledge.good_moment(t, ctx.tz, times, busy=lambda _: False, place_kind=None)[0]:
+                return t
+    return None
+
+
+async def t_knowledge_call(ctx: Context) -> dict:
+    from . import knowledge, models
+    from .db import Call, KnowledgeItem
+    times = ctx.knowledge.times() if callable(ctx.knowledge.times) else ctx.knowledge.times
+    pushes = _Pushes()
+    caller = knowledge.Caller(engine=ctx.engine, tz=ctx.tz, times=times, pusher=pushes,
+                              busy=lambda now: False, place_kind=lambda: None)
+    made: list[int] = []
+    try:
+        with Session(ctx.engine) as s:
+            for i in range(3):
+                knowledge.ask_later(s, f"{MARK} question {i + 1}?", about=f"{MARK} topic {i + 1}", source="acceptance")
+        when = _learn_moment(ctx, times)
+        if when is None:
+            return _result(False, {"a call window that is also a good moment": False},
+                           "no call window fits the good times in Settings")
+        first = await asyncio.to_thread(caller.run, when)
+        if first.get("call_id"):
+            made.append(first["call_id"])
+        with Session(ctx.engine) as s:
+            call = s.get(Call, first["call_id"]) if first.get("call_id") else None
+            agenda = json.loads(call.agenda_json or "[]") if call else []
+            rings_as_kairo = call is not None and call.purpose == "learn" and call.kind == "kairo"
+            s.add(Call(reason=f"{MARK} earlier call", opening="-", kind="kairo", status="ended",
+                       created_at=when.astimezone(dt.timezone.utc)))
+            s.commit()
+            made.extend(c.id for c in s.exec(select(Call).where(Call.reason == f"{MARK} earlier call")).all())
+        second = await asyncio.to_thread(caller.run, when + dt.timedelta(minutes=30))
+        if second.get("call_id"):
+            made.append(second["call_id"])
+        checks = {"a learning call with 3-4 questions": bool(first.get("called")) and 3 <= len(agenda) <= 4,
+                  "it rings like any Kairo call": bool(pushes.sent) and pushes.sent[0][3] == "call" and rings_as_kairo,
+                  "no learning call once Kairo called that day": not second.get("called"),
+                  "learning calls on Haiku": models.pick("learn_call", ctx.schedule) == "haiku"}
+        return _result(True, checks, f"{when:%a %H:%M}: {first.get('why') or 'called'}; then: {second.get('why') or 'called'}")
+    finally:
+        with Session(ctx.engine) as s:
+            for cid in made:
+                c = s.get(Call, cid)
+                if c is not None:
+                    s.delete(c)
+            for q in s.exec(select(KnowledgeItem).where(KnowledgeItem.question.like(f"{MARK}%"))).all():
+                s.delete(q)
+            s.commit()
+
+
+async def t_recap(ctx: Context) -> dict:
+    from . import prefs
+    from .db import OpenLoop
+    from .gate import TOOL_PREFIX
+    from .gate_context import read_context
+    from .scheduler import cron_jobs
+    now = dt.datetime.now(ctx.tz)
+    done = f"{MARK} finished the report"
+    private = f"{MARK} person: a private note"
+    with Session(ctx.engine) as s:
+        setting = prefs.load(s).get("recap") or "off"
+        s.add(Task(title=done, status="done", done_at=now.astimezone(dt.timezone.utc) - dt.timedelta(minutes=5)))
+        s.add(OpenLoop(kind="people", source="people", source_ref=MARK, what=private, who=f"{MARK} person", status="open"))
+        s.commit()
+    try:
+        with Session(ctx.engine) as s:
+            subject, body = await asyncio.to_thread(ctx.recap.build, s, now)
+        args = {"subject": subject, "body": body, "label": "Kairo/Recap"}
+        d = ctx.gate.decide(TOOL_PREFIX + "propose_action", {"action": "gmail.send_self", "args": args,
+                                                            "reason": "acceptance: evening recap (not sent)"},
+                            read_context(ctx.engine, "job"))
+        planned = "evening_recap" in cron_jobs(ctx.schedule)
+        checks = {"planned only when a time is set": planned == (setting != "off"),
+                  "what you did is in it": done in body,
+                  "no notes about other people": private not in body and f"{MARK} person" not in body,
+                  "only to your own address (no recipient field)": d.verdict == "execute"
+                  and d.action == "gmail.send_self" and not {"to", "cc", "bcc"} & set(d.args or {})}
+        return _result(True, checks, f"recap: {setting}; subject: {subject}")
+    finally:
+        with Session(ctx.engine) as s:
+            for row in s.exec(select(Task).where(Task.title == done)).all():
+                s.delete(row)
+            for row in s.exec(select(OpenLoop).where(OpenLoop.source_ref == MARK)).all():
+                s.delete(row)
+            s.commit()
+
+
+async def t_document(ctx: Context) -> dict:
+    from types import SimpleNamespace
+    from . import gauntlet
+    from .db import Document
+    if ctx.vault_dir is None or ctx.gauntlet is None:
+        return _result(False, {"vault and gauntlet": False}, "not wired")
+    source = f"Kairo/{MARK} gauntlet source.md"
+    (ctx.vault_dir / source).parent.mkdir(parents=True, exist_ok=True)
+    (ctx.vault_dir / source).write_text(f"# {MARK}\n\nThree points: plan the week, sleep 8 hours, drink water.\n",
+                                        encoding="utf-8")
+    sent = RecordingExecutor()
+    g = gauntlet.Gauntlet(engine=ctx.engine, gate=ctx.gate, executor=sent, vault_dir=ctx.vault_dir,
+                          renderer=ctx.gauntlet.renderer, language=ctx.gauntlet.language)
+    doc_id, out, error = None, {}, ""
+    try:
+        with Session(ctx.engine) as s:
+            doc = Document(kind="document", title=f"{MARK} summary", brief="One page: the three points, short.",
+                           sources_json=json.dumps([source]))
+            s.add(doc)
+            s.commit()
+            doc_id = doc.id
+
+        def work() -> dict:
+            with Session(ctx.engine) as s:
+                job = SimpleNamespace(session=s, ask=lambda prompt, system, images=None, purpose=None:
+                                      ctx.ask(prompt, system, purpose=purpose or "document", images=images))
+                return g.run(job, doc_id)
+        try:
+            out = await asyncio.to_thread(work)
+        except Exception as exc:   # the gauntlet failed: a failed test, cleaned up below
+            error = f"{type(exc).__name__}: {exc}"[:200]
+        pdf = ctx.vault_dir / out["vault_path"] if out.get("vault_path") else None
+        mail = sent.calls[0] if sent.calls else ("", {})
+        checks = {"a PDF in the vault": bool(pdf and pdf.is_file() and pdf.read_bytes()[:4] == b"%PDF"),
+                  "checked and fixed at most 3 rounds": 1 <= int(out.get("rounds") or 0) <= gauntlet.MAX_ROUNDS,
+                  "only to your own Gmail, with the PDF": mail[0] == "gmail.send_self"
+                  and mail[1].get("attachments") == [out.get("vault_path")] and not {"to", "cc", "bcc"} & set(mail[1]),
+                  "nothing sent": True}
+        return _result(True, checks, error or f"{out.get('rounds')} round(s); issues left: {len(out.get('issues_left') or [])}")
+    finally:
+        (ctx.vault_dir / source).unlink(missing_ok=True)
+        docs = ctx.vault_dir / "Kairo" / "Documents"
+        for f in docs.glob(f"*{MARK}*") if docs.is_dir() else []:
+            f.unlink(missing_ok=True)
+        if doc_id is not None:
+            with Session(ctx.engine) as s:
+                row = s.get(Document, doc_id)
+                if row is not None:
+                    s.delete(row)
+                    s.commit()
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
     20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
-    29: t_lag, 30: t_health, 31: t_graph,
+    29: t_lag, 30: t_health, 31: t_graph, 33: t_knowledge_call, 34: t_recap, 35: t_document,
 }
 
 
@@ -857,9 +1031,9 @@ async def run(ctx: Context, *, version: str, ids: list[int] | None = None) -> di
             continue
         t0 = time.monotonic()
         try:
-            r = await asyncio.wait_for(fn(ctx), TEST_TIMEOUT_S)
+            r = await asyncio.wait_for(fn(ctx), TIMEOUTS.get(test_id, TEST_TIMEOUT_S))
         except asyncio.TimeoutError:
-            r = {"ok": False, "checks": {}, "detail": f"no answer within {TEST_TIMEOUT_S} s"}
+            r = {"ok": False, "checks": {}, "detail": f"no answer within {TIMEOUTS.get(test_id, TEST_TIMEOUT_S)} s"}
         except Exception as exc:   # a broken test is a failed test, never a crash
             log.exception("acceptance test %s", test_id)
             r = {"ok": False, "checks": {}, "detail": f"{type(exc).__name__}: {exc}"[:300]}

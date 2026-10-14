@@ -131,6 +131,7 @@ class PeopleNote(Strict):
     note: str = Field(default="", max_length=2000)
     contacted: bool = False
     relation: str | None = Field(default=None, max_length=60)
+    birthday: date | None = None   # YYYY-MM-DD (year unknown: 1900)
     email: str | None = Field(default=None, max_length=200)
 
     @field_validator("email")
@@ -384,8 +385,21 @@ class GmailSendSelf(Strict):
     subject: str = Field(min_length=1, max_length=300)
     body: str = Field(min_length=1, max_length=50_000)
     label: str | None = Field(default=None, max_length=100)
+    # Files from the owner's vault (relative paths), e.g. a study sheet or OLAT material. The executor
+    # reads them only from inside the vault; still only ever to the owner's own address.
+    attachments: list[Annotated[str, Field(min_length=1, max_length=300)]] | None = Field(default=None, max_length=5)
 
     _subject = field_validator("subject")(_one_line)
+
+    @field_validator("attachments")
+    @classmethod
+    def vault_paths(cls, v):
+        for path in v or []:
+            parts = path.replace("\\", "/").split("/")
+            if (path.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", path) or ".." in parts or "" in parts
+                    or any(c in path for c in "\x00\r\n")):
+                raise ValueError(f"attachments are vault paths like 'Kairo/Documents/x.pdf': {path!r}")
+        return v
 
     @field_validator("label")
     @classmethod
@@ -444,6 +458,44 @@ class CalendarDelete(Strict):
     event_id: str = Field(pattern=_GOOGLE_ID)
 
 
+class KnowledgeAskLater(Strict):
+    """Something Kairo needs to know about the owner: asked on the next getting-to-know-you call."""
+
+    question: str = Field(min_length=3, max_length=300)
+    about: str | None = Field(default=None, max_length=80)
+
+
+class KnowledgeAnswered(Strict):
+    """A queued question got its answer (the facts themselves go through people_note / profile_learn)."""
+
+    id: int = Field(ge=1)
+    summary: str = Field(min_length=1, max_length=300)
+
+
+class ProfileLearn(Strict):
+    """A fact about the owner, saved to the vault (10 Profile/Learned by Kairo.md)."""
+
+    fact: str = Field(min_length=3, max_length=500)
+
+
+class DocumentCreate(Strict):
+    """A document or slide deck the owner asked for: made, rendered, checked and fixed (max 3 rounds),
+    then saved to the vault and mailed to the owner's own address (no recipient field)."""
+
+    kind: Literal["document", "slides"]
+    title: str = Field(min_length=1, max_length=120)
+    brief: str = Field(min_length=1, max_length=4000)
+    sources: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(default_factory=list, max_length=5)
+    label: Literal["Kairo/School", "Kairo/Work"] | None = None
+
+    _title = field_validator("title")(_one_line)
+
+    @field_validator("sources")
+    @classmethod
+    def vault_paths(cls, v):
+        return GmailSendSelf.vault_paths(v)
+
+
 SCHEMAS: dict[str, type[Strict]] = {
     "gmail.search": GmailSearch,
     "gmail.read": GmailRead,
@@ -459,6 +511,10 @@ SCHEMAS: dict[str, type[Strict]] = {
     "people.note": PeopleNote,
     "captures.answer": CapturesAnswer,
     "wishlist.add": WishlistAdd,
+    "knowledge.ask_later": KnowledgeAskLater,
+    "knowledge.answered": KnowledgeAnswered,
+    "profile.learn": ProfileLearn,
+    "document.create": DocumentCreate,
     "finance.list": FinanceList,
     "health.list": HealthList,
     "memory.search": MemorySearch,
@@ -499,6 +555,7 @@ MIN_TIER: dict[str, int] = {
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
     "calendar.tag": 1, "loops.list": 0, "debrief": 0, "settings.list": 0, "settings.set": 1, "place.set": 1, "place.remove": 1, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
+    "knowledge.ask_later": 1, "knowledge.answered": 1, "profile.learn": 1, "document.create": 1,
     "gmail.send_self": 2, "calendar.move": 2,
     "gmail.trash": 2,   # v7: Gmail keeps trash 30 days
     "calendar.delete": 4,
@@ -538,6 +595,10 @@ DIRECT_TOOLS: dict[str, str] = {
     "loops_add": "loops.add",
     "loops_snooze": "loops.snooze",
     "loops_close": "loops.close",
+    "knowledge_ask_later": "knowledge.ask_later",
+    "knowledge_answered": "knowledge.answered",
+    "profile_learn": "profile.learn",
+    "document_create": "document.create",
 }
 
 # Fields that would let a tier-2 action reach other people. Never allowed on

@@ -134,6 +134,25 @@ class PortalItem(SQLModel, table=True):
     briefed: bool = Field(default=False, index=True)
 
 
+class Document(SQLModel, table=True):
+    """A document or slide deck the owner asked for, made through the gauntlet (v7 item 11)."""
+
+    __tablename__ = "documents"
+    id: int | None = Field(default=None, primary_key=True)
+    kind: str = "document"                      # document / slides
+    title: str
+    brief: str = Field(sa_column=Column(Text, nullable=False))
+    sources_json: str | None = None             # vault paths
+    label: str | None = None                    # Kairo/School, Kairo/Work
+    status: str = Field(default="queued", index=True)   # queued / working / done / error
+    rounds: int = 0
+    vault_path: str | None = None
+    issues_left_json: str | None = Field(default=None, sa_column=Column(Text))
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime | None = None
+
+
 class Brief(SQLModel, table=True):
     __tablename__ = "briefs"
     id: int | None = Field(default=None, primary_key=True)
@@ -268,6 +287,24 @@ class Call(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
     answered_at: datetime | None = None
     ended_at: datetime | None = None
+    purpose: str = Field(default="plain", index=True)    # plain / learn (getting to know the owner)
+    agenda_json: str | None = Field(default=None, sa_column=Column(Text))   # learn: question ids
+
+
+class KnowledgeItem(SQLModel, table=True):
+    """What Kairo still wants to know about the owner (question) or learned on a call (fact)."""
+
+    __tablename__ = "knowledge_items"
+    id: int | None = Field(default=None, primary_key=True)
+    kind: str = Field(default="question", index=True)    # question / fact
+    question: str | None = None
+    about: str | None = None
+    source: str = "chat"                                  # chat / rule
+    status: str = Field(default="open", index=True)      # open / answered / dropped / learned
+    asks: int = 0
+    answer: str | None = Field(default=None, sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=utcnow)
+    answered_at: datetime | None = None
 
 
 class Transaction(SQLModel, table=True):

@@ -5,6 +5,18 @@
 - Every PR also removes what it replaces and says what it removed.
 - Order: voice reply sound → voice-first capture → P1/P2 proven → capture from anywhere → judgment → semantic memory → coaching → profile import → P3–P5 → Obsidian graph → no SYSTEM writes into data (then OLAT on).
 - Owner only, app-wide; no visual brain; no WhatsApp bots.
+## 2026-10-14 — build: document gauntlet (v7 item 11)
+- Ask in chat for a document (A4) or slides: Sonnet writes the content into Kairo's own template (serif headings, one accent colour, no gradients, icons or emojis), Kairo's Chromium renders every page/slide to an image (offline, overflow measured), Sonnet critiques the images (layout, readability, consistency, "looks AI-made?") and fixes. Max 3 rounds; "good" doesn't count while text is cut off.
+- The PDF goes to vault `Kairo/Documents/` and to your own Gmail (label Kairo/School or Kairo/Work), with a push when it's ready.
+
+## 2026-10-14 — build: mail to yourself (v7 item 10)
+- Evening recap at 20:30 to your own Gmail, label Kairo/Recap: done today, still open, tomorrow, new on OLAT. Built by code, no model run. No notes about other people (item 14). Change the time or switch it off in More -> Settings.
+- Files go to your own Gmail: gmail.send_self takes up to 5 vault files (read only from inside the vault, 25 MB max), labels Kairo/School and Kairo/Work. Still no recipient field: nobody else can be reached.
+
+## 2026-10-14 — build: Kairo calls to get to know you (owner's request)
+- Kairo keeps a list of what it doesn't know: questions the model queues (knowledge_ask_later) plus rules (people without a relation, close people without a birthday, no family known). Never asks for passwords, codes, PINs or bank details.
+- At most one call a day, only at a good moment: after work (weekends from 10:00), before 21:00, calendar free, not at school, work or training. Declined or missed: another day. Needs 3+ questions (or one waiting 3 days).
+- On the call (Sonnet): 4 topics max, smart follow-ups, double-checks contradictions, accepts corrections, stops when you say so and hangs up itself. People go to the People table and vault `60 People/<name>.md` (with birthday), facts about you to `10 Profile/Learned by Kairo.md`. After the call one line: "Saved from our call: ...". Unanswered topics come back; asked 3 times = dropped.
 
 ## 2026-10-14 — build: school portal (OLAT), read-only (owner's request)
 - More -> Settings -> Logins: OLAT username and password, typed in the app only, encrypted on the PC (Windows DPAPI, bound to kairo-svc). Never in the repo, chat, logs, database or an API answer. The model has no tool for it.

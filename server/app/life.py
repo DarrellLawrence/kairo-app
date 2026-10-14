@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 import re
 import statistics
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+from pathlib import Path
 
 from sqlmodel import Session, func, select
 
 from .db import Chore, HealthDay, Person, ShoppingItem, Transaction, WishItem, utcnow
+
+log = logging.getLogger("kairo.life")
 
 MAX_CAMT = 10 * 1024 * 1024
 
@@ -125,7 +129,8 @@ def people_list(s: Session, name: str | None = None) -> list[Person]:
 
 
 def people_note(s: Session, *, name: str, note: str = "", contacted: bool = False, relation: str | None = None,
-                today: dt.date, email: str | None = None) -> Person:
+                today: dt.date, email: str | None = None, birthday: dt.date | None = None,
+                vault_dir: Path | None = None) -> Person:
     p = person_find(s, name)
     if p is None:
         p = Person(name=" ".join(name.split())[:80])
@@ -133,6 +138,8 @@ def people_note(s: Session, *, name: str, note: str = "", contacted: bool = Fals
         p.relation = relation[:60]
     if email:
         p.email = email.strip().lower()[:200]
+    if birthday:
+        p.birthday = birthday
     if note.strip():
         line = f"{today.isoformat()}: {note.strip()}"
         p.notes = f"{p.notes}\n{line}" if p.notes else line
@@ -142,7 +149,26 @@ def people_note(s: Session, *, name: str, note: str = "", contacted: bool = Fals
     s.add(p)
     s.commit()
     s.refresh(p)
+    if vault_dir is not None:
+        person_to_vault(Path(vault_dir), p)
     return p
+
+
+def person_to_vault(vault_dir: Path, p: Person) -> None:
+    """60 People/<name>.md, Kairo's own section (owner text in the file stays). Stays in the vault (item 14)."""
+    from . import vault
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", p.name).strip(" .") or "Unknown"
+    lines = [f"**{p.name}**" + (f" · {p.relation}" if p.relation else "")]
+    if p.birthday:
+        lines.append(f"Birthday: {p.birthday.day} {p.birthday:%B}" + (f" {p.birthday.year}" if p.birthday.year > 1900 else ""))
+    if p.email:
+        lines.append(f"Email: {p.email}")
+    if p.notes:
+        lines += ["", "Notes:", *[f"- {line}" for line in p.notes.splitlines()[-100:]]]
+    try:
+        vault.write_section(vault_dir, f"60 People/{safe}.md", "person", "\n".join(lines))
+    except Exception as exc:   # vault not reachable: the database still has it
+        log.warning("person not written to the vault: %s", exc)
 
 
 def wish_add(s: Session, *, person: str, title: str, price_chf: float | None = None, url: str | None = None,

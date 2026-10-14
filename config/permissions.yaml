@@ -32,6 +32,10 @@ actions:
   people.note:           1_internal
   captures.answer:       1_internal   # v8 B: the owner answered a quick question in chat
   wishlist.add:          1_internal   # v8 B: a gift idea on that person's wishlist (Kairo's own table)
+  knowledge.ask_later:   1_internal   # a question for the next getting-to-know-you call (no secrets: refused)
+  knowledge.answered:    1_internal
+  profile.learn:         1_internal   # vault 10 Profile/Learned by Kairo.md, Kairo's own section
+  document.create:       1_internal   # gauntlet: PDF in vault Kairo/Documents; the mail to self is gated again (tier 2)
   settings.list:         0_read       # owner settings (not the gate, not permissions)
   settings.set:          1_internal
   place.set:             1_internal   # home / school / work / training; only station names leave the PC

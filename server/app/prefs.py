@@ -180,6 +180,7 @@ SETTINGS = {
                      "these), water_l (daily goal), food_check (time, or null), study_sessions a week, faith_habit + "
                      "faith_after (an existing morning habit), snacks_week_chf, gifts_year_chf, style_month_chf, "
                      "savings [{name, chf, by}]."),
+    "recap": (str, "Evening recap mail to your own Gmail: a time like 20:30, or off (the default)."),
 }
 
 
@@ -211,6 +212,9 @@ def validate(key: str, value):
             if not v:
                 raise ValueError("English or German")
             return v
+        if key == "recap":
+            v = str(value).strip().lower()
+            return "off" if v in ("off", "no", "none", "aus") else _hhmm(v)
         if key == "models":
             if not isinstance(value, dict) or any(v not in ("haiku", "sonnet", "opus") for v in value.values()):
                 raise ValueError("models are haiku, sonnet or opus")
@@ -291,6 +295,11 @@ def apply(prefs: dict, *, schedule: dict, profile) -> None:
         schedule.setdefault("reviews", {}).update(prefs["review_times"])
     if prefs.get("models"):
         schedule.setdefault("models", {}).update(prefs["models"])
+    if prefs.get("recap") and prefs["recap"] != "off":
+        h, m = prefs["recap"].split(":")
+        schedule.setdefault("jobs", {}).setdefault("evening_recap", {})["cron"] = f"{int(m)} {int(h)} * * *"
+    else:   # off (the default): not planned at all
+        ((schedule.get("jobs") or {}).get("evening_recap") or {}).pop("cron", None)
     if prefs.get("brief_times"):
         mb = schedule.setdefault("jobs", {}).setdefault("morning_brief", {})
         for k, cron_days in (("weekdays", "1-5"), ("weekends", "6,0")):

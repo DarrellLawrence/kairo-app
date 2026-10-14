@@ -14,6 +14,8 @@ import {
   transcribe, unlockAudio,
 } from '../voice.js'
 
+const HANG_UP = /\s*\[\[hang up\]\]\s*$/i
+const HANG_UP_ANY = /\s*\[\[hang up\]\]\s*/gi   // the marker is never spoken or shown
 const BYE = /^(bye|goodbye|that'?s all|thanks,? bye|tsch(ü|ue)ss|ciao|adieu|auf wiederh|das war'?s|danke,? das war'?s)\b/i
 const LABEL = {
   connecting: 'Connecting', ringing: 'Kairo is calling', listening: 'Listening', thinking: 'Thinking',
@@ -154,7 +156,7 @@ export default function Call({ callId: initialId, onClose }) {
         }
       }
       ws.addEventListener('message', onMsg)
-      ws.send(JSON.stringify({ type: 'message', text: `(spoken, on a call) ${text}` }))
+      ws.send(JSON.stringify({ type: 'message', text: `(spoken, on a call) ${text}`, call_id: idRef.current }))
     }))
     l.turn = mine.catch(() => {})
     return mine
@@ -186,7 +188,8 @@ export default function Call({ callId: initialId, onClose }) {
       onNeedTap: () => { stopMonitor(); setNeedTap(true); return new Promise((resolve) => { l.afterTap = resolve }) },
       onStart: () => { if (speechEndedAt) timeTurn(speechEndedAt) },
     })
-    const out = (sentence) => {
+    const out = (piece) => {
+      const sentence = (piece || '').replace(HANG_UP_ANY, ' ').trim()
       if (!sentence || abort.signal.aborted || !l.on || l.phase === 'paused') return
       if (!spoken) {
         set('speaking')
@@ -209,9 +212,9 @@ export default function Call({ callId: initialId, onClose }) {
       if (answer.error) out(answer.text)
       else if (!spoken) out(answer.text.trim() || buf.trim())   // nothing came in pieces: the whole answer
       else out(buf.trim())
-      if (!spoken && l.on) caption(answer.text)   // paused meanwhile: the answer waits in the captions
+      if (!spoken && l.on) caption(answer.text.replace(HANG_UP_ANY, ' ').trim())   // paused meanwhile: the answer waits in the captions
     } else {
-      writing.then((a) => { if (!spoken && l.on && l.phase === 'paused') caption(a.text) })
+      writing.then((a) => { if (!spoken && l.on && l.phase === 'paused') caption(a.text.replace(HANG_UP_ANY, ' ').trim()) })
     }
     q.end()
     try {
@@ -221,6 +224,7 @@ export default function Call({ callId: initialId, onClose }) {
     }
     while (l.replay) await l.replay   // tapped "No sound?": let the replay finish first
     stopMonitor()
+    return Boolean(answer && !answer.error && HANG_UP.test(answer.text))
   }
 
   const listen = useCallback(async () => {
@@ -246,7 +250,9 @@ export default function Call({ callId: initialId, onClose }) {
           live.current.empty = 0
           setLog((x) => [...x, { who: 'me', text: heard }])
           if (BYE.test(heard)) { await say('Bye!'); hangup(true); return }
-          await reply(heard, speechEndedAt)
+          // Kairo wraps up a getting-to-know-you call itself ([[hang up]], never spoken).
+          const ending = await reply(heard, speechEndedAt)
+          if (ending && live.current.on && !live.current.interrupted) { hangup(true); return }
           if (['speaking', 'thinking'].includes(live.current.phase) || live.current.interrupted) listen()
         },
       })

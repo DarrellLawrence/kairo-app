@@ -39,7 +39,7 @@ from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
 from . import conflicts as conflicts_mod, health as health_mod, links as links_mod, status_files
-from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
+from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, knowledge, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError, models_dir as voice_models_dir, wav_problems
 from .voice import calls as voice_calls
@@ -60,7 +60,7 @@ from .tools import ToolRunner
 from .brain.claude_cli import ClaudeCLIBrain
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
+from .db import Approval, AuditLog, Call, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import REPO_ROOT, Settings, get_settings
 
@@ -287,7 +287,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = s_.get(CalendarTag, event_id)
             return row.type if row else "FIXED"
 
-    app.state.executor = Executor(secrets_dir=settings.secrets_dir, owner_email=profile.gmail, event_type=_event_type)
+    app.state.executor = Executor(secrets_dir=settings.secrets_dir, owner_email=profile.gmail, event_type=_event_type,
+                                  vault_dir=settings.vault_dir)
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile,
                               max_per_day=lambda: loops.max_pings(app.state.jobs.schedule))
     app.state.on_new_card = lambda card: None if getattr(app.state, "acceptance_running", False) else app.state.pusher.notify(
@@ -398,7 +399,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "pa": lambda ctx: app.state.pa.run(ctx),
                 "coach": lambda ctx: app.state.coach.run(ctx),
                 "olat": lambda ctx: _olat_job(ctx),
-                "chat_memory": lambda ctx: _memory_job(ctx)})
+                "chat_memory": lambda ctx: _memory_job(ctx),
+                "knowledge_call": lambda ctx: json.dumps(app.state.knowledge.run()),
+                "evening_recap": lambda ctx: json.dumps(app.state.recap.run()),
+                "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id)})
     app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                                        calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
                                        vault_dir=settings.vault_dir, config_dir=settings.config_dir)
@@ -426,6 +430,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.pa = pa_mod.PA(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                              executor=lambda: app.state.executor, gate=gate, vault_dir=settings.vault_dir, config_dir=settings.config_dir)
+    def _place_kind() -> str | None:
+        """Kind of the place the owner is at now (school / work / training / home), from location + Settings -> Places."""
+        with session_for(engine) as s_:
+            here = location.current_place(s_)
+            if not here:
+                return None
+            for p_ in prefs_mod.places(s_):
+                if p_.name.lower() == here.lower():
+                    return p_.kind
+        return None
+
+    app.state.knowledge = knowledge.Caller(engine=engine, tz=profile.tz, times=lambda: loops.good_times(app.state.jobs.schedule),
+                                           pusher=pusher, busy=lambda now: app.state.loops._busy(now), place_kind=_place_kind)
+    from . import gauntlet as gauntlet_mod
+
+    app.state.gauntlet = gauntlet_mod.Gauntlet(
+        engine=engine, gate=gate, executor=lambda: app.state.executor, vault_dir=settings.vault_dir,
+        renderer=gauntlet_mod.ChromiumRenderer(settings.data_dir.parent / "tools" / "browser"),
+        language=profile.default_language, notify=lambda body: pusher.notify("Kairo", body, "/#chat", source="document"))
+
+    def _document_job(ctx, doc_id=None) -> str:
+        from .db import Document
+        from .scheduler import Skipped
+        if doc_id is None:   # run from More -> Jobs: the oldest waiting one
+            doc = ctx.session.exec(select(Document).where(Document.status == "queued").order_by(Document.id)).first()
+            if doc is None:
+                raise Skipped("no document waiting")
+            doc_id = doc.id
+        return json.dumps(app.state.gauntlet.run(ctx, doc_id))
+
+    tools.on_document = lambda doc_id: threading.Thread(
+        target=app.state.jobs.run_job, args=("document",), kwargs={"forced": True, "doc_id": doc_id},
+        name=f"document-{doc_id}", daemon=True).start()
+
+    from . import recap as recap_mod
+    app.state.recap = recap_mod.Recap(engine=engine, gate=gate, executor=lambda: app.state.executor, tz=profile.tz,
+                                      calendar=lambda day: app.state.brief.calendar(day))
     app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
     app.state.coach = coach_mod.Coacher(engine=engine, profile=profile, schedule=app.state.jobs.schedule,
                                         vault_dir=settings.vault_dir)
@@ -707,14 +748,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await ws.send_json({"type": "error", "message": f"message longer than {MAX_PROMPT_CHARS} characters"})
                     continue
                 # Shielded: hanging up cancels this handler, not the turn (v7).
-                turn = asyncio.get_running_loop().create_task(_handle_message(ws, data.get("thread_id"), text_in))
+                turn = asyncio.get_running_loop().create_task(
+                    _handle_message(ws, data.get("thread_id"), text_in, call_id=data.get("call_id")))
                 _turns.add(turn)
                 turn.add_done_callback(_turns.discard)
                 await asyncio.shield(turn)
         except WebSocketDisconnect:
             return
 
-    async def _handle_message(ws: WebSocket, thread_id, text_in: str) -> None:
+    def _call_notes(call_id) -> str | None:
+        """On a getting-to-know-you call the model gets Kairo's agenda with each turn (not stored as the owner's words)."""
+        if not isinstance(call_id, int):
+            return None
+        with session_for(engine) as s_:
+            c = s_.get(Call, call_id)
+            if c is None or c.purpose != "learn" or c.status != "answered":
+                return None
+            return knowledge.agenda_prompt(s_, c)
+
+    async def _handle_message(ws: WebSocket, thread_id, text_in: str, call_id=None) -> None:
         gone = False
 
         async def send(frame: dict) -> None:
@@ -748,12 +800,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await send({"type": "thread", "id": tid})
         chat_purpose = "call" if text_in.startswith("(spoken, on a call)") else (
             coach_mod.purpose_for(text_in) or "chat")   # calls want speed; money questions go to Opus (v8 E)
+        notes = _call_notes(call_id)
+        prompt_in = text_in
+        if notes:
+            chat_purpose = "learn_call"   # a getting-to-know-you call: Haiku answers on the call (fix plan 29)
+            prompt_in = f"{notes}\n\nThe owner said: {text_in}"
 
         parts: list[str] = []
         final_text: str | None = None
         error = None
         new_sid = None
-        async for event in owner_turn(text_in, session_id=session_id, thread_id=tid, purpose=chat_purpose, before_id=msg_in.id):
+        async for event in owner_turn(prompt_in, session_id=session_id, thread_id=tid, purpose=chat_purpose, before_id=msg_in.id):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
@@ -777,7 +834,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 chat.add_message(s, tid, "system", f"[{status}] {error.text}")
                 await send({"type": "error", "message": error.text, "status": status})
                 return
-            msg = chat.add_message(s, tid, "kairo", final_text or "")
+            msg = chat.add_message(s, tid, "kairo", (final_text or "").replace("[[hang up]]", "").strip())
         await send({"type": "done", "text": final_text or "", "message_id": msg.id})
         fold_memory_soon()
         if chat_purpose == "call":
@@ -1000,6 +1057,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             broken_selftests=broken_selftests, schedule=app.state.jobs.schedule,
             memory=app.state.memory, vault_dir=settings.vault_dir, profile=profile, coach=app.state.coach, pa=app.state.pa,
             share=acceptance_share, runner=runner, health=app.state.health, data_dir=settings.data_dir,
+            knowledge=app.state.knowledge, recap=app.state.recap, gauntlet=app.state.gauntlet,
             ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
                 prompt, system, images=images, purpose=purpose))
 
@@ -2139,9 +2197,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             runner.brain.close_warm()
         with session_for(engine) as s:
             try:
-                return voice_calls.as_dict(voice_calls.set_status(s, call_id, "answered" if action == "answer" else "ended"))
+                before = voice_calls.get(s, call_id)
+                was_open = before is not None and before.status in ("ringing", "answered")
+                c = voice_calls.set_status(s, call_id, "answered" if action == "answer" else "ended")
             except KeyError:
                 raise HTTPException(404, "no such call")
+            if action == "end" and was_open and c.purpose == "learn":
+                line = knowledge.finish(s, c)   # unanswered topics come back another day
+                if line:
+                    pusher.notify("Kairo", line, "/#chat", source="call")
+                    thread = chat.main_thread(s, brain_name=runner.brain.name)
+                    chat.add_message(s, thread.id, "kairo", line)
+            return voice_calls.as_dict(c)
 
     @app.post("/api/voice/options/{key}")
     def voice_option(key: str, body: dict):

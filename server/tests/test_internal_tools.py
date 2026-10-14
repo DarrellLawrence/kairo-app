@@ -80,7 +80,11 @@ def test_tool_list_has_no_write_tools(setup):
                      # v8 E: coaching log (Kairo's own table) and status (read)
                      "coach_log", "coach_status",
                      # v8 G: the owner's own profile into the vault
-                     "profile_import", "profile_apply"}
+                     "profile_import", "profile_apply",
+                     # knowledge calls: Kairo's own questions and the owner's profile/people notes
+                     "knowledge_ask_later", "knowledge_answered", "profile_learn",
+                     # document gauntlet: Kairo-owned vault file + mail to the owner's own address
+                     "document_create"}
     propose = [t for t in tools if t["name"] == "propose_action"][0]
     assert "gmail.send" in propose["inputSchema"]["properties"]["action"]["enum"]
     assert not any("pay" in a or "money" in a for a in propose["inputSchema"]["properties"]["action"]["enum"])

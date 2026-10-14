@@ -103,7 +103,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -r server/requirements-dev.txt -r server/requirements-browser.txt
       - run: python -m playwright install --with-deps chromium
-      - run: python -m pytest -o addopts="" tests/test_portal.py tests/test_portal_browser.py -s
+      - run: python -m pytest -o addopts="" tests/test_portal.py tests/test_portal_browser.py tests/test_gauntlet.py -s
         working-directory: server
 
   # The setup zip itself has hands (fix P0): built like the release (with its release check),

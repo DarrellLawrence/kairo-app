@@ -316,6 +316,31 @@ def test_mail_to_self_goes_only_to_the_owner(env):
     assert env["fake"].labels["Kairo/School"] in env["fake"].messages[out["sent_id"]]["labelIds"]
 
 
+def test_mail_to_self_with_files_from_the_vault(env, migrated):
+    vault = migrated.data_dir / "vault"
+    (vault / "Kairo" / "Documents").mkdir(parents=True)
+    (vault / "Kairo" / "Documents" / "Thermo.pdf").write_bytes(b"%PDF-1.4 thermo")
+    ex = Executor(secrets_dir=env["executor"].secrets_dir, transport=env["fake"].transport(),
+                  owner_email="owner@example.com", vault_dir=vault)
+    d = propose("gmail.send_self", {"subject": "Study sheet", "body": "Attached.", "label": "Kairo/School",
+                                    "attachments": ["Kairo/Documents/Thermo.pdf"]})
+    ex.run(d.action, d.args)
+    msg = decode_raw(env["fake"].sent[-1]["raw"])
+    files = [(a.get_filename(), a.get_content()) for a in msg.iter_attachments()]
+    assert msg["To"] == "owner@example.com" and files == [("Thermo.pdf", b"%PDF-1.4 thermo")]
+    for bad in ("Kairo/Documents/missing.pdf",):
+        d = propose("gmail.send_self", {"subject": "x", "body": "y", "attachments": [bad]})
+        with pytest.raises(ValueError):
+            ex.run(d.action, d.args)
+    outside = migrated.data_dir / "secrets" / "x.txt"
+    outside.write_text("secret")
+    (vault / "Kairo" / "link").symlink_to(outside.parent, target_is_directory=True) if hasattr(outside, "symlink_to") and __import__("sys").platform != "win32" else None
+    if (vault / "Kairo" / "link").exists():
+        d = propose("gmail.send_self", {"subject": "x", "body": "y", "attachments": ["Kairo/link/x.txt"]})
+        with pytest.raises(ValueError, match="vault"):
+            ex.run(d.action, d.args)
+
+
 def test_mail_to_self_needs_the_profile_address(env):
     d = propose("gmail.send_self", {"subject": "x", "body": "y"})
     with pytest.raises(ValueError):

@@ -420,6 +420,27 @@ def test_mail_to_self_runs_and_has_no_recipient_field(gate):
     assert gate.decide(*propose("gmail.send_self", {**ok, "subject": "a\nBcc: x@example.com"}), ctx()).verdict == "deny"
 
 
+def test_mail_to_self_with_vault_files(gate):
+    ok = {"subject": "Study sheet: Thermo", "body": "Attached.", "label": "Kairo/School",
+          "attachments": ["Kairo/Documents/Thermo summary.pdf", "40 School/OLAT/Math/Script.pdf"]}
+    d = gate.decide(*propose("gmail.send_self", ok), ctx(origin="job"))
+    assert (d.verdict, d.tier) == ("execute", 2)
+
+
+@pytest.mark.parametrize("files", [
+    ["../secrets/google-write.json"],
+    ["Kairo/../../secrets/x"],
+    ["/etc/passwd"],
+    ["C:\\Kairo\\data\\secrets\\x"],
+    ["\\\\server\\share\\x"],
+    [""],
+    ["Kairo/a.pdf"] * 6,                          # at most 5
+])
+def test_mail_to_self_attachments_stay_in_the_vault(gate, files):
+    args = {"subject": "x", "body": "y", "attachments": files}
+    assert gate.decide(*propose("gmail.send_self", args), ctx()).verdict == "deny"
+
+
 @pytest.mark.parametrize("kind", ["FIXED", "SOCIAL", "FLEXIBLE"])
 def test_tagging_an_event_is_internal(gate, kind):
     d = gate.decide(P + "calendar_tag", {"event_id": "ev1", "type": kind}, ctx())
@@ -513,6 +534,51 @@ def test_settings_tools_are_internal(gate, tool, args, tier):
 ])
 def test_unknown_settings_are_denied(gate, tool, args):
     assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+# ---------------------------------------------------------------- knowledge calls (written before the code)
+
+@pytest.mark.parametrize("tool,args", [
+    ("knowledge_ask_later", {"question": "Who is Anna to you?", "about": "Anna"}),
+    ("knowledge_answered", {"id": 4, "summary": "Anna: a friend, birthday 9 March"}),
+    ("profile_learn", {"fact": "Trains on Tuesdays and Thursdays"}),
+    ("people_note", {"name": "Anna", "relation": "friend", "birthday": "2001-03-09"}),
+])
+def test_knowledge_tools_are_internal(gate, tool, args):
+    d = gate.decide(P + tool, args, ctx())
+    assert (d.verdict, d.tier) == ("allow", 1)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("knowledge_ask_later", {"question": ""}),
+    ("knowledge_ask_later", {"question": "x" * 301}),
+    ("knowledge_answered", {"id": 0, "summary": "x"}),
+    ("profile_learn", {"fact": ""}),
+    ("profile_learn", {"fact": "x", "path": "../../etc"}),                   # no say in where it goes
+    ("people_note", {"name": "Anna", "birthday": "9th of March"}),
+])
+def test_knowledge_tools_bad_args_denied(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+# ---------------------------------------------------------------- document gauntlet (written before the code)
+
+def test_document_create_is_internal(gate):
+    d = gate.decide(P + "document_create", {"kind": "document", "title": "Thermo summary", "brief": "One page, key formulas",
+                                            "sources": ["40 School/Thermo/notes.md"], "label": "Kairo/School"}, ctx())
+    assert (d.verdict, d.tier) == ("allow", 1)
+
+
+@pytest.mark.parametrize("args", [
+    {"kind": "spreadsheet", "title": "x", "brief": "y"},
+    {"kind": "document", "title": "", "brief": "y"},
+    {"kind": "document", "title": "x", "brief": "y", "sources": ["../secrets/x"]},
+    {"kind": "document", "title": "x", "brief": "y", "sources": ["a.md"] * 6},
+    {"kind": "document", "title": "x", "brief": "y", "label": "INBOX"},
+    {"kind": "document", "title": "x", "brief": "y", "to": ["someone@example.com"]},
+])
+def test_document_create_bad_args_denied(gate, args):
+    assert gate.decide(P + "document_create", args, ctx()).verdict == "deny"
 
 
 # ---------------------------------------------------------------- v8 block B: quick questions + wishlists (written before the code)

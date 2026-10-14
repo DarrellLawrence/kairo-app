@@ -52,6 +52,7 @@ DEFAULT_CRON = {
     "lerndoku_prompt": "30 17 * * 5",
     "promises": "10 7-21 * * *",
     "olat": "5 6 * * *",
+    "evening_recap": "30 20 * * *",
 }
 # Silent housekeeping: no model, no push unless it fails. Allowed in the quiet window.
 QUIET_EXEMPT = {"backup", "restore_test"}
@@ -76,7 +77,20 @@ JOB_TITLES = {
     "coach": "Coach: training, food and water, study, faith",
     "olat": "School portal (OLAT, read-only)",
     "chat_memory": "Conversation memory",
+    "knowledge_call": "Getting-to-know-you call (max 1 a day)",
+    "evening_recap": "Evening recap mail (to your own Gmail)",
+    "document": "Document gauntlet (write, render, check, fix)",
 }
+
+
+CRON_JOBS = ("backup", "restore_test", "lerndoku_prompt", "promises", "olat", "evening_recap")
+OPT_IN = ("evening_recap",)   # off until the owner sets a time in Settings (prefs.apply writes the cron)
+
+
+def cron_jobs(schedule: dict | None) -> list[str]:
+    """The fixed-time jobs to plan; an opt-in job only once the settings gave it a time."""
+    jobs = (schedule or {}).get("jobs") or {}
+    return [n for n in CRON_JOBS if n not in OPT_IN or (jobs.get(n) or {}).get("cron")]
 
 
 class Skipped(Exception):
@@ -412,6 +426,9 @@ class Jobs:
             every = ((self.schedule.get("jobs") or {}).get("open_loops") or {}).get("every_minutes") or LOOPS_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["open_loops"],
                           id="open_loops", misfire_grace_time=600)
+        if "knowledge_call" in self.bodies:   # checks every 30 min; calls at most once a day, at a good moment
+            sched.add_job(self.run_job, IntervalTrigger(minutes=30, timezone=tz), args=["knowledge_call"],
+                          id="knowledge_call", misfire_grace_time=600)
         if "pa" in self.bodies:
             every = ((self.schedule.get("jobs") or {}).get("pa") or {}).get("every_minutes") or PA_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["pa"], id="pa",
@@ -420,7 +437,7 @@ class Jobs:
             every = ((self.schedule.get("jobs") or {}).get("coach") or {}).get("every_minutes") or COACH_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["coach"], id="coach",
                           misfire_grace_time=900)
-        for name in ("backup", "restore_test", "lerndoku_prompt", "promises", "olat"):
+        for name in cron_jobs(self.schedule):
             if name in self.bodies:
                 sched.add_job(self.run_job, cron_trigger(self._cron(name), tz), args=[name], id=name)
         if "capture_process" in self.bodies:

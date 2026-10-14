@@ -7,6 +7,7 @@ never sees the write token.
 from __future__ import annotations
 
 import base64
+import mimetypes
 from email.message import EmailMessage
 from email.utils import getaddresses
 from pathlib import Path
@@ -21,8 +22,10 @@ KAIRO_HOLD_PREFIX = "[Kairo] "
 
 class Executor:
     def __init__(self, *, secrets_dir: Path, transport: httpx.BaseTransport | None = None,
-                 owner_email: str | None = None, event_type: Callable[[str], str] | None = None):
+                 owner_email: str | None = None, event_type: Callable[[str], str] | None = None,
+                 vault_dir: Path | None = None):
         self.secrets_dir = Path(secrets_dir)
+        self.vault_dir = Path(vault_dir) if vault_dir else None   # gmail.send_self attachments come only from here
         self._transport = transport
         self.owner_email = owner_email   # profile.gmail: the only address gmail.send_self can reach
         self.event_type = event_type or (lambda event_id: "FIXED")   # Kairo's calendar tags (v7)
@@ -86,11 +89,26 @@ class Executor:
         # The recipient comes from the profile, never from the args (there is no field for it).
         if not self.owner_email:
             raise ValueError("no own address in config/profile.yaml (gmail:)")
+        files = [self._vault_file(p) for p in a.get("attachments") or []]
+        if sum(len(data) for _, data in files) > MAX_ATTACH:
+            raise ValueError("attachments too big for one mail (25 MB)")
         sent = g.request("POST", "/gmail/v1/users/me/messages/send",
-                         json_body={"raw": _raw(to=[self.owner_email], cc=[], subject=a["subject"], body=a["body"])})
+                         json_body={"raw": _raw(to=[self.owner_email], cc=[], subject=a["subject"], body=a["body"],
+                                                files=files)})
         if a.get("label"):
             self._gmail_label(g, {"message_id": sent["id"], "add": [a["label"]], "remove": []})
         return {"sent_id": sent.get("id"), "to": "owner"}
+
+    def _vault_file(self, rel: str) -> tuple[str, bytes]:
+        if self.vault_dir is None:
+            raise ValueError("no vault configured for attachments")
+        root = self.vault_dir.resolve()
+        target = (root / rel.replace("\\", "/")).resolve()   # symlinks resolved: must still be inside the vault
+        if root not in target.parents:
+            raise ValueError(f"attachment outside the vault: {rel}")
+        if not target.is_file():
+            raise ValueError(f"attachment not found in the vault: {rel}")
+        return target.name, target.read_bytes()
 
     def _calendar_move(self, g: GoogleAPI, a: dict) -> dict:
         kind = self.event_type(a["event_id"])
@@ -148,8 +166,12 @@ def _refs(existing: str | None, message_id: str | None) -> str | None:
     return " ".join(parts) or None
 
 
+MAX_ATTACH = 25 * 1024 * 1024
+
+
 def _raw(*, to: list[str], cc: list[str], subject: str, body: str,
-         in_reply_to: str | None = None, references: str | None = None) -> str:
+         in_reply_to: str | None = None, references: str | None = None,
+         files: list[tuple[str, bytes]] | None = None) -> str:
     msg = EmailMessage()
     msg["To"] = ", ".join(to)
     if cc:
@@ -160,6 +182,10 @@ def _raw(*, to: list[str], cc: list[str], subject: str, body: str,
     if references:
         msg["References"] = references
     msg.set_content(body)
+    for name, data in files or []:
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        maintype, subtype = ctype.split("/", 1)
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
     return base64.urlsafe_b64encode(msg.as_bytes()).decode().rstrip("=")
 
 

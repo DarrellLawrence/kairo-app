@@ -852,6 +852,14 @@ function PrefsBlock() {
         <label className="k-field">Most pings a day
           <input type="number" min={1} max={20} defaultValue={st.max_pings || 6} onBlur={(e) => save('max_pings', Number(e.target.value))} />
         </label>
+        {st.recap === 'off'
+          ? <Button variant="secondary" size="sm" onClick={() => save('recap', '20:30')} style={{ marginBottom: 12 }}>Turn on the evening recap mail</Button>
+          : (
+            <>
+              {time('Evening recap mail', st.recap || '20:30', (v) => save('recap', v))}
+              <Button variant="secondary" size="sm" onClick={() => save('recap', 'off')} style={{ marginBottom: 12 }}>No recap mail</Button>
+            </>
+          )}
         <label className="k-field">Language
           <select defaultValue={st.language || 'English'} onChange={(e) => save('language', e.target.value)}><option value="English">English</option><option value="German">Deutsch</option></select>
         </label>
