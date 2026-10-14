@@ -94,14 +94,7 @@ class Triage:
         if not mails:
             raise Skipped("no new mail")
         tz = ctx.jobs.profile.tz
-        prompt = PROMPT.format(today=dt.datetime.now(tz).date().isoformat(), language=ctx.jobs.profile.default_language,
-                               emails="\n\n".join(untrusted(f"an email (id {m['id']})", m) for m in mails))
-        answer = ctx.ask(prompt, JOB_RULES)
-        if not answer.ok:
-            raise RuntimeError(f"model failed: {answer.error or answer.status}")
-        rows = extract_json(answer.text)
-        if not isinstance(rows, list):
-            raise ValueError("triage answer is not a list")
+        rows = classify(mails, ctx.ask, today=dt.datetime.now(tz).date(), language=ctx.jobs.profile.default_language)
         by_id = {m["id"]: m for m in mails}
         counts = {"reply": 0, "fyi": 0, "ignore": 0, "suspicious": 0, "tasks": 0}
         for row in rows:
@@ -148,6 +141,21 @@ class Triage:
             audit(s, actor="backend", action="gmail.label", tier=2, args=decision.args, outcome="executed (triage, in digest)")
         except Exception as exc:   # a label that fails is not worth failing the triage for
             audit(s, actor="backend", action="gmail.label", tier=2, args=decision.args, outcome=f"failed: {exc}")
+
+
+def classify(mails: list[dict], ask, *, today: dt.date, language: str) -> list[dict]:
+    """The model sorts mails: data only, no side effects (the triage job and acceptance test 7 use it).
+    ask(prompt, system) -> AskResult. Rows whose id isn't one of the mails are dropped."""
+    prompt = PROMPT.format(today=today.isoformat(), language=language,
+                           emails="\n\n".join(untrusted(f"an email (id {m['id']})", m) for m in mails))
+    answer = ask(prompt, JOB_RULES)
+    if not answer.ok:
+        raise RuntimeError(f"model failed: {answer.error or answer.status}")
+    rows = extract_json(answer.text)
+    if not isinstance(rows, list):
+        raise ValueError("triage answer is not a list")
+    ids = {m["id"] for m in mails}
+    return [r for r in rows if isinstance(r, dict) and r.get("id") in ids]
 
 
 def needs_reply(s: Session, limit: int = 5) -> list[TriagedEmail]:

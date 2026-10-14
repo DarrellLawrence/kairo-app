@@ -206,6 +206,24 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
         for w in st.get("warnings") or []:
             r.add("  warning:", w)
 
+    r.h("Acceptance (docs/ACCEPTANCE.md, on this PC)")
+    value = one("SELECT value FROM settings WHERE key='acceptance.results'")
+    try:
+        acc = json.loads(value) if value and not str(value).startswith("ERROR") else None
+    except (TypeError, ValueError):
+        acc = None
+    if not acc:
+        r.add("  not run yet")
+    else:
+        last = acc.get("last_run") or {}
+        r.add(f"  last run {last.get('at')} on {last.get('version')}: {last.get('passed')}/{last.get('total')} passed "
+              f"({last.get('seconds')}s)")
+        for tid, res in sorted((acc.get("tests") or {}).items(), key=lambda x: int(x[0])):
+            mark = "PASS" if res.get("ok") else "FAIL"
+            failed = [k for k, v in (res.get("checks") or {}).items() if not v]
+            r.add(f"  {mark} #{tid} ({res.get('by')}, {res.get('version')}): {res.get('detail', '')[:160]}"
+                  + (f" | failed: {', '.join(failed)}" if failed else ""))
+
 
 def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
     r.h("G.6 releases and update state")

@@ -26,6 +26,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
+from . import acceptance as acceptance_mod
 from . import config_layers
 from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
@@ -50,6 +51,7 @@ from .google.oauth import WEB_CLIENT, GoogleOAuth, OAuthError
 from .mcp_tools import tool_list, tool_names
 from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
+from .brain.claude_cli import ClaudeCLIBrain
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
 from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
@@ -156,11 +158,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pass
 
     def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
-                   system: str | None = None, before_id: int | None = None):
-        """The one way an owner message reaches the model: chat, calls and the self-test (fix P0,
-        2026-10-14: a self-test with its own prompt and tools was green while chat had none)."""
+                   system: str | None = None, before_id: int | None = None, via=None):
+        """The one way an owner message reaches the model: chat, calls, the self-test and the acceptance
+        tests (fix P0, 2026-10-14: a self-test with its own prompt and tools was green while chat had
+        none). via: another runner, only for acceptance's deliberately broken tool-server copy."""
         system = system or system_prompt(thread_id=thread_id, fresh=session_id is None, before_id=before_id)
-        return runner.stream(text, session_id=session_id, system=system, tools=model_tools,
+        return (via or runner).stream(text, session_id=session_id, system=system, tools=model_tools,
                              origin="owner_chat", thread_id=thread_id, purpose=purpose,
                              model=model or model_table.pick(purpose, app.state.jobs.schedule))
 
@@ -173,13 +176,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = asyncio.create_task(run_forever(Housekeeping(app)))
+        background = []
         if os.environ.get("KAIRO_SCHEDULER", "1") != "0":   # tests switch it off
             app.state.jobs.start()
+            background.append(asyncio.create_task(acceptance_after_release(app)))
             if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
                 asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
         yield
         app.state.jobs.stop()
         task.cancel()
+        for b in background:
+            b.cancel()
         engine.dispose()
 
     app = FastAPI(title="Kairo", lifespan=lifespan)
@@ -195,7 +202,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.executor = Executor(secrets_dir=settings.secrets_dir, owner_email=profile.gmail, event_type=_event_type)
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
-    app.state.on_new_card = lambda card: app.state.pusher.notify(
+    app.state.on_new_card = lambda card: None if getattr(app.state, "acceptance_running", False) else app.state.pusher.notify(
         f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
     inbox_dir = settings.data_dir / "inbox"
     pusher = app.state.pusher
@@ -709,12 +716,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.fold_memory_soon = fold_memory_soon
 
-    async def _owner_path_run(token: str, due_iso: str, system: str) -> dict:
+    async def _owner_path_run(token: str, due_iso: str, system: str, via=None) -> dict:
         """The self-test's turn, through owner_turn() exactly like an owner message (fix P0, 2026-10-14)."""
         before = app.state.tool_calls.get(selftest_mod.TOOL, 0)
         out = {"used": False, "error": None, "mcp": "unknown", "listed": []}
         async for event in owner_turn(selftest_mod.prompt(token, due_iso), session_id=None, thread_id=None,
-                                      purpose="selftest", model="haiku", system=system):
+                                      purpose="selftest", model="haiku", system=system, via=via):
             if event.kind is EventKind.session:
                 data = event.data or {}
                 servers = {x.get("name"): x.get("status") for x in data.get("mcp_servers") or []}
@@ -747,6 +754,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         install/update, boot check). notify=0: the installer reports instead (it may roll back)."""
         if not is_local_request(request):
             raise HTTPException(403, "self-test only from this PC")
+        return await run_tools_selftest(notify=bool(notify), voice=bool(voice), browser=bool(browser))
+
+    async def run_tools_selftest(*, notify: bool, voice: bool, browser: bool) -> dict:
         started = time.monotonic()
         env = runner.brain.hook_env("owner_chat") if hasattr(runner.brain, "hook_env") else {}
         hooks = await asyncio.to_thread(selftest_mod.hook_checks, settings.workspace_dir, env)
@@ -798,6 +808,118 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if notify and not result["ok"] and (prev.get("ok", True) or prev.get("reason") != result["reason"]):
             pusher.notify("Kairo", f"Self-test failed: {result['reason']}"[:200], "/#today")
         return result
+
+    # ---------------------------------------------------------------- acceptance tests on the PC (KICKOFF v8)
+
+    def release_version() -> str:
+        try:
+            return str(json.loads((REPO_ROOT / "release.json").read_text(encoding="utf-8"))["version"])
+        except (OSError, ValueError, KeyError):
+            return "dev"
+
+    async def acceptance_turn(text: str) -> acceptance_mod.Turn:
+        """An owner message through owner_turn(), like chat, but not saved in the one conversation."""
+        out = acceptance_mod.Turn()
+        parts = []
+        chat_model = model_table.pick("chat", app.state.jobs.schedule)   # tested like chat, counted as acceptance
+        async for event in owner_turn(text, session_id=None, thread_id=None, purpose="acceptance", model=chat_model):
+            if event.kind is EventKind.text:
+                parts.append(event.text)
+            elif event.kind is EventKind.result:
+                out.reply = (event.text or "".join(parts)).strip()
+            elif event.kind is EventKind.tool_use:
+                out.tools.append(str((event.data or {}).get("name", "")))
+            elif event.kind is EventKind.error:
+                out.error = event.text or "error"
+        out.reply = out.reply or "".join(parts).strip()
+        return out
+
+    def acceptance_classify(mail: dict) -> list[dict]:
+        ask = lambda prompt, system: app.state.jobs.ask_brain(prompt, system, purpose="triage")   # noqa: E731
+        return triage.classify([mail], ask, today=dt.datetime.now(profile.tz).date(), language=profile.default_language)
+
+    async def broken_selftests() -> dict:
+        """Self-test honesty: the same checks on throwaway copies, never the live install. A tool server
+        that can't start (like a missing mcp_kairo), and a voice without its model files."""
+        ws = settings.data_dir / "acceptance" / "broken-tool-server"
+        cfg = write_workspace(ws, tool_url=f"http://127.0.0.1:{settings.port}/internal/tools", token="acceptance")
+        spec = json.loads(cfg.read_text(encoding="utf-8"))
+        for server in spec["mcpServers"].values():
+            server["args"] = ["-m", "mcp_kairo_missing_on_purpose"]
+        cfg.write_text(json.dumps(spec), encoding="utf-8")
+        broken_runner = chat.BrainRunner(ClaudeCLIBrain(claude_bin=settings.claude_bin, workspace_dir=ws, mcp_config=cfg,
+                                                        timeout_s=settings.brain_timeout_s, extra_env=hook_env))
+        due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        token = secrets.token_hex(4)
+        system = system_prompt(thread_id=None, fresh=True)
+        r = await _owner_path_run(token, due.isoformat(), system, via=broken_runner)
+        await asyncio.to_thread(_take_test_task, token)
+        ok_ctx = {"profile": True, "goals": True, "state": "ok", "personality": "current", "detail": ""}
+        tool_server = selftest_mod.verdict(hooks={"deny": True, "allow": True, "detail": ""}, mcp=r["mcp"],
+                                           listed=r["listed"], expected=list(model_tools), tool_used=r["used"],
+                                           tool_arrived=r["arrived"], task_found=False, claude_error=r["error"],
+                                           claude_status="ok", context=ok_ctx)
+        empty = settings.data_dir / "acceptance" / "no-voice-models"
+        empty.mkdir(parents=True, exist_ok=True)
+        voice_r = await asyncio.to_thread(Voice(empty, site_dir=tool_sites.site("voice", settings.data_dir)).selftest)
+        return {"tool server": tool_server, "voice model": voice_r}
+
+    app.state.acceptance_running = False
+
+    def acceptance_ctx() -> acceptance_mod.Context:
+        return acceptance_mod.Context(
+            engine=engine, tz=profile.tz, turn=acceptance_turn, classify_mail=acceptance_classify, gate=gate,
+            selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
+            broken_selftests=broken_selftests)
+
+    async def run_acceptance(ids: list[int] | None = None) -> dict:
+        if app.state.acceptance_running:
+            return {}
+        app.state.acceptance_running = True
+        try:
+            results = await acceptance_mod.run(acceptance_ctx(), version=release_version(), ids=ids)
+        finally:
+            app.state.acceptance_running = False
+        failed = [acceptance_mod.BY_ID[i].name for i, r in results.items() if not r["ok"]]
+        if failed:
+            pusher.notify("Kairo acceptance", f"{len(failed)} of {len(results)} failed: {', '.join(failed)}. More → System → Acceptance.",
+                          "/#more")
+        return results
+
+    app.state.run_acceptance = run_acceptance
+    app.state.acceptance_ctx = acceptance_ctx
+    app.state.release_version = release_version
+    app.state.engine = engine
+    app.state.profile = profile
+
+    @app.get("/api/acceptance")
+    def acceptance_report():
+        with session_for(engine) as s:
+            return acceptance_mod.report(s, version=release_version(), running=app.state.acceptance_running)
+
+    @app.post("/api/acceptance/run")
+    async def acceptance_start(body: dict | None = None):
+        """Runs the automated tests now, in the background (minutes: they use the real model)."""
+        if app.state.acceptance_running:
+            return {"started": False, "reason": "already running"}
+        ids = [int(i) for i in (body or {}).get("ids") or [] if str(i).isdigit()] or None
+        task = asyncio.create_task(run_acceptance(ids))
+        app.state.acceptance_task = task
+        return {"started": True}
+
+    @app.post("/api/acceptance/{test_id}/manual")
+    def acceptance_manual(test_id: int, body: dict):
+        """The owner tapped Pass/Fail on a manual test (M) after doing it on the iPhone."""
+        spec = acceptance_mod.BY_ID.get(test_id)
+        if spec is None or spec.kind != "manual":
+            raise HTTPException(400, "not a manual test")
+        ok = body.get("ok")
+        if not isinstance(ok, bool):
+            raise HTTPException(400, "ok must be true or false")
+        with session_for(engine) as s:
+            acceptance_mod.record(s, test_id, {"ok": ok, "checks": {}, "detail": str(body.get("note") or "")[:300]},
+                                  version=release_version(), by="owner")
+            return acceptance_mod.report(s, version=release_version())
 
     # ---------------------------------------------------------------- auto-update (installer/Kairo-AutoUpdate.ps1)
 
@@ -2171,6 +2293,22 @@ def is_local_request(request: Request) -> bool:
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
     forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "tailscale-user-login"))
     return client in LOCAL_HOSTS and host in {"127.0.0.1", "localhost", "::1"} and not forwarded
+
+
+async def acceptance_after_release(app: FastAPI, first_wait_s: int = 900, every_s: int = 600) -> None:
+    """After every new release the PC runs the automated acceptance tests itself (KICKOFF v8), once,
+    at the first quiet moment: not in quiet hours, no chat, job or call running."""
+    await asyncio.sleep(first_wait_s)
+    while True:
+        try:
+            st = app.state
+            with session_for(st.engine) as s:
+                due = acceptance_mod.due_after_release(s, st.release_version()) and not voice_calls.live(s)
+            if due and not st.runner.busy and not st.jobs.busy() and not in_quiet_hours(st.profile):
+                await st.run_acceptance()
+        except Exception:   # never take the app down; the next round tries again
+            logging.getLogger("kairo.acceptance").exception("acceptance after release")
+        await asyncio.sleep(every_s)
 
 
 def owner_request(request: HTTPConnection, owner_login: str | None) -> bool:
