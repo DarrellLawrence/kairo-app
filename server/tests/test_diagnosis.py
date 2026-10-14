@@ -72,6 +72,9 @@ def logs(settings) -> None:
         "Traceback (most recent call last):",
         "2026-10-14 09:05:00,123 WARNING app.serve: https://kairo-home.tail1234.ts.net slow, call +41 79 123 45 67",
     ]) + "\n", encoding="utf-8")
+    import os
+    for f in d.glob("kairo.log*"):         # Windows can stamp both files alike: order by rotation, not time
+        os.utime(f, (1_700_000_000, 1_700_000_000))
 
 
 def report(settings) -> str:

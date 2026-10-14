@@ -235,7 +235,10 @@ def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
 
 
 def _logs(r: _Report, log_dir: Path) -> None:
-    files = sorted(log_dir.glob("kairo.log*"), key=lambda p: p.stat().st_mtime)
+    def age(p: Path) -> int:               # kairo.log.5 is the oldest, kairo.log the newest (rotation)
+        suffix = p.name.rsplit(".", 1)[-1]
+        return -int(suffix) if suffix.isdigit() else 0
+    files = sorted(log_dir.glob("kairo.log*"), key=age)
     r.h(f"Logs: {', '.join(p.name for p in files) or 'none'}")
     counts = {p: 0 for p in LOG_PATTERNS}
     levels: dict[str, int] = {}
@@ -247,8 +250,8 @@ def _logs(r: _Report, log_dir: Path) -> None:
                 for line in fh:
                     stamp = line[:19]
                     if len(stamp) == 19 and stamp[4] == "-" and stamp[10] == " ":
-                        first = first or stamp
-                        last = stamp
+                        first = min(first or stamp, stamp)
+                        last = max(last or stamp, stamp)
                         level = line[24:].split(" ", 1)[0]
                         levels[level] = levels.get(level, 0) + 1
                         if level in ("ERROR", "CRITICAL", "WARNING"):
