@@ -8,7 +8,9 @@ import { spring } from '../design/motion.js'
 import { Badge, Button, EmptyState, IconCheck, IconSparkle, Page, Sheet, SkeletonCard, useToast } from '../ui/index.js'
 
 const URGENCY = { urgent: ['danger', 'Urgent'], normal: ['accent', 'Open'], low: ['neutral', 'Low'] }
-const KIND = { reply: 'Waiting for you', waiting: 'Waiting for you', promise: 'Your promise', deadline: 'Deadline', task: 'Task' }
+const KIND = { reply: 'Waiting for you', waiting: 'Waiting for you', promise: 'Your promise', deadline: 'Deadline', task: 'Task',
+  birthday: 'Birthday', people: 'People', money: 'Money', study: 'School', pattern: 'Pattern' }
+const GOT_IT = ['money', 'pattern']
 
 const backAt = (iso) => {
   const d = new Date(iso)
@@ -39,7 +41,7 @@ function LoopCard({ loop, focus, onChanged }) {
   const snooze = (body) => act('later', async () => {
     setLater(false)
     const r = await api(`/api/loops/${loop.id}/later`, { method: 'POST', body })
-    toast.show({ text: `OK. Back ${backAt(r.next_at)}.` })
+    toast.show({ text: r.message || `OK. Back ${backAt(r.next_at)}.`, duration: r.message?.includes('But') ? 6000 : 3500 })
     onChanged()
   })
   const close = (reason) => act('close', async () => {
@@ -62,6 +64,14 @@ function LoopCard({ loop, focus, onChanged }) {
       </div>
       <p className="k-loop-phrase">{loop.phrase}</p>
       {loop.draft?.note && <p className="k-approval-reason">{loop.draft.note}</p>}
+      {loop.draft?.ideas?.length > 0 && (
+        <ul className="k-ideas selectable">
+          {loop.draft.ideas.map((i, n) => (
+            <li key={n}><b>{i.idea}</b>{i.for ? ` · for ${i.for}` : ''}{i.price_chf ? ` · CHF ${i.price_chf}` : ''}
+              {(i.where || i.why) && <span>{[i.where, i.why].filter(Boolean).join(' · ')}</span>}</li>
+          ))}
+        </ul>
+      )}
       {text && !editing && <p className="k-approval-preview selectable">{text}</p>}
       {editing && (
         <div className="k-field"><textarea rows={5} value={text} autoFocus onChange={(e) => setText(e.target.value)} /></div>
@@ -78,7 +88,7 @@ function LoopCard({ loop, focus, onChanged }) {
             <Button variant="secondary" disabled={!!busy} onClick={() => setEditing(!editing)}>{editing ? 'Done editing' : 'Edit'}</Button>
           </>
         ) : (
-          <Button variant="primary" disabled={!!busy} onClick={() => close('done')}>Done</Button>
+          <Button variant="primary" disabled={!!busy} onClick={() => close('done')}>{GOT_IT.includes(loop.kind) ? 'Got it' : 'Done'}</Button>
         )}
         <Button variant="secondary" disabled={!!busy} onClick={() => setLater(true)}>Later</Button>
       </div>

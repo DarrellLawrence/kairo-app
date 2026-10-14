@@ -123,12 +123,14 @@ def people_list(s: Session, name: str | None = None) -> list[Person]:
 
 
 def people_note(s: Session, *, name: str, note: str = "", contacted: bool = False, relation: str | None = None,
-                today: dt.date) -> Person:
+                today: dt.date, email: str | None = None) -> Person:
     p = person_find(s, name)
     if p is None:
         p = Person(name=" ".join(name.split())[:80])
     if relation:
         p.relation = relation[:60]
+    if email:
+        p.email = email.strip().lower()[:200]
     if note.strip():
         line = f"{today.isoformat()}: {note.strip()}"
         p.notes = f"{p.notes}\n{line}" if p.notes else line
@@ -159,7 +161,8 @@ def person_dict(p: Person, today: dt.date) -> dict:
     overdue = bool(p.contact_every_days and (p.last_contact is None or (today - p.last_contact).days > p.contact_every_days))
     return {"id": p.id, "name": p.name, "relation": p.relation, "birthday": p.birthday.isoformat() if p.birthday else None,
             "birthday_in_days": (nb - today).days if nb else None, "notes": p.notes, "contact_every_days": p.contact_every_days,
-            "last_contact": p.last_contact.isoformat() if p.last_contact else None, "reach_out": overdue}
+            "last_contact": p.last_contact.isoformat() if p.last_contact else None, "reach_out": overdue,
+            "email": p.email}
 
 
 def people_reminders(s: Session, today: dt.date, days: int = 7) -> dict:

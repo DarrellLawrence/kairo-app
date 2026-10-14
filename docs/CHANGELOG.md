@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-14 — build: PA behaviour rules (KICKOFF 13d)
+- Debrief by time of day (learns when you usually ask), topic only when asked, known routine left out.
+- Pushback when something important is pushed away; critical things can't be snoozed. Reply mails ping at once with a draft; promises come back next morning.
+- PA job every 30 min: birthdays (gift ideas 5 days before, eve reminder, message on the day; partner and Christmas ~2 months ahead), people nudges by closeness with a reason and draft, unusual spending once with the why and again when it continues, monthly money review, study plan for tests (blocks, summary, flashcards, skipped blocks moved), patterns said once and used in the brief and reviews.
+- Late-night nudge once; lighter plan after short sleep. Leaving home: only delays or weather that matters (needs `commute` in schedule.yaml).
+
 ## 2026-10-14 — build: open loops (owner's request, KICKOFF 13c)
 - Kairo tracks what's unfinished (waiting mails, promises in sent mail, deadlines, tasks, school dates) and raises the most urgent one with a ready answer in your voice. Send is one tap and still an approval.
 - Later brings it back by urgency, more direct each time; it closes itself when you already answered in Gmail.

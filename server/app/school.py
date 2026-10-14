@@ -99,6 +99,8 @@ def needed(grades: list[Grade], target: float, weight: float = 1.0) -> float | N
 # ---------------------------------------------------------------- flashcards
 
 def review(card: Flashcard, knew: bool, today: dt.date) -> Flashcard:
+    from .db import utcnow
+    card.reviewed_at = utcnow()
     if knew:
         card.box = min(5, card.box + 1)
         card.due = today + dt.timedelta(days=INTERVALS[card.box])

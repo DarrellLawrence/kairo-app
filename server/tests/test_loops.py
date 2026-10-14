@@ -190,6 +190,7 @@ def test_daily_ping_limit_quiet_hours_and_calendar(env):
         triaged(s, days_ago=1)                                           # normal
         loops.sync(s, now=WED, tz=TZ, times=TIMES)
         s.get(OpenLoop, 1).next_at = WED
+        s.get(OpenLoop, 1).raised = 1          # already raised once: limits and calendar apply (fresh replies ping at once)
         s.commit()
         busy = [{"summary": "Berufsschule", "start": (WED - dt.timedelta(hours=1)).isoformat(),
                  "end": (WED + dt.timedelta(hours=1)).isoformat(), "all_day": False}]
@@ -290,3 +291,52 @@ def test_promises_are_found_in_sent_mail(env):
         assert (loop.kind, loop.who, loop.who_email, loop.urgency) == ("promise", "Lea", "lea@example.com", "urgent")
         with pytest.raises(loops.Skipped):
             finder.run(Ctx(s, answer), now=WED)                           # already seen
+
+
+# ---------------------------------------------------------------- PA rules (written before the code)
+
+def _due_loop(s, hours, snoozed=0, draft=True):
+    loop = OpenLoop(kind="deadline", source="chat", source_ref=f"f{hours}", what="Lehrvertrag form", since=WED,
+                    due=WED + dt.timedelta(hours=hours), urgency="urgent", snoozed=snoozed,
+                    draft_json=json.dumps({"text": "filled in"}) if draft else None)
+    s.add(loop)
+    s.commit()
+    s.refresh(loop)
+    return loop
+
+
+def test_critical_things_cannot_be_snoozed(env):
+    with Session(env["engine"]) as s:
+        loop = _due_loop(s, hours=2)
+        with pytest.raises(loops.Refused) as exc:
+            loops.snooze(s, loop.id, now=WED, tz=TZ, times=TIMES, when="in_1h")
+        assert "can't move" in str(exc.value) and "12:00" in str(exc.value) and "ready" in str(exc.value)
+        assert loops.aware(s.get(OpenLoop, loop.id).next_at) is None or loop.snoozed == 0
+
+
+def test_repeated_snooze_of_something_important_gets_pushback(env):
+    with Session(env["engine"]) as s:
+        loop = _due_loop(s, hours=20, snoozed=2)
+        loop, msg = loops.snooze(s, loop.id, now=WED, tz=TZ, times=TIMES, when="in_1h")
+        assert loops.aware(loop.next_at) == WED + dt.timedelta(hours=1)
+        assert msg.startswith("OK, back at 11:00. But it's due tomorrow 06:00") and "ready" in msg
+        relaxed = _due_loop(s, hours=200)
+        _, msg = loops.snooze(s, relaxed.id, now=WED, tz=TZ, times=TIMES, when="in_1h")
+        assert msg == "OK, back at 11:00."
+
+
+def test_reply_mails_ping_at_once_even_over_the_daily_limit(env):
+    pushes = Pushes()
+    with Session(env["engine"]) as s:
+        triaged(s, days_ago=0)                                           # fresh mail, normal urgency
+        for _ in range(6):
+            s.add(AuditLog(actor="backend", action="proactive.ping", outcome="x", ts=WED.astimezone(dt.timezone.utc)))
+        s.commit()
+        out = json.loads(engine_for(env, pushes).run(Ctx(s, DRAFT), now=WED))
+        assert out["raised"] is not None and "Reply ‘Thursday 14:00 works" in pushes.sent[0][1]
+
+
+def test_promises_come_back_the_next_morning(env):
+    with Session(env["engine"]) as s:
+        loop = loops.add(s, kind="promise", what="send Lea the notes", who="Lea", due=None, now=WED, tz=TZ, times=TIMES)
+        assert loops.aware(loop.next_at).astimezone(TZ).strftime("%a %H:%M") == "Thu 07:15"

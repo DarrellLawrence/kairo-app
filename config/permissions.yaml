@@ -25,6 +25,7 @@ actions:
   health.list:           0_read
   shopping.add:          1_internal
   people.note:           1_internal
+  debrief:               0_read       # PA rule 1: what's going on, by time of day
   loops.list:            0_read       # open loops: what is still waiting
   loops.add:             1_internal
   loops.snooze:          1_internal   # "not now", "tomorrow", "in an hour"

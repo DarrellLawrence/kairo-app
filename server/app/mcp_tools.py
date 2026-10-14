@@ -21,6 +21,7 @@ DESCRIPTIONS = {
     "people_note": "Remember something about a person (and/or that the owner was in touch today).",
     "finance_list": "The owner's spending: totals by category and recent payments (read only; Kairo can't pay).",
     "health_list": "Daily health numbers from Apple Health: steps, sleep, resting heart rate, workouts.",
+    "debrief": "Owner asks 'debrief me' / 'what's going on': the right scope for the time of day (or scope=everything when bored, a topic like school). Follow its 'how'.",
     "loops_list": "Open loops: mails and questions waiting for the owner, promises, deadlines. With id, who, what, since, urgency.",
     "loops_add": "Remember an open loop: a promise the owner made ('I'll send it tomorrow') or something someone waits for.",
     "loops_snooze": "Owner said 'not now' (when=later), 'in an hour' (in_1h), 'tomorrow', or an exact time (at). It comes back.",

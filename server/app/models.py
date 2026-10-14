@@ -24,7 +24,7 @@ DEFAULTS = {
     "plan": "opus", "review_big": "opus",
 }
 JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
-               "open_loops": "draft", "promises": "promises"}
+               "open_loops": "draft", "promises": "promises", "pa": "draft"}
 
 
 def pick(purpose: str, schedule: dict | None = None) -> str:
