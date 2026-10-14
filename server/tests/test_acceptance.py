@@ -183,7 +183,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 24))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 29))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable

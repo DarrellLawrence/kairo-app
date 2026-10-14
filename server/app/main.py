@@ -28,6 +28,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from . import acceptance as acceptance_mod
+from . import coach as coach_mod
 from . import config_layers
 from . import files as files_mod
 from . import diagnosis as diagnosis_mod
@@ -338,6 +339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "open_loops": lambda ctx: app.state.loops.run(ctx),
                 "promises": lambda ctx: app.state.promises.run(ctx),
                 "pa": lambda ctx: app.state.pa.run(ctx),
+                "coach": lambda ctx: app.state.coach.run(ctx),
                 "olat": lambda ctx: _olat_job(ctx),
                 "chat_memory": lambda ctx: _memory_job(ctx)})
     app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
@@ -368,6 +370,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.pa = pa_mod.PA(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                              executor=lambda: app.state.executor, gate=gate, vault_dir=settings.vault_dir, config_dir=settings.config_dir)
     app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
+    app.state.coach = coach_mod.Coacher(engine=engine, profile=profile, schedule=app.state.jobs.schedule,
+                                        vault_dir=settings.vault_dir)
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.tool_calls = {}           # tool name -> calls that reached the backend (self-test)
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
@@ -685,7 +689,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_id = thread.brain_session_id
             tid = thread.id
         await send({"type": "thread", "id": tid})
-        chat_purpose = "call" if text_in.startswith("(spoken, on a call)") else "chat"   # calls want speed: Haiku
+        chat_purpose = "call" if text_in.startswith("(spoken, on a call)") else (
+            coach_mod.purpose_for(text_in) or "chat")   # calls want speed; money questions go to Opus (v8 E)
 
         parts: list[str] = []
         final_text: str | None = None
@@ -927,7 +932,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             engine=engine, tz=profile.tz, turn=acceptance_turn, classify_mail=acceptance_classify, gate=gate,
             selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
             broken_selftests=broken_selftests, schedule=app.state.jobs.schedule,
-            memory=app.state.memory, vault_dir=settings.vault_dir)
+            memory=app.state.memory, vault_dir=settings.vault_dir, profile=profile, coach=app.state.coach, pa=app.state.pa,
+            ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
+                prompt, system, images=images, purpose=purpose))
 
     async def run_acceptance(ids: list[int] | None = None) -> dict:
         if app.state.acceptance_running:
@@ -2219,6 +2226,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health_get(days: int = 30):
         with session_for(engine) as s:
             return life.health_summary(s, max(1, min(days, 366)), _today())
+
+    # ---------------------------------------------------------------- v8 E: coaching (Today card)
+
+    @app.get("/api/coach")
+    def coach_get():
+        with session_for(engine) as s:
+            return {"on": bool(prefs_mod.load(s).get("coach")), **coach_mod.status(s, _today(), profile.tz)}
+
+    @app.post("/api/coach/log")
+    async def coach_log_post(request: Request):
+        """The owner taps Done (or Skipped) on Today: the same log as telling Kairo in chat."""
+        from .actions import CoachLog as CoachLogIn
+        try:
+            a = CoachLogIn.model_validate(await request.json())
+        except (ValidationError, ValueError) as exc:
+            raise HTTPException(400, "module, what, done, value or day is not valid") from exc
+        day = a.day or _today()
+        if abs((day - _today()).days) > 7:
+            raise HTTPException(400, "log within a week of today")
+        with session_for(engine) as s:
+            row = coach_mod.log_entry(s, module=a.module, what=a.what, day=day, done=a.done, value=a.value, source="app",
+                                      now=dt.datetime.now(profile.tz))
+            return {"ok": True, "id": row.id, "streak": coach_mod.streak(s, a.module, _today()),
+                    "water_today_l": coach_mod.water_today(s, _today())}
 
     @app.get("/api/usage")
     def usage_get(days: int = 7):

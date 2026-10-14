@@ -81,6 +81,15 @@ SPECS = [
     Spec(22, "Model routing", "auto", "Judgment calls never on Haiku, money on Opus: in the settings and in the last 14 days of runs.", "D"),
     Spec(23, "Call windows", "auto", "Kairo rings only for important things or real questions, and only in the call windows "
          "(checked on the rules and on the last 14 days of calls).", "D"),
+    Spec(24, "Training coach", "auto", "Next week's plan keeps training days free, the set minutes and only the listed equipment, "
+         "with a leg day; a reported session is logged with its streak; a skipped one gets one firm loop.", "E"),
+    Spec(25, "Food and water", "auto", "Evening-before check only before work/school days; water reminders only in work hours, "
+         "at most 2 a day, never in quiet hours.", "E"),
+    Spec(26, "Study plan", "auto", "An exam 30 days ahead gets a plan to its date: sessions every week, none on training days.", "E"),
+    Spec(27, "Money coach", "auto", "Monthly review and money questions on Opus: facts, options, one recommendation, budgets; "
+         "no money tool; Christmas plan from 1 November with wishlists and the gift budget.", "E"),
+    Spec(28, "People, faith, style", "auto", "Gift ideas start from the wishlist; one faith line in the brief only when set; "
+         "style inside its budget, second-hand first.", "E"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -107,6 +116,10 @@ class Context:
     schedule: dict = field(default_factory=dict)           # the live schedule (model overrides)
     memory: object = None                                  # semantic.MemoryIndex (v8 C6)
     vault_dir: Path | None = None
+    ask: Callable | None = None                            # a job's model call: ask(prompt, system, purpose=...) (v8 E)
+    profile: object = None
+    coach: object = None                                   # coach.Coacher
+    pa: object = None                                      # pa.PA
 
 
 class RecordingExecutor:
@@ -349,10 +362,236 @@ def _strip_test_lines(folder: Path, before: dict) -> None:
             p.write_text(kept.rstrip() + "\n", encoding="utf-8")
 
 
+# ---------------------------------------------------------------- v8 E: coaching
+
+def _no_coach(ctx: Context) -> dict | None:
+    from . import prefs
+    with Session(ctx.engine) as s:
+        if prefs.load(s).get("coach"):
+            return None
+    return _result(False, {"coach settings exist": False},
+                   "No coach settings yet: tell Kairo your training days, equipment and goals, or import your profile (G).")
+
+
+async def t_training(ctx: Context) -> dict:
+    from . import coach, prefs
+    from .db import CoachLog
+    if (r := _no_coach(ctx)) is not None:
+        return r
+    today = dt.datetime.now(ctx.tz).date()
+    start = coach.week_start(today) + dt.timedelta(days=7)
+
+    def plan():
+        with Session(ctx.engine) as s:
+            cfg = prefs.coach(s)
+            return cfg, coach.make_plan(ctx.ask, s, cfg=cfg, start=start, name=ctx.profile.name,
+                                        language=ctx.profile.default_language, notes=ctx.coach.notes())
+    cfg, p = await asyncio.to_thread(plan)
+    sessions = p["sessions"]
+    checks = {
+        "the set number of home sessions": len(sessions) == cfg.home_sessions,
+        "none on training days": all(coach.day_name(dt.date.fromisoformat(x["day"])) not in cfg.training_days for x in sessions),
+        "at most the set minutes": all(x["minutes"] <= cfg.home_minutes for x in sessions),
+        "only listed equipment": all(coach._equipment_ok(e["equipment"], cfg.equipment) for x in sessions for e in x["exercises"]),
+        "a leg day": p["leg_day"] is not None or cfg.home_sessions == 0,
+    }
+    leg = {"day": today.isoformat(), "focus": "legs", "minutes": 20, "exercises": []}
+    morning = dt.datetime.combine(today + dt.timedelta(days=1), dt.time(7), tzinfo=ctx.tz)
+    found = coach.nudges(cfg, morning, plan={today: leg}, logged=[], water_sent=2, study=[], quiet=False)
+    done = CoachLog(module="training", day=today, what="x")
+    checks["a skipped leg day gets one firm loop"] = [n.ref for n in found if n.kind == "loop" and "Leg day" in n.what] == [f"training:missed:{today}"]
+    checks["none once it's logged"] = not any("missed" in n.ref for n in coach.nudges(
+        cfg, morning, plan={today: leg}, logged=[done], water_sent=2, study=[], quiet=False))
+    began = dt.datetime.now(dt.timezone.utc)
+    t = await ctx.turn(f"{MARK}: did my home session today, 20 min core.")
+    with Session(ctx.engine) as s:
+        rows = [r for r in s.exec(select(CoachLog).where(CoachLog.module == "training").where(CoachLog.day == today)).all()
+                if _utc(r.created_at) >= began]
+        checks["the session is logged"] = bool(rows)
+        for r in rows:
+            s.delete(r)
+        s.commit()
+    lines = [ln for ln in t.reply.splitlines() if ln.strip()]
+    said = t.reply.lower()
+    checks["one line with the streak"] = len(lines) <= 2 and any(w in said for w in ("streak", "in a row", "serie", "in folge"))
+    detail = f"{len(sessions)} sessions: " + "; ".join(f"{x['day']} {x['focus']} {x['minutes']} min" for x in sessions)
+    return _result(t.error is None, checks, t.error or f"{detail}. Kairo said: {t.reply[:160]}")
+
+
+async def t_food_water(ctx: Context) -> dict:
+    from . import coach, prefs
+    from .push import in_quiet_hours
+    if (r := _no_coach(ctx)) is not None:
+        return r
+    with Session(ctx.engine) as s:
+        cfg = prefs.coach(s)
+    today = dt.datetime.now(ctx.tz).date()
+    food_at, water, bad_food, bad_water = {}, {}, [], []
+    a, b = (coach._hm(x) for x in cfg.work_hours.split("-"))
+    for i in range(7):
+        day = today + dt.timedelta(days=i)
+        sent = 0
+        for q in range(96):                                    # every 15 minutes of the week
+            now = dt.datetime.combine(day, dt.time(q // 4, q % 4 * 15), tzinfo=ctx.tz)
+            quiet = in_quiet_hours(ctx.profile, now)
+            for n in coach.nudges(cfg, now, plan={}, logged=[], water_sent=sent, study=[], quiet=quiet):
+                if n.ref.startswith("food:"):
+                    food_at.setdefault(day, now.time())
+                    if quiet or coach.day_name(day + dt.timedelta(days=1)) not in cfg.work_days:
+                        bad_food.append(f"{day} {now:%H:%M}")
+                if n.kind == "push" and n.ref.startswith("water:"):
+                    sent += 1
+                    water.setdefault(day, []).append(now.time())
+                    if quiet or coach.day_name(day) not in cfg.work_days or not a <= now.time() <= b:
+                        bad_water.append(f"{day} {now:%H:%M}")
+    checks = {
+        "food check only before work/school days, never in quiet hours": not bad_food,
+        "food check at the set time": all(t == coach._hm(cfg.food_check) for t in food_at.values()) if cfg.food_check else not food_at,
+        "water only on work/school days inside work hours": not bad_water,
+        "water at most 2 a day": all(len(v) <= 2 for v in water.values()),
+        "no water reminders without a goal": bool(cfg.water_l) or not water,
+    }
+    detail = (f"food check {cfg.food_check or 'off'} on {len(food_at)} evenings; water goal {cfg.water_l or 'not set'}, "
+              f"{sum(len(v) for v in water.values())} reminders this week")
+    return _result(True, checks, detail + ("; wrong: " + ", ".join((bad_food + bad_water)[:4]) if bad_food or bad_water else ""))
+
+
+async def t_study(ctx: Context) -> dict:
+    from . import coach, prefs
+    from .db import SchoolEvent
+    if (r := _no_coach(ctx)) is not None:
+        return r
+    today = dt.datetime.now(ctx.tz).date()
+    exam_day = today + dt.timedelta(days=30)
+    with Session(ctx.engine) as s:
+        ev = SchoolEvent(subject=f"{MARK} Physics", kind="exam", date=dt.datetime.combine(exam_day, dt.time(8), tzinfo=ctx.tz),
+                         notes="Mechanics, energy, waves")
+        s.add(ev)
+        s.commit()
+        s.refresh(ev)
+        ev_id = ev.id
+    try:
+        def plan():
+            with Session(ctx.engine) as s:
+                cfg = prefs.coach(s)
+                return cfg, coach.make_study_plan(ctx.ask, s, cfg=cfg, event=s.get(SchoolEvent, ev_id), today=today, tz=ctx.tz,
+                                                  language=ctx.profile.default_language, notes="Mechanics. Energy. Waves.")
+        cfg, p = await asyncio.to_thread(plan)
+        days = [dt.date.fromisoformat(d) for w in p["weeks"] for d in w["days"]]
+        full = [w for w in p["weeks"] if dt.date.fromisoformat(w["start"]) > today
+                and dt.date.fromisoformat(w["start"]) + dt.timedelta(days=6) < exam_day]
+        checks = {"a plan to the exam date": p["date"] == exam_day.isoformat() and bool(days) and max(days) < exam_day,
+                  "sessions every week": all(len(w["days"]) == cfg.study_sessions for w in full) and len(p["weeks"]) >= 4,
+                  "none on training days": all(coach.day_name(d) not in cfg.training_days for d in days),
+                  "commute = flashcards": "flashcard" in p["commute"],
+                  "a topic for every week": all(w["topic"] for w in p["weeks"])}
+        detail = f"{len(p['weeks'])} weeks, {len(days)} sessions: " + " | ".join(w["topic"][:40] for w in p["weeks"][:3])
+    finally:
+        with Session(ctx.engine) as s:
+            for key in (coach.STUDY_KEY.format(ev_id),):
+                row = s.get(SettingKV, key)
+                if row is not None:
+                    s.delete(row)
+            row = s.get(SchoolEvent, ev_id)
+            if row is not None:
+                s.delete(row)
+            s.commit()
+        if ctx.vault_dir is not None:
+            for f in (ctx.vault_dir / coach.NOTE_DIR).glob(f"Study {MARK}*.md"):
+                f.unlink(missing_ok=True)
+    return _result(True, checks, detail)
+
+
+async def t_money(ctx: Context) -> dict:
+    from . import coach, models
+    from .db import ModelRun, Person, WishItem
+    checks = {"money review on Opus": models.pick("money_review", ctx.schedule) == "opus",
+              "money questions in chat on Opus": models.pick(coach.purpose_for("Should I put my savings into an ETF?") or "chat",
+                                                             ctx.schedule) == "opus"
+              and coach.purpose_for("Wie viel habe ich diesen Monat ausgegeben?") == "money",
+              "no tool can move money": not any(a.startswith(("finance.", "money.", "pay", "transfer", "invest")) and a != "finance.list"
+                                                for a in ctx.gate.actions)}
+    now = dt.datetime.now(ctx.tz)
+    with Session(ctx.engine) as s:
+        rd = ctx.pa.review_data(s, now)
+    if rd is None:                                             # no bank data last month: the same review on sample numbers
+        rd = {"month": f"{MARK} sample month", "data": {"by_category": {"groceries": 420, "eating out": 260, "snacks": 95, "shopping": 180},
+              "avg_3_months_before": {"groceries": 400, "eating out": 150, "snacks": 60, "shopping": 90}, "subscriptions": [],
+              "budgets": {"snacks_per_week_chf": 15, "style_per_month_chf": 100, "gifts_per_year_chf": 600},
+              "savings_goals": [{"name": "emergency fund", "chf": 3000, "by": None}]}}
+    began = dt.datetime.now(dt.timezone.utc)
+    advice = await asyncio.to_thread(ctx.pa.review_advice, ctx.ask, rd)
+    with Session(ctx.engine) as s:
+        run = s.exec(select(ModelRun).where(ModelRun.purpose == "money_review").order_by(ModelRun.id.desc())).first()
+    checks["ran on Opus"] = run is not None and _utc(run.ts) >= began - dt.timedelta(seconds=5) and models.family(run.model) in ("opus", "unknown")
+    checks["facts, options and one recommendation"] = bool(advice["facts"]) and len(advice["options"]) >= 2 and bool(advice["recommendation"])
+    xmas = [ctx.pa.christmas_due(dt.date(now.year, m, d)) for m, d in ((10, 31), (11, 1), (12, 24), (12, 25))]
+    checks["Christmas planning from 1 November"] = xmas == [False, True, True, False]
+    with Session(ctx.engine) as s:
+        p = Person(name=f"{MARK} Sam", relation="sister")
+        s.add(p)
+        s.commit()
+        s.refresh(p)
+        s.add(WishItem(person_id=p.id, title=f"{MARK} climbing chalk bag", price_chf=25))
+        s.commit()
+        try:
+            plan = ctx.pa.christmas_plan(s)
+            mine = next((x for x in plan["people"] if x["name"] == p.name), None)
+            checks["Christmas plan has the people, their wishlists and the budget"] = (
+                mine is not None and any("chalk" in w["title"] for w in mine["wishlist"]) and "per_person_chf" in plan)
+        finally:
+            for w in s.exec(select(WishItem).where(WishItem.person_id == p.id)).all():
+                s.delete(w)
+            s.delete(p)
+            s.commit()
+    return _result(True, checks, f"recommendation: {advice['recommendation'][:160]}")
+
+
+async def t_people_faith_style(ctx: Context) -> dict:
+    from . import coach, pa, prefs
+    from .db import Person, WishItem
+    with Session(ctx.engine) as s:
+        p = Person(name=f"{MARK} Robin", relation="friend", notes="Likes hiking.")
+        s.add(p)
+        s.commit()
+        s.refresh(p)
+        s.add(WishItem(person_id=p.id, title="Climbing chalk bag", price_chf=25))
+        s.commit()
+        prompt = ctx.pa.gift_prompt(s, p, "birthday", dt.datetime.now(ctx.tz).date() + dt.timedelta(days=10))
+        pid = p.id
+    try:
+        answer = await asyncio.to_thread(ctx.ask, prompt, "Return JSON only.", purpose="draft")
+        from .jobkit import extract_json
+        ideas = (extract_json(answer.text) or {}).get("ideas", []) if answer.ok else []
+        first = str((ideas or [{}])[0].get("idea", "")).lower()
+    finally:
+        with Session(ctx.engine) as s:
+            for w in s.exec(select(WishItem).where(WishItem.person_id == pid)).all():
+                s.delete(w)
+            row = s.get(Person, pid)
+            if row is not None:
+                s.delete(row)
+            s.commit()
+    today = dt.datetime.now(ctx.tz).date()
+    with Session(ctx.engine) as s:
+        cfg = prefs.coach(s)
+        on = coach.brief_lines(s, today, ctx.tz, cfg=cfg.model_copy(update={"faith_habit": "a short prayer", "faith_after": "coffee"}))
+        off = coach.brief_lines(s, today, ctx.tz, cfg=cfg.model_copy(update={"faith_habit": None}))
+    checks = {"gift ideas start from the wishlist": "chalk" in first,
+              "one faith line when the habit is set": sum(x.startswith("Faith:") for x in on) == 1,
+              "no faith line without a habit": not any(x.startswith("Faith:") for x in off),
+              "style inside its budget, second-hand first": "style" in pa.REVIEW_PROMPT and "second-hand first" in pa.REVIEW_PROMPT}
+    return _result(True, checks, f"first gift idea: {first[:120] or '(none)'}")
+
+
+def _utc(ts: dt.datetime) -> dt.datetime:
+    return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
-    19: t_leave_it, 21: t_language,
-    22: t_routing, 23: t_call_windows,
+    19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
+    24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
 }
 
 

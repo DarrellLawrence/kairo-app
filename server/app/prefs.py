@@ -107,6 +107,63 @@ class CallWindow(_Strict):
         return _hhmm(v)
 
 
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+Day = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+class SavingsGoal(_Strict):
+    name: str = Field(min_length=1, max_length=60)
+    chf: float = Field(gt=0, le=1_000_000)
+    by: dt.date | None = None
+
+
+class Coach(_Strict):
+    """v8 E: the owner's coaching facts. Generic features; the values come from the owner (chat, the profile import)."""
+
+    training_days: list[Day] = Field(default_factory=list, max_length=7)       # fixed training: never planned over
+    work_days: list[Day] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"], max_length=7)
+    work_hours: str = "08:00-17:00"                                            # school or work
+    home_sessions: int = Field(default=2, ge=0, le=6)                          # short home sessions a week
+    home_minutes: int = Field(default=20, ge=5, le=90)
+    equipment: list[str] = Field(default_factory=list, max_length=20)          # home sessions use only these
+    water_l: float | None = Field(default=None, ge=0.5, le=6)                  # daily goal; no goal = no reminders
+    food_check: str | None = "20:00"                                           # evening-before check; None = off
+    study_sessions: int = Field(default=3, ge=1, le=7)                         # a week, until an exam
+    faith_habit: str | None = Field(default=None, max_length=120)              # small, daily
+    faith_after: str | None = Field(default=None, max_length=80)               # next to this existing morning habit
+    snacks_week_chf: float | None = Field(default=None, ge=0, le=10_000)
+    gifts_year_chf: float | None = Field(default=None, ge=0, le=100_000)
+    style_month_chf: float | None = Field(default=None, ge=0, le=10_000)
+    savings: list[SavingsGoal] = Field(default_factory=list, max_length=10)
+
+    @field_validator("equipment")
+    @classmethod
+    def items(cls, v):
+        out: dict[str, str] = {}
+        for x in v:
+            name = str(x).strip()[:40]
+            if name:
+                out.setdefault(name.lower(), name)
+        return list(out.values())
+
+    @field_validator("work_hours")
+    @classmethod
+    def hours(cls, v):
+        a, sep, b = str(v).partition("-")
+        if not sep or _hhmm(a.strip()) >= _hhmm(b.strip()):
+            raise ValueError("work_hours like 08:00-17:00")
+        return f"{a.strip()}-{b.strip()}"
+
+    @field_validator("food_check")
+    @classmethod
+    def t(cls, v):
+        return None if v is None else _hhmm(v)
+
+
+def coach(s: Session) -> Coach:
+    return Coach.model_validate(load(s).get("coach") or {})
+
+
 SETTINGS = {
     # key: (validator, what it means)
     "quiet_hours": (QuietHours, "No pushes and no background work between these times."),
@@ -118,6 +175,11 @@ SETTINGS = {
     "models": (dict, "Model per job, e.g. {\"brief\": \"sonnet\"} (haiku / sonnet / opus). Judgment never Haiku, money stays Opus."),
     "call_windows": (list, "When Kairo may ring (important things and real questions only): a list of "
                            "{name, days: weekdays|weekend|all, start, end}, e.g. morning commute 06:00-08:00."),
+    "coach": (Coach, "Coaching facts (only the fields given change): training_days and work_days (mon..sun), "
+                     "work_hours 08:00-17:00, home_sessions a week, home_minutes, equipment (home sessions use only "
+                     "these), water_l (daily goal), food_check (time, or null), study_sessions a week, faith_habit + "
+                     "faith_after (an existing morning habit), snacks_week_chf, gifts_year_chf, style_month_chf, "
+                     "savings [{name, chf, by}]."),
 }
 
 
@@ -160,6 +222,8 @@ def validate(key: str, value):
             if any(w["start"] >= w["end"] for w in out):
                 raise ValueError("each window starts before it ends (no windows over midnight)")
             return out
+        if key == "coach":
+            return kind.model_validate(value).model_dump(mode="json")   # null switches a coach item off
         return kind.model_validate(value).model_dump(mode="json", exclude_none=True)
     except (ValidationError, ValueError, TypeError) as exc:
         msg = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc)
@@ -168,6 +232,8 @@ def validate(key: str, value):
 
 def set_key(s: Session, key: str, value) -> dict:
     data = load(s)
+    if key == "coach" and isinstance(value, dict):        # one fact at a time: the rest stays
+        value = {**(data.get("coach") or {}), **value}
     data[key] = validate(key, value)
     return _save(s, data)
 

@@ -172,11 +172,31 @@ def prefill(session: Session, kind: str, start: dt.date, end: dt.date, tz=None) 
                 top = ", ".join(f"{k} {v:.0f}" for k, v in list(m["by_category"].items())[:3])
                 facts.append(f"Spent CHF {m['spent_chf']:.0f} ({top})")
         facts += location.patterns(session, tz or dt.timezone.utc, weeks=max(1, (end - start).days // 7 + 1), today=end)
+        facts += _coach_facts(session, start, end, tz or dt.timezone.utc)
     return {
         "facts": facts,
         "last_commitments": json.loads(prev.commitments_json) if prev and prev.commitments_json else [],
         "goals": goals if kind in ("monthly", "quarterly", "half_year", "yearly") else {},
     }
+
+
+def _coach_facts(session: Session, start: dt.date, end: dt.date, tz) -> list[str]:
+    """v8 E: training planned vs done, the faith habit (gently), water, snacks against the budget."""
+    from . import coach, prefs
+    if not prefs.load(session).get("coach"):
+        return []
+    c = coach.review_block(session, start, end, tz)
+    out = []
+    t = c["training"]
+    if t["planned"]:
+        out.append(f"Home training: {t['done']} of {t['planned']} sessions" + (f"; skipped: {', '.join(t['skipped'][:4])}" if t["skipped"] else ""))
+    if c["faith_days"] is not None:
+        out.append(f"Faith habit on {c['faith_days']} of {c['days']} days")
+    if c["water_days"] is not None:
+        out.append(f"Water logged on {c['water_days']} of {c['days']} days")
+    if c.get("snacks_budget_chf") is not None:
+        out.append(f"Snacks this week CHF {c['snacks_chf']:.0f} (budget {c['snacks_budget_chf']:.0f})")
+    return out
 
 
 # ---------------------------------------------------------------- lifecycle

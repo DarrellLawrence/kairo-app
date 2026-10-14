@@ -23,6 +23,10 @@ DESCRIPTIONS = {
     "wishlist_add": "Put a gift idea on a person's wishlist (title, price in CHF, link). Only things that person wants or would like.",
     "finance_list": "The owner's spending: totals by category and recent payments (read only; Kairo can't pay).",
     "health_list": "Daily health numbers from Apple Health: steps, sleep, resting heart rate, workouts.",
+    "coach_log": "Log what the owner did for a coaching module (training session, water in litres, food packed, "
+                 "study session, the faith habit), or skipped on purpose (done=false, say why). Then say the streak.",
+    "coach_status": "The coaching plan: today's session, this week's plan and what's done, streaks, water, faith "
+                    "habit, snack spending vs budget, the coach settings.",
     "memory_search": "Search everything Kairo knows about the owner (vault notes, file summaries, people, open loops, "
                      "conversation memory) by meaning and keywords, any language. Use it before answering about the "
                      "owner's life when the notes in your prompt don't cover it; name the note you used.",

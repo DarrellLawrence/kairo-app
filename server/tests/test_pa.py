@@ -123,10 +123,16 @@ def test_unusual_spending_once_with_why_and_again_next_month(migrated):
         assert again.what.startswith("Again: Food delivery 240 CHF")
         review = s.exec(select(OpenLoop).where(OpenLoop.source_ref == "review:2026-10")).first()
         assert review is None                                                 # only in the first days of a month
-        p_.money(Ctx(s, {"ideas": ["Cook twice a week"]}), dt.datetime(2026, 11, 2, 10, tzinfo=TZ))
+        advice = {"facts": ["Food delivery 180 CHF, three times usual."], "options": ["Cook twice a week", "A 60 CHF delivery cap"],
+                  "recommendation": "Cook twice a week: about 80 CHF less."}
+        ctx = Ctx(s, advice)
+        p_.money(ctx, dt.datetime(2026, 11, 2, 10, tzinfo=TZ))
         review = s.exec(select(OpenLoop).where(OpenLoop.source_ref == "review:2026-10")).one()
         assert review.what.startswith("Money review for October 2026 is ready: 180 CHF spent")
-        assert (vault_dir / "Kairo/Money/2026-10.md").read_text(encoding="utf-8").count("Cook twice a week") == 1
+        note = (vault_dir / "Kairo/Money/2026-10.md").read_text(encoding="utf-8")
+        assert "## Facts" in note and "## Options" in note and "## Recommendation\nCook twice a week: about 80 CHF less." in note
+        assert "You decide." in note
+        assert ctx.prompts[-1][0] == "money_review"                            # v8 D/E: on Opus
 
 
 # ---------------------------------------------------------------- 9. tests

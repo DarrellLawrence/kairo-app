@@ -150,6 +150,20 @@ class HealthList(Strict):
     days: int = Field(default=14, ge=1, le=366)
 
 
+class CoachLog(Strict):
+    """v8 E: what the owner did (or skipped on purpose) for a coaching module. Kairo's own table."""
+
+    module: Literal["training", "food", "water", "study", "faith"]
+    what: str = Field(min_length=1, max_length=200)
+    done: bool = True
+    value: float | None = Field(default=None, ge=0, le=10_000)    # minutes, litres
+    day: dt.date | None = None                                    # default: today
+
+
+class CoachStatus(Strict):
+    module: Literal["training", "food", "water", "study", "faith"] | None = None
+
+
 class MemorySearch(Strict):
     """v8 C6: the owner's notes, people, open loops and conversation memory, by keywords and meaning."""
 
@@ -385,6 +399,8 @@ SCHEMAS: dict[str, type[Strict]] = {
     "finance.list": FinanceList,
     "health.list": HealthList,
     "memory.search": MemorySearch,
+    "coach.log": CoachLog,
+    "coach.status": CoachStatus,
     "calendar.tag": CalendarTag,
     "debrief": Debrief,
     "settings.list": SettingsList,
@@ -413,6 +429,7 @@ MIN_TIER: dict[str, int] = {
     "gmail.search": 0, "gmail.read": 0, "calendar.list": 0, "vault.read": 0, "tasks.list": 0,
     "tasks.create": 1, "tasks.update": 1, "notes.write": 1,
     "shopping.list": 0, "people.list": 0, "finance.list": 0, "health.list": 0, "memory.search": 0,
+    "coach.status": 0, "coach.log": 1,
     "shopping.add": 1, "people.note": 1, "captures.answer": 1, "wishlist.add": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
@@ -442,6 +459,8 @@ DIRECT_TOOLS: dict[str, str] = {
     "finance_list": "finance.list",
     "health_list": "health.list",
     "memory_search": "memory.search",
+    "coach_log": "coach.log",
+    "coach_status": "coach.status",
     "calendar_tag": "calendar.tag",
     "debrief": "debrief",
     "settings_list": "settings.list",

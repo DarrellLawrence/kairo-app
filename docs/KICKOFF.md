@@ -753,7 +753,7 @@ start the next until its checks pass and the owner says go.
 - [ ] B Shortcuts, share sheet, quick questions, wishlists, files (tests 5, 17)
 - [ ] D Leave it, language per message, model routing, call windows, brief, push style (tests 10, 13, 19, 21, 22, 23)
 - [ ] C6 Semantic memory (tests 2, 18)
-- [ ] E Coaching modules: training, food and water, study, money, people, faith, style
+- [ ] E Coaching modules: training, food and water, study, money, people, faith, style (tests 24-28)
 - [ ] G Profile import (test 20)
 - [ ] F23 P3–P5 from the diagnosis numbers (tests 4, 8, 9, 14)
 - [ ] C7 Obsidian graph

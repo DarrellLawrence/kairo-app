@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { OnboardingCard } from './Onboarding.jsx'
 import { CaptureSheet } from './CaptureSheet.jsx'
+import { CoachCard } from './CoachCard.jsx'
 import { playLastAgain, speak, stopSpeaking, unlockAudio } from '../voice.js'
 import { api, parseTs } from '../api.js'
 import { spring } from '../design/motion.js'
@@ -316,6 +317,8 @@ export default function Today({ go, onboarding }) {
       ))}
 
       <OnboardingCard onOpen={onboarding} />
+
+      <CoachCard />
 
       {!h ? <SkeletonCard lines={4} /> : (
         <Card className="k-streak">

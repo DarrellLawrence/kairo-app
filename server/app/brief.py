@@ -36,7 +36,8 @@ routine (training, school, work hours) unless something about it changed today. 
 test or deadline date matters, new files are one short mention. "mails_maybe_needing_reply": Kairo couldn't tell if someone waits on these; never in the
 top 3, at most one short mention ("not sure if X needs an answer"). "patterns" are facts from the owner's places (arrive/leave times); mention
 one only if it matters today (e.g. a long school day and training planned). "open_loops" are
-people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3.
+people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3. "coach_today" is
+today's training/study/faith plan: the app shows it, so mention it only if it changed or a session was skipped.
 If "health" shows under 6 h sleep last night: plan a lighter day (move study and hard tasks later)
 and say so in the headline. Use "patterns_known" to adapt the plan; skip routine nobody needs told. Mention a birthday
 today or tomorrow, and short sleep last night, only if they are there. Write in the owner's language ({language}). Be concrete and short.
@@ -136,6 +137,7 @@ class BriefMaker:
             "open_loops": self._loops(s),
             "school_news": portal_news(s),
             "patterns_known": [l.what for l in s.exec(select(OpenLoop).where(OpenLoop.kind == "pattern")).all()][:5],
+            "coach": _coach(s, day, tz),
         }
 
     def _loops(self, s: Session) -> list[dict]:
@@ -235,9 +237,20 @@ def _warnings(s: Session) -> list[str]:
     return out
 
 
+def _coach(s: Session, day: dt.date, tz) -> list[str]:
+    """v8 E: today's session, study, the faith habit (only when set), a streak; nothing without coach settings."""
+    from . import coach, prefs
+    try:
+        return coach.brief_lines(s, day, tz) if prefs.load(s).get("coach") else []
+    except Exception:   # never lose the brief over this
+        log.exception("coach lines for the brief")
+        return []
+
+
 def _data_for_model(data: dict) -> str:
     own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals", "place_tasks", "patterns",
                                 "chores_due", "people", "health")}
+    own["coach_today"] = data.get("coach") or []
     outside = {"calendar": data["calendar"], "mails_needing_reply": [{"from": m["from"], "subject": m["subject"],
                "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]],
                "school_portal_new": [{"course": n["course"], "kind": n["kind"], "title": n["title"], "text": n["snippet"]}
@@ -261,6 +274,8 @@ def render_markdown(c: dict) -> str:
         lines += ["## New on OLAT", *[f"- {n['course']}: {n['title']}" for n in c["school_news"]], ""]
     if c.get("maybe_reply"):
         lines += ["## Not sure these need you", *[f"- {m['from']}: {m['subject']}" for m in c["maybe_reply"]], ""]
+    if c.get("coach"):
+        lines += ["## Coach", *[f"- {x}" for x in c["coach"]], ""]
     if c.get("next7"):
         lines += ["## Next 7 days", *[f"- {t['due'][:10]} {t['title']}" for t in c["next7"]], ""]
     if c.get("approvals"):

@@ -30,7 +30,7 @@ DEFAULTS = {
     "plan": "opus", "review_big": "opus",
 }
 JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
-               "open_loops": "draft", "promises": "promises", "pa": "judgment"}
+               "open_loops": "draft", "promises": "promises", "pa": "judgment", "coach": "coach"}
 NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review", "coach", "plan", "review_big"}
 OPUS_ONLY = {"judgment_high", "money", "money_review"}
 RANK = {"haiku": 0, "sonnet": 1, "opus": 2}

@@ -293,6 +293,37 @@ def test_memory_search_rejects_bad_arguments(gate, args):
     assert gate.decide(P + "memory_search", args, ctx()).verdict == "deny"
 
 
+# ---------------------------------------------------------------- v8 E: coaching (written before the code)
+
+@pytest.mark.parametrize("tool,args,tier", [
+    ("coach_log", {"module": "training", "what": "20 min legs at home"}, 1),
+    ("coach_log", {"module": "water", "what": "bottle", "value": 0.5}, 1),
+    ("coach_log", {"module": "faith", "what": "morning habit", "done": False, "day": "2026-10-13"}, 1),
+    ("coach_status", {}, 0),
+    ("coach_status", {"module": "training"}, 0),
+])
+def test_coach_tools_are_direct_at_their_tier(gate, tool, args, tier):
+    d = gate.decide(P + tool, args, ctx())
+    assert (d.verdict, d.tier) == ("allow", tier)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("coach_log", {"module": "money", "what": "paid rent"}),          # money is read-only coaching, nothing to log
+    ("coach_log", {"module": "training", "what": ""}),
+    ("coach_log", {"module": "training", "what": "x" * 201}),
+    ("coach_log", {"module": "water", "what": "x", "value": -1}),
+    ("coach_log", {"module": "training", "what": "x", "send_to": "coach@example.com"}),
+    ("coach_status", {"module": "investing"}),
+])
+def test_coach_tools_reject_bad_arguments(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+def test_coaching_adds_no_money_action(gate):
+    assert not any(a.startswith(("finance.", "money.", "invest")) and a != "finance.list" for a in gate.actions)
+    assert gate.decide(*propose("coach.log", {"module": "training", "what": "x"}), ctx()).verdict == "deny"
+
+
 def test_memory_search_cannot_be_proposed(gate):
     assert gate.decide(*propose("memory.search", {"query": "x"}), ctx()).verdict == "deny"
 

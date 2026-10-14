@@ -24,6 +24,8 @@ actions:
   finance.list:          0_read       # read only; money actions don't exist (tier 5)
   health.list:           0_read
   memory.search:         0_read       # v8 C6: the owner's notes by keywords and meaning (local index)
+  coach.status:          0_read       # v8 E: plans, streaks, today's session (no money: tier 5 has no tools)
+  coach.log:             1_internal   # v8 E: a session done, water, food packed, the faith habit (Kairo's own table)
   shopping.add:          1_internal
   people.note:           1_internal
   captures.answer:       1_internal   # v8 B: the owner answered a quick question in chat

@@ -22,6 +22,8 @@ from .db import Chore, HealthDay, Person, ShoppingItem, Transaction, WishItem, u
 MAX_CAMT = 10 * 1024 * 1024
 
 CATEGORIES = {
+    # v8 E: before groceries, so a station kiosk or "Coop Pronto" counts as a snack, not the weekly shop
+    "snacks": ["kiosk", "avec", "coop pronto", "migrolino", "selecta", "valora", "brezelkönig", "spar express"],
     "groceries": ["migros", "coop", "denner", "aldi", "lidl", "spar", "volg", "manor food", "landi"],
     "transport": ["sbb", "cff", "zvv", "bls", "postauto", "tpg", "mobility", "uber", "bolt", "tankstelle", "shell", "avia", "bp "],
     "eating out": ["restaurant", "mcdonald", "burger king", "starbucks", "cafe", "café", "kebab", "pizza", "subway", "takeaway", "bar "],

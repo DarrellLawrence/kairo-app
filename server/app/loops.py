@@ -39,7 +39,7 @@ from .tools import _body_text, _headers, untrusted
 log = logging.getLogger("kairo.loops")
 
 URGENCY_RANK = {"urgent": 0, "normal": 1, "low": 2}
-PA_KINDS = ("birthday", "people", "money", "study", "pattern")   # raised by the PA engine (pa.py)
+PA_KINDS = ("birthday", "people", "money", "study", "pattern", "coach")   # raised by pa.py and coach.py
 URGENT_STEPS_MIN = (30, 60)
 DEFAULT_TIMES = {"after_work": "17:30", "weekend": "10:00", "morning": "07:15", "morning_weekend": "09:00"}
 DEFAULT_MAX_PINGS = 6

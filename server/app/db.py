@@ -325,6 +325,20 @@ class WishItem(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class CoachLog(SQLModel, table=True):
+    """v8 E: what the owner did for a coaching module (a session, water, packed food, the faith habit)."""
+
+    __tablename__ = "coach_logs"
+    id: int | None = Field(default=None, primary_key=True)
+    module: str = Field(index=True)          # training / food / water / study / faith
+    day: dt.date = Field(index=True)         # the owner's local day
+    what: str
+    done: bool = True                        # False: skipped on purpose (said so)
+    value: float | None = None               # minutes, litres, ...
+    source: str = "chat"                     # chat / app / shortcut
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Chore(SQLModel, table=True):
     __tablename__ = "chores"
     id: int | None = Field(default=None, primary_key=True)

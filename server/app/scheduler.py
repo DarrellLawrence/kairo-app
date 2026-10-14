@@ -53,6 +53,7 @@ QUIET_EXEMPT = {"backup", "restore_test"}
 CAPTURE_EVERY_MIN = 15
 LOOPS_EVERY_MIN = 15
 PA_EVERY_MIN = 30
+COACH_EVERY_MIN = 30
 
 # Shown in the app (More -> Jobs) and runnable on demand.
 JOB_TITLES = {
@@ -67,6 +68,7 @@ JOB_TITLES = {
     "open_loops": "Open loops",
     "promises": "Find promises in sent mail",
     "pa": "PA: birthdays, people, money, tests, patterns",
+    "coach": "Coach: training, food and water, study, faith",
     "olat": "School portal (OLAT, read-only)",
     "chat_memory": "Conversation memory",
 }
@@ -347,6 +349,10 @@ class Jobs:
         if "pa" in self.bodies:
             every = ((self.schedule.get("jobs") or {}).get("pa") or {}).get("every_minutes") or PA_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["pa"], id="pa",
+                          misfire_grace_time=900)
+        if "coach" in self.bodies:
+            every = ((self.schedule.get("jobs") or {}).get("coach") or {}).get("every_minutes") or COACH_EVERY_MIN
+            sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["coach"], id="coach",
                           misfire_grace_time=900)
         for name in ("backup", "restore_test", "lerndoku_prompt", "promises", "olat"):
             if name in self.bodies:

@@ -256,6 +256,30 @@ class ToolRunner:
         with Session(self.engine) as s:
             return json.dumps(life.health_summary(s, a["days"], datetime.now().date()), default=str)
 
+    def _coach_log(self, a: dict) -> str:
+        from . import coach
+        tz = self.profile.tz if self.profile else None
+        today = datetime.now(tz).date()
+        day = datetime.fromisoformat(str(a["day"])).date() if a.get("day") else today
+        if abs((day - today).days) > 7:
+            raise ToolError("log within a week of today")
+        with Session(self.engine) as s:
+            row = coach.log_entry(s, module=a["module"], what=a["what"], day=day, done=a.get("done", True),
+                                  value=a.get("value"), now=datetime.now(tz))
+            return json.dumps({"logged": {"module": row.module, "day": row.day, "what": row.what, "done": row.done,
+                                          "value": row.value},
+                               "streak": coach.streak(s, row.module, today),
+                               "water_today_l": coach.water_today(s, today) if row.module == "water" else None}, default=str)
+
+    def _coach_status(self, a: dict) -> str:
+        from . import coach
+        tz = self.profile.tz if self.profile else None
+        with Session(self.engine) as s:
+            st = coach.status(s, datetime.now(tz).date(), tz)
+        if a.get("module"):
+            st = {"module": a["module"], "streak": st["streaks"].get(a["module"]), **{k: st[k] for k in ("today", "week")}}
+        return json.dumps(st, default=str)
+
     def _memory_search(self, a: dict) -> str:
         """v8 C6: notes can hold captured mail or web text, so the hits come back as untrusted data."""
         from . import semantic
