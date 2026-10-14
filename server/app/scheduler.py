@@ -115,8 +115,8 @@ class JobContext:
     forced: bool          # started by the owner
     jobs: "Jobs"
 
-    def ask(self, prompt: str, system: str):
-        return self.jobs.ask_brain(prompt, system)
+    def ask(self, prompt: str, system: str, images=None):
+        return self.jobs.ask_brain(prompt, system, images=images)
 
 
 class Jobs:
@@ -171,7 +171,7 @@ class Jobs:
         paused = bool(until and dt.datetime.fromisoformat(until) > utcnow())
         return {"runs_today": used, "budget": self.budget, "paused_until": until if paused else None}
 
-    def ask_brain(self, prompt: str, system: str):
+    def ask_brain(self, prompt: str, system: str, images=None):
         """One model run for a job, counted against the daily budget."""
         if self._ask is None:
             raise Skipped("no model configured")
@@ -182,7 +182,7 @@ class Jobs:
             if st["runs_today"] >= self.budget:
                 raise Skipped(f"daily model budget of {self.budget} runs reached")
             self._set_kv(s, f"brain_runs:{self.today().isoformat()}", str(st["runs_today"] + 1))
-        result = self._ask(prompt, system)
+        result = self._ask(prompt, system, images) if images else self._ask(prompt, system)
         if result.status == "usage_limited":
             with Session(self.engine) as s:
                 self._set_kv(s, "brain_paused_until", (utcnow() + USAGE_PAUSE).isoformat())

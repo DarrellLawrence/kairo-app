@@ -163,7 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.jobs = Jobs(
         engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
-        ask=lambda prompt, system: chat.ask_sync(runner, prompt, system=system),
+        ask=lambda prompt, system, images=None: chat.ask_sync(runner, prompt, system=system, images=images),
         bodies={"email_triage": lambda ctx: app.state.triage.run(ctx),
                 "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
                 "capture_process": lambda ctx: app.state.captures.run(ctx),

@@ -88,6 +88,7 @@ function CapturePage() {
       <div className="k-pad">
         <ol className="k-steps">
           <li>New shortcut <b>Send to Kairo</b>. Tap the <b>(i)</b> → turn on <b>Show in Share Sheet</b>, types: <b>Images</b> and <b>PDFs</b>.</li>
+          <li>For photos: add <b>Convert Image</b> → <b>JPEG</b>, then <b>Resize Image</b> → width <b>2000</b> (Kairo can't read iPhone HEIC photos).</li>
           <li>Add <b>Get Contents of URL</b>. URL: the address above + <b>?source=share</b>. Method <b>POST</b>.</li>
           <li>Same <b>Authorization</b> header as above.</li>
           <li>Request Body: <b>File</b> → <b>Shortcut Input</b>.</li>
@@ -98,7 +99,7 @@ function CapturePage() {
 
       <SectionTitle>What happens</SectionTitle>
       <div className="k-pad">
-        <p className="k-small">Within 15 minutes Kairo files it: task, school date, note, person, idea. If it is unclear, Kairo asks you on Today. It never sends or deletes anything because of a capture.</p>
+        <p className="k-small">Within 15 minutes Kairo files it: task, school date, note, person, idea. Letters and bills (photo or PDF): Claude reads them, a bill becomes a “Pay …” task with its due date, a note goes to 80 Admin/Letters. Voice memos are transcribed on the PC first. If it is unclear, Kairo asks you on Today. It never sends, deletes or pays anything because of a capture.</p>
       </div>
 
       <Sheet open={confirm} onClose={() => setConfirm(false)} title="New key?">

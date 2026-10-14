@@ -76,7 +76,8 @@ class AskResult:
         return self.status == "ok" and not self.error
 
 
-def ask_sync(runner: BrainRunner, prompt: str, *, system: str, origin: str = "job") -> AskResult:
+def ask_sync(runner: BrainRunner, prompt: str, *, system: str, origin: str = "job",
+             images: list[tuple[bytes, str]] | None = None) -> AskResult:
     """One brain run for a job, blocking (jobs run in scheduler threads). No
     tools: jobs give the model the data and get JSON back; the backend acts."""
     with runner._lock:
@@ -84,7 +85,8 @@ def ask_sync(runner: BrainRunner, prompt: str, *, system: str, origin: str = "jo
         parts: list[str] = []
         final, status, error = None, "ok", ""
         try:
-            for ev in runner.brain.run(prompt, session_id=None, system=system, tools=[], origin=origin):
+            kwargs = {"images": images} if images else {}
+            for ev in runner.brain.run(prompt, session_id=None, system=system, tools=[], origin=origin, **kwargs):
                 if ev.kind == EventKind.text:
                     parts.append(ev.text)
                 elif ev.kind == EventKind.result:

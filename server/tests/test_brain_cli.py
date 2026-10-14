@@ -144,3 +144,15 @@ def test_fake_probe_reports_identity(tmp_path):
     data = json.loads(report.read_text())
     assert data["user"]
     assert data["readable"] == {str(secret): True, str(tmp_path / "missing.txt"): False}
+
+
+def test_images_go_in_as_one_stream_json_message(settings):
+    from app.brain.claude_cli import ClaudeCLIBrain
+    from tests.conftest import FAKE_CLAUDE
+    brain = ClaudeCLIBrain(claude_bin=str(FAKE_CLAUDE), workspace_dir=settings.workspace_dir, mcp_config=None, timeout_s=20)
+    events = list(brain.run("What is this letter?", session_id=None, system="s", tools=[], origin="job",
+                            images=[(b"\x89PNG fake", "image/png")]))
+    assert "--input-format" in brain.build_command(session_id=None, system="s", tools=[], images=True)
+    assert "--input-format" not in brain.build_command(session_id=None, system="s", tools=[])
+    final = [e for e in events if e.kind.value == "result"][-1].text
+    assert "[1 image(s)] What is this letter?" in final
