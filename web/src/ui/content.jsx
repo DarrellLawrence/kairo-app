@@ -3,7 +3,7 @@ import { motion } from 'motion/react'
 import { memo, useEffect, useLayoutEffect, useRef } from 'react'
 import { spring } from '../design/motion.js'
 import { Badge, Button, Swipeable } from './basics.jsx'
-import { IconMic, IconSend } from './icons.jsx'
+import { IconMic, IconPlus, IconSend } from './icons.jsx'
 
 export function TypingDots() {
   return <span className="k-typing" role="status" aria-label="Kairo is typing"><i /><i /><i /></span>
@@ -16,9 +16,9 @@ export const ChatBubble = memo(function ChatBubble({ role, text, chunks, typing 
   return (
     <motion.div
       className={`k-bubble ${role} selectable`}
-      initial={{ opacity: 0, scale: 0.86, y: 10 }}
+      initial={role === 'owner' ? { opacity: 0, scale: 0.9, y: 10 } : { opacity: 0, y: 6 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
-      transition={spring.bouncy}
+      transition={role === 'owner' ? spring.bouncy : spring.smooth}
     >
       {typing ? <TypingDots /> : chunks ? chunks.map((c, i) => <span key={i} className="k-chunk">{c}</span>) : text}
     </motion.div>
@@ -26,7 +26,7 @@ export const ChatBubble = memo(function ChatBubble({ role, text, chunks, typing 
 })
 
 /* Grows with the text (up to ~5 lines). Enter sends, Shift+Enter is a new line. */
-export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Message', mic }) {
+export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Message', mic, onPlus }) {
   const ref = useRef(null)
   useLayoutEffect(() => {
     const ta = ref.current
@@ -37,7 +37,12 @@ export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Mes
   const canSend = !disabled && value.trim().length > 0
   const submit = (e) => { e.preventDefault(); if (canSend) onSend() }
   return (
-    <form className="k-inputbar" onSubmit={submit}>
+    <form className="k-inputbar k-glow" onSubmit={submit}>
+      {onPlus && (
+        <motion.button type="button" className="k-plus" onClick={onPlus} whileTap={{ scale: 0.88 }} transition={spring.snappy} aria-label="More">
+          <IconPlus />
+        </motion.button>
+      )}
       <textarea
         ref={ref}
         rows={1}
@@ -79,11 +84,20 @@ export function SuccessCheck({ size = 72 }) {
 
 const TIER_LABEL = { 3: 'Sends', 4: 'Deletes' }
 
-/* An approval waiting for the owner. Swipe right = approve, left = reject
-   (with resistance and snap-back); buttons do the same. Tier 4 never acts on a
-   swipe alone: the caller asks for a second confirmation. */
+function who(card) {
+  const a = card.args || {}
+  const to = [...(a.to || []), ...(a.cc || [])]
+  if (to.length) return `To ${to.join(', ')}`
+  if (a.response) return `Reply to the organiser: ${a.response}`
+  return card.tool?.replace('.', ' · ') || ''
+}
+
+/* An approval waiting for the owner: who, what, the full text, and two big
+   buttons. Swipe right = approve, left = reject (spring + resistance). Tier 4
+   never acts on a swipe alone: the caller asks for a second confirmation. */
 export function ApprovalCard({ card, onApprove, onReject, onOpen, busy, hint }) {
   const tier4 = card.tier >= 4
+  const a = card.args || {}
   return (
     <motion.div
       className="k-approval"
@@ -100,13 +114,16 @@ export function ApprovalCard({ card, onApprove, onReject, onOpen, busy, hint }) 
         <div className={tier4 ? 'k-approval-face tier4' : 'k-approval-face'} onClick={onOpen}>
           <div className="k-approval-head">
             <Badge tone={tier4 ? 'danger' : 'accent'} pop={false}>{TIER_LABEL[card.tier] ?? `Tier ${card.tier}`}</Badge>
+            <span className="k-approval-who">{who(card)}</span>
             <span className="k-approval-num">#{card.id}</span>
           </div>
-          <p className="k-approval-summary">{card.summary}</p>
-          {card.reason && <p className="k-approval-reason">“{card.reason}”</p>}
+          <p className="k-approval-summary">{a.subject || card.summary}</p>
+          {a.body && <p className="k-approval-preview selectable" onClick={(e) => e.stopPropagation()}>{a.body}</p>}
+          {!a.body && a.subject && <p className="k-approval-reason">{card.summary}</p>}
+          {card.reason && <p className="k-approval-reason">Why: {card.reason}</p>}
           <div className="k-approval-actions" onClick={(e) => e.stopPropagation()}>
-            <Button variant="danger" size="sm" disabled={busy} onClick={onReject}>Reject</Button>
-            <Button variant={tier4 ? 'danger' : 'primary'} size="sm" disabled={busy} onClick={onApprove}>{tier4 ? 'Delete…' : 'Approve'}</Button>
+            <Button variant="secondary" disabled={busy} onClick={onReject}>Reject</Button>
+            <Button variant={tier4 ? 'danger' : 'primary'} breathe={!tier4} disabled={busy} onClick={onApprove}>{tier4 ? 'Delete…' : 'Approve'}</Button>
           </div>
         </div>
       </Swipeable>

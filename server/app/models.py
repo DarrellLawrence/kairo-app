@@ -18,12 +18,13 @@ ALIASES = ("haiku", "sonnet", "opus")
 DEFAULTS = {
     "chat": "sonnet", "call": "haiku", "voice_note": "sonnet",
     "triage": "haiku", "capture": "haiku", "letters": "haiku", "brief": "haiku", "reminder": "haiku",
-    "proactive": "haiku", "summary": "haiku",
+    "proactive": "haiku", "summary": "haiku", "promises": "haiku",
     "draft": "sonnet", "document": "sonnet", "gauntlet": "sonnet", "study": "sonnet", "lerndoku": "sonnet",
     "voice_check": "sonnet",
     "plan": "opus", "review_big": "opus",
 }
-JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief"}
+JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
+               "open_loops": "draft", "promises": "promises"}
 
 
 def pick(purpose: str, schedule: dict | None = None) -> str:

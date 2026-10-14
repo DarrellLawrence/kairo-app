@@ -315,3 +315,32 @@ def test_moving_an_own_event_is_reversible(gate):
 @pytest.mark.parametrize("extra", [{"attendees": []}, {"sendUpdates": "all"}, {"summary": "x"}, {"end": MOVE["start"]}])
 def test_move_allows_only_new_times(gate, extra):
     assert gate.decide(*propose("calendar.move", {**MOVE, **extra}), ctx()).verdict == "deny"
+
+
+# ---------------------------------------------------------------- open loops (written before the code)
+
+@pytest.mark.parametrize("tool,args,tier", [
+    ("loops_list", {}, 0),
+    ("loops_add", {"kind": "promise", "who": "Lea", "what": "send her the ABU notes", "due": "2026-10-15"}, 1),
+    ("loops_snooze", {"id": 3, "when": "later"}, 1),
+    ("loops_snooze", {"id": 3, "when": "in_1h"}, 1),
+    ("loops_snooze", {"id": 3, "when": "tomorrow"}, 1),
+    ("loops_snooze", {"id": 3, "at": "2026-10-15T16:00:00+02:00"}, 1),
+    ("loops_close", {"id": 3, "reason": "dropped"}, 1),
+    ("loops_close", {"id": 3, "reason": "done"}, 1),
+])
+def test_loop_tools_are_internal(gate, tool, args, tier):
+    d = gate.decide(P + tool, args, ctx(origin="voice_note"))
+    assert (d.verdict, d.tier) == ("allow", tier)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("loops_snooze", {"id": 3, "when": "never"}),
+    ("loops_snooze", {"id": 3}),                                   # when or at
+    ("loops_snooze", {"id": 3, "at": "2026-10-15T16:00:00"}),      # needs a time zone
+    ("loops_close", {"id": 3, "reason": "sent"}),                  # sending is never a loop tool
+    ("loops_add", {"kind": "promise", "who": "Lea", "what": ""}),
+    ("loops_add", {"kind": "send", "who": "Lea", "what": "x"}),
+])
+def test_bad_loop_calls_are_denied(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"

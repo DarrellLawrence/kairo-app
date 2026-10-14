@@ -3,6 +3,44 @@
 // All speech processing happens on kairo-home.
 
 let player = null
+let envelope = null   // Kairo's loudness while speaking: one value (0..1) per 30 ms of the reply
+
+/* How loud Kairo is right now (drives the call orb). Read from the WAV we
+   play, so no extra audio routing that iOS might fight with. */
+export function speakingLevel() {
+  if (!player || player.paused || !envelope) return 0
+  return envelope[Math.min(envelope.length - 1, Math.floor(player.currentTime / 0.03))] || 0
+}
+
+function wavEnvelope(buf) {
+  try {
+    const v = new DataView(buf)
+    let off = 12
+    let rate = 24000
+    let bits = 16
+    let ch = 1
+    while (off + 8 <= v.byteLength) {
+      const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3))
+      const size = v.getUint32(off + 4, true)
+      if (id === 'fmt ') { ch = v.getUint16(off + 10, true); rate = v.getUint32(off + 12, true); bits = v.getUint16(off + 22, true) }
+      if (id === 'data') {
+        if (bits !== 16) return null
+        const step = Math.max(1, Math.round(rate * 0.03)) * ch
+        const n = Math.floor(size / 2)
+        const out = []
+        for (let i = 0; i < n; i += step) {
+          let sum = 0
+          const end = Math.min(n, i + step)
+          for (let j = i; j < end; j += ch) { const x = v.getInt16(off + 8 + j * 2, true) / 32768; sum += x * x }
+          out.push(Math.min(1, Math.sqrt(sum / ((end - i) / ch)) * 5))
+        }
+        return out
+      }
+      off += 8 + size + (size % 2)
+    }
+  } catch { /* not a WAV we understand: orb just breathes */ }
+  return null
+}
 
 // iOS only lets a page play sound after a tap: call this inside a tap handler once.
 export function unlockAudio() {
@@ -19,7 +57,9 @@ export async function speak(text, { signal } = {}) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }), signal,
   })
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Voice failed (${res.status})`)
-  const url = URL.createObjectURL(await res.blob())
+  const blob = await res.blob()
+  envelope = wavEnvelope(await blob.arrayBuffer())
+  const url = URL.createObjectURL(blob)
   if (!player) unlockAudio()
   return new Promise((resolve) => {
     const done = () => { URL.revokeObjectURL(url); player.onended = null; resolve() }

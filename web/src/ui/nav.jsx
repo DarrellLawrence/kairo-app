@@ -5,29 +5,40 @@ import { AnimatePresence, animate, motion, useDragControls, useMotionValue, useT
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { pageVariants, rubber, spring } from '../design/motion.js'
+import { justSwiped } from './basics.jsx'
 import { IconArrowDown, IconBack, IconRefresh } from './icons.jsx'
 
 // ---------------------------------------------------------------- tab bar
 
-export function TabBar({ tabs, active, onSelect }) {
+/* Floating glass bar: two tabs, the raised voice orb, two tabs. */
+export function TabBar({ tabs, active, onSelect, onOrb, orbLabel = 'Talk to Kairo', orbIcon }) {
+  const tab = (t) => (
+    <motion.button
+      key={t.id}
+      type="button"
+      className={t.id === active ? 'k-tab active' : 'k-tab'}
+      onClick={() => onSelect(t.id)}
+      whileTap={{ scale: 0.88 }}
+      transition={spring.snappy}
+      aria-current={t.id === active ? 'page' : undefined}
+    >
+      {t.id === active && <motion.span layoutId="k-tab-pill" className="k-tab-pill" transition={spring.smooth} />}
+      {t.icon}
+      {t.badge}
+      <span className="k-tab-label">{t.label}</span>
+    </motion.button>
+  )
+  const half = Math.ceil(tabs.length / 2)
   return (
     <nav className="k-tabbar" aria-label="Tabs">
-      {tabs.map((t) => (
-        <motion.button
-          key={t.id}
-          type="button"
-          className={t.id === active ? 'k-tab active' : 'k-tab'}
-          onClick={() => onSelect(t.id)}
-          whileTap={{ scale: 0.9 }}
-          transition={spring.snappy}
-          aria-current={t.id === active ? 'page' : undefined}
-        >
-          {t.id === active && <motion.span layoutId="k-tab-pill" className="k-tab-pill" transition={spring.smooth} />}
-          {t.icon}
-          {t.badge}
-          <span className="k-tab-label">{t.label}</span>
-        </motion.button>
-      ))}
+      {tabs.slice(0, half).map(tab)}
+      <motion.button type="button" className="k-orb-btn" onClick={onOrb} aria-label={orbLabel}
+        whileTap={{ scale: 0.9 }} transition={spring.bouncy}>
+        <span className="k-orb-ring" />
+        <span className="k-orb-core" />
+        {orbIcon}
+      </motion.button>
+      {tabs.slice(half).map(tab)}
     </nav>
   )
 }
@@ -164,16 +175,19 @@ export function BackButton({ label = 'Back', onClick }) {
 
 /* A screen: nav bar on top, large title that hands over to the small one as
    it scrolls away, rubber-band list, optional pull to refresh. */
-export function Page({ title, large = true, left, right, onRefresh, tabbar = true, children }) {
+/* hero: the screen draws its own big serif header; the small title and the
+   frosted bar only fade in once that header has scrolled away. */
+export function Page({ title, large = true, hero = false, left, right, onRefresh, tabbar = true, children }) {
   const scrollY = useMotionValue(0)
-  const titleOpacity = useTransform(scrollY, large ? [24, 44] : [0, 1], [0, 1])
+  const titleOpacity = useTransform(scrollY, hero ? [70, 100] : large ? [24, 44] : [0, 1], [0, 1])
   const largeOpacity = useTransform(scrollY, [0, 30], [1, 0])
   const bgOpacity = useTransform(scrollY, [0, 16], [0, 1])   // iOS: the bar is clear until content scrolls under it
+  if (hero) large = false
   const stack = useContext(StackCtx)
   const leftSide = left ?? (stack?.depth > 0 ? <BackButton label={stack.backLabel} onClick={stack.pop} /> : null)
   return (
     <div className="k-layer">
-      <NavBar title={title} titleOpacity={titleOpacity} bgOpacity={large ? bgOpacity : 1} left={leftSide} right={right} />
+      <NavBar title={title} titleOpacity={titleOpacity} bgOpacity={large || hero ? bgOpacity : 1} left={leftSide} right={right} />
       <ScrollArea onRefresh={onRefresh} onScrollY={(v) => scrollY.set(v)} tabbar={tabbar}>
         {large && <motion.h1 className="k-largetitle" style={{ opacity: largeOpacity }}>{title}</motion.h1>}
         {children}
@@ -263,7 +277,7 @@ export function Expandable({ id, preview, detail, open, onOpen, onClose }) {
   useEffect(() => { if (open) y.set(0) }, [open, y])
   return (
     <>
-      <motion.div layoutId={`exp-${id}`} onClick={onOpen} transition={spring.smooth} style={{ position: 'relative', zIndex: open ? 0 : 1 }}>
+      <motion.div layoutId={`exp-${id}`} onClick={() => { if (!justSwiped()) onOpen() }} transition={spring.smooth} style={{ position: 'relative', zIndex: open ? 0 : 1 }}>
         {preview}
       </motion.div>
       {createPortal(<AnimatePresence>

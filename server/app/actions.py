@@ -8,7 +8,7 @@ is denied.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -132,6 +132,42 @@ class CalendarTag(Strict):
 
     event_id: str = Field(pattern=_GOOGLE_ID)
     type: Literal["FIXED", "SOCIAL", "FLEXIBLE"]
+
+
+class LoopsList(Strict):
+    include_snoozed: bool = True
+
+
+class LoopsAdd(Strict):
+    """Something to keep raising: a promise the owner made, something someone waits for."""
+
+    kind: Literal["promise", "waiting", "task", "deadline"]
+    who: str | None = Field(default=None, max_length=120)
+    what: str = Field(min_length=1, max_length=300)
+    due: date | None = None
+
+    _what = field_validator("what")(_one_line)
+
+
+class LoopsSnooze(Strict):
+    """'not now' = later (by urgency), 'in an hour', 'tomorrow', or an exact time."""
+
+    id: int = Field(ge=1)
+    when: Literal["later", "in_1h", "tomorrow"] | None = None
+    at: datetime | None = None
+
+    @model_validator(mode="after")
+    def one_of(self):
+        if (self.when is None) == (self.at is None):
+            raise ValueError("give when or at")
+        if self.at is not None and self.at.tzinfo is None:
+            raise ValueError("at needs a time zone")
+        return self
+
+
+class LoopsClose(Strict):
+    id: int = Field(ge=1)
+    reason: Literal["done", "dropped"]
 
 
 # ---------------------------------------------------------------- tier 2: reversible, nobody notified
@@ -267,6 +303,10 @@ SCHEMAS: dict[str, type[Strict]] = {
     "finance.list": FinanceList,
     "health.list": HealthList,
     "calendar.tag": CalendarTag,
+    "loops.list": LoopsList,
+    "loops.add": LoopsAdd,
+    "loops.snooze": LoopsSnooze,
+    "loops.close": LoopsClose,
     "gmail.send_self": GmailSendSelf,
     "calendar.move": CalendarMove,
     "gmail.label": GmailLabel,
@@ -288,7 +328,8 @@ MIN_TIER: dict[str, int] = {
     "shopping.add": 1, "people.note": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
-    "calendar.tag": 1, "gmail.send_self": 2, "calendar.move": 2,
+    "calendar.tag": 1, "loops.list": 0, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
+    "gmail.send_self": 2, "calendar.move": 2,
     "gmail.trash": 2,   # v7: Gmail keeps trash 30 days
     "calendar.delete": 4,
 }
@@ -311,6 +352,10 @@ DIRECT_TOOLS: dict[str, str] = {
     "finance_list": "finance.list",
     "health_list": "health.list",
     "calendar_tag": "calendar.tag",
+    "loops_list": "loops.list",
+    "loops_add": "loops.add",
+    "loops_snooze": "loops.snooze",
+    "loops_close": "loops.close",
 }
 
 # Fields that would let a tier-2 action reach other people. Never allowed on

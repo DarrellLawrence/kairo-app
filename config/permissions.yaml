@@ -25,6 +25,10 @@ actions:
   health.list:           0_read
   shopping.add:          1_internal
   people.note:           1_internal
+  loops.list:            0_read       # open loops: what is still waiting
+  loops.add:             1_internal
+  loops.snooze:          1_internal   # "not now", "tomorrow", "in an hour"
+  loops.close:           1_internal   # done / "drop it"
   calendar.tag:          1_internal   # v7: FIXED / SOCIAL / FLEXIBLE, kept in Kairo's own table
   # tier 2-4: reachable ONLY via mcp_kairo.propose_action; executed by the backend
   gmail.label:           2_reversible

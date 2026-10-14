@@ -85,3 +85,23 @@ def test_hanging_up_mid_answer_still_saves_the_reply(migrated, monkeypatch):
             time.sleep(0.2)
         assert [m["role"] for m in msgs] == ["owner", "kairo"]
         assert msgs[-1]["text"] == "echo: (spoken, on a call) remind me about the dentist"
+
+
+def test_every_message_gets_its_own_answer(migrated, tmp_path, monkeypatch):
+    """Owner's bug report: two different messages must reach the model as themselves and get two
+    different replies, never a replayed brief."""
+    import json
+
+    rec = tmp_path / "rec.json"
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        a = converse(ws, "Quiz me for my Mathe test on Friday")
+        first = json.loads(rec.read_text())
+        b = converse(ws, "Move gym to tomorrow")
+        second = json.loads(rec.read_text())
+    assert first["stdin"] == "Quiz me for my Mathe test on Friday"
+    assert second["stdin"] == "Move gym to tomorrow"
+    assert a[-1]["text"] != b[-1]["text"]
+    system = second["argv"][second["argv"].index("--system-prompt-file") + 1]
+    text = open(system, encoding="utf-8").read()
+    assert "Morning brief" not in text and "Answer first" in text and "Right now:" in text

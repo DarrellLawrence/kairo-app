@@ -4,8 +4,8 @@ import { OnboardingCard } from './Onboarding.jsx'
 import { api, parseTs } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
-  Badge, Button, Card, EmptyState, Expandable, IconCalendar, IconInbox, IconMail, IconMic, IconPlus, IconPulse, IconShield,
-  IconCloud, IconPin, IconSparkle, IconTrain, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, useToast,
+  Badge, Button, Card, EmptyState, Expandable, Flame3D, GlowChip, IconCalendar, IconCheck, IconChevron, IconInbox, IconMail, IconMic,
+  IconPlus, IconCloud, IconPin, IconSparkle, IconTrain, IconWarn, IconX, List, ListRow, Page, SectionTitle, Sheet, Skeleton, SkeletonCard, useToast,
 } from '../ui/index.js'
 
 function greeting(d = new Date()) {
@@ -42,6 +42,15 @@ function BriefDetail({ b, startDrag, close, onDone }) {
       </div>
       <div>
         {b.top3?.length > 0 && <><SectionTitle>Top 3</SectionTitle><div className="k-pad"><Top3 items={b.top3} /></div></>}
+        {b.open_loops?.length > 0 && (
+          <>
+            <SectionTitle>Still open</SectionTitle>
+            <List>{b.open_loops.map((l) => (
+              <ListRow key={l.id} icon={<IconWarn />} title={l.phrase} subtitle={l.offer || undefined} wrap chevron
+                onClick={() => { close(); window.location.hash = `#loops/${l.id}` }} />
+            ))}</List>
+          </>
+        )}
         <SectionTitle>Calendar</SectionTitle>
         <List>
           {b.calendar_error && <ListRow icon={<IconWarn />} title="Calendar not available" subtitle={b.calendar_error} wrap />}
@@ -161,11 +170,9 @@ function HereNow() {
   )
 }
 
-export default function Today({ openCards, go, onboarding }) {
+export default function Today({ go, onboarding }) {
   const toast = useToast()
-  const [health, setHealth] = useState(null)
-  const [status, setStatus] = useState(null)
-  const [google, setGoogle] = useState(null)
+  const [home, setHome] = useState(null)
   const [brief, setBrief] = useState(undefined)
   const [tri, setTri] = useState({ needs_reply: [], flagged: [] })
   const [asking, setAsking] = useState([])
@@ -173,20 +180,18 @@ export default function Today({ openCards, go, onboarding }) {
   const [notes, setNotes] = useState([])
   const [briefOpen, setBriefOpen] = useState(false)
   const [due, setDue] = useState([])
+  const [ticked, setTicked] = useState({})
   const [captureOpen, setCaptureOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const [answering, setAnswering] = useState(null)
   const [answer, setAnswer] = useState('')
 
   const load = useCallback(async () => {
-    const [h, s, g, b, t, a, l, r, v] = await Promise.allSettled([
-      fetch('/health').then((x) => x.json()), api('/api/status'), api('/api/setup/google/status'), api('/api/brief'),
-      api('/api/triage'), api('/api/captures?status=asking'), api('/api/captures?status=later'), api('/api/reviews?status=open'),
-      api('/api/captures?status=filed&limit=30'),
+    const [hm, b, t, a, l, r, v] = await Promise.allSettled([
+      api('/api/today'), api('/api/brief'), api('/api/triage'), api('/api/captures?status=asking'),
+      api('/api/captures?status=later'), api('/api/reviews?status=open'), api('/api/captures?status=filed&limit=30'),
     ])
-    setHealth(h.status === 'fulfilled' ? (h.value.detail ?? h.value) : { status: 'unreachable' })
-    setStatus(s.status === 'fulfilled' ? s.value : {})
-    setGoogle(g.status === 'fulfilled' ? g.value : null)
+    setHome(hm.status === 'fulfilled' ? hm.value : { error: true })
     setBrief(b.status === 'fulfilled' ? b.value.brief : null)
     if (t.status === 'fulfilled') setTri(t.value)
     setAsking(a.status === 'fulfilled' ? a.value : [])
@@ -202,6 +207,23 @@ export default function Today({ openCards, go, onboarding }) {
     toast.show({ text: last?.status === 'ok' ? 'Brief ready.' : `Brief failed: ${last?.error || 'unknown'}` })
     load()
   })
+
+  const tick = async (t) => {
+    const on = !ticked[t.id]
+    setTicked((x) => ({ ...x, [t.id]: on }))
+    try {
+      await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { status: on ? 'done' : 'open' } })
+      if (on) toast.show({ text: `Done: ${t.title}` })
+    } catch (e) {
+      setTicked((x) => ({ ...x, [t.id]: !on }))
+      toast.show({ text: e.message })
+    }
+  }
+
+  const ask = (prompt) => {
+    try { sessionStorage.setItem('kairo-chat-prefill', prompt) } catch { /* private mode */ }
+    go('chat')
+  }
 
   const markDone = async (id) => {
     await api(`/api/triage/${encodeURIComponent(id)}/done`, { method: 'POST', body: {} })
@@ -238,20 +260,44 @@ export default function Today({ openCards, go, onboarding }) {
     setLater((a) => a.filter((x) => x.id !== c.id))
   }
 
-  const loading = health === null
-  const boot = status?.boot_check
-  const allOk = health?.status === 'ok' && health?.brain === 'ok' && (!boot || boot.all_ok)
-  const googleEnd = google && [google.read_may_end, google.write_may_end].filter(Boolean).sort()[0]
+  const h = home && !home.error ? home : null
+  const name = h?.name || ''
   const briefIsToday = brief && brief.date === new Date().toLocaleDateString('sv-SE')
+  const st = h?.streak
 
   return (
-    <Page title="Today" onRefresh={load}
+    <Page title="Today" hero onRefresh={load}
       right={<Button variant="ghost" size="sm" icon={<IconPlus />} onClick={() => setCaptureOpen(true)} aria-label="Capture" />}>
-      <p className="k-hello">{greeting()} · {new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+
+      <motion.header className="k-hero" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={spring.smooth}>
+        <h1>{greeting()}{name ? <>,<br /><em>{name}</em></> : ''}</h1>
+        {h ? <p>{h.summary}</p> : <Skeleton w="80%" h={16} />}
+        {h?.issues?.length > 0 && (
+          <motion.button className="k-warnchip" onClick={() => { window.location.hash = '#more'; sessionStorage.setItem('kairo-more-open', 'system') }}
+            whileTap={{ scale: 0.95 }} title={h.issues.join(' · ')}>
+            <IconWarn />{h.issues.length === 1 ? h.issues[0] : `${h.issues.length} things need a look`}
+          </motion.button>
+        )}
+      </motion.header>
+
+      {h?.loops?.count > 0 && (
+        <motion.div className="k-stack" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.08 }}>
+          {h.loops.count > 2 && <span className="k-stack-layer l2" />}
+          {h.loops.count > 1 && <span className="k-stack-layer" />}
+          <Card interactive onClick={() => { window.location.hash = `#loops/${h.loops.top[0].id}` }}>
+            <div className="k-approval-head">
+              <span className="k-stack-count"><b>{h.loops.count}</b><span className="k-muted k-small">open</span></span>
+              {h.loops.urgent > 0 && <Badge tone="danger" pop={false}>{h.loops.urgent} urgent</Badge>}
+            </div>
+            <p className="k-loop-phrase" style={{ fontSize: 19, marginBottom: 6 }}>{h.loops.top[0].phrase}</p>
+            {h.loops.top[0].offer && <p className="k-card-sub">{h.loops.top[0].offer}</p>}
+          </Card>
+        </motion.div>
+      )}
 
       {due.map((r) => (
         <Card key={r.id} accent interactive onClick={() => { window.location.hash = `#reviews/${r.id}` }}>
-          <p className="k-eyebrow">{r.title} · {r.minutes} min</p>
+          <p className="k-eyebrow ember">{r.title} · {r.minutes} min</p>
           <p className="k-card-title">Ready when you are</p>
           <p className="k-card-sub">Kairo filled in what it knows. A few questions, then it's saved to your vault.</p>
         </Card>
@@ -259,53 +305,105 @@ export default function Today({ openCards, go, onboarding }) {
 
       <OnboardingCard onOpen={onboarding} />
 
-      {brief === undefined ? <SkeletonCard lines={3} /> : brief ? (
-        <Expandable
-          id="brief"
-          open={briefOpen}
-          onOpen={() => setBriefOpen(true)}
-          onClose={() => setBriefOpen(false)}
-          preview={
-            <Card accent interactive>
-              <p className="k-eyebrow">Morning brief{briefIsToday ? '' : ` · ${day(brief.date)}`}</p>
-              <p className="k-card-title">{brief.headline}</p>
-              {brief.top3?.length > 0 && <Top3 items={brief.top3} />}
-            </Card>
-          }
-          detail={(p) => <BriefDetail b={brief} onDone={markDone} {...p} />}
-        />
-      ) : (
-        <Card accent>
-          <p className="k-eyebrow">Morning brief</p>
-          <p className="k-card-title">No brief yet</p>
-          <p className="k-card-sub">It arrives at 06:20 on weekdays and 08:20 on weekends.</p>
-          <div style={{ marginTop: 12 }}><Button variant="primary" size="sm" loading={making} onClick={makeBrief}>Make it now</Button></div>
+      {!h ? <SkeletonCard lines={4} /> : (
+        <Card className="k-streak">
+          <motion.div className="k-flame" initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={spring.bouncy}>
+            <span className="k-flame-disc" />
+            <Flame3D />
+          </motion.div>
+          <p className="k-streak-num">{st.count}</p>
+          <p className="k-streak-label">Day check-in streak</p>
+          <p className="k-streak-sub">{st.done_today ? 'Today is in. Nice.' : st.count ? 'Check in tonight to keep it going.' : 'Check in tonight to start one.'}</p>
+          <div className="k-week">
+            {st.week.map((d, i) => (
+              <motion.div key={d.date} className={`k-weekday ${d.state}`} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+                transition={{ ...spring.smooth, delay: 0.04 * i }}>
+                <span>{d.day}</span>
+                <span className={`k-weekdot ${d.state}`}>{d.state === 'missed' ? <IconX /> : null}</span>
+              </motion.div>
+            ))}
+          </div>
         </Card>
       )}
-      {brief && !briefIsToday && (
-        <div className="k-pad" style={{ marginBottom: 12 }}><Button variant="secondary" size="sm" block loading={making} onClick={makeBrief}>Make today's brief now</Button></div>
+
+      {h && (
+        <>
+          <SectionTitle>Your snapshot</SectionTitle>
+          <Card>
+            <div className="k-snapshot">
+              {h.snapshot.map((x) => (
+                <div key={x.label}>
+                  <p className="k-num">{x.value ?? '–'}{x.value != null && x.unit ? <small>{x.unit}</small> : null}</p>
+                  <span className="k-num-label">{x.label}</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </>
       )}
 
-      <HereNow />
-
-      {notes.length > 0 && (
+      {h?.top3?.length > 0 && (
         <>
-          <SectionTitle>Your voice notes</SectionTitle>
-          <List>{notes.map((c) => (
-            <ListRow key={c.id} icon={<IconMic />} title={c.result?.reply || c.title} subtitle={`You: “${c.title}”`}
-              onClick={() => { window.location.hash = '#chat' }} />
-          ))}</List>
+          <SectionTitle>Top 3 for today</SectionTitle>
+          <div className="k-list">
+            {h.top3.map((t) => {
+              const on = !!ticked[t.id]
+              return (
+                <motion.button key={t.id} className={on ? 'k-task done' : 'k-task'} onClick={() => tick(t)} whileTap={{ scale: 0.98 }} transition={spring.snappy}>
+                  <motion.span className={on ? 'k-tick on' : 'k-tick'} animate={{ scale: on ? [1, 1.25, 1] : 1 }} transition={spring.bouncy}>
+                    {on && <IconCheck />}
+                  </motion.span>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span className="k-task-title" style={{ display: 'block' }}>{t.title}</span>
+                    {t.why && <span className={t.why === 'overdue' ? 'k-task-why overdue' : 'k-task-why'}>{t.why}</span>}
+                  </span>
+                </motion.button>
+              )
+            })}
+          </div>
+        </>
+      )}
+
+      {h?.next_up && (
+        <>
+          <SectionTitle>Next up</SectionTitle>
+          <Card>
+            <div className="k-nextup">
+              <div className="k-nextup-time">
+                <b>{h.next_up.time}</b>
+                <span>{h.next_up.tomorrow ? 'tomorrow' : h.next_up.in_minutes < 60 ? `in ${h.next_up.in_minutes} min` : `in ${Math.round(h.next_up.in_minutes / 60)} h`}</span>
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <p className="k-card-title">{h.next_up.title}</p>
+                {h.next_up.location && <p className="k-card-sub" style={{ display: 'flex', gap: 4, alignItems: 'center' }}><IconPin width={14} height={14} />{h.next_up.location}</p>}
+              </div>
+            </div>
+          </Card>
+        </>
+      )}
+
+      <div className="k-talk">
+        <Button variant="primary" block breathe icon={<IconMic />} onClick={() => { window.location.hash = '#call/new' }}>Talk to Kairo</Button>
+      </div>
+
+      {h?.suggestions?.length > 0 && (
+        <>
+          <SectionTitle>Try asking</SectionTitle>
+          <div className="k-chips">
+            {h.suggestions.map((c) => <GlowChip key={c.text} glow={c.glow} onClick={() => ask(c.prompt)}>{c.text}</GlowChip>)}
+          </div>
         </>
       )}
 
       <AnimatePresence initial={false}>
         {asking.map((c) => (
-          <motion.div key={`q${c.id}`} layout initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth}>
-            <Card>
-              <p className="k-eyebrow">Kairo has a question</p>
+          <motion.div key={`q${c.id}`} layout initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth}
+            style={{ marginTop: 24 }}>
+            <Card accent>
+              <p className="k-eyebrow ember">Kairo has a question</p>
               <p className="k-card-title">{c.question}</p>
               <p className="k-card-sub">“{(c.text || '').split('\n[Kairo asked')[0].slice(0, 140)}”</p>
-              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
                 <Button variant="primary" size="sm" onClick={() => { setAnswering(c); setAnswer('') }}>Answer</Button>
                 <Button variant="ghost" size="sm" onClick={() => dismiss(c)}>Drop it</Button>
               </div>
@@ -313,6 +411,45 @@ export default function Today({ openCards, go, onboarding }) {
           </motion.div>
         ))}
       </AnimatePresence>
+
+      {notes.length > 0 && (
+        <>
+          <SectionTitle>Your voice notes</SectionTitle>
+          <List>{notes.map((c) => (
+            <ListRow key={c.id} icon={<IconMic />} title={c.result?.reply || c.title} subtitle={`You: “${c.title}”`} wrap
+              onClick={() => go('chat')} />
+          ))}</List>
+        </>
+      )}
+
+      {brief === undefined ? null : brief ? (
+        <>
+          <SectionTitle>Morning brief{briefIsToday ? '' : ` · ${day(brief.date)}`}</SectionTitle>
+          <Expandable
+            id="brief"
+            open={briefOpen}
+            onOpen={() => setBriefOpen(true)}
+            onClose={() => setBriefOpen(false)}
+            preview={
+              <Card interactive>
+                <p className="k-card-title" style={{ font: '400 21px/1.3 var(--font-serif)' }}>{brief.headline}</p>
+                {brief.top3?.length > 0 && <Top3 items={brief.top3} />}
+                <p className="k-card-sub" style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 4 }}>Calendar, mail, the week<IconChevron width={12} height={12} /></p>
+              </Card>
+            }
+            detail={(p) => <BriefDetail b={brief} onDone={markDone} {...p} />}
+          />
+          {!briefIsToday && <div className="k-pad" style={{ marginBottom: 12 }}><Button variant="secondary" size="sm" block loading={making} onClick={makeBrief}>Make today's brief now</Button></div>}
+        </>
+      ) : (
+        <>
+          <SectionTitle>Morning brief</SectionTitle>
+          <Card>
+            <p className="k-card-sub">It arrives at 06:20 on weekdays and 08:20 on weekends.</p>
+            <div style={{ marginTop: 12 }}><Button variant="secondary" size="sm" loading={making} onClick={makeBrief}>Make it now</Button></div>
+          </Card>
+        </>
+      )}
 
       {tri.flagged.length > 0 && (
         <>
@@ -338,7 +475,7 @@ export default function Today({ openCards, go, onboarding }) {
                 swipe={{ right: { label: 'Done', onAction: () => markDone(m.id) } }} />
             ))}
           </List>
-          <p className="k-muted k-small k-pad">Swipe right when it's handled. To answer with Kairo, ask in Chat.</p>
+          <p className="k-muted k-small k-pad">Swipe right when it's handled.</p>
         </>
       )}
 
@@ -352,43 +489,12 @@ export default function Today({ openCards, go, onboarding }) {
                 swipe={{ left: { label: 'Drop', onAction: () => dismiss(c) } }} />
             ))}
           </List>
-          <p className="k-muted k-small k-pad">Kept in the inbox folder on the PC. Reading photos and PDFs comes in a later step.</p>
         </>
       )}
 
-      {loading ? <><SkeletonCard lines={2} /><SkeletonCard lines={2} /></> : (
-        <>
-          <div className="k-grid2">
-            <Card interactive glass onClick={() => go('approvals')}>
-              <p className="k-eyebrow">Waiting</p>
-              <div className="k-stat"><b>{openCards}</b><span className="k-muted k-small">{openCards === 1 ? 'approval' : 'approvals'}</span></div>
-            </Card>
-            <Card interactive glass onClick={() => go('more')}>
-              <p className="k-eyebrow">Kairo</p>
-              <div className="k-stat">
-                <Badge tone={allOk ? 'ok' : 'warn'} pop={false}>{allOk ? 'All good' : 'Check'}</Badge>
-              </div>
-            </Card>
-          </div>
+      <HereNow />
 
-          <SectionTitle>Status</SectionTitle>
-          <List>
-            <ListRow icon={<IconPulse />} title="Kairo" subtitle={health.status === 'ok' ? 'Running' : `Problem: ${health.status}`}
-              value={<Badge tone={health.status === 'ok' ? 'ok' : 'danger'} pop={false}>{health.status === 'ok' ? 'OK' : 'Down'}</Badge>} />
-            <ListRow icon={<IconSparkle />} title="Claude" subtitle={health.brain_busy ? 'Working on something' : 'Ready'}
-              value={<Badge tone={health.brain === 'ok' ? 'ok' : 'warn'} pop={false}>{health.brain === 'ok' ? 'OK' : (health.brain ?? '–')}</Badge>} />
-            <ListRow icon={<IconMail />} title="Google"
-              subtitle={!google ? 'Unknown' : google.signed_out ? 'Signed out: sign in again under More' : google.read ? `Connected${googleEnd ? ` · ends ${new Date(googleEnd * 1000).toLocaleDateString()}` : ''}` : 'Not connected yet'}
-              value={<Badge tone={google?.read && !google?.signed_out ? 'ok' : 'warn'} pop={false}>{google?.read && !google?.signed_out ? 'OK' : 'Fix'}</Badge>} />
-            <ListRow icon={<IconShield />} title="Last boot check" subtitle={boot ? new Date(boot.time).toLocaleString() : 'Not run yet'}
-              value={boot ? <Badge tone={boot.all_ok ? 'ok' : 'danger'} pop={false}>{boot.all_ok ? 'OK' : 'Failed'}</Badge> : undefined} />
-          </List>
-        </>
-      )}
-
-      {!loading && !brief && tri.needs_reply.length === 0 && asking.length === 0 && due.length === 0 && (
-        <EmptyState icon={<IconSparkle />} title="Quiet so far" text="Tap + to capture anything. Kairo sorts it for you." />
-      )}
+      {home?.error && <EmptyState icon={<IconSparkle />} title="Kairo is not answering" text="Pull down to try again." />}
 
       <Sheet open={captureOpen} onClose={() => setCaptureOpen(false)} title="Capture">
         <div className="k-field">
@@ -396,7 +502,7 @@ export default function Today({ openCards, go, onboarding }) {
             placeholder="A task, a test date, an idea, a link…" />
         </div>
         <Button variant="primary" block disabled={!draft.trim()} onClick={sendCapture}>Capture</Button>
-        <p className="k-muted k-small" style={{ textAlign: 'center', marginTop: 12 }}>Faster: set up the Action button under More → Capture.</p>
+        <p className="k-muted k-small" style={{ textAlign: 'center', marginTop: 12 }}>Faster: Back Tap or the lock screen, see More → Capture.</p>
       </Sheet>
 
       <Sheet open={!!answering} onClose={() => setAnswering(null)} title="Answer Kairo">
