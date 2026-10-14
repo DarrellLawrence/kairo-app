@@ -330,6 +330,49 @@ $tables = Get-Tables
 Check ($tables -contains 'tasks') 'table probe works (sees the tasks table)'
 Check (-not ($tables -contains 'ci_probe')) 'schema change of the broken release was undone'
 
+# ---- a migration that fails half way, on a real-sized database: the backup from before the
+#      update comes back, not a downgrade of a half-applied schema (fix P2.15)
+$fill = Join-Path $work 'fill.py'
+Set-Content -Path $fill -Encoding ASCII -Value @(
+    'import sqlite3, sys',
+    'db = sqlite3.connect(sys.argv[1])',
+    'if sys.argv[2] == "fill":',
+    '    db.executemany("insert into tasks (title, priority, status, source, created_at) values (?, 0, ''open'', ''chat'', ''2026-10-14 10:00:00'')", [("ci task %d %s" % (i, "x" * 80),) for i in range(20000)])',
+    '    db.commit()',
+    'tables = ",".join(r[0] for r in db.execute("select name from sqlite_master where type = ''table''"))',
+    'changed = db.execute("select count(*) from tasks where title like ''%!''").fetchone()[0]',
+    'print(db.execute("select count(*) from tasks").fetchone()[0], tables, changed)')
+$py = Join-Path $Root 'app\current\venv\Scripts\python.exe'
+$db = Join-Path $Root 'data\db\kairo.sqlite'
+Stop-Kairo (Get-KairoPaths $Root)
+$before = [string](& $py $fill $db 'fill')
+Start-Kairo; [void](Wait-Healthy 90)
+$v8 = "$v1-ci8-halfmig"
+$s8 = Copy-Setup $s1 'v8' $v8
+$head = (Get-ChildItem (Join-Path $s8 'app\server\migrations\versions') -Filter '*.py' | Sort-Object Name | Select-Object -Last 1).Name.Split('_')[0]
+$half = @"
+from alembic import op
+import sqlalchemy as sa
+revision = "0098"
+down_revision = "$head"
+branch_labels = None
+depends_on = None
+def upgrade():
+    op.create_table("ci_half", sa.Column("id", sa.Integer, primary_key=True))
+    op.execute("update tasks set title = title || '!'")
+    raise RuntimeError("ci: migration fails half way")
+def downgrade():
+    op.drop_table("ci_half")
+"@
+Set-Content -Path (Join-Path $s8 'app\server\migrations\versions\0098_ci_half.py') -Value $half -Encoding ASCII
+Check ((Invoke-Install $s8) -ne 0) 'an update whose migration fails half way reports failure'
+Check ((Get-StateObj).current -eq $v2 -and (Get-HealthObj).status -eq 'ok') 'still on v2, answering'
+Stop-Kairo (Get-KairoPaths $Root)
+$after = [string](& $py $fill $db 'count')
+Start-Kairo; [void](Wait-Healthy 90)
+Check (($before -split ' ')[0] -eq ($after -split ' ')[0] -and $after -notmatch 'ci_half') "the database from before the update is back ($(($after -split ' ')[0]) tasks, no half-applied table)"
+Check (($after.Trim() -split ' ')[-1] -eq '0') 'no row changed by the failed migration survived'
+
 
 # ---- an update without Kairo's tool bridge (what every release before 2026-10-14 was): the
 #      self-test after the switch fails, the update rolls back by itself and says why
@@ -386,14 +429,37 @@ Check ((Get-StateObj).current -eq $v4) "auto-update installed $v4"
 $note = Get-Content -Raw (Join-Path $Root 'data\updates\last-update.json') | ConvertFrom-Json
 Check ($note.message -eq "Kairo updated to $v4." -and -not $note.notified) 'one-line update note left for the iPhone push'
 Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0 -and (Get-StateObj).current -eq $v4) 'already up to date: nothing happens'
+function Get-UpdaterStateObj { return (Get-Content -Raw (Join-Path $Root 'updater\state.json') | ConvertFrom-Json) }
 $zip3 = Join-Path $work "Kairo-Setup-$v3.zip"
 Compress-Archive -Path $s3 -DestinationPath $zip3
-Check ((Invoke-AutoUpdate "v$v3" '[urgent] CI' $zip3) -ne 0) 'a broken release fails'
+$logLines = @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count
+Check ((Invoke-AutoUpdate "v$v3" '[urgent] CI' $zip3) -eq 0 -and (Get-StateObj).current -eq $v4 -and
+       @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count -eq $logLines) 'an older version is never installed automatically'
+$v6 = "$v1-ci6-broken"
+$s6 = Copy-Setup $s3 'v6' $v6
+$zip6 = Join-Path $work "Kairo-Setup-$v6.zip"
+Compress-Archive -Path $s6 -DestinationPath $zip6
+Check ((Invoke-AutoUpdate "v$v6" '[urgent] CI' $zip6) -ne 0) 'a broken release fails'
 Check ((Get-StateObj).current -eq $v4) "still on $v4 after the broken auto-update"
 $note = Get-Content -Raw (Join-Path $Root 'data\updates\last-update.json') | ConvertFrom-Json
 Check ($note.message -match 'failed and was undone') 'the failure is noted for the iPhone push'
+Check (@((Get-UpdaterStateObj).failed) -contains $v6) 'a release that ran and failed is blacklisted'
 $logLines = @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count
-Check ((Invoke-AutoUpdate "v$v3" '[urgent] CI' $zip3) -eq 0 -and @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count -eq $logLines) 'a failed version is not tried again'
+Check ((Invoke-AutoUpdate "v$v6" '[urgent] CI' $zip6) -eq 0 -and @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count -eq $logLines) 'a failed version is not tried again'
+
+# ---- a hiccup before anything changed (here: the download is missing) is retried later, not blacklisted (fix P2.13)
+$v7 = "$v1-ci7"
+Check ((Invoke-AutoUpdate "v$v7" '[urgent] CI' (Join-Path $work 'not-there.zip')) -ne 0) 'a failed download reports failure'
+$us = Get-UpdaterStateObj
+Check ((Get-StateObj).current -eq $v4 -and -not (@($us.failed) -contains $v7) -and $us.retry.version -eq $v7 -and [int]$us.retry.attempts -eq 1) 'a hiccup is not blacklisted: retried later'
+$logLines = @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count
+Check ((Invoke-AutoUpdate "v$v7" '[urgent] CI' (Join-Path $work 'not-there.zip')) -eq 0 -and @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count -eq $logLines) 'the retry waits (10 minutes first)'
+
+# ---- a manual rollback sticks (fix P2.13)
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Rollback-Kairo.ps1') -CI -Root $Root | Out-Host
+Check ($LASTEXITCODE -eq 0 -and (Get-StateObj).current -eq $v2) "manual rollback from $v4 to $v2"
+Check ((Get-UpdaterStateObj).hold -eq $v4) 'the auto-updater remembers what was rolled back'
+Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0 -and (Get-StateObj).current -eq $v2) "the auto-updater does not put $v4 back"
 
 # ---- uninstall keeps data
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Uninstall-Kairo.ps1') -CI -Root $Root | Out-Host

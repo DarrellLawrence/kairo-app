@@ -5,29 +5,29 @@ on:
   pull_request:
 
 jobs:
-  # On main, the long Windows install test is only needed when something the
-  # installer uses changed (pull requests always run it). App-only merges then
-  # reach kairo-home in about 4 minutes instead of 12.
-  changes:
+  # The setup zip, built once (fix P2.12): every test below runs on exactly this file, and the
+  # release publishes exactly this file.
+  build:
     runs-on: ubuntu-24.04
-    outputs:
-      installer: ${{ steps.diff.outputs.installer }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
-      - id: diff
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          if [ "${{ github.event_name }}" != "push" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            echo "installer=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -qE '^(installer/|scripts/|config/|\.github/|server/migrations/|server/requirements|server/pyproject)'; then
-            echo "installer=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "installer=false" >> "$GITHUB_OUTPUT"
-          fi
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build setup zip (with its release check)
+        run: scripts/build-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: setup-zip
+          path: |
+            dist/Kairo-Setup-*.zip
+            dist/Kairo-Setup-*.zip.sha256
+            dist/VERSION
+          if-no-files-found: error
+          retention-days: 30
 
   server:
     strategy:
@@ -84,17 +84,17 @@ jobs:
   # extracted, its own requirements in a clean venv, then the shipped app, mcp_kairo and safety
   # hook driven by the fake CLI: self-test, a proposal that makes a card, one the hook blocks.
   release-tools:
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-      - name: Build setup zip
-        run: scripts/build-release.sh
+          name: setup-zip
+          path: dist
       - name: Extract it and install its requirements in a clean venv
         run: |
           mkdir -p "$RUNNER_TEMP/rel"
@@ -125,8 +125,7 @@ jobs:
   # Builds the real setup zip and installs, updates, breaks, rolls back and
   # uninstalls it on a Windows machine with Windows PowerShell 5.1.
   windows-install:
-    needs: [changes, server, web]
-    if: needs.changes.outputs.installer == 'true'
+    needs: build
     runs-on: windows-latest
     env:
       # 2 GB of speech packages; the voice job tests them on Linux. The browser is installed for
@@ -138,14 +137,10 @@ jobs:
         id: py
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-      - name: Build setup zip
-        shell: bash
-        env:
-          PYTHON: python
-        run: scripts/build-release.sh
+          name: setup-zip
+          path: dist
       - name: Let normal users read Python (like C:\Program Files on a real PC)
         shell: powershell
         run: |
@@ -175,24 +170,24 @@ jobs:
           Get-ChildItem C:\KairoCI\data\logs -ErrorAction SilentlyContinue | ForEach-Object { "==== $($_.Name)"; Get-Content $_.FullName -Tail 200 }
           foreach ($f in @('C:\KairoCI\updater\auto-update.log', 'C:\KairoCI\install.log')) { if (Test-Path $f) { "==== $f"; Get-Content $f -Tail 200 } }
 
-  # Only a version that passed everything above becomes "the latest tested
-  # version" that "Update Kairo" on kairo-home downloads.
+  # Only the exact zip that passed everything above becomes "the latest tested version" that
+  # kairo-home installs (fix P2.11/12): every job must succeed; a skipped one blocks the release.
   release:
-    if: >-
-      always() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      needs.server.result == 'success' && needs.web.result == 'success' && needs.release-tools.result == 'success' &&
-      (needs.windows-install.result == 'success' || needs.windows-install.result == 'skipped')
-    needs: [server, web, release-tools, windows-install]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, server, voice, browser, web, release-tools, windows-install]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-      - name: Build setup zip
-        run: scripts/build-release.sh
+          name: setup-zip
+          path: dist
+      - name: Check the zip is the tested one
+        run: |
+          cd dist
+          sha256sum -c Kairo-Setup-*.zip.sha256
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

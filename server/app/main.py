@@ -1962,9 +1962,14 @@ log = logging.getLogger("kairo.main")
 
 def _mark_interrupted(engine) -> None:
     """Runs a restart cut off (an update, a crash) stay "running" forever otherwise (fix P2.14)."""
+    from sqlalchemy.exc import OperationalError
+
     from .db import JobRun, utcnow
     with session_for(engine) as s:
-        rows = s.exec(select(JobRun).where(JobRun.status == "running")).all()
+        try:
+            rows = s.exec(select(JobRun).where(JobRun.status == "running")).all()
+        except OperationalError:   # not migrated yet: /health says so
+            return
         for run in rows:
             run.status, run.finished_at = "interrupted", utcnow()
             run.error = "Kairo restarted while this was running"

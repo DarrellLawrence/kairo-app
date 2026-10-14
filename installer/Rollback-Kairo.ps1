@@ -26,7 +26,9 @@ try {
     $state.current = $state.previous
     $state.previous = $was
     Save-State $P $state
+    Set-UpdateHold $P $was   # fix P2.13: the auto-updater must not put it straight back
     Write-Ok "Now running $($state.current). Run Rollback again to switch back to $was."
+    Write-Note "Automatic updates skip $was and older; the next newer version installs as usual."
 } catch {
     Write-Bad $_.Exception.Message
     $exitCode = 1
