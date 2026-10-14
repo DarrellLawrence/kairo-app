@@ -214,7 +214,10 @@ class PA:
             log.info("message for %s: %s", p.name, exc)
             return
         if isinstance(out, dict) and str(out.get("text") or "").strip():
-            loop.draft_json = json.dumps({"text": str(out["text"]).strip()[:2000], "note": clip(out.get("reason"), 200),
+            from . import writer
+            checked = writer.polish(ctx.ask, str(out["text"]).strip()[:2000], level=level, language=self.profile.default_language,
+                                    voice=self._voice(), samples=writer.chat_samples(self.vault_dir, self.profile.name))
+            loop.draft_json = json.dumps({"text": checked["text"], "note": clip(out.get("reason"), 200),
                                           "subject": "Hi" if purpose != "happy birthday" else "Happy birthday!", "level": level})
             ctx.session.add(loop)
             ctx.session.commit()

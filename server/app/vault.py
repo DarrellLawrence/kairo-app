@@ -43,7 +43,8 @@ def context(root: Path, limit: int = CONTEXT_LIMIT) -> str:
     for folder in CONTEXT_FOLDERS:
         d = root / folder
         if d.is_dir():
-            files += [p for p in d.rglob("*.md") if p.is_file()]
+            # chat exports hold other people's messages (untrusted): only the voice checker reads them
+            files += [p for p in d.rglob("*.md") if p.is_file() and "chats" not in p.relative_to(d).parts]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     parts, used = [], 0
     for p in files:

@@ -645,9 +645,13 @@ class LoopEngine:
         out = extract_json(answer.text)
         if not isinstance(out, dict) or not str(out.get("text") or "").strip():
             raise ValueError("no draft in the answer")
-        d = {"text": str(out["text"]).strip()[:4000], "note": clip(out.get("note"), 160),
-             "subject": clip(out.get("subject"), 200) or None, "level": level_for(s, loop.who, loop.who_email),
-             "language": language}
+        level = level_for(s, loop.who, loop.who_email)
+        from . import writer
+        checked = writer.polish(ctx.ask, str(out["text"]).strip()[:4000], level=level, language=language,
+                                voice=voice_text(self.vault_dir, self.config_dir, self.profile),
+                                samples=writer.chat_samples(self.vault_dir, self.profile.name))
+        d = {"text": checked["text"], "note": clip(out.get("note"), 160), "subject": clip(out.get("subject"), 200) or None,
+             "level": level, "language": language, "voice_rounds": checked["rounds"]}
         loop.draft_json = json.dumps(d, ensure_ascii=False)
         s.add(loop)
         s.commit()
