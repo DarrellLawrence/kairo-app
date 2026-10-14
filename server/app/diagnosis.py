@@ -253,6 +253,33 @@ def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
     r.add("  updater log and state: C:\\Kairo\\updater (admins only; Kairo's account can't read them)")
 
 
+def _memory(r: _Report, index: Path) -> None:
+    """v8 C6: how much the memory index holds and how it last ran (counts only, never note text)."""
+    r.h("Semantic memory (index)")
+    if not index.is_file():
+        r.add("  no index yet")
+        return
+    try:
+        c = connect_ro(index)
+        try:
+            n, nv = c.execute("SELECT COUNT(*), COUNT(vec) FROM chunks").fetchone()
+            by = c.execute("SELECT source, COUNT(*) FROM docs GROUP BY source ORDER BY source").fetchall()
+            last = c.execute("SELECT value FROM meta WHERE key='last'").fetchone()
+        finally:
+            c.close()
+    except sqlite3.Error as e:
+        r.add(f"  can't read the index: {e}")
+        return
+    r.add(f"  {n} pieces, {nv} with meaning ({'keywords + meaning' if nv else 'keywords only'})")
+    r.add("  sources: " + (", ".join(f"{src} {k}" for src, k in by) or "none"))
+    try:
+        info = json.loads(last[0]) if last else {}
+        at = dt.datetime.fromtimestamp(info["at"], dt.timezone.utc).isoformat(timespec="seconds") if info.get("at") else "never"
+        r.add(f"  last re-index {at}; embedding model on {info.get('device') or 'none'}")
+    except (ValueError, TypeError, KeyError, OSError):
+        pass
+
+
 def _logs(r: _Report, log_dir: Path) -> None:
     def age(p: Path) -> int:               # kairo.log.5 is the oldest, kairo.log the newest (rotation)
         suffix = p.name.rsplit(".", 1)[-1]
@@ -321,6 +348,7 @@ def run(*, db_url: str, data_dir: Path, app_root: Path, now: dt.datetime | None 
         finally:
             c.close()
     _release(r, app_root, data_dir)
+    _memory(r, data_dir / "memory" / "index.sqlite")
     _logs(r, data_dir / "logs")
     r.add(f"\n(took {time.monotonic() - started:.1f}s)")
     return {"text": redact("\n".join(r.lines)), "at": now.isoformat(timespec="seconds")}

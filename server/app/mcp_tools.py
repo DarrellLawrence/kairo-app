@@ -23,6 +23,9 @@ DESCRIPTIONS = {
     "wishlist_add": "Put a gift idea on a person's wishlist (title, price in CHF, link). Only things that person wants or would like.",
     "finance_list": "The owner's spending: totals by category and recent payments (read only; Kairo can't pay).",
     "health_list": "Daily health numbers from Apple Health: steps, sleep, resting heart rate, workouts.",
+    "memory_search": "Search everything Kairo knows about the owner (vault notes, file summaries, people, open loops, "
+                     "conversation memory) by meaning and keywords, any language. Use it before answering about the "
+                     "owner's life when the notes in your prompt don't cover it; name the note you used.",
     "settings_list": "The owner's settings (quiet hours, brief times, ping limit, ...) and places.",
     "settings_set": "Change a setting the owner asked for ('quiet hours from 23:00', 'brief at 7').",
     "place_set": "Save a place: home, school, work, training (+ nearest station; address stays private on the PC; valid_from/until for a job that changes).",

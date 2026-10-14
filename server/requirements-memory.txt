@@ -1,0 +1,13 @@
+# v8 C6 semantic memory (owner: "multilingual embedding model on the GPU, pick and justify").
+# Installed on kairo-home only, in tools\memory-<hash> with the model inside (model\); the app runs
+# without them (search is then keywords only and the self-test says so). The model runs in its own
+# process (app/embed_worker.py), so these never meet voice's onnxruntime and CUDA DLLs.
+# model: onnx-community/Qwen3-Embedding-0.6B-ONNX@c25a394dd583836952667c12f008335071b3f43d
+# onnxruntime-gpu 1.26 is the last build for CUDA 12 (1.27+ need CUDA 13 and an R580+ driver);
+# cuDNN and cuBLAS pinned like voice's (proven on this PC).
+onnxruntime-gpu[cuda,cudnn]==1.26.0; sys_platform == "win32"
+nvidia-cudnn-cu12==9.27.0.42; sys_platform == "win32"
+nvidia-cublas-cu12==12.9.2.10; sys_platform == "win32"
+onnxruntime==1.26.0; sys_platform != "win32"
+tokenizers==0.23.3
+numpy==2.5.4

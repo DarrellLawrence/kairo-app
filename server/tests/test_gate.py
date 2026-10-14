@@ -277,6 +277,26 @@ def test_life_tools_reject_bad_arguments(gate, tool, args):
     assert gate.decide(P + tool, args, ctx()).verdict == "deny"
 
 
+# ---------------------------------------------------------------- v8 C6: memory search (written before the code)
+
+def test_memory_search_is_a_read_tool(gate):
+    d = gate.decide(P + "memory_search", {"query": "Wann ist mein Training?"}, ctx())
+    assert (d.verdict, d.action, d.tier) == ("allow", "memory.search", 0)
+    assert gate.decide(P + "memory_search", {"query": "x", "k": 8}, ctx(origin="job")).verdict == "allow"
+
+
+@pytest.mark.parametrize("args", [
+    {"query": ""}, {"query": "x" * 501}, {"query": "x", "k": 0}, {"query": "x", "k": 21},
+    {"query": "x", "write": "10 Profile/x.md"}, {},
+])
+def test_memory_search_rejects_bad_arguments(gate, args):
+    assert gate.decide(P + "memory_search", args, ctx()).verdict == "deny"
+
+
+def test_memory_search_cannot_be_proposed(gate):
+    assert gate.decide(*propose("memory.search", {"query": "x"}), ctx()).verdict == "deny"
+
+
 @pytest.mark.parametrize("action", ["shopping.add", "people.note", "finance.list"])
 def test_life_actions_cannot_be_proposed(gate, action):
     """Tier 0-1 are direct tools; proposing them is refused (and nothing about money exists)."""

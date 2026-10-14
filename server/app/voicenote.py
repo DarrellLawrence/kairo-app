@@ -41,10 +41,11 @@ must act within the next hour."""
 
 
 class VoiceNotes:
-    def __init__(self, *, engine, inbox_dir, profile, runner, state, system, tools, pick_model, paused):
+    def __init__(self, *, engine, inbox_dir, profile, runner, state, system, tools, pick_model, paused, recall=None):
         self.engine, self.inbox_dir, self.profile = engine, inbox_dir, profile
         self.runner, self.state = runner, state   # app.state: voice and pusher are looked up when used
         self.system, self.tools, self.pick_model, self.paused = system, tools, pick_model, paused
+        self.recall = recall                      # v8 C6: what the owner's notes say about this note
         self._tasks: set[asyncio.Task] = set()
 
     def accept(self, data: bytes, content_type: str, source: str) -> Capture:
@@ -120,6 +121,8 @@ class VoiceNotes:
                 s.commit()
             tid, session_id = thread.id, thread.brain_session_id
         system = self.system(thread_id=tid, fresh=session_id is None, before_id=msg_in.id)
+        if self.recall is not None:
+            system += await asyncio.to_thread(self.recall, text)
         parts, final, error, new_sid = [], None, None, None
         async for ev in self.runner.stream(f"(voice note) {text}", session_id=session_id, system=system + RULES,
                                            tools=self.tools, origin="voice_note", thread_id=tid, purpose="voice_note",

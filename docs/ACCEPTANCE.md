@@ -13,7 +13,7 @@ Google account and the owner's real iPhone. Green CI is not done.
 | # | Test | How | Pass when |
 |---|---|---|---|
 | 1 | Tools | Chat "add task KAIRO-TEST buy milk tomorrow" | The task exists with tomorrow's date; Kairo confirms in 1 line; no question back |
-| 2 | Memory | Chat "my training is Monday 18:30"; hours later "when is my training?" | Correct answer; the fact is in the vault |
+| 2 | Memory | Chat "remember: my KAIRO-TEST kite lesson is on Thursdays at 07:40"; then, in a new conversation, "when is my kite lesson?" (automated; real life: tell a fact, ask hours later) | Correct answer; the fact is in the vault |
 | 3 | Voice (M) | Tap the mic, say a sentence | Correct transcript in < 3 s; the reply is spoken and audible |
 | 4 | Call (M) | "Call Kairo" Shortcut | Mic on; Kairo starts answering < 2 s after the owner stops talking; the owner can interrupt; hanging up mid-sentence still handles what was said |
 | 5 | Voice note (M) | Shortcut records "remind me to call mom Friday" | No app opens; the reminder exists in < 30 s |
@@ -29,7 +29,7 @@ Google account and the owner's real iPhone. Green CI is not done.
 | 15 | Sound (M) | Voice reply on the iPhone, silent switch on and off, with and without AirPods | Audible every time |
 | 16 | Capture (M) | + → hold the mic → "buy protein powder" → release | Filed as task/shopping, one-line confirmation, no reply needed |
 | 17 | Share (M) | Share a WhatsApp message, a photo and a PDF to Kairo | Each filed on the PC; wish/gift ideas in the right wishlist, or a quick question asked next time |
-| 18 | Semantic memory | Tell Kairo a fact; days later ask in different words | Correct answer naming the source note |
+| 18 | Semantic memory | An English note, asked in German with no word in common: "Wo habe ich den Ersatzschlüssel fürs Velo-Schloss versteckt?" (automated; real life: tell a fact, days later ask in other words) | Found by meaning (not keywords); correct answer naming the source note |
 | 19 | Leave it | Discuss two things, then say "leave it" | Only the last one is dropped, and Kairo says which |
 | 20 | Profile import | Attach the fake profile in chat: "save this to my profile" | Stored as-is in `10 Profile/`; loops, calendar tags and people created; summary in a few lines |
 | 21 | Language | A German message, then an English one in the same conversation | German answer, then English answer |

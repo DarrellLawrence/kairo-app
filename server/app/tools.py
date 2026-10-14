@@ -45,6 +45,7 @@ class ToolRunner:
         self.profile = profile          # time zone for open loops
         self.schedule = schedule or {}
         self.on_settings_change = None  # main re-applies settings when the owner changes one
+        self.memory = None              # v8 C6: semantic.MemoryIndex, set by main
 
     def run(self, decision: Decision) -> str:
         """Run an allowed tier 0-1 decision. Returns text for the model; errors are text too."""
@@ -254,6 +255,15 @@ class ToolRunner:
         from . import life
         with Session(self.engine) as s:
             return json.dumps(life.health_summary(s, a["days"], datetime.now().date()), default=str)
+
+    def _memory_search(self, a: dict) -> str:
+        """v8 C6: notes can hold captured mail or web text, so the hits come back as untrusted data."""
+        from . import semantic
+        if self.memory is None:
+            raise ToolError("memory search is not set up")
+        hits = self.memory.search(a["query"], k=a.get("k", 5))
+        return untrusted("the owner's notes (memory search)",
+                         [{"source": semantic.where(h), "text": h["text"]} for h in hits] or "nothing found")
 
 
     # ---------------------------------------------------------------- open loops

@@ -158,7 +158,7 @@ def test_selftest_adds_a_real_task_through_the_owner_chat_path(tmp_path, migrate
         c = r["checks"]
         assert c["hook_deny"] and c["hook_allow"] and c["mcp"] == "connected" and c["tools_missing"] == []
         assert c["task_added"] is True and c["profile"] and c["goals"] and c["personality"] == "current"
-        assert c["voice"] is None and c["browser"] is None                 # not set up in dev: skipped, not failed
+        assert c["voice"] is None and c["browser"] is None and c["memory"] is None   # not set up in dev: skipped, not failed
         proof = r["proof"]["task"]
         assert proof["title"].startswith("Kairo self-test") and proof["due"] and proof["removed"] is True
         assert tasks(migrated) == []                                       # the test task is gone again

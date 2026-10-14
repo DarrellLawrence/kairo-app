@@ -65,6 +65,32 @@ jobs:
       - run: python -m pytest -o addopts="" tests/test_voice.py -s
         working-directory: server
 
+  # v8 C6: the real embedding model (Qwen3-Embedding, CPU int8) in its own process, its packages in a
+  # separate folder like kairo-home's tools\memory-<hash>: a German question finds the English note.
+  memory:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      KAIRO_MEMORY_TEST: "1"
+      KAIRO_MEMORY_MODELS: ${{ github.workspace }}/memory-model
+      KAIRO_MEMORY_SITE: ${{ github.workspace }}/memory-site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: memory-model
+          key: memory-model-${{ hashFiles('server/requirements-memory.txt') }}
+      - run: pip install -r server/requirements-dev.txt
+      - run: pip install --disable-pip-version-check --target memory-site -r server/requirements-memory.txt
+      - run: python -m pytest -o addopts="" tests/test_semantic.py -s
+        working-directory: server
+
   # The school portal's read-only rule in a real browser (Chromium) against a fake OLAT.
   browser:
     runs-on: ubuntu-24.04
@@ -131,6 +157,8 @@ jobs:
       # 2 GB of speech packages; the voice job tests them on Linux. The browser is installed for
       # real: same install path as voice (versioned folder, rights reset), checked as kairo-svc.
       KAIRO_SKIP_VOICE: "1"
+      # 3 GB (GPU runtime + model); the memory job tests the same folder layout on Windows and Linux.
+      KAIRO_SKIP_MEMORY: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

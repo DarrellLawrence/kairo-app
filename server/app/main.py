@@ -34,6 +34,7 @@ from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
 from . import memory
 from . import selftest as selftest_mod
+from . import semantic
 from . import tool_sites
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
@@ -174,15 +175,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     except OperationalError:   # not migrated yet: /health says so
         pass
 
-    def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
-                   system: str | None = None, before_id: int | None = None, via=None):
+    async def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
+                         system: str | None = None, before_id: int | None = None, via=None):
         """The one way an owner message reaches the model: chat, calls, the self-test and the acceptance
         tests (fix P0, 2026-10-14: a self-test with its own prompt and tools was green while chat had
-        none). via: another runner, only for acceptance's deliberately broken tool-server copy."""
+        none). via: another runner, only for acceptance's deliberately broken tool-server copy.
+        v8 C6: what the owner's notes say about this message goes in too (memory search)."""
         system = system or system_prompt(thread_id=thread_id, fresh=session_id is None, before_id=before_id)
-        return (via or runner).stream(text, session_id=session_id, system=system, tools=model_tools,
-                             origin="owner_chat", thread_id=thread_id, purpose=purpose,
-                             model=model or model_table.pick(purpose, app.state.jobs.schedule))
+        system += await asyncio.to_thread(recall, text)
+        async for event in (via or runner).stream(text, session_id=session_id, system=system, tools=model_tools,
+                                                  origin="owner_chat", thread_id=thread_id, purpose=purpose,
+                                                  model=model or model_table.pick(purpose, app.state.jobs.schedule)):
+            yield event
+
+    def recall(text: str) -> str:
+        """v8 C6: the best hits for the owner's message (keywords + meaning), with the note they come from."""
+        mem = getattr(app.state, "memory", None)
+        if mem is None or len((text or "").strip()) < semantic.MIN_QUERY_CHARS:
+            return ""
+        try:
+            return semantic.prompt_block(mem.search(text, k=5))
+        except Exception:   # never lose a turn over this
+            log.exception("memory search failed")
+            return ""
 
     def google_read() -> GoogleAPI:
         return GoogleAPI(settings.secrets_dir, "read", transport=getattr(app.state, "google_transport", None))
@@ -197,6 +212,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if os.environ.get("KAIRO_SCHEDULER", "1") != "0":   # tests switch it off
             app.state.jobs.start()
             background.append(asyncio.create_task(acceptance_after_release(app)))
+            background.append(asyncio.create_task(memory_loop(app)))
             if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
                 asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
         yield
@@ -204,6 +220,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task.cancel()
         for b in background:
             b.cancel()
+        if app.state.memory.embedder is not None:
+            app.state.memory.embedder.close()
         engine.dispose()
 
     app = FastAPI(title="Kairo", lifespan=lifespan)
@@ -228,6 +246,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today"))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
     app.state.voice = Voice(settings.data_dir / "models", site_dir=tool_sites.site("voice", settings.data_dir))
+    # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
+    memory_site = tool_sites.site("memory", settings.data_dir)
+    app.state.memory = semantic.MemoryIndex(
+        settings.data_dir / "memory" / "index.sqlite", vault_dir=settings.vault_dir, engine=engine,
+        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site) if tool_sites.configured("memory") else None)
+    tools.memory = app.state.memory
 
     def _transcribe_for_capture(data: bytes) -> str:
         return app.state.voice.transcribe(data).text
@@ -245,7 +269,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.voice_notes = voicenote.VoiceNotes(
         engine=engine, inbox_dir=inbox_dir, profile=profile, runner=runner, state=app.state, system=system_prompt,
-        tools=model_tools, pick_model=lambda purpose: model_table.pick(purpose, app.state.jobs.schedule), paused=_paused)
+        tools=model_tools, pick_model=lambda purpose: model_table.pick(purpose, app.state.jobs.schedule), paused=_paused,
+        recall=recall)
     backup_dir = settings.data_dir / "backups" / "nightly"
 
     def _backup_status(s, **update):
@@ -776,7 +801,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(403, "self-test only from this PC")
         return await run_tools_selftest(notify=bool(notify), voice=bool(voice), browser=bool(browser))
 
-    async def run_tools_selftest(*, notify: bool, voice: bool, browser: bool) -> dict:
+    async def run_tools_selftest(*, notify: bool, voice: bool, browser: bool, memory: bool = True) -> dict:
         started = time.monotonic()
         env = runner.brain.hook_env("owner_chat") if hasattr(runner.brain, "hook_env") else {}
         hooks = await asyncio.to_thread(selftest_mod.hook_checks, settings.workspace_dir, env)
@@ -804,6 +829,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if browser:
             extras["browser"] = (await asyncio.to_thread(portal_browser.selftest, browser_site)) \
                 if tool_sites.configured("browser") else {"ok": None, "reason": "not set up for this release"}
+        if memory:   # v8 C6: a German question finds the English note (the real model, GPU or CPU)
+            emb = app.state.memory.embedder
+            extras["memory"] = (await asyncio.to_thread(emb.selftest)) if emb is not None \
+                else {"ok": None, "reason": "not set up for this release"}
         result["checks"].update({k: v.get("ok") for k, v in extras.items()})
         result["details"] = extras
         if extras.get("voice", {}).get("heard"):
@@ -864,7 +893,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def broken_selftests() -> dict:
         """Self-test honesty: the same checks on throwaway copies, never the live install. A tool server
-        that can't start (like a missing mcp_kairo), and a voice without its model files."""
+        that can't start (like a missing mcp_kairo), a voice and a memory without their model files."""
         ws = settings.data_dir / "acceptance" / "broken-tool-server"
         cfg = write_workspace(ws, tool_url=f"http://127.0.0.1:{settings.port}/internal/tools", token="acceptance")
         spec = json.loads(cfg.read_text(encoding="utf-8"))
@@ -886,7 +915,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         empty = settings.data_dir / "acceptance" / "no-voice-models"
         empty.mkdir(parents=True, exist_ok=True)
         voice_r = await asyncio.to_thread(Voice(empty, site_dir=tool_sites.site("voice", settings.data_dir)).selftest)
-        return {"tool server": tool_server, "voice model": voice_r}
+        no_model = settings.data_dir / "acceptance" / "no-memory-model"
+        no_model.mkdir(parents=True, exist_ok=True)
+        mem_r = await asyncio.to_thread(semantic.Embedder(no_model, site_dir=memory_site).selftest)
+        return {"tool server": tool_server, "voice model": voice_r, "memory model": mem_r}
 
     app.state.acceptance_running = False
 
@@ -894,7 +926,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return acceptance_mod.Context(
             engine=engine, tz=profile.tz, turn=acceptance_turn, classify_mail=acceptance_classify, gate=gate,
             selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
-            broken_selftests=broken_selftests, schedule=app.state.jobs.schedule)
+            broken_selftests=broken_selftests, schedule=app.state.jobs.schedule,
+            memory=app.state.memory, vault_dir=settings.vault_dir)
 
     async def run_acceptance(ids: list[int] | None = None) -> dict:
         if app.state.acceptance_running:
@@ -2337,6 +2370,20 @@ def is_local_request(request: Request) -> bool:
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
     forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "tailscale-user-login"))
     return client in LOCAL_HOSTS and host in {"127.0.0.1", "localhost", "::1"} and not forwarded
+
+
+async def memory_loop(app: FastAPI, every_s: int = 180) -> None:
+    """v8 C6: keep the memory index up to date. Only what changed is read again; the first run after a
+    start also starts the embedding model, so the first chat message doesn't wait for it."""
+    mlog = logging.getLogger("kairo.memory")
+    while True:
+        try:
+            r = await asyncio.to_thread(app.state.memory.reindex)
+            if r["changed"] or r["removed"] or r["embedded"]:
+                mlog.info("memory index: %s", json.dumps(r))
+        except Exception:   # never take the app down; the next round tries again
+            mlog.exception("memory index")
+        await asyncio.sleep(every_s)
 
 
 async def acceptance_after_release(app: FastAPI, first_wait_s: int = 900, every_s: int = 600) -> None:

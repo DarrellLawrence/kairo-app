@@ -55,10 +55,12 @@ if ($t -and $t.PSObject.Properties['checks'] -and $t.checks) {
     }
     $claudeOk = [string]$c.claude -eq 'ok'
     Add-Check 'Claude login' $claudeOk $(if ($claudeOk) { "answers ($($t.seconds)s for the whole self-test)" } else { [string]$t.reason })
-    foreach ($kind in @('voice', 'browser')) {
+    $labels = @{ voice = 'Voice'; browser = 'Browser'; memory = 'Semantic memory' }
+    foreach ($kind in @('voice', 'browser', 'memory')) {
         if ($c.PSObject.Properties[$kind] -and $null -ne $c.$kind) {
             $d = $t.details.$kind
-            Add-Check $(if ($kind -eq 'voice') { 'Voice' } else { 'Browser' }) ([bool]$c.$kind) $(if ($c.$kind) { 'imports and works for kairo-svc' } else { [string]$d.reason })
+            $okText = if ($kind -eq 'memory') { "works for kairo-svc (on $([string]$d.device))" } else { 'imports and works for kairo-svc' }
+            Add-Check $labels[$kind] ([bool]$c.$kind) $(if ($c.$kind) { $okText } else { [string]$d.reason })
         }
     }
 } else {

@@ -503,7 +503,7 @@ function Repair-LegacyToolSites($P) {
 function Remove-UnusedToolSites($P) {
     $used = @{}
     $releases = @(Get-ChildItem $P.Releases -Directory -ErrorAction SilentlyContinue)
-    foreach ($kind in @('voice', 'browser')) {
+    foreach ($kind in @('voice', 'browser', 'memory')) {
         $legacyUsed = $false
         foreach ($r in $releases) {
             $f = Join-Path $r.FullName "$kind-site.txt"
@@ -512,7 +512,7 @@ function Remove-UnusedToolSites($P) {
         if ($legacyUsed) { $used[(Join-Path $P.Tools $kind).ToLower()] = $true }
     }
     foreach ($d in @(Get-ChildItem $P.Tools -Directory -ErrorAction SilentlyContinue)) {
-        if ($d.Name -notmatch '^(voice|browser)(-[0-9a-f]{12}(\.new)?)?$') { continue }
+        if ($d.Name -notmatch '^(voice|browser|memory)(-[0-9a-f]{12}(\.new)?)?$') { continue }
         if ($used.ContainsKey($d.FullName.ToLower())) { continue }
         try { Remove-Item -Recurse -Force $d.FullName; Write-Note "removed unused $($d.Name)" }
         catch { Write-Warn "Could not remove $($d.FullName) ($($_.Exception.Message.Trim()))" }
@@ -537,6 +537,30 @@ function Install-Voice($P, [string]$ReleaseDir) {
         return $true
     } catch {
         Write-Warn "Voice not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
+        return $false
+    }
+}
+
+# v8 C6 semantic memory: ONNX Runtime (GPU build, CUDA 12) + tokenizer, about 1.5 GB, and the
+# embedding model (Qwen3-Embedding-0.6B, about 1.3 GB) inside the same folder (model\), so the
+# download happens in an admins-only folder (never as SYSTEM into data\) and a rollback switches
+# the model too. The model revision is in requirements-memory.txt, so a new one = a new folder.
+function Install-Memory($P, [string]$ReleaseDir) {
+    if ($env:KAIRO_SKIP_MEMORY -eq '1') { Write-Note 'Semantic memory skipped (KAIRO_SKIP_MEMORY=1).'; return $true }
+    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-memory.txt'))) { return $true }
+    $model = {
+        param($new, $py)
+        Push-Location (Join-Path $ReleaseDir 'server')
+        try { Invoke-Checked $py @('-m', 'app.semantic', 'download', '--to', (Join-Path $new 'model')) 'Downloading the memory model' }
+        finally { Pop-Location }
+    }
+    try {
+        Use-KairoEnv $P
+        $site = Install-ToolSite $P $ReleaseDir 'memory' 'semantic memory (search by meaning, about 3 GB)' $model
+        Write-Ok "Semantic memory ready ($site)"
+        return $true
+    } catch {
+        Write-Warn "Semantic memory not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
         return $false
     }
 }
@@ -780,6 +804,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     $warnings = @()
     if (-not (Install-Voice $P $newDir)) { $warnings += 'voice' }
     if (-not (Install-Browser $P $newDir)) { $warnings += 'browser' }
+    if (-not (Install-Memory $P $newDir)) { $warnings += 'memory' }
     $backup = Backup-Database $P "before-$version" $Python
 
     Write-Step 'Switching to the new version'
@@ -803,7 +828,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
         $selftestOk = Test-SelfTestPassed $selftest
         if (-not $selftestOk) { Write-Bad "Self-test failed: $(Get-SelfTestReason $selftest)" }
         elseif ($selftest -and -not $selftest.ok) { Write-Warn "Self-test: $(Get-SelfTestReason $selftest) (no reason to go back; Kairo shows it on Today)" }
-        elseif ($selftest) { Write-Ok 'Self-test passed: tools, safety hook, Claude, voice and browser work for kairo-svc' }
+        elseif ($selftest) { Write-Ok 'Self-test passed: tools, safety hook, Claude, voice, browser and memory work for kairo-svc' }
     }
 
     if ($healthy -and ($selftestOk -or -not $prev)) {
@@ -846,7 +871,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
 # toolchain failure when Kairo doesn't answer. Saved to data\updates\selftest.json for the
 # update note.
 function Invoke-ToolSelfTest($P, [string]$Version, [switch]$Quiet) {
-    if (-not $Quiet) { Write-Note 'Self-test (tools, safety hook, Claude, voice, browser; up to 15 minutes)...' }
+    if (-not $Quiet) { Write-Note 'Self-test (tools, safety hook, Claude, voice, browser, memory; up to 15 minutes)...' }
     $r = $null
     try {
         $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$script:Port/api/selftest/tools?notify=0" -Method Post -Body '{}' `

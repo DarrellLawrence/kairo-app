@@ -150,6 +150,13 @@ class HealthList(Strict):
     days: int = Field(default=14, ge=1, le=366)
 
 
+class MemorySearch(Strict):
+    """v8 C6: the owner's notes, people, open loops and conversation memory, by keywords and meaning."""
+
+    query: str = Field(min_length=1, max_length=500)
+    k: int = Field(default=5, ge=1, le=20)
+
+
 class CalendarTag(Strict):
     """v7: how Kairo may treat an event. FIXED never moves (also the default for
     untagged events), SOCIAL: suggest a move + draft a message, FLEXIBLE: moved freely."""
@@ -377,6 +384,7 @@ SCHEMAS: dict[str, type[Strict]] = {
     "wishlist.add": WishlistAdd,
     "finance.list": FinanceList,
     "health.list": HealthList,
+    "memory.search": MemorySearch,
     "calendar.tag": CalendarTag,
     "debrief": Debrief,
     "settings.list": SettingsList,
@@ -404,7 +412,7 @@ SCHEMAS: dict[str, type[Strict]] = {
 MIN_TIER: dict[str, int] = {
     "gmail.search": 0, "gmail.read": 0, "calendar.list": 0, "vault.read": 0, "tasks.list": 0,
     "tasks.create": 1, "tasks.update": 1, "notes.write": 1,
-    "shopping.list": 0, "people.list": 0, "finance.list": 0, "health.list": 0,
+    "shopping.list": 0, "people.list": 0, "finance.list": 0, "health.list": 0, "memory.search": 0,
     "shopping.add": 1, "people.note": 1, "captures.answer": 1, "wishlist.add": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
@@ -433,6 +441,7 @@ DIRECT_TOOLS: dict[str, str] = {
     "wishlist_add": "wishlist.add",
     "finance_list": "finance.list",
     "health_list": "health.list",
+    "memory_search": "memory.search",
     "calendar_tag": "calendar.tag",
     "debrief": "debrief",
     "settings_list": "settings.list",

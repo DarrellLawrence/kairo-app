@@ -17,6 +17,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from sqlmodel import Session, func, select
@@ -45,7 +46,8 @@ class Spec:
 SPECS = [
     Spec(1, "Tools", "auto", f"Chat \"add task {MARK} buy milk tomorrow\": the task exists with tomorrow's date, one-line "
          "confirmation, no question back.", "P0"),
-    Spec(2, "Memory", "later", "Tell Kairo a fact, ask hours later in a new session.", "C6"),
+    Spec(2, "Memory", "auto", f"Chat \"remember: my {MARK} kite lesson is on Thursdays at 07:40\"; then, in a new "
+         "conversation, \"when is my kite lesson?\": right answer, and the fact is in the vault.", "C6"),
     Spec(3, "Voice", "manual", "Chat: tap the mic, say a sentence. The transcript shows in under 3 s and you hear the reply.", "A1"),
     Spec(4, "Call", "manual", "\"Call Kairo\": talk, stop; Kairo answers within 2 s; talk over it; hang up mid-sentence and "
          "check Chat that it was handled.", "F23"),
@@ -70,7 +72,8 @@ SPECS = [
     Spec(17, "Share", "manual", "Share a WhatsApp message, a photo and a PDF with \"Share to Kairo\": no app opens, each "
          "notification says where it went (Files/<category>/ on the PC), a gift idea lands on the wishlist or comes back "
          "as a quick question the next time you talk to Kairo.", "B"),
-    Spec(18, "Semantic memory", "later", "A fact told days ago, asked in other words: right answer naming the note.", "C6"),
+    Spec(18, "Semantic memory", "auto", "A note in English, asked in German with other words (no word in common): found by "
+         "meaning, right answer naming the note.", "C6"),
     Spec(19, "Leave it", "auto", "Two open things talked about one after the other, then \"leave it\": only the last one "
          "is dropped, the other stays, and Kairo says which.", "D"),
     Spec(20, "Profile import", "later", "Attach a profile in chat: stored as-is, loops/tags/people created, summary.", "G"),
@@ -102,6 +105,8 @@ class Context:
     selftest: Callable[[], Awaitable[dict]]                # the real tools self-test
     broken_selftests: Callable[[], Awaitable[dict]]        # {"tool server": result, "voice model": result}
     schedule: dict = field(default_factory=dict)           # the live schedule (model overrides)
+    memory: object = None                                  # semantic.MemoryIndex (v8 C6)
+    vault_dir: Path | None = None
 
 
 class RecordingExecutor:
@@ -274,8 +279,79 @@ async def t_call_windows(ctx: Context) -> dict:
     return _result(True, checks, f"windows: {', '.join(w['name'] for w in wins)}; {len(kairo_rang)} calls by Kairo checked")
 
 
+KITE_TOLD = f"Please remember this: my {MARK} kite lesson is on Thursdays at 07:40."
+KITE_ASK = f"When is my {MARK} kite lesson?"
+SPARE_KEY_NOTE = f"Kairo/{MARK} spare key.md"
+SPARE_KEY_TEXT = (f"# {MARK} spare key\n\nThe spare key for the bike lock is hidden in the blue toolbox down in the cellar, "
+                  "behind the paint cans.\n")
+SPARE_KEY_ASK = "Wo habe ich den Ersatzschlüssel fürs Velo-Schloss versteckt?"
+
+
+async def t_memory(ctx: Context) -> dict:
+    """Test 2: a fact told in one conversation is known in the next one, because it went into the vault."""
+    if ctx.vault_dir is None:
+        return _result(False, {}, "no vault")
+    kairo_dir = ctx.vault_dir / "Kairo"
+    before = {p: p.stat().st_mtime_ns for p in kairo_dir.rglob("*.md")} if kairo_dir.is_dir() else {}
+    try:
+        t1 = await ctx.turn(KITE_TOLD)
+        saved = [p for p in kairo_dir.rglob("*.md") if MARK in p.read_text(encoding="utf-8", errors="replace")
+                 and "07:40" in p.read_text(encoding="utf-8", errors="replace")] if kairo_dir.is_dir() else []
+        if ctx.memory is not None:
+            await asyncio.to_thread(ctx.memory.reindex)
+        t2 = await ctx.turn(KITE_ASK)                       # a new conversation: only the vault knows
+        reply = t2.reply.lower()
+        checks = {"the fact is in the vault": bool(saved), "right answer in a new conversation": "07:40" in reply or "7:40" in reply,
+                  "the day too": any(d in reply for d in ("thursday", "donnerstag"))}
+    finally:
+        _strip_test_lines(kairo_dir, before)
+        if ctx.memory is not None:
+            await asyncio.to_thread(ctx.memory.reindex)
+    err = t1.error or t2.error
+    return _result(err is None, checks, err or f"Kairo said: {t2.reply[:200]}")
+
+
+async def t_semantic(ctx: Context) -> dict:
+    """Test 18: found by meaning, not by words (English note, German question, no word in common)."""
+    if ctx.vault_dir is None or ctx.memory is None:
+        return _result(False, {}, "memory search is not set up")
+    note = ctx.vault_dir / SPARE_KEY_NOTE
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(SPARE_KEY_TEXT, encoding="utf-8")
+    try:
+        await asyncio.to_thread(ctx.memory.reindex)
+        meaning = await asyncio.to_thread(ctx.memory.search_by_meaning, SPARE_KEY_ASK)
+        by_meaning = any(h["ref"] == SPARE_KEY_NOTE for h in meaning)
+        t = await ctx.turn(SPARE_KEY_ASK)
+        reply = t.reply.lower()
+        checks = {"found by meaning (no word in common)": by_meaning,
+                  "right answer": any(w in reply for w in ("toolbox", "werkzeug")) and any(w in reply for w in ("cellar", "keller", "basement")),
+                  "names the note": "spare key" in reply}
+    finally:
+        note.unlink(missing_ok=True)
+        await asyncio.to_thread(ctx.memory.reindex)
+    device = getattr(ctx.memory.embedder, "device", None)
+    return _result(t.error is None, checks, t.error or f"model on {device or 'none'}; Kairo said: {t.reply[:200]}")
+
+
+def _strip_test_lines(folder: Path, before: dict) -> None:
+    """Kairo's own folder only: test lines go; a file the test created and that holds nothing else goes too."""
+    if not folder.is_dir():
+        return
+    for p in folder.rglob("*.md"):
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if MARK not in text:
+            continue
+        kept = "\n".join(ln for ln in text.splitlines() if MARK not in ln)
+        if p not in before and not any(ln.strip() and not ln.lstrip().startswith("#") for ln in kept.splitlines()):
+            p.unlink(missing_ok=True)
+        else:
+            p.write_text(kept.rstrip() + "\n", encoding="utf-8")
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
-    1: t_tools, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 19: t_leave_it, 21: t_language,
+    1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
+    19: t_leave_it, 21: t_language,
     22: t_routing, 23: t_call_windows,
 }
 
