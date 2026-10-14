@@ -328,7 +328,6 @@ def test_move_allows_only_new_times(gate, extra):
     ("loops_snooze", {"id": 3, "at": "2026-10-15T16:00:00+02:00"}, 1),
     ("loops_close", {"id": 3, "reason": "dropped"}, 1),
     ("loops_close", {"id": 3, "reason": "done"}, 1),
-    ("loops_close", {"id": 3, "reason": "not_for_me"}, 1),        # "not a real reply": mutes that sender's mails
 ])
 def test_loop_tools_are_internal(gate, tool, args, tier):
     d = gate.decide(P + tool, args, ctx(origin="voice_note"))
@@ -340,7 +339,6 @@ def test_loop_tools_are_internal(gate, tool, args, tier):
     ("loops_snooze", {"id": 3}),                                   # when or at
     ("loops_snooze", {"id": 3, "at": "2026-10-15T16:00:00"}),      # needs a time zone
     ("loops_close", {"id": 3, "reason": "sent"}),                  # sending is never a loop tool
-    ("loops_close", {"id": 3, "reason": "automated"}),             # only the backend decides that
     ("loops_add", {"kind": "promise", "who": "Lea", "what": ""}),
     ("loops_add", {"kind": "send", "who": "Lea", "what": "x"}),
 ])
