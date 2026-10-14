@@ -78,7 +78,9 @@ def test_tool_list_has_no_write_tools(setup):
                      # v8 C6: search the owner's notes (read only)
                      "memory_search",
                      # v8 E: coaching log (Kairo's own table) and status (read)
-                     "coach_log", "coach_status"}
+                     "coach_log", "coach_status",
+                     # v8 G: the owner's own profile into the vault
+                     "profile_import", "profile_apply"}
     propose = [t for t in tools if t["name"] == "propose_action"][0]
     assert "gmail.send" in propose["inputSchema"]["properties"]["action"]["enum"]
     assert not any("pay" in a or "money" in a for a in propose["inputSchema"]["properties"]["action"]["enum"])

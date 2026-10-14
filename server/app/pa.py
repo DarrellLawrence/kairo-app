@@ -126,7 +126,7 @@ class PA:
     def run(self, ctx: JobContext, now: dt.datetime | None = None) -> str:
         now = (now or dt.datetime.now(self.tz)).astimezone(self.tz)
         out = {}
-        for name in ("birthdays", "people", "money", "tests", "patterns"):
+        for name in ("birthdays", "people", "money", "tests", "patterns", "calendar_rules"):
             try:
                 out[name] = getattr(self, name)(ctx, now)
             except Skipped as exc:
@@ -326,6 +326,16 @@ class PA:
             if not (loop.source_ref or "").endswith(f":{year}-{week // 2}"):
                 loops.close(s, loop.id, "stale", now=now)   # the next two weeks bring new ones
         return made
+
+    def calendar_rules(self, ctx, now) -> dict:
+        """v8 G: the profile's calendar rules (a word in titles -> FIXED / FLEXIBLE / SOCIAL), once a day on new events."""
+        from . import profile_import
+        s = ctx.session
+        if not profile_import.rules(s) or _setting(s, "calendar.rules.day", None) == now.date().isoformat():
+            return {"tagged": 0}
+        tagged = profile_import.apply_rules(s, self.google_read, self.tz, today=now.date())
+        _set(s, "calendar.rules.day", now.date().isoformat())
+        return {"tagged": tagged}
 
     # ---------------------------------------------------------------- 8. money
 

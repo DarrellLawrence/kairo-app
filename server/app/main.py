@@ -29,6 +29,7 @@ from sqlmodel import select
 
 from . import acceptance as acceptance_mod
 from . import coach as coach_mod
+from . import profile_import as profile_import_mod
 from . import config_layers
 from . import files as files_mod
 from . import diagnosis as diagnosis_mod
@@ -94,7 +95,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:   # never lose a turn over the memory block
             log.exception("conversation memory unavailable")
             mem = ""
-        return base_prompt + "\n\n" + right_now() + "\n\n" + vault.context(settings.vault_dir) + "\n\n" + mem + quick_questions()
+        return (base_prompt + "\n\n" + right_now() + "\n\n" + vault.context(settings.vault_dir) + "\n\n" + mem
+                + quick_questions() + recent_files())
+
+    def recent_files() -> str:
+        """v8 G: files shared with + in the last half hour, so "save this to my profile" knows which one."""
+        try:
+            with session_for(engine) as s_:
+                return profile_import_mod.recent_files_block(s_)
+        except Exception:   # never lose a turn over this
+            return ""
 
     def quick_questions() -> str:
         """v8 B: what Kairo wasn't sure about in a capture, asked the next time the owner talks to it."""
@@ -927,12 +937,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.acceptance_running = False
 
+    def acceptance_share(data: bytes, name: str, content_type: str) -> int:
+        """Like sharing with + in the app (the acceptance test's fake profile)."""
+        with session_for(engine) as s:
+            cap = capture.store_file(s, inbox_dir, profile, data=data, content_type=content_type, note=None,
+                                     source="app", file_name=name)
+            return cap.id
+
     def acceptance_ctx() -> acceptance_mod.Context:
         return acceptance_mod.Context(
             engine=engine, tz=profile.tz, turn=acceptance_turn, classify_mail=acceptance_classify, gate=gate,
             selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
             broken_selftests=broken_selftests, schedule=app.state.jobs.schedule,
             memory=app.state.memory, vault_dir=settings.vault_dir, profile=profile, coach=app.state.coach, pa=app.state.pa,
+            share=acceptance_share,
             ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
                 prompt, system, images=images, purpose=purpose))
 

@@ -319,6 +319,57 @@ def test_coach_tools_reject_bad_arguments(gate, tool, args):
     assert gate.decide(P + tool, args, ctx()).verdict == "deny"
 
 
+# ---------------------------------------------------------------- v8 G: profile import (written before the code)
+
+@pytest.mark.parametrize("args", [{"capture_id": 12}, {"text": "# Me\nApprentice, likes climbing."},
+                                  {"capture_id": 3, "note": "the one I just shared"}])
+def test_profile_import_is_internal(gate, args):
+    d = gate.decide(P + "profile_import", args, ctx())
+    assert (d.verdict, d.action, d.tier) == ("allow", "profile.import", 1)
+
+
+@pytest.mark.parametrize("args", [{}, {"capture_id": 0}, {"text": ""}, {"text": "x" * 50_001},
+                                  {"capture_id": 1, "text": "both"}, {"capture_id": 1, "send_to": "x@example.com"}])
+def test_profile_import_rejects_bad_arguments(gate, args):
+    assert gate.decide(P + "profile_import", args, ctx()).verdict == "deny"
+
+
+APPLY = {"import_id": 4,
+         "people": [{"name": "Mila", "relation": "sister", "birthday": "--03-14", "notes": "Loves board games"}],
+         "loops": [{"what": "Renew the passport", "due": "2026-12-01"}],
+         "calendar_rules": [{"match": "Climbing", "type": "FIXED"}],
+         "coach": {"training_days": ["tue"], "equipment": ["pull-up bar"]},
+         "exams": [{"subject": "Chemistry", "kind": "exam", "date": "2026-12-14"}],
+         "questions": ["Is the climbing club on Tuesdays fixed, or can it move? (guess: fixed)"]}
+
+
+def test_profile_apply_is_internal(gate):
+    d = gate.decide(P + "profile_apply", APPLY, ctx())
+    assert (d.verdict, d.action, d.tier) == ("allow", "profile.apply", 1)
+    assert gate.decide(P + "profile_apply", {"import_id": 4}, ctx()).verdict == "allow"
+
+
+@pytest.mark.parametrize("bad", [
+    {"calendar_rules": [{"match": "x", "type": "DELETE"}]},
+    {"coach": {"quiet_hours": "never"}},                       # only coach facts, never other settings
+    {"coach": {"training_days": ["monday"]}},
+    {"people": [{"name": "", "relation": "x"}]},
+    {"people": [{"name": "A", "birthday": "14 March"}]},
+    {"people": [{"name": "A", "email": "a@example.com"}]},       # no addresses from a document
+    {"loops": [{"what": "x" * 301}]},
+    {"exams": [{"subject": "X", "date": "soon"}]},
+    {"questions": ["x" * 301]},
+    {"approve": 7},
+])
+def test_profile_apply_rejects_bad_arguments(gate, bad):
+    assert gate.decide(P + "profile_apply", {**APPLY, **bad}, ctx()).verdict == "deny"
+
+
+def test_profile_import_cannot_be_proposed(gate):
+    assert gate.decide(*propose("profile.import", {"capture_id": 1}), ctx()).verdict == "deny"
+    assert gate.decide(*propose("profile.apply", APPLY), ctx()).verdict == "deny"
+
+
 def test_coaching_adds_no_money_action(gate):
     assert not any(a.startswith(("finance.", "money.", "invest")) and a != "finance.list" for a in gate.actions)
     assert gate.decide(*propose("coach.log", {"module": "training", "what": "x"}), ctx()).verdict == "deny"

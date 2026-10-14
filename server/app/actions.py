@@ -164,6 +164,69 @@ class CoachStatus(Strict):
     module: Literal["training", "food", "water", "study", "faith"] | None = None
 
 
+class ProfileImport(Strict):
+    """v8 G: the owner's own profile, shared with + (capture_id) or pasted (text), saved to the vault."""
+
+    capture_id: int | None = Field(default=None, ge=1)
+    text: str | None = Field(default=None, min_length=1, max_length=50_000)
+    note: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def one_source(self):
+        if (self.capture_id is None) == (self.text is None):
+            raise ValueError("give capture_id (a shared file) or text (pasted), not both")
+        return self
+
+
+class ProfilePerson(Strict):
+    name: str = Field(min_length=1, max_length=80)
+    relation: str | None = Field(default=None, max_length=60)
+    birthday: str | None = Field(default=None, pattern=r"^(\d{4}|-)-\d{2}-\d{2}$")   # YYYY-MM-DD, or --MM-DD without a year
+    notes: str | None = Field(default=None, max_length=1000)
+
+
+class ProfileLoop(Strict):
+    what: str = Field(min_length=1, max_length=300)
+    due: date | None = None
+
+
+class CalendarRule(Strict):
+    match: str = Field(min_length=2, max_length=60)        # a word in event titles
+    type: Literal["FIXED", "SOCIAL", "FLEXIBLE"]
+
+
+class ProfileExam(Strict):
+    subject: str = Field(min_length=1, max_length=80)
+    kind: Literal["exam", "test"] = "exam"
+    date: date
+
+
+class ProfileApply(Strict):
+    """v8 G: what the chat model read in the owner's profile. Only Kairo's own tables and the coach facts."""
+
+    import_id: int = Field(ge=1)
+    people: list[ProfilePerson] = Field(default_factory=list, max_length=30)
+    loops: list[ProfileLoop] = Field(default_factory=list, max_length=30)
+    calendar_rules: list[CalendarRule] = Field(default_factory=list, max_length=20)
+    coach: dict = Field(default_factory=dict)
+    exams: list[ProfileExam] = Field(default_factory=list, max_length=10)
+    questions: list[str] = Field(default_factory=list, max_length=10)   # unclear: asked next time, with a best guess
+
+    @field_validator("questions")
+    @classmethod
+    def short_questions(cls, v):
+        if any(not q.strip() or len(q) > 300 for q in v):
+            raise ValueError("questions are 1-300 characters")
+        return v
+
+    @field_validator("coach")
+    @classmethod
+    def coach_facts_only(cls, v):
+        from .prefs import Coach
+        Coach.model_validate(v)                                # unknown keys or bad values: refused
+        return v
+
+
 class MemorySearch(Strict):
     """v8 C6: the owner's notes, people, open loops and conversation memory, by keywords and meaning."""
 
@@ -400,6 +463,8 @@ SCHEMAS: dict[str, type[Strict]] = {
     "health.list": HealthList,
     "memory.search": MemorySearch,
     "coach.log": CoachLog,
+    "profile.import": ProfileImport,
+    "profile.apply": ProfileApply,
     "coach.status": CoachStatus,
     "calendar.tag": CalendarTag,
     "debrief": Debrief,
@@ -429,7 +494,7 @@ MIN_TIER: dict[str, int] = {
     "gmail.search": 0, "gmail.read": 0, "calendar.list": 0, "vault.read": 0, "tasks.list": 0,
     "tasks.create": 1, "tasks.update": 1, "notes.write": 1,
     "shopping.list": 0, "people.list": 0, "finance.list": 0, "health.list": 0, "memory.search": 0,
-    "coach.status": 0, "coach.log": 1,
+    "coach.status": 0, "coach.log": 1, "profile.import": 1, "profile.apply": 1,
     "shopping.add": 1, "people.note": 1, "captures.answer": 1, "wishlist.add": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
@@ -461,6 +526,8 @@ DIRECT_TOOLS: dict[str, str] = {
     "memory_search": "memory.search",
     "coach_log": "coach.log",
     "coach_status": "coach.status",
+    "profile_import": "profile.import",
+    "profile_apply": "profile.apply",
     "calendar_tag": "calendar.tag",
     "debrief": "debrief",
     "settings_list": "settings.list",

@@ -127,6 +127,12 @@
    "[\"actions\", \"place.set\"]": [
     "9fe4c6d61f516b4f83823780"
    ],
+   "[\"actions\", \"profile.apply\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"profile.import\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
    "[\"actions\", \"settings.list\"]": [
     "d5f7e60aa5c52aca74fa4e18"
    ],

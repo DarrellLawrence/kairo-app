@@ -27,6 +27,14 @@ DESCRIPTIONS = {
                  "study session, the faith habit), or skipped on purpose (done=false, say why). Then say the streak.",
     "coach_status": "The coaching plan: today's session, this week's plan and what's done, streaks, water, faith "
                     "habit, snack spending vs budget, the coach settings.",
+    "profile_import": "The owner asked to save a profile about themselves: pass the shared file's capture_id (see "
+                      "'Files shared recently') or the pasted text. Kairo stores it as-is in 10 Profile/ and returns its "
+                      "text and an import_id. Then call profile_apply.",
+    "profile_apply": "After profile_import: what the profile says, for Kairo's own tables. people (name, relation, "
+                     "birthday YYYY-MM-DD or --MM-DD, notes), loops (things still to do, due), calendar_rules (a word in "
+                     "event titles -> FIXED never moves / FLEXIBLE Kairo may move / SOCIAL with others), coach (training_days, "
+                     "equipment, water_l, faith_habit, budgets, savings ... only what it says), exams (subject, date). "
+                     "Leave out what it doesn't say. Then tell the owner in a few lines what was added.",
     "memory_search": "Search everything Kairo knows about the owner (vault notes, file summaries, people, open loops, "
                      "conversation memory) by meaning and keywords, any language. Use it before answering about the "
                      "owner's life when the notes in your prompt don't cover it; name the note you used.",

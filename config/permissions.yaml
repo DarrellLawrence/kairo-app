@@ -26,6 +26,8 @@ actions:
   memory.search:         0_read       # v8 C6: the owner's notes by keywords and meaning (local index)
   coach.status:          0_read       # v8 E: plans, streaks, today's session (no money: tier 5 has no tools)
   coach.log:             1_internal   # v8 E: a session done, water, food packed, the faith habit (Kairo's own table)
+  profile.import:        1_internal   # v8 G: the owner's own profile, stored as-is in 10 Profile/
+  profile.apply:         1_internal   # v8 G: what it says: people, loops, calendar rules, coach facts, exams (own tables)
   shopping.add:          1_internal
   people.note:           1_internal
   captures.answer:       1_internal   # v8 B: the owner answered a quick question in chat

@@ -76,7 +76,8 @@ SPECS = [
          "meaning, right answer naming the note.", "C6"),
     Spec(19, "Leave it", "auto", "Two open things talked about one after the other, then \"leave it\": only the last one "
          "is dropped, the other stays, and Kairo says which.", "D"),
-    Spec(20, "Profile import", "later", "Attach a profile in chat: stored as-is, loops/tags/people created, summary.", "G"),
+    Spec(20, "Profile import", "auto", "A fake profile shared in chat, \"save this to my profile\": stored as-is in 10 Profile/, "
+         "people, loops, calendar rules, coach facts and the exam created; a short summary; all removed afterwards.", "G"),
     Spec(21, "Language", "auto", "A German message gets a German answer; the next English one an English answer.", "D"),
     Spec(22, "Model routing", "auto", "Judgment calls never on Haiku, money on Opus: in the settings and in the last 14 days of runs.", "D"),
     Spec(23, "Call windows", "auto", "Kairo rings only for important things or real questions, and only in the call windows "
@@ -120,6 +121,7 @@ class Context:
     profile: object = None
     coach: object = None                                   # coach.Coacher
     pa: object = None                                      # pa.PA
+    share: Callable[[bytes, str, str], int] | None = None  # share a file like the + sheet does: (data, name, type) -> capture id
 
 
 class RecordingExecutor:
@@ -584,6 +586,75 @@ async def t_people_faith_style(ctx: Context) -> dict:
     return _result(True, checks, f"first gift idea: {first[:120] or '(none)'}")
 
 
+# ---------------------------------------------------------------- v8 G: profile import
+
+FAKE_PROFILE = """# {mark} profile
+
+A made-up profile for Kairo's acceptance test. Nothing here is real. Run {run}.
+
+## People
+- {mark} Mila: my sister. Birthday 14 March. Loves board games.
+
+## Week
+- Climbing club every Tuesday at 18:00. That one is fixed, never move it.
+- Training days: Tuesday. At home I have a pull-up bar.
+
+## To do
+- Renew my passport before 1 December.
+
+## School
+- Final exam in {mark} Chemistry on {exam}.
+"""
+
+
+async def t_profile_import(ctx: Context) -> dict:
+    from . import prefs, profile_import
+    from .db import OpenLoop, Person, SchoolEvent
+    from .loops import aware
+    today = dt.datetime.now(ctx.tz).date()
+    exam = today + dt.timedelta(days=60)
+    text = FAKE_PROFILE.format(mark=MARK, run=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), exam=exam.isoformat())
+    name = f"{MARK} profile.md"
+    with Session(ctx.engine) as s:
+        coach_before = prefs.load(s).get("coach")
+    cap_id = await asyncio.to_thread(ctx.share, text.encode("utf-8"), name, "text/markdown")
+    record = None
+    try:
+        t = await ctx.turn(f"{MARK}: save the file I just shared ({name}) to my profile.")
+        with Session(ctx.engine) as s:
+            record = profile_import.last(s)
+            mine = record if record and record.get("capture_id") == cap_id else None
+            created = (mine or {}).get("created", {})
+            people = [s.get(Person, i) for i in created.get("people", [])]
+            mila = next((p for p in people if p and "mila" in p.name.lower()), None)
+            loops_ = [s.get(OpenLoop, i) for i in created.get("loops", [])]
+            exams = [s.get(SchoolEvent, i) for i in created.get("exams", [])]
+            stored = ctx.vault_dir / "10 Profile" / name if ctx.vault_dir else None
+            checks = {
+                "stored as-is in 10 Profile/": bool(stored and stored.is_file() and stored.read_text(encoding="utf-8") == text),
+                "the person, with relation and birthday": bool(mila and (mila.relation or "").lower() == "sister" and mila.birthday
+                                                               and (mila.birthday.month, mila.birthday.day) == (3, 14)),
+                "the loop (passport)": any(lp and "passport" in lp.what.lower() for lp in loops_),
+                "the calendar rule (climbing = FIXED)": any("climbing" in r["match"].lower() and r["type"] == "FIXED"
+                                                             for r in profile_import.rules(s)),
+                "the coach facts (training Tuesday, pull-up bar)": "tue" in prefs.coach(s).training_days
+                and any("pull" in e.lower() for e in prefs.coach(s).equipment),
+                "the exam": any(e and e.kind in ("exam", "test") and aware(e.date).astimezone(ctx.tz).date() == exam for e in exams),
+                "a short summary": 0 < len([ln for ln in t.reply.splitlines() if ln.strip()]) <= 8,
+            }
+    finally:
+        with Session(ctx.engine) as s:
+            profile_import.undo(s, ctx.vault_dir, record if record and record.get("capture_id") == cap_id else None,
+                                capture_id=cap_id)
+            data = prefs.load(s)
+            if coach_before is None:
+                data.pop("coach", None)
+            else:
+                data["coach"] = coach_before
+            prefs._save(s, data)
+    return _result(t.error is None, checks, t.error or f"Kairo said: {t.reply[:200]}")
+
+
 def _utc(ts: dt.datetime) -> dt.datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
 
@@ -591,7 +662,7 @@ def _utc(ts: dt.datetime) -> dt.datetime:
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
-    24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
+    20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
 }
 
 

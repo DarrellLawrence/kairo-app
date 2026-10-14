@@ -74,7 +74,7 @@ def fetch_events(google_read, start: dt.datetime, end: dt.datetime) -> tuple[lis
     for e in data.get("items", []) or []:
         st, en = e.get("start") or {}, e.get("end") or {}
         orig = (e.get("originalStartTime") or {}).get("dateTime")
-        out.append({"summary": clip(e.get("summary") or "(no title)", 120), "start": st.get("dateTime") or st.get("date"),
+        out.append({"id": e.get("id"), "summary": clip(e.get("summary") or "(no title)", 120), "start": st.get("dateTime") or st.get("date"),
                     "end": en.get("dateTime") or en.get("date"), "all_day": "date" in st and "dateTime" not in st,
                     "location": clip(e.get("location"), 120) or None,
                     "routine": bool(e.get("recurringEventId")) and (not orig or orig == st.get("dateTime")),
