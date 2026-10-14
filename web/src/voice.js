@@ -1,16 +1,52 @@
 // Voice in the browser: record (MediaRecorder), detect the end of speech
 // (simple level meter), send to the PC for speech-to-text, play Kairo's voice.
 // All speech processing happens on kairo-home.
+//
+// Why a reply could be silent on the iPhone (fix A1, 2026-10-14): while the mic is open, iOS puts
+// the page in its "call" audio route (play-and-record), which plays through the earpiece at call
+// volume. So: chat replies close the mic first and play in the "playback" session (loudspeaker or
+// AirPods, also with the silent switch on); calls set the session explicitly; and when nothing is
+// heard, "No sound? Tap to play" replays through the speaker inside the tap and remembers, for
+// this phone, to pause the mic while Kairo talks on calls. Every step is logged to the PC.
+import { clientLog, device } from './clientlog.js'
 
-let player = null
-let envelope = null   // Kairo's loudness while speaking: one value (0..1) per 30 ms of the reply
+let outCtx = null      // Kairo's voice: one AudioContext, started inside a tap
+let element = null     // <audio> fallback, primed inside a tap
+let current = null     // the reply playing now: { stop(), level() }
+let last = null        // the last reply, for "tap to play": { buf, call }
+const RELEASE_KEY = 'voice.release-mic-while-speaking'
 
-/* How loud Kairo is right now (drives the call orb). Read from the WAV we
-   play, so no extra audio routing that iOS might fight with. */
-export function speakingLevel() {
-  if (!player || player.paused || !envelope) return 0
-  return envelope[Math.min(envelope.length - 1, Math.floor(player.currentTime / 0.03))] || 0
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const errName = (e) => `${e?.name || 'Error'}: ${e?.message || e}`.slice(0, 160)
+
+export class NeedTap extends Error {
+  constructor(why) { super('No sound? Tap to play'); this.name = 'NeedTap'; this.why = why }
 }
+
+/* Calls on this phone: pause the mic while Kairo talks (set by "tap to play" or the sound check). */
+export function releaseWhileSpeaking() {
+  try { return localStorage.getItem(RELEASE_KEY) === '1' } catch { return false }
+}
+export function setReleaseWhileSpeaking(on) {
+  try { localStorage.setItem(RELEASE_KEY, on ? '1' : '0') } catch { /* private mode */ }
+  clientLog('audio.release_mode', { on })
+}
+
+function setSession(type) {
+  if (!('audioSession' in navigator)) return
+  try { if (navigator.audioSession.type !== type) navigator.audioSession.type = type } catch (e) { clientLog('audio.session_error', { type, err: errName(e) }) }
+}
+
+function silentWav(seconds = 0.05, rate = 8000) {
+  const n = Math.round(seconds * rate)
+  const b = new DataView(new ArrayBuffer(44 + n * 2))
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) b.setUint8(o + i, t.charCodeAt(i)) }
+  str(0, 'RIFF'); b.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt '); b.setUint32(16, 16, true)
+  b.setUint16(20, 1, true); b.setUint16(22, 1, true); b.setUint32(24, rate, true); b.setUint32(28, rate * 2, true)
+  b.setUint16(32, 2, true); b.setUint16(34, 16, true); str(36, 'data'); b.setUint32(40, n * 2, true)
+  return URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }))
+}
+let SILENCE = null
 
 function wavEnvelope(buf) {
   try {
@@ -26,7 +62,7 @@ function wavEnvelope(buf) {
       if (id === 'data') {
         if (bits !== 16) return null
         const step = Math.max(1, Math.round(rate * 0.03)) * ch
-        const n = Math.floor(size / 2)
+        const n = Math.floor(Math.min(size, v.byteLength - off - 8) / 2)
         const out = []
         for (let i = 0; i < n; i += step) {
           let sum = 0
@@ -42,37 +78,125 @@ function wavEnvelope(buf) {
   return null
 }
 
-// iOS only lets a page play sound after a tap: call this inside a tap handler once.
-export function unlockAudio() {
-  if (!player) {
-    player = new Audio()
-    player.playsInline = true
-  }
-  player.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
-  player.play().catch(() => {})
+/* How loud Kairo is right now (drives the call orb). */
+export function speakingLevel() {
+  return current ? current.level() : 0
 }
 
-export async function speak(text, { signal } = {}) {
+/* iOS lets a page start sound only inside a tap: call this in every tap that can lead to Kairo
+   talking. Starts Kairo's AudioContext and primes the <audio> fallback with real (silent) samples. */
+export function unlockAudio() {
+  setSession(mic ? 'play-and-record' : 'playback')
+  try {
+    if (!outCtx || outCtx.state === 'closed') outCtx = new (window.AudioContext || window.webkitAudioContext)()
+    if (outCtx.state !== 'running') outCtx.resume().catch(() => {})
+    const src = outCtx.createBufferSource()
+    src.buffer = outCtx.createBuffer(1, 1, outCtx.sampleRate)
+    src.connect(outCtx.destination)
+    src.start(0)
+  } catch (e) { clientLog('audio.unlock_error', { err: errName(e) }) }
+  if (!element) { element = new Audio(); element.playsInline = true; element.preload = 'auto' }
+  if (!current) {
+    SILENCE = SILENCE || silentWav()
+    element.src = SILENCE
+    element.play().catch(() => {})
+  }
+}
+
+async function play(buf, { signal, call = false, keepMic = false, viaTap = false, fetchMs = null } = {}) {
+  const env = wavEnvelope(buf)
+  const levelAt = (t) => (env ? env[Math.min(env.length - 1, Math.floor(t / 0.03))] || 0 : 0)
+  const micWasOpen = Boolean(mic)
+  if (mic && !keepMic && (!call || viaTap || releaseWhileSpeaking())) {
+    closeMic()
+    await sleep(350)            // iOS keeps the call route for a moment after the mic stops
+  }
+  setSession(mic ? 'play-and-record' : 'playback')
+  const info = { ...device(), call, viaTap, micWasOpen, micOpen: Boolean(mic), bytes: buf.byteLength, fetchMs }
+
+  if (outCtx && outCtx.state !== 'running') await Promise.race([outCtx.resume().catch(() => {}), sleep(400)])
+  if (outCtx && outCtx.state === 'running') {
+    try {
+      const audio = await outCtx.decodeAudioData(buf.slice(0))
+      clientLog('audio.play', { ...info, path: 'webaudio', rate: audio.sampleRate, secs: Number(audio.duration.toFixed(2)) })
+      await new Promise((resolve) => {
+        const src = outCtx.createBufferSource()
+        src.buffer = audio
+        src.connect(outCtx.destination)
+        const t0 = outCtx.currentTime
+        const done = () => { if (current?.src === src) current = null; resolve() }
+        current = { src, stop: () => { try { src.stop() } catch { /* already stopped */ } done() }, level: () => levelAt(outCtx.currentTime - t0) }
+        src.onended = done
+        signal?.addEventListener('abort', () => current?.src === src && current.stop())
+        src.start()
+      })
+      return
+    } catch (e) { clientLog('audio.webaudio_error', { ...info, err: errName(e) }) }
+  }
+
+  // Web Audio not running (no tap yet, or iOS interrupted it): the <audio> element, watched.
+  if (!element) { element = new Audio(); element.playsInline = true }
+  const el = element
+  const url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }))
+  try {
+    await new Promise((resolve, reject) => {
+      let progressed = false
+      const finish = (err) => {
+        clearTimeout(watchdog)
+        el.onended = el.onerror = el.ontimeupdate = null
+        URL.revokeObjectURL(url)
+        if (current?.el === el) current = null
+        if (err) { el.pause(); reject(err) } else resolve()
+      }
+      const watchdog = setTimeout(() => { if (!progressed) finish(new NeedTap('no progress')) }, 2500)
+      el.ontimeupdate = () => { if (el.currentTime > 0) progressed = true }
+      el.onended = () => finish()
+      el.onerror = () => finish(new NeedTap(`media error ${el.error?.code}`))
+      signal?.addEventListener('abort', () => finish())
+      current = { el, stop: () => finish(), level: () => levelAt(el.currentTime) }
+      el.src = url
+      el.play().then(() => clientLog('audio.play', { ...info, path: 'element', ctx: outCtx?.state ?? 'none' }))
+        .catch((e) => finish(new NeedTap(errName(e))))
+    })
+  } catch (e) {
+    clientLog('audio.blocked', { ...info, ctx: outCtx?.state ?? 'none', why: e.why || errName(e) })
+    throw e
+  }
+}
+
+/* Speak a reply. call=true keeps the call's mic open (unless this phone needs it paused).
+   keepMic forces the mic to stay open (the sound check's call test).
+   Throws NeedTap when iOS didn't let it play: show "No sound? Tap to play" -> playLastAgain(). */
+export async function speak(text, { signal, call = false, keepMic = false } = {}) {
+  const t0 = performance.now()
   const res = await fetch('/api/voice/speak', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }), signal,
   })
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Voice failed (${res.status})`)
-  const blob = await res.blob()
-  envelope = wavEnvelope(await blob.arrayBuffer())
-  const url = URL.createObjectURL(blob)
-  if (!player) unlockAudio()
-  return new Promise((resolve) => {
-    const done = () => { URL.revokeObjectURL(url); player.onended = null; resolve() }
-    player.onended = done
-    player.onerror = done
-    signal?.addEventListener('abort', () => { player.pause(); done() })
-    player.src = url
-    player.play().catch(done)
-  })
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))).detail || `Voice failed (${res.status})`
+    clientLog('audio.speak_failed', { status: res.status, detail: String(detail).slice(0, 160) })
+    throw new Error(detail)
+  }
+  const buf = await res.arrayBuffer()
+  last = { buf: buf.slice(0), call }
+  return play(buf, { signal, call, keepMic, fetchMs: Math.round(performance.now() - t0) })
+}
+
+/* "No sound? Tap to play": inside the tap, through the speaker, without the mic. On a call that
+   means the call route was the problem, so this phone pauses the mic while Kairo talks from now on. */
+export async function playLastAgain({ signal } = {}) {
+  if (!last) return
+  stopSpeaking()
+  if (mic) closeMic()
+  setSession('playback')
+  unlockAudio()
+  clientLog('audio.tap_to_play', { ...device(), call: last.call })
+  if (last.call && !releaseWhileSpeaking()) setReleaseWhileSpeaking(true)
+  await play(last.buf.slice(0), { signal, call: last.call, viaTap: true })
 }
 
 export function stopSpeaking() {
-  if (player) player.pause()
+  current?.stop()
 }
 
 export async function transcribe(blob, language) {
@@ -106,6 +230,7 @@ async function openMic() {
     return mic
   }
   closeMic()
+  setSession('play-and-record')
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
   const ctx = new (window.AudioContext || window.webkitAudioContext)()
   const analyser = ctx.createAnalyser()
@@ -121,6 +246,7 @@ function closeMic() {
   mic.stream.getTracks().forEach((t) => t.stop())
   mic.ctx.close().catch(() => {})
   mic = null
+  setSession('playback')
 }
 
 function idleMic() {

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, parseTs } from '../api.js'
+import { clientLog, device } from '../clientlog.js'
+import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
 import {
   Badge, Button, EmptyState, IconBell, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower, IconPulse, IconRefresh,
-  IconPin, IconShield, IconSparkle, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
+  IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
 } from '../ui/index.js'
 
 const STATUS_TONE = { ok: 'ok', skipped: 'neutral', error: 'danger', running: 'warn' }
@@ -531,6 +533,57 @@ function DiagnosisPage() {
   )
 }
 
+/* Sound check (fix A1): proves on this iPhone which way Kairo's voice is audible, and sets calls up
+   to match. Every answer goes to the PC log, so the real cause is on record. */
+function SoundCheckPage() {
+  const [state, setState] = useState({ step: null, busy: false, heard: {}, needTap: false })
+  const play = async (step) => {
+    unlockAudio()                       // inside the tap
+    setState((s) => ({ ...s, step, busy: true, needTap: false }))
+    try {
+      if (step === 'speaker') { releaseMic(); await speak('This is Kairo. Sound check, through the speaker.') }
+      else { await holdMic(); unlockAudio(); await speak('Sound check two. This is how I sound on a call.', { call: true, keepMic: true }) }
+      setState((s) => ({ ...s, busy: false }))
+    } catch (e) {
+      setState((s) => ({ ...s, busy: false, needTap: e.name === 'NeedTap', error: e.name === 'NeedTap' ? null : e.message }))
+    }
+  }
+  const answer = (step, heard) => {
+    clientLog('audio.check', { step, heard, ...device() })
+    if (step === 'call') { setReleaseWhileSpeaking(!heard); releaseMic() }
+    setState((s) => ({ ...s, step: null, heard: { ...s.heard, [step]: heard } }))
+  }
+  const h = state.heard
+  return (
+    <Page title="Sound check">
+      <p className="k-hello">Two short tests, 30 seconds. Volume up. Do it once with the silent switch on and once with AirPods.</p>
+      <List>
+        <ListRow icon={<IconSpeaker />} title="1. Through the speaker" subtitle="Mic off, like a chat reply"
+          value={h.speaker === undefined ? undefined : <Badge tone={h.speaker ? 'ok' : 'danger'} pop={false}>{h.speaker ? 'Heard' : 'Silent'}</Badge>}
+          onClick={() => !state.busy && play('speaker')} />
+        <ListRow icon={<IconMic />} title="2. Like a call" subtitle="Mic on while Kairo talks"
+          value={h.call === undefined ? undefined : <Badge tone={h.call ? 'ok' : 'warn'} pop={false}>{h.call ? 'Heard' : 'Silent'}</Badge>}
+          onClick={() => !state.busy && play('call')} />
+      </List>
+      {state.needTap && (
+        <div className="k-pad"><Button variant="primary" block onClick={() => { setState((s) => ({ ...s, needTap: false })); playLastAgain().catch(() => {}) }}>Tap to play</Button></div>
+      )}
+      {state.step && !state.busy && (
+        <div className="k-pad" style={{ display: 'flex', gap: 8 }}>
+          <Button block onClick={() => answer(state.step, true)}>I heard it</Button>
+          <Button block variant="danger" onClick={() => answer(state.step, false)}>Nothing</Button>
+        </div>
+      )}
+      {state.error && <p className="k-small k-pad" style={{ color: 'var(--danger)' }}>{state.error}</p>}
+      <p className="k-muted k-small k-pad" style={{ marginTop: 12 }}>
+        {h.call === false ? 'Calls on this phone: the mic pauses while Kairo talks. Tap the orb to interrupt.'
+          : h.call ? 'Calls on this phone: Kairo keeps listening while it talks, so you can talk over it.'
+            : 'If test 1 is silent too, the phone itself is muted for media or connected to another speaker.'}
+      </p>
+    </Page>
+  )
+}
+
 function SystemPage() {
   const stack = useStack()
   const toast = useToast()
@@ -596,6 +649,8 @@ function SystemPage() {
               onClick={() => stack.push('Backups', () => <BackupsPage />)} />
             <ListRow icon={<IconChart />} title="Run diagnosis" subtitle="Read-only report to copy or share" chevron
               onClick={() => stack.push('Diagnosis', () => <DiagnosisPage />)} />
+            <ListRow icon={<IconSpeaker />} title="Sound check" subtitle="Is Kairo's voice audible on this iPhone?" chevron
+              onClick={() => stack.push('Sound check', () => <SoundCheckPage />)} />
           </List>
         </>
       )}

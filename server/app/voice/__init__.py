@@ -69,6 +69,36 @@ def to_wav(samples, rate: int) -> bytes:
     return buf.getvalue()
 
 
+def wav_problems(wav: bytes) -> list[str]:
+    """What's wrong with a TTS answer before it goes to the phone: [] when it's a valid, non-silent
+    16-bit PCM WAV of at least 0.3 s that iOS Safari can play (fix A1)."""
+    import array
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as w:
+            channels, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            pcm = w.readframes(frames)
+    except (wave.Error, EOFError) as exc:
+        return [f"not a WAV: {exc}"]
+    problems = []
+    if width != 2:
+        problems.append(f"{width * 8}-bit samples (iOS wants 16-bit PCM)")
+    if channels not in (1, 2):
+        problems.append(f"{channels} channels")
+    if not 8000 <= rate <= 48000:
+        problems.append(f"sample rate {rate} Hz")
+    if rate and frames / rate < 0.3:
+        problems.append(f"only {frames / rate:.2f} s long")
+    if width == 2 and pcm:
+        samples = array.array("h")
+        samples.frombytes(pcm[: len(pcm) // 2 * 2])
+        if sys.byteorder == "big":
+            samples.byteswap()
+        rms = (sum(x * x for x in samples) / len(samples)) ** 0.5 / 32768
+        if rms < 0.005:
+            problems.append(f"silent (level {rms:.4f})")
+    return problems
+
+
 def use_site(site_dir: Path | None) -> None:
     """The installer puts the voice packages in C:\\Kairo\\tools\\voice (shared by all releases)."""
     if site_dir and Path(site_dir).is_dir() and str(site_dir) not in sys.path:
@@ -153,16 +183,20 @@ class Voice:
         if all(checks.values()):
             try:
                 wav, lang = self.speak("Kairo voice test.", "en")
-                checks["tts_en"] = wav[:4] == b"RIFF" and lang == "en"
+                bad = wav_problems(wav)
+                checks["tts_en"] = not bad and lang == "en"
+                problems += [f"English voice: {p}" for p in bad]
                 t = self.transcribe(wav, language="en")
                 heard = t.text
                 checks["stt_roundtrip"] = "test" in t.text.lower()
                 if not checks["stt_roundtrip"]:
                     problems.append(f"Whisper heard {t.text!r}")
                 de, lang = self.speak("Kairo Test.", "de")
-                checks["tts_de"] = de[:4] == b"RIFF" and lang == "de"
-                if not checks["tts_de"]:
+                bad = wav_problems(de)
+                checks["tts_de"] = not bad and lang == "de"
+                if lang != "de":
                     problems.append("the German voice didn't speak")
+                problems += [f"German voice: {p}" for p in bad]
             except Exception as exc:
                 problems.append(f"{type(exc).__name__}: {exc}"[:240])
                 checks.setdefault("tts_en", False)
