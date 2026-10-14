@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
+from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError
 from .voice import calls as voice_calls
@@ -37,7 +37,7 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
+from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import Settings, get_settings
 
@@ -100,7 +100,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.system_prompt = system_prompt
     app.state.gate = gate
     app.state.tool_token = tool_token
-    app.state.executor = Executor(secrets_dir=settings.secrets_dir)
+    def _event_type(event_id: str) -> str:
+        with session_for(engine) as s_:
+            row = s_.get(CalendarTag, event_id)
+            return row.type if row else "FIXED"
+
+    app.state.executor = Executor(secrets_dir=settings.secrets_dir, owner_email=profile.gmail, event_type=_event_type)
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
     app.state.on_new_card = lambda card: app.state.pusher.notify(
         f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
@@ -118,6 +123,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.captures = capture.Processor(
         engine=engine, vault_dir=settings.vault_dir, profile=profile, transcribe=_transcribe_for_capture,
         on_question=lambda c: pusher.notify("Kairo has a question", c.question or "About your capture", "/#today"))
+
+    def _paused() -> bool:
+        with session_for(engine) as s_:
+            return killswitch.is_paused(s_)
+
+    app.state.voice_notes = voicenote.VoiceNotes(
+        engine=engine, inbox_dir=inbox_dir, profile=profile, runner=runner, state=app.state, system=system_prompt,
+        tools=model_tools, pick_model=lambda purpose: model_table.pick(purpose, app.state.jobs.schedule), paused=_paused)
     backup_dir = settings.data_dir / "backups" / "nightly"
 
     def _backup_status(s, **update):
@@ -423,6 +436,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows = s.exec(select(ChatMessage).where(ChatMessage.thread_id == thread_id).order_by(ChatMessage.id)).all()
             return [{"id": m.id, "role": m.role, "text": m.text, "created_at": m.created_at} for m in rows]
 
+    _turns: set[asyncio.Task] = set()   # chat turns still running after the socket went away
+    app.state.chat_turns = _turns
+
     @app.websocket("/ws/chat")
     async def chat_ws(ws: WebSocket):
         """Protocol (JSON):
@@ -449,18 +465,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if len(text_in) > MAX_PROMPT_CHARS:
                     await ws.send_json({"type": "error", "message": f"message longer than {MAX_PROMPT_CHARS} characters"})
                     continue
-                await _handle_message(ws, data.get("thread_id"), text_in)
+                # Shielded: hanging up cancels this handler, not the turn (v7).
+                turn = asyncio.get_running_loop().create_task(_handle_message(ws, data.get("thread_id"), text_in))
+                _turns.add(turn)
+                turn.add_done_callback(_turns.discard)
+                await asyncio.shield(turn)
         except WebSocketDisconnect:
             return
 
     async def _handle_message(ws: WebSocket, thread_id, text_in: str) -> None:
+        gone = False
+
+        async def send(frame: dict) -> None:
+            """The owner may hang up mid-answer (v7): finish the run and save the reply anyway."""
+            nonlocal gone
+            if gone:
+                return
+            try:
+                await ws.send_json(frame)
+            except Exception:
+                gone = True
+
         if time.time() < app.state.maintenance_until:
-            await ws.send_json({"type": "error", "status": "updating",
+            await send({"type": "error", "status": "updating",
                                 "message": "Kairo is installing an update. Try again in a minute."})
             return
         with session_for(engine) as s:
             if killswitch.is_paused(s):
-                await ws.send_json({"type": "error", "status": "paused",
+                await send({"type": "error", "status": "paused",
                                     "message": "Kairo is paused (kill switch). Resume it under More."})
                 return
         with session_for(engine) as s:
@@ -470,7 +502,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             chat.add_message(s, thread.id, "owner", text_in)
             session_id = thread.brain_session_id
             tid = thread.id
-        await ws.send_json({"type": "thread", "id": tid})
+        await send({"type": "thread", "id": tid})
         chat_purpose = "call" if text_in.startswith("(spoken, on a call)") else "chat"   # calls want speed: Haiku
 
         parts: list[str] = []
@@ -484,7 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
                 parts.append(event.text)
-                await ws.send_json({"type": "delta", "text": event.text})
+                await send({"type": "delta", "text": event.text})
             elif event.kind is EventKind.result:
                 final_text = event.text or "".join(parts)
                 new_sid = event.session_id or new_sid
@@ -501,10 +533,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if error is not None:
                 status = "paused" if error.data.get("cancelled") else (error.status or BrainStatus.unavailable).value
                 chat.add_message(s, tid, "system", f"[{status}] {error.text}")
-                await ws.send_json({"type": "error", "message": error.text, "status": status})
+                await send({"type": "error", "message": error.text, "status": status})
                 return
             msg = chat.add_message(s, tid, "kairo", final_text or "")
-        await ws.send_json({"type": "done", "text": final_text or "", "message_id": msg.id})
+        await send({"type": "done", "text": final_text or "", "message_id": msg.id})
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -693,6 +725,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(401, "wrong or missing capture token")
         source = request.query_params.get("source") or "shortcut"
         return await _capture(request, source if source in ("shortcut", "share") else "shortcut")
+
+    async def _voice_note(request: Request, source: str):
+        if time.time() < app.state.maintenance_until:
+            raise HTTPException(503, "Kairo is installing an update. Try again in a minute.")
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        try:
+            cap = app.state.voice_notes.accept(await request.body(), ctype, source)
+        except capture.CaptureError as exc:
+            raise HTTPException(400, str(exc))
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="voice_note", outcome=f"stored #{cap.id} ({source})")
+        app.state.voice_notes.start(cap.id)
+        return {"ok": True, "id": cap.id, "message": "Got it."}
+
+    @app.post("/api/voice-note")
+    async def voice_note_from_shortcut(request: Request):
+        """iPhone Shortcut: record, send, done (v7). Capture token; raw audio body."""
+        if not capture.check_token(settings.secrets_dir, request.headers.get("authorization")):
+            raise HTTPException(401, "wrong or missing capture token")
+        return await _voice_note(request, "voice_note")
+
+    @app.post("/api/voice-notes")
+    async def voice_note_from_app(request: Request):
+        """The app: e.g. hanging up a call while still talking."""
+        return await _voice_note(request, "app_voice")
 
     @app.post("/api/captures")
     async def capture_from_app(request: Request):
@@ -1078,7 +1135,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/voice/calls")
     def voice_call_now(body: dict):
-        """'Call me now' (also how the owner tests it)."""
+        """'Call me now' (also how the owner tests it), or {"outgoing": true} when the owner calls Kairo."""
+        if body.get("outgoing"):   # "Call Kairo": no ringing, the mic opens at once
+            with session_for(engine) as s:
+                c = voice_calls.start(s, "You called Kairo", "", None)
+                return voice_calls.as_dict(voice_calls.set_status(s, c.id, "answered"))
         reason = str(body.get("reason") or "Test call")[:120]
         with session_for(engine) as s:
             c = voice_calls.start(s, reason, f"Hi, it's Kairo. {reason}. What's on your mind?", app.state.pusher, ignore_quiet=True)

@@ -13,7 +13,7 @@ from sqlalchemy.engine import Engine
 
 from .gate import GateContext
 
-ORIGINS = ("owner_chat", "job")
+ORIGINS = ("owner_chat", "job", "voice_note")   # voice_note: Shortcut voice note, nobody watching
 
 
 def read_context(engine: Engine, origin: str) -> GateContext:

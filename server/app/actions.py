@@ -126,6 +126,14 @@ class HealthList(Strict):
     days: int = Field(default=14, ge=1, le=366)
 
 
+class CalendarTag(Strict):
+    """v7: how Kairo may treat an event. FIXED never moves (also the default for
+    untagged events), SOCIAL: suggest a move + draft a message, FLEXIBLE: moved freely."""
+
+    event_id: str = Field(pattern=_GOOGLE_ID)
+    type: Literal["FIXED", "SOCIAL", "FLEXIBLE"]
+
+
 # ---------------------------------------------------------------- tier 2: reversible, nobody notified
 
 class GmailLabel(Strict):
@@ -166,6 +174,41 @@ class CalendarCreateHold(Strict):
     reminders: dict | None = None
     colorId: str | None = Field(default=None, pattern=r"^\d{1,2}$")
     transparency: Literal["opaque", "transparent"] | None = None
+
+    @model_validator(mode="after")
+    def end_after_start(self):
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
+        if self.start.tzinfo is None or self.end.tzinfo is None:
+            raise ValueError("start and end need a time zone")
+        return self
+
+
+class GmailSendSelf(Strict):
+    """Mail to the owner's own address (v7: files, study sheets, evening recap).
+    There is no recipient field: the executor sends to profile.gmail, nobody else."""
+
+    subject: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1, max_length=50_000)
+    label: str | None = Field(default=None, max_length=100)
+
+    _subject = field_validator("subject")(_one_line)
+
+    @field_validator("label")
+    @classmethod
+    def kairo_label(cls, v):
+        if v is not None and not v.startswith(KAIRO_LABEL_PREFIX):
+            raise ValueError(f"label must be one of Kairo's own ({KAIRO_LABEL_PREFIX}...)")
+        return v
+
+
+class CalendarMove(Strict):
+    """New times for one of the owner's own events. Only times: no guests, no
+    notifications. The executor also refuses events with guests or not FLEXIBLE."""
+
+    event_id: str = Field(pattern=_GOOGLE_ID)
+    start: datetime
+    end: datetime
 
     @model_validator(mode="after")
     def end_after_start(self):
@@ -223,6 +266,9 @@ SCHEMAS: dict[str, type[Strict]] = {
     "people.note": PeopleNote,
     "finance.list": FinanceList,
     "health.list": HealthList,
+    "calendar.tag": CalendarTag,
+    "gmail.send_self": GmailSendSelf,
+    "calendar.move": CalendarMove,
     "gmail.label": GmailLabel,
     "gmail.create_draft": GmailCreateDraft,
     "calendar.create_hold": CalendarCreateHold,
@@ -242,7 +288,9 @@ MIN_TIER: dict[str, int] = {
     "shopping.add": 1, "people.note": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
-    "gmail.trash": 4, "calendar.delete": 4,
+    "calendar.tag": 1, "gmail.send_self": 2, "calendar.move": 2,
+    "gmail.trash": 2,   # v7: Gmail keeps trash 30 days
+    "calendar.delete": 4,
 }
 
 # Model-facing tool names (mcp__kairo__<name>) for tiers 0-1. Tiers 2-4 have
@@ -262,6 +310,7 @@ DIRECT_TOOLS: dict[str, str] = {
     "people_note": "people.note",
     "finance_list": "finance.list",
     "health_list": "health.list",
+    "calendar_tag": "calendar.tag",
 }
 
 # Fields that would let a tier-2 action reach other people. Never allowed on

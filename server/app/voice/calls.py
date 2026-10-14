@@ -24,7 +24,8 @@ def start(s: Session, reason: str, opening: str, pusher, *, ignore_quiet: bool =
     s.add(c)
     s.commit()
     s.refresh(c)
-    pusher.notify("Kairo is calling", reason[:120], f"/#call/{c.id}", ignore_quiet=ignore_quiet)
+    if pusher is not None:   # None: the owner is calling Kairo ("Call Kairo" Shortcut)
+        pusher.notify("Kairo is calling", reason[:120], f"/#call/{c.id}", ignore_quiet=ignore_quiet)
     return c
 
 

@@ -53,11 +53,12 @@ function CapturePage() {
   const [confirm, setConfirm] = useState(false)
   useEffect(() => { api('/api/capture/setup').then(setSetup).catch(() => setSetup({})) }, [])
   const url = setup?.url || `${window.location.origin}/api/capture`
+  const base = url.replace(/\/api\/capture$/, '')
   const rotate = async () => {
     const r = await api('/api/capture/token/rotate', { method: 'POST', body: {} })
     setSetup((s) => ({ ...s, token: r.token }))
     setConfirm(false)
-    toast.show({ text: 'New key. Put it into both Shortcuts.' })
+    toast.show({ text: 'New key. Put it into your Shortcuts.' })
   }
   return (
     <Page title="Capture">
@@ -71,7 +72,40 @@ function CapturePage() {
         <Button variant="secondary" size="sm" onClick={() => setConfirm(true)}>Make a new key</Button>
       </div>
 
-      <SectionTitle>Shortcut 1: Action button (text)</SectionTitle>
+      <SectionTitle>Shortcut 1: Voice note (say it, done)</SectionTitle>
+      <div className="k-pad">
+        <ol className="k-steps">
+          <li>Open the <b>Shortcuts</b> app → <b>+</b> → name it <b>Kairo Voice</b>.</li>
+          <li>Add <b>Record Audio</b>. Tap the arrow: Start Recording <b>Immediately</b>, Finish Recording <b>On Tap</b>.</li>
+          <li>Add <b>Get Contents of URL</b>. URL: <span className="k-code" style={{ display: 'inline' }} onClick={() => copy(`${base}/api/voice-note`, toast)}>{base}/api/voice-note</span> Method <b>POST</b>.</li>
+          <li>Headers → Add: key <b>Authorization</b>, value <b>Bearer</b> + space + the key above.</li>
+          <li>Request Body: <b>File</b> → <b>Recorded Audio</b>.</li>
+          <li>Add <b>Show Notification</b>: “Kairo got it”.</li>
+        </ol>
+        <p className="k-muted k-small">Talk, tap stop, put the phone away. Kairo writes it down on the PC and does it: tasks, notes, reminders, your own calendar. Anything for other people waits as a draft in the app. You see the answer next time you open Kairo; a push only if it is urgent.</p>
+      </div>
+
+      <SectionTitle>Lock screen and back of the phone</SectionTitle>
+      <div className="k-pad">
+        <ol className="k-steps">
+          <li><b>Lock screen</b> (iOS 18): on the lock screen, touch and hold → <b>Customize</b> → <b>Lock Screen</b>.</li>
+          <li>Tap the <b>−</b> on the flashlight button, then the empty <b>+</b> → search <b>Shortcut</b> → pick <b>Kairo Voice</b> → <b>Done</b>.</li>
+          <li><b>Back Tap</b>: iPhone Settings → <b>Accessibility</b> → <b>Touch</b> → <b>Back Tap</b> → <b>Double Tap</b> → scroll down → <b>Kairo Voice</b>.</li>
+          <li>Optional: <b>Triple Tap</b> → <b>Call Kairo</b> (below).</li>
+        </ol>
+      </div>
+
+      <SectionTitle>Shortcut 2: Call Kairo (talk live)</SectionTitle>
+      <div className="k-pad">
+        <ol className="k-steps">
+          <li>New shortcut <b>Call Kairo</b>. Add <b>Open URLs</b>: <span className="k-code" style={{ display: 'inline' }} onClick={() => copy(`${base}/#call/new`, toast)}>{base}/#call/new</span></li>
+          <li>It opens in Safari with the mic on at once. Allow the mic once: iPhone Settings → <b>Apps</b> → <b>Safari</b> → <b>Microphone</b> → <b>Allow</b>.</li>
+          <li>To hear Kairo, tap the screen once (iPhone rule: sound only after a tap).</li>
+        </ol>
+        <p className="k-muted k-small">You can say something and hang up straight away. Kairo handles it like a voice note.</p>
+      </div>
+
+      <SectionTitle>Shortcut 3: Type it (text)</SectionTitle>
       <div className="k-pad">
         <ol className="k-steps">
           <li>Open the <b>Shortcuts</b> app → <b>+</b> → name it <b>Kairo Capture</b>.</li>
@@ -80,11 +114,11 @@ function CapturePage() {
           <li>Headers → Add: key <b>Authorization</b>, value <b>Bearer</b> + space + the key above.</li>
           <li>Request Body: <b>JSON</b> → Add field: key <b>text</b>, type Text, value: <b>Provided Input</b>.</li>
           <li>Add <b>Show Notification</b>: “Captured”.</li>
-          <li>iPhone Settings → <b>Action Button</b> → Shortcut → <b>Kairo Capture</b>.</li>
+          <li>Put it on the lock screen or Back Tap like above, if you want.</li>
         </ol>
       </div>
 
-      <SectionTitle>Shortcut 2: Share sheet (photos, PDFs)</SectionTitle>
+      <SectionTitle>Shortcut 4: Share sheet (photos, PDFs)</SectionTitle>
       <div className="k-pad">
         <ol className="k-steps">
           <li>New shortcut <b>Send to Kairo</b>. Tap the <b>(i)</b> → turn on <b>Show in Share Sheet</b>, types: <b>Images</b> and <b>PDFs</b>.</li>
@@ -94,7 +128,7 @@ function CapturePage() {
           <li>Request Body: <b>File</b> → <b>Shortcut Input</b>.</li>
           <li>Add <b>Show Notification</b>: “Sent to Kairo”.</li>
         </ol>
-        <p className="k-muted k-small">Links and text from other apps: copy, then press the Action button and paste.</p>
+        <p className="k-muted k-small">Links and text from other apps: copy, then run Kairo Capture and paste.</p>
       </div>
 
       <SectionTitle>What happens</SectionTitle>
@@ -103,7 +137,7 @@ function CapturePage() {
       </div>
 
       <Sheet open={confirm} onClose={() => setConfirm(false)} title="New key?">
-        <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>The old key stops working. You have to paste the new one into both Shortcuts.</p>
+        <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>The old key stops working. You have to paste the new one into every Kairo Shortcut.</p>
         <Button variant="danger" block onClick={rotate}>Make a new key</Button>
         <Button variant="secondary" block style={{ marginTop: 8 }} onClick={() => setConfirm(false)}>Cancel</Button>
       </Sheet>

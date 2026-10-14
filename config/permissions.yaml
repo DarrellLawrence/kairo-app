@@ -25,14 +25,17 @@ actions:
   health.list:           0_read
   shopping.add:          1_internal
   people.note:           1_internal
+  calendar.tag:          1_internal   # v7: FIXED / SOCIAL / FLEXIBLE, kept in Kairo's own table
   # tier 2-4: reachable ONLY via mcp_kairo.propose_action; executed by the backend
   gmail.label:           2_reversible
   gmail.create_draft:    2_reversible
   calendar.create_hold:  2_reversible # own calendar, marked [Kairo], no attendees (rule below)
+  calendar.move:         2_reversible # v7: own FLEXIBLE events without guests, sendUpdates none
+  gmail.send_self:       2_reversible # v7: only to profile.gmail; no recipient field exists
+  gmail.trash:           2_reversible # v7: Gmail keeps trash 30 days
   gmail.send:            3_outbound
   gmail.reply:           3_outbound
   calendar.respond:      3_outbound
-  gmail.trash:           4_destructive
   calendar.delete:       4_destructive
 
 rules:

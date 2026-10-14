@@ -38,7 +38,7 @@ class GateConfigError(Exception):
 @dataclass(frozen=True)
 class GateContext:
     paused: bool
-    origin: Literal["owner_chat", "job"]
+    origin: Literal["owner_chat", "job", "voice_note"]
     open_approvals: int
     outbound_last_24h: int
 
@@ -120,7 +120,7 @@ class Gate:
         if tier == 2:
             return Decision("execute", f"{action}: tier 2, runs now and goes in the digest", action, tier, args)
         if ctx.origin != "owner_chat":
-            return _deny(f"{action} needs the owner: background jobs can't create approval cards", action, tier)
+            return _deny(f"{action} needs the owner: only the app can create approval cards (not jobs or voice notes)", action, tier)
         if ctx.open_approvals >= self.approvals_open_max:
             return _deny(f"{self.approvals_open_max} approval cards are already open; decide those first", action, tier)
         if tier == 3 and ctx.outbound_last_24h >= self.outbound_per_day_max:

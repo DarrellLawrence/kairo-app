@@ -351,3 +351,12 @@ def make_engine(db_url: str):
 
 def session_for(engine) -> Session:
     return Session(engine, expire_on_commit=False)
+
+
+class CalendarTag(SQLModel, table=True):
+    """v7: FIXED never moves (default for untagged), SOCIAL: suggest + draft a message, FLEXIBLE: Kairo moves it."""
+
+    __tablename__ = "calendar_tags"
+    event_id: str = Field(primary_key=True)
+    type: str
+    updated_at: datetime = Field(default_factory=utcnow)

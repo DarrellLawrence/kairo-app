@@ -214,14 +214,13 @@ def test_reject_sends_nothing(env):
 
 
 def test_destructive_needs_second_confirmation(env):
-    card = make_card(env, "gmail.trash", {"message_id": "m1"})
-    assert "Projektarbeit" in card.summary
+    card = make_card(env, "calendar.delete", {"event_id": "ev1"})
     with Session(env["engine"]) as s:
         with pytest.raises(approvals.ApprovalError):
             approvals.approve(s, card.id, executor=env["executor"], gate=GATE)
-        assert env["fake"].trashed == set()
+        assert env["fake"].deleted_events == []
         approvals.approve(s, card.id, executor=env["executor"], gate=GATE, confirm=True)
-    assert env["fake"].trashed == {"m1"}
+    assert [e for e, _ in env["fake"].deleted_events] == ["ev1"]
 
 
 def test_cards_expire_after_48_hours(env):
@@ -247,8 +246,8 @@ def test_approving_twice_sends_once(env):
 
 
 def test_failed_execution_is_recorded(env):
-    card = make_card(env, "gmail.trash", {"message_id": "m1"})
-    del env["fake"].messages["m1"]
+    card = make_card(env, "calendar.delete", {"event_id": "ev1"})
+    del env["fake"].events["ev1"]
     with Session(env["engine"]) as s:
         done = approvals.approve(s, card.id, executor=env["executor"], gate=GATE, confirm=True)
     assert done.status == "failed" and "404" in done.result_json
@@ -293,3 +292,51 @@ def test_google_write_token_is_only_used_in_executor():
     pattern = re.compile(r'GoogleAPI\([^)]*"write"')
     users = [p.relative_to(app_dir).as_posix() for p in app_dir.rglob("*.py") if pattern.search(p.read_text(encoding="utf-8"))]
     assert users == ["executor.py"]
+
+
+# ---------------------------------------------------------------- v7: things that only touch the owner (before the code)
+
+def test_trash_runs_at_once(env):
+    d = propose("gmail.trash", {"message_id": "m1"})
+    assert d.verdict == "execute"
+    env["executor"].run(d.action, d.args)
+    assert env["fake"].trashed == {"m1"}
+
+
+def own_executor(env, types=None):
+    return Executor(secrets_dir=env["executor"].secrets_dir, transport=env["fake"].transport(),
+                    owner_email="owner@example.com", event_type=lambda eid: (types or {}).get(eid, "FIXED"))
+
+
+def test_mail_to_self_goes_only_to_the_owner(env):
+    d = propose("gmail.send_self", {"subject": "Study sheet", "body": "Thermo notes", "label": "Kairo/School"})
+    out = own_executor(env).run(d.action, d.args)
+    msg = decode_raw(env["fake"].sent[-1]["raw"])
+    assert msg["To"] == "owner@example.com" and msg["Cc"] is None and msg["Bcc"] is None
+    assert env["fake"].labels["Kairo/School"] in env["fake"].messages[out["sent_id"]]["labelIds"]
+
+
+def test_mail_to_self_needs_the_profile_address(env):
+    d = propose("gmail.send_self", {"subject": "x", "body": "y"})
+    with pytest.raises(ValueError):
+        env["executor"].run(d.action, d.args)   # no owner_email configured
+    assert env["fake"].sent == []
+
+
+def test_move_only_flexible_events_without_guests(env):
+    env["fake"].add_event("ev9", summary="Gym", start="2026-10-20T18:00:00+02:00")
+    d = propose("calendar.move", {"event_id": "ev9", "start": "2026-10-20T19:00:00+02:00", "end": "2026-10-20T20:00:00+02:00"})
+    with pytest.raises(ValueError, match="FIXED"):
+        own_executor(env).run(d.action, d.args)
+    own_executor(env, {"ev9": "FLEXIBLE"}).run(d.action, d.args)
+    ev = env["fake"].events["ev9"]
+    assert ev["start"]["dateTime"] == "2026-10-20T19:00:00+02:00" and ev["_sendUpdates"] == "none"
+    d2 = propose("calendar.move", {"event_id": "ev1", "start": "2026-10-20T19:00:00+02:00", "end": "2026-10-20T20:00:00+02:00"})
+    with pytest.raises(ValueError, match="guests"):
+        own_executor(env, {"ev1": "FLEXIBLE"}).run(d2.action, d2.args)
+
+
+def test_calendar_tag_and_list_show_the_type(env):
+    assert "FIXED" in env["tools"].run(decide("calendar_list", {}))
+    env["tools"].run(decide("calendar_tag", {"event_id": "ev1", "type": "SOCIAL"}))
+    assert '"kairo_type": "SOCIAL"' in env["tools"].run(decide("calendar_list", {}))

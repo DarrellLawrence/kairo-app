@@ -125,7 +125,6 @@ def test_hold_must_end_after_start(gate):
     ("gmail.send", {"to": ["a@example.com"], "subject": "Hi", "body": "x"}, 3),
     ("gmail.reply", {"message_id": "abc", "body": "Thanks!"}, 3),
     ("calendar.respond", {"event_id": "ev1", "response": "accepted"}, 3),
-    ("gmail.trash", {"message_id": "abc"}, 4),
     ("calendar.delete", {"event_id": "ev1"}, 4),
 ])
 def test_outbound_and_destructive_need_approval(gate, action, args, tier):
@@ -134,7 +133,7 @@ def test_outbound_and_destructive_need_approval(gate, action, args, tier):
 
 
 def test_destructive_needs_second_confirmation(gate):
-    assert gate.decide(*propose("gmail.trash", {"message_id": "abc"}), ctx()).confirm_twice
+    assert gate.decide(*propose("calendar.delete", {"event_id": "ev1"}), ctx()).confirm_twice
     assert not gate.decide(*propose("gmail.send", {"to": ["a@example.com"], "subject": "s", "body": "b"}), ctx()).confirm_twice
 
 
@@ -151,7 +150,7 @@ def test_jobs_cannot_create_cards(gate):
 
 
 def test_open_approvals_limit(gate):
-    d = gate.decide(*propose("gmail.trash", {"message_id": "abc"}), ctx(open_approvals=10))
+    d = gate.decide(*propose("calendar.delete", {"event_id": "ev1"}), ctx(open_approvals=10))
     assert d.verdict == "deny"
 
 
@@ -204,6 +203,9 @@ def write_config(tmp_path, mutate):
     lambda d: d["actions"].update({"gmail.send": "2_reversible"}),
     lambda d: d["actions"].update({"gmail.send": "nonexistent_tier"}),
     lambda d: d["rules"]["calendar.create_hold"]["allow_only_fields"].append("attendees"),
+    lambda d: d["actions"].update({"calendar.delete": "2_reversible"}),
+    lambda d: d["actions"].update({"gmail.send_self": "1_internal"}),
+    lambda d: d["actions"].update({"calendar.move": "1_internal"}),
 ])
 def test_config_that_weakens_the_gate_refuses_to_load(tmp_path, mutate):
     with pytest.raises(GateConfigError):
@@ -264,3 +266,52 @@ def test_finance_is_read_only_and_money_still_impossible(gate):
     for action in ("finance.pay", "finance.transfer", "twint.send"):
         tool, args = propose(action, {"amount": 10})
         assert gate.decide(tool, args, ctx()).verdict == "deny"
+
+
+def test_voice_notes_act_but_cannot_create_cards(gate):
+    """A Shortcut voice note runs with nobody watching (KICKOFF v7 item 7): own-only actions run,
+    anything that would reach another person waits for the owner in the app."""
+    d = gate.decide(*propose("gmail.reply", {"message_id": "abc", "body": "ok"}), ctx(origin="voice_note"))
+    assert d.verdict == "deny"
+    assert gate.decide(*propose("gmail.label", {"message_id": "a", "add": ["Kairo/FYI"]}), ctx(origin="voice_note")).verdict == "execute"
+
+
+# ---------------------------------------------------------------- v7: act alone on what only touches the owner (before the code)
+
+def test_trash_is_reversible_now(gate):
+    """Gmail keeps trash 30 days: tier 2, runs at once, in the digest."""
+    d = gate.decide(*propose("gmail.trash", {"message_id": "abc"}), ctx(origin="job"))
+    assert (d.verdict, d.tier) == ("execute", 2)
+
+
+def test_mail_to_self_runs_and_has_no_recipient_field(gate):
+    ok = {"subject": "Study sheet: Thermo", "body": "Notes", "label": "Kairo/School"}
+    d = gate.decide(*propose("gmail.send_self", ok), ctx(origin="job"))
+    assert (d.verdict, d.tier) == ("execute", 2)
+    for extra in ({"to": ["x@example.com"]}, {"cc": ["x@example.com"]}, {"bcc": ["x@example.com"]}):
+        assert gate.decide(*propose("gmail.send_self", {**ok, **extra}), ctx()).verdict == "deny"
+    assert gate.decide(*propose("gmail.send_self", {**ok, "label": "INBOX"}), ctx()).verdict == "deny"
+    assert gate.decide(*propose("gmail.send_self", {**ok, "subject": "a\nBcc: x@example.com"}), ctx()).verdict == "deny"
+
+
+@pytest.mark.parametrize("kind", ["FIXED", "SOCIAL", "FLEXIBLE"])
+def test_tagging_an_event_is_internal(gate, kind):
+    d = gate.decide(P + "calendar_tag", {"event_id": "ev1", "type": kind}, ctx())
+    assert (d.verdict, d.tier) == ("allow", 1)
+
+
+def test_bad_tag_is_denied(gate):
+    assert gate.decide(P + "calendar_tag", {"event_id": "ev1", "type": "WHATEVER"}, ctx()).verdict == "deny"
+
+
+MOVE = {"event_id": "ev1", "start": "2026-10-20T16:00:00+02:00", "end": "2026-10-20T17:00:00+02:00"}
+
+
+def test_moving_an_own_event_is_reversible(gate):
+    d = gate.decide(*propose("calendar.move", MOVE), ctx(origin="voice_note"))
+    assert (d.verdict, d.tier) == ("execute", 2)
+
+
+@pytest.mark.parametrize("extra", [{"attendees": []}, {"sendUpdates": "all"}, {"summary": "x"}, {"end": MOVE["start"]}])
+def test_move_allows_only_new_times(gate, extra):
+    assert gate.decide(*propose("calendar.move", {**MOVE, **extra}), ctx()).verdict == "deny"

@@ -8,6 +8,7 @@ because the adapter only passes allow-listed variables through):
   logged_out   error result asking to /login
   crash        exit 1 with a message on stderr, no result
   slow         sleep 30 s before answering (timeout tests)
+  pause        1.5 s pause in the middle of the answer (hang-up tests)
   bad_flag     exit 1 like the real CLI does on a missing --verbose
 
 FAKE_CLAUDE_PROBE=<report.json> (+ FAKE_CLAUDE_PROBE_PATHS=a;b): write who ran
@@ -109,6 +110,8 @@ def main():
     half = len(reply) // 2
     out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply[:half]}]}, "session_id": sid})
     out({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}, "session_id": sid})
+    if mode == "pause":
+        time.sleep(1.5)
     out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply[half:]}]}, "session_id": sid})
     out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid})
     return 0

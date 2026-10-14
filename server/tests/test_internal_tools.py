@@ -67,7 +67,9 @@ def test_tool_list_has_no_write_tools(setup):
     assert names == {"gmail_search", "gmail_read", "calendar_list", "vault_read", "tasks_list", "tasks_create",
                      "tasks_update", "notes_write", "propose_action",
                      # phase 3: Kairo's own tables only (no Google, no money)
-                     "shopping_list", "shopping_add", "people_list", "people_note", "finance_list", "health_list"}
+                     "shopping_list", "shopping_add", "people_list", "people_note", "finance_list", "health_list",
+                     # v7: Kairo's own tag table (calendar types)
+                     "calendar_tag"}
     propose = [t for t in tools if t["name"] == "propose_action"][0]
     assert "gmail.send" in propose["inputSchema"]["properties"]["action"]["enum"]
     assert not any("pay" in a or "money" in a for a in propose["inputSchema"]["properties"]["action"]["enum"])

@@ -149,3 +149,10 @@ def test_outbound_count_reads_recent_done_cards(migrated):
         s.commit()
     ctx = read_context(engine, "owner_chat")
     assert ctx.outbound_last_24h == 1 and ctx.open_approvals == 1
+
+
+def test_voice_note_origin_reads_but_cannot_propose_outbound(migrated):
+    assert run_hook(json.dumps(event(P + "gmail_search", {"query": "x"})),
+                    hook_env(migrated, KAIRO_HOOK_ORIGIN="voice_note")).returncode == 0
+    ev = event(P + "propose_action", {"action": "gmail.reply", "args": {"message_id": "abc", "body": "hi"}})
+    assert run_hook(json.dumps(ev), hook_env(migrated, KAIRO_HOOK_ORIGIN="voice_note")).returncode == 2

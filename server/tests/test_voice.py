@@ -165,3 +165,10 @@ def test_real_voice_round_trip(tmp_path):
     t = v.transcribe(de, language="de")
     print("WHISPER HEARD (de):", t.text)
     assert "mathe" in t.text.lower()
+
+
+def test_owner_calls_kairo(client):
+    """'Call Kairo' Shortcut: the call starts answered, nothing rings, no push."""
+    c = client.post("/api/voice/calls", json={"outgoing": True}).json()
+    assert c["status"] == "answered" and c["reason"] == "You called Kairo"
+    assert client.pushes == []

@@ -65,3 +65,23 @@ def test_bad_input_is_rejected(migrated):
         assert ws.receive_json()["type"] == "error"
         ws.send_json({"type": "message", "text": "x" * 20_001})
         assert ws.receive_json()["type"] == "error"
+
+
+def test_hanging_up_mid_answer_still_saves_the_reply(migrated, monkeypatch):
+    """v7: say something on a call and hang up; Kairo finishes and keeps the answer."""
+    import time
+
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_MODE", "pause")
+    with TestClient(create_app(migrated)) as client:
+        with client.websocket_connect("/ws/chat") as ws:
+            ws.send_json({"type": "message", "text": "(spoken, on a call) remind me about the dentist"})
+            tid = ws.receive_json()["id"]
+            assert ws.receive_json()["type"] == "delta"
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            msgs = client.get(f"/api/threads/{tid}/messages").json()
+            if any(m["role"] == "kairo" for m in msgs):
+                break
+            time.sleep(0.2)
+        assert [m["role"] for m in msgs] == ["owner", "kairo"]
+        assert msgs[-1]["text"] == "echo: (spoken, on a call) remind me about the dentist"
