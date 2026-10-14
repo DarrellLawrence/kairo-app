@@ -104,7 +104,7 @@
 .k-chevron { width: 14px; height: 14px; color: var(--text-3); flex: none; }
 
 /* ---------------------------------------------------------------- badge */
-.k-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--r-pill); font: var(--t-caption); font-weight: 700; }
+.k-badge { white-space: nowrap; flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--r-pill); font: var(--t-caption); font-weight: 700; }
 .k-badge.accent { background: var(--accent); color: var(--on-accent); }
 .k-badge.ok { background: var(--ok-soft); color: var(--ok); }
 .k-badge.warn { background: var(--warn-soft); color: var(--warn); }
@@ -257,3 +257,12 @@
   .k-kanban { flex-direction: row; align-items: flex-start; }
   .k-kanban-col { flex: 1; min-width: 0; }
 }
+
+/* School: flashcards and study guides */
+.k-flash { position: relative; min-height: 280px; display: flex; flex-direction: column; padding: var(--s-5); border-radius: var(--r-xl, 24px); background: var(--surface-strong); box-shadow: inset 0 0 0 0.5px var(--hairline-strong), 0 12px 30px rgba(0,0,0,.25); touch-action: pan-y; cursor: pointer; }
+.k-flash-front { font: var(--t-title, 600 22px/1.3 system-ui); margin: var(--s-3) 0; }
+.k-flash-back { font: var(--t-body); color: var(--accent-2); margin: 0 0 var(--s-3); white-space: pre-wrap; }
+.k-flash-tag { position: absolute; top: 16px; padding: 4px 10px; border-radius: var(--r-pill); font: var(--t-caption); font-weight: 700; }
+.k-flash-tag.ok { right: 16px; background: var(--ok-soft); color: var(--ok); }
+.k-flash-tag.no { left: 16px; background: var(--danger-soft); color: var(--danger); }
+.k-guide { white-space: pre-wrap; font: var(--t-sub); color: var(--text); max-height: 60vh; overflow-y: auto; margin-bottom: var(--s-3); }

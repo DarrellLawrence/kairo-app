@@ -197,6 +197,21 @@ class Grade(SQLModel, table=True):
     date: dt.date
     grade: float
     weight: float = 1.0
+    title: str | None = None
+
+
+class Flashcard(SQLModel, table=True):
+    """Spaced repetition (Leitner boxes 1-5)."""
+
+    __tablename__ = "flashcards"
+    id: int | None = Field(default=None, primary_key=True)
+    subject: str = Field(index=True)
+    topic: str | None = None
+    front: str = Field(sa_column=Column(Text, nullable=False))
+    back: str = Field(sa_column=Column(Text, nullable=False))
+    box: int = 1
+    due: dt.date = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Lerndoku(SQLModel, table=True):

@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, board, brief, capture, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
+from . import approvals, backup, board, brief, capture, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
 from .audit import audit
 from .executor import Executor
@@ -841,6 +841,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.post(f"/api/{path}", name=f"{path}_create")(create_)
             app.patch(f"/api/{path}/{{item_id}}", name=f"{path}_update")(update_)
         _make()
+
+    # ---------------------------------------------------------------- school (Milestone D)
+
+    from .db import Flashcard, Grade, SchoolEvent as SchoolEventRow
+
+    def _today():
+        return dt.datetime.now(profile.tz).date()
+
+    def _model_ask(prompt, system):
+        try:
+            return app.state.jobs.ask_brain(prompt, system)
+        except Exception as exc:   # budget reached / usage limit / no model
+            raise HTTPException(503, f"Claude is not available right now: {exc}")
+
+    @app.get("/api/school")
+    def school_get():
+        with session_for(engine) as s:
+            return school.overview(s, _today(), profile.tz)
+
+    @app.post("/api/school/events")
+    def school_event_add(body: dict):
+        data = _parse(school.EventIn, body)
+        with session_for(engine) as s:
+            d = data.date if data.date.tzinfo else data.date.replace(tzinfo=profile.tz)
+            row = SchoolEventRow(subject=data.subject.strip(), kind=data.kind, date=d, notes=data.notes)
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return {"id": row.id}
+
+    @app.delete("/api/school/events/{event_id}")
+    def school_event_delete(event_id: int):
+        with session_for(engine) as s:
+            row = s.get(SchoolEventRow, event_id)
+            if row is None:
+                raise HTTPException(404, "no such event")
+            s.delete(row)
+            s.commit()
+            return {"deleted": 1}
+
+    @app.post("/api/school/grades")
+    def school_grade_add(body: dict):
+        data = _parse(school.GradeIn, body)
+        with session_for(engine) as s:
+            row = Grade(subject=data.subject.strip(), grade=data.grade, weight=data.weight, date=data.date or _today(), title=data.title)
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return {"id": row.id}
+
+    @app.delete("/api/school/grades/{grade_id}")
+    def school_grade_delete(grade_id: int):
+        with session_for(engine) as s:
+            row = s.get(Grade, grade_id)
+            if row is None:
+                raise HTTPException(404, "no such grade")
+            s.delete(row)
+            s.commit()
+            return {"deleted": 1}
+
+    @app.get("/api/school/needed")
+    def school_needed(subject: str, target: float = 4.0, weight: float = 1.0):
+        if not (1 <= target <= 6) or not (0 < weight <= 10):
+            raise HTTPException(400, "target 1-6, weight above 0")
+        with session_for(engine) as s:
+            grades = s.exec(select(Grade).where(Grade.subject == subject)).all()
+            return {"subject": subject, "target": target, "weight": weight, "needed": school.needed(list(grades), target, weight)}
+
+    @app.post("/api/school/guide")
+    def school_guide(body: dict):
+        data = _parse(school.MaterialIn, body)
+        try:
+            return school.make_guide(_model_ask, settings.vault_dir, data)
+        except school.SchoolError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/school/cards/generate")
+    def school_cards_generate(body: dict):
+        data = _parse(school.MaterialIn, body)
+        with session_for(engine) as s:
+            try:
+                cards = school.make_cards(_model_ask, s, settings.vault_dir, data, _today())
+            except school.SchoolError as exc:
+                raise HTTPException(400, str(exc))
+            return [school.card_dict(c) for c in cards]
+
+    @app.post("/api/school/cards")
+    def school_card_add(body: dict):
+        data = _parse(school.CardIn, body)
+        with session_for(engine) as s:
+            c = Flashcard(**data.model_dump(), box=1, due=_today())
+            s.add(c)
+            s.commit()
+            s.refresh(c)
+            return school.card_dict(c)
+
+    @app.get("/api/school/cards/due")
+    def school_cards_due(subject: str | None = None):
+        with session_for(engine) as s:
+            return [school.card_dict(c) for c in school.due_cards(s, _today(), subject)]
+
+    @app.get("/api/school/cards")
+    def school_cards_all(subject: str):
+        with session_for(engine) as s:
+            return [school.card_dict(c) for c in s.exec(select(Flashcard).where(Flashcard.subject == subject).order_by(Flashcard.id)).all()]
+
+    @app.post("/api/school/cards/{card_id}/review")
+    def school_card_review(card_id: int, body: dict):
+        with session_for(engine) as s:
+            c = s.get(Flashcard, card_id)
+            if c is None:
+                raise HTTPException(404, "no such card")
+            school.review(c, bool(body.get("knew")), _today())
+            s.add(c)
+            s.commit()
+            s.refresh(c)
+            return school.card_dict(c)
+
+    @app.delete("/api/school/cards/{card_id}")
+    def school_card_delete(card_id: int):
+        with session_for(engine) as s:
+            c = s.get(Flashcard, card_id)
+            if c is None:
+                raise HTTPException(404, "no such card")
+            s.delete(c)
+            s.commit()
+            return {"deleted": 1}
 
     @app.get("/api/backups")
     def backups_list():
