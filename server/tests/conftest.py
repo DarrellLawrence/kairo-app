@@ -34,6 +34,7 @@ def settings(tmp_path: Path) -> Settings:
         claude_bin=str(FAKE_CLAUDE),
         brain_timeout_s=20,
         web_dist_dir=tmp_path / "no-web",
+        owner_check=False,          # TestClient isn't the PC; test_owner_only turns it on
     )
 
 

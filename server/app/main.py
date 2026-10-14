@@ -21,6 +21,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from starlette.requests import HTTPConnection
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlmodel import select
@@ -2037,16 +2038,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"brain": runner.brain.health().value, "boot_check": boot, "selftest": selftest_last}
 
     @app.post("/api/diagnosis")
-    def run_diagnosis(request: Request):
-        """Run diagnosis (More -> System): DIAGNOSIS section G from the phone. Owner only, read-only,
-        secrets redacted (app/diagnosis.py). A plain def: FastAPI runs it off the event loop."""
-        boot = status().get("boot_check") or {}
-        if not owner_request(request, boot.get("tailnet_login") if isinstance(boot, dict) else None):
-            raise HTTPException(403, "Run diagnosis is only for the owner: on the PC, or through Kairo's address "
-                                     "signed in to Tailscale as the same account as the PC.")
+    def run_diagnosis():
+        """Run diagnosis (More -> System): DIAGNOSIS section G from the phone. Read-only, secrets
+        redacted (app/diagnosis.py); owner only like every route. A plain def: off the event loop."""
         return diagnosis_mod.run(db_url=settings.db_url, data_dir=settings.data_dir, app_root=REPO_ROOT)
 
     _mount_web(app, settings.web_dist_dir)
+    if settings.owner_check:
+        app.add_middleware(OwnerOnly, data_dir=settings.data_dir)
     return app
 
 
@@ -2139,7 +2138,7 @@ def is_local_request(request: Request) -> bool:
     return client in LOCAL_HOSTS and host in {"127.0.0.1", "localhost", "::1"} and not forwarded
 
 
-def owner_request(request: Request, owner_login: str | None) -> bool:
+def owner_request(request: HTTPConnection, owner_login: str | None) -> bool:
     """The owner: on the PC itself, or through tailscale serve (Kairo's .ts.net address) as a signed-in
     Tailscale person (tailscale serve sets Tailscale-User-Login and drops one a client sends). Once the
     boot check has recorded the PC's own Tailscale account (owner_login), only that account."""
@@ -2151,6 +2150,45 @@ def owner_request(request: Request, owner_login: str | None) -> bool:
     if not host.endswith(".ts.net") or not login:
         return False
     return not owner_login or login == owner_login.strip().lower()
+
+
+OPEN_PATHS = {"/health"}       # the boot check and the updater poll it; nothing personal in it
+
+
+def pinned_owner_login(data_dir: Path, _cache: dict = {}) -> str | None:
+    """The PC's own Tailscale account, recorded by the boot check (boot-check.json, tailnet_login)."""
+    path = data_dir / "logs" / "boot-check.json"
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    if _cache.get("key") != (path, stamp):
+        try:
+            login = json.loads(path.read_text(encoding="utf-8-sig")).get("tailnet_login")
+        except (OSError, ValueError, AttributeError):
+            login = None
+        _cache.update(key=(path, stamp), login=str(login) if login else None)
+    return _cache["login"]
+
+
+class OwnerOnly:
+    """Owner only, app-wide (owner's request 2026-10-14): every HTTP route and websocket, before
+    anything else runs. Pure ASGI, because @app.middleware("http") never sees websockets."""
+
+    def __init__(self, app, data_dir: Path) -> None:
+        self.app = app
+        self.data_dir = data_dir
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and scope.get("path") not in OPEN_PATHS:
+            if not owner_request(HTTPConnection(scope), pinned_owner_login(self.data_dir)):
+                logging.getLogger("kairo.owner").warning("refused %s %s: not the owner", scope["type"], scope.get("path"))
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                await JSONResponse({"detail": "Kairo answers only its owner."}, status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def _mount_web(app: FastAPI, dist: Path) -> None:
