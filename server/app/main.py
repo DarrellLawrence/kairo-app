@@ -249,7 +249,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "lerndoku_prompt": lambda ctx: lerndoku_prompt_job(ctx),
                 "open_loops": lambda ctx: app.state.loops.run(ctx),
                 "promises": lambda ctx: app.state.promises.run(ctx),
-                "pa": lambda ctx: app.state.pa.run(ctx)})
+                "pa": lambda ctx: app.state.pa.run(ctx),
+                "olat": lambda ctx: _olat_job(ctx)})
     app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                                        calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
                                        vault_dir=settings.vault_dir, config_dir=settings.config_dir)
@@ -759,6 +760,107 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          name=f"job-{name}", daemon=True).start()
         return {"started": name}
 
+    # ---------------------------------------------------------------- logins for sites Kairo reads (school portal)
+    # The password is typed in the app (never in chat), encrypted on the PC (secretbox, DPAPI)
+    # and never returned, logged or stored in the database. The model has no tool for any of it.
+
+    from . import secretbox
+    from .portal import browser as portal_browser
+    from .portal import olat as portal_olat
+
+    LOGIN_SITES = {"olat": "School portal (OLAT)"}
+    browser_site = settings.data_dir.parent / "tools" / "browser"
+
+    def _login_path(site: str) -> Path:
+        return settings.secrets_dir / "logins" / f"{site}.bin"
+
+    def _portal() -> dict:
+        return dict(profile.school_portal or {})
+
+    def _olat_creds() -> tuple[str, str] | None:
+        v = secretbox.load(_login_path("olat"))
+        return (v["username"], v["password"]) if v and v.get("username") and v.get("password") else None
+
+    from . import timetable as timetable_mod
+
+    def _timetable():
+        imp = timetable_mod.Importer(engine=engine, gate=gate, executor=lambda: app.state.executor, tz=profile.tz,
+                                     school_class=_portal().get("class"))
+        imp.on_done = lambda msg: pusher.notify("Kairo", msg, "/#today")
+        return imp
+
+    app.state.captures.timetable = lambda ctx, data, mt: _timetable().import_file(ctx, data, mt)
+
+    def _olat_job(ctx) -> str:
+        from .scheduler import Skipped
+        portal = _portal()
+        if portal.get("kind") != "olat" or not portal.get("url"):
+            raise Skipped("no school portal in profile.yaml")
+        if not _olat_creds():
+            raise Skipped("no OLAT login yet (More -> Logins)")
+        reader = portal_olat.OlatReader(
+            engine=engine, vault_dir=settings.vault_dir, base=portal["url"], school_class=portal.get("class"),
+            driver_factory=lambda: portal_browser.PlaywrightDriver(portal["url"], site_dir=browser_site),
+            credentials=_olat_creds)
+        reader.on_need_timetable = lambda: pusher.notify(
+            "Kairo", "I couldn't find your timetable in OLAT. Send me a photo or PDF of it once (Share -> Kairo).", "/#chat")
+        try:
+            report = reader.run()
+            tt = report.get("timetable") or {}
+            path = settings.vault_dir / tt["file"] if tt.get("found") else None
+            mt = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(
+                path.suffix.lower()) if path else None
+            if path and mt and path.is_file():
+                report["timetable"]["import"] = _timetable().import_file(ctx, path.read_bytes(), mt)
+        except portal_olat.PortalError as exc:
+            with session_for(engine) as s_:
+                row = s_.get(SettingKV, portal_olat.REPORT_KEY) or SettingKV(key=portal_olat.REPORT_KEY)
+                row.value = json.dumps({"at": dt.datetime.now(dt.timezone.utc).isoformat(), "error": str(exc)})
+                s_.add(row)
+                s_.commit()
+            raise
+        return json.dumps({k: report.get(k) for k in ("courses", "new_files", "new_pages", "skipped", "timetable")})
+
+    @app.get("/api/logins")
+    def logins_list():
+        out = []
+        with session_for(engine) as s:
+            row = s.get(SettingKV, portal_olat.REPORT_KEY)
+            report = json.loads(row.value) if row and row.value else None
+        for site, label in LOGIN_SITES.items():
+            path = _login_path(site)
+            try:
+                v = secretbox.load(path) or {}
+            except Exception:
+                v = {}
+            out.append({"site": site, "label": label, "url": _portal().get("url"), "username": v.get("username"),
+                        "password_set": bool(v.get("password")), "encrypted": secretbox.encrypted(path),
+                        "browser_installed": portal_browser.available(browser_site),
+                        "report": report if site == "olat" else None})
+        return out
+
+    @app.put("/api/logins/{site}")
+    def logins_set(site: str, body: dict):
+        if site not in LOGIN_SITES:
+            raise HTTPException(404, "unknown site")
+        username = str((body or {}).get("username") or "").strip()
+        password = str((body or {}).get("password") or "")
+        if not username or not password or len(username) > 120 or len(password) > 200:
+            raise HTTPException(400, "username and password are needed")
+        secretbox.save(_login_path(site), {"username": username, "password": password})
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="login.set", outcome=f"{site}: saved (encrypted on the PC)")
+        return {"ok": True, "site": site, "username": username, "password_set": True}
+
+    @app.delete("/api/logins/{site}")
+    def logins_delete(site: str):
+        if site not in LOGIN_SITES:
+            raise HTTPException(404, "unknown site")
+        removed = secretbox.remove(_login_path(site))
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="login.remove", outcome=f"{site}: {'removed' if removed else 'none'}")
+        return {"ok": True, "removed": removed}
+
     # ---------------------------------------------------------------- settings (More -> Settings, or by voice)
 
     @app.get("/api/settings")
@@ -851,8 +953,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/loops/{loop_id}/close")
     def loop_close(loop_id: int, body: dict | None = None):
         reason = (body or {}).get("reason") or "done"
-        if reason not in ("done", "dropped"):
-            raise HTTPException(400, "reason must be done or dropped")
+        if reason not in loops.OWNER_CLOSE:
+            raise HTTPException(400, "reason must be done, dropped or not_for_me")
         with session_for(engine) as s:
             try:
                 return loops.as_dict(loops.close(s, loop_id, reason), _loop_now(), profile.tz)

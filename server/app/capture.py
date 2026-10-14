@@ -44,7 +44,7 @@ MAX_READ = 8 * 1024 * 1024
 
 LETTER_PROMPT = """This is a photo or scan the owner captured (often a letter, bill or appointment).
 Read it and return JSON only:
-{{"kind": "bill" | "appointment" | "letter" | "receipt" | "other" | "unreadable",
+{{"kind": "bill" | "appointment" | "letter" | "receipt" | "timetable" | "other" | "unreadable",
   "sender": "who sent it", "title": "short title",
   "summary": "2-3 sentences in {language}: what it is and what the owner must do",
   "amount_chf": number or null, "due": "YYYY-MM-DD" or null (pay-by date or appointment date),
@@ -192,6 +192,7 @@ class Processor:
         self.profile = profile
         self.on_question = on_question
         self.transcribe = transcribe   # local speech to text (phase 3), or None
+        self.timetable = None          # (ctx, data, media_type) -> dict: a school timetable goes into the calendar
 
     def transcribe_memos(self, s: Session) -> int:
         """Voice memos waiting as 'later' become text captures once speech-to-text works."""
@@ -235,6 +236,10 @@ class Processor:
             row = extract_json(answer_.text)
             if not isinstance(row, dict):
                 raise ValueError("letter answer is not an object")
+            if row.get("kind") == "timetable" and self.timetable is not None:
+                out = self.timetable(ctx, data, mt)
+                row = {**row, "kind": "other", "summary": f"School timetable: {out.get('created', 0)} weekly school blocks "
+                                                           f"in the calendar ({out.get('why') or 'until ' + str(out.get('until'))})."}
             self.file_letter(s, cap, row, today)
             n += 1
         return n

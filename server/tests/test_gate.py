@@ -114,6 +114,30 @@ def test_hold_that_could_notify_or_leave_own_calendar_is_denied(gate, extra):
     assert d.reason
 
 
+@pytest.mark.parametrize("rule", [
+    "RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20270131T235959Z",          # timetable: one school day, until semester end
+    "RRULE:FREQ=WEEKLY;UNTIL=20270131",
+])
+def test_weekly_hold_with_an_end_is_executed(gate, rule):
+    d = gate.decide(*propose("calendar.create_hold", {**HOLD, "recurrence": [rule], "time_zone": "Europe/Zurich"}), ctx())
+    assert (d.verdict, d.action) == ("execute", "calendar.create_hold")
+
+
+@pytest.mark.parametrize("extra", [
+    {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO"], "time_zone": "Europe/Zurich"},                 # never ending
+    {"recurrence": ["RRULE:FREQ=DAILY;UNTIL=20270131"], "time_zone": "Europe/Zurich"},           # weekly only
+    {"recurrence": ["RRULE:FREQ=WEEKLY;COUNT=500"], "time_zone": "Europe/Zurich"},
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131", "RDATE:20270201"], "time_zone": "Europe/Zurich"},
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131;X-ATTENDEE=a@example.com"], "time_zone": "Europe/Zurich"},
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20290131"], "time_zone": "Europe/Zurich"},           # more than a year
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131"]},                                          # needs the zone
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131"], "time_zone": "Not/AZone"},
+])
+def test_recurring_hold_must_be_weekly_with_an_end_within_a_year(gate, extra):
+    d = gate.decide(*propose("calendar.create_hold", {**HOLD, **extra}), ctx())
+    assert d.verdict == "deny"
+
+
 def test_hold_must_end_after_start(gate):
     d = gate.decide(*propose("calendar.create_hold", {**HOLD, "end": HOLD["start"]}), ctx())
     assert d.verdict == "deny"
@@ -328,6 +352,7 @@ def test_move_allows_only_new_times(gate, extra):
     ("loops_snooze", {"id": 3, "at": "2026-10-15T16:00:00+02:00"}, 1),
     ("loops_close", {"id": 3, "reason": "dropped"}, 1),
     ("loops_close", {"id": 3, "reason": "done"}, 1),
+    ("loops_close", {"id": 3, "reason": "not_for_me"}, 1),        # "not a real reply": mutes that sender's mails
 ])
 def test_loop_tools_are_internal(gate, tool, args, tier):
     d = gate.decide(P + tool, args, ctx(origin="voice_note"))
@@ -339,6 +364,7 @@ def test_loop_tools_are_internal(gate, tool, args, tier):
     ("loops_snooze", {"id": 3}),                                   # when or at
     ("loops_snooze", {"id": 3, "at": "2026-10-15T16:00:00"}),      # needs a time zone
     ("loops_close", {"id": 3, "reason": "sent"}),                  # sending is never a loop tool
+    ("loops_close", {"id": 3, "reason": "automated"}),             # only the backend decides that
     ("loops_add", {"kind": "promise", "who": "Lea", "what": ""}),
     ("loops_add", {"kind": "send", "who": "Lea", "what": "x"}),
 ])

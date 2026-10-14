@@ -18,7 +18,7 @@ import json
 import logging
 from email.utils import parsedate_to_datetime
 
-from sqlmodel import Session, select
+from sqlmodel import Session, or_, select
 
 from .audit import audit
 from .db import Task, TriagedEmail, utcnow
@@ -151,8 +151,17 @@ class Triage:
 
 
 def needs_reply(s: Session, limit: int = 5) -> list[TriagedEmail]:
+    """Mails a real person waits on (or not checked yet). Codes, alerts, promos are left out."""
     since = utcnow() - dt.timedelta(days=7)
     return list(s.exec(select(TriagedEmail).where(TriagedEmail.category == "reply").where(TriagedEmail.done == False)  # noqa: E712
+                       .where(or_(TriagedEmail.personal_reply == None, TriagedEmail.personal_reply == True))  # noqa: E711,E712
+                       .where(TriagedEmail.triaged_at >= since).order_by(TriagedEmail.received_at.desc()).limit(limit)).all())
+
+
+def maybe_reply(s: Session, limit: int = 3) -> list[TriagedEmail]:
+    """Kairo couldn't tell if someone waits on these: no loop, one line in the brief."""
+    since = utcnow() - dt.timedelta(days=2)
+    return list(s.exec(select(TriagedEmail).where(TriagedEmail.reply_why == "unsure").where(TriagedEmail.done == False)  # noqa: E712
                        .where(TriagedEmail.triaged_at >= since).order_by(TriagedEmail.received_at.desc()).limit(limit)).all())
 
 

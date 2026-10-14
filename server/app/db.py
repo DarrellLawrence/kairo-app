@@ -99,6 +99,37 @@ class TriagedEmail(SQLModel, table=True):
     task_id: int | None = None
     done: bool = Field(default=False, index=True)  # the owner dealt with it
     triaged_at: datetime = Field(default_factory=utcnow)
+    # Does a real person wait on the owner's own answer? None = not checked yet (rules, learned senders, Haiku).
+    personal_reply: bool | None = None
+    reply_why: str | None = None
+
+
+class ReplySender(SQLModel, table=True):
+    """What the owner taught Kairo about a sender by closing loops: 'person' (answers them) or 'muted'."""
+
+    __tablename__ = "reply_senders"
+    address: str = Field(primary_key=True)
+    verdict: str = Field(index=True)   # person / muted
+    drops: int = 0
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class PortalItem(SQLModel, table=True):
+    """Something Kairo found on the school portal (read-only): a file saved to the vault,
+    a page that changed, the timetable. Content is untrusted data."""
+
+    __tablename__ = "portal_items"
+    id: int | None = Field(default=None, primary_key=True)
+    site: str = Field(index=True)
+    key: str = Field(index=True)
+    kind: str                                   # file / page / timetable
+    course: str | None = None
+    title: str | None = None
+    snippet: str | None = Field(default=None, sa_column=Column(Text))
+    vault_path: str | None = None
+    digest: str | None = None
+    found_at: datetime = Field(default_factory=utcnow)
+    briefed: bool = Field(default=False, index=True)
 
 
 class Brief(SQLModel, table=True):

@@ -8,8 +8,10 @@ is denied.
 from __future__ import annotations
 
 import re
+import datetime as dt
 from datetime import date, datetime
-from typing import Literal
+from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -208,7 +210,7 @@ class LoopsSnooze(Strict):
 
 class LoopsClose(Strict):
     id: int = Field(ge=1)
-    reason: Literal["done", "dropped"]
+    reason: Literal["done", "dropped", "not_for_me"]   # not_for_me: never a loop from this sender again
 
 
 # ---------------------------------------------------------------- tier 2: reversible, nobody notified
@@ -239,6 +241,9 @@ class GmailCreateDraft(Strict):
     _subject = field_validator("subject")(_one_line)
 
 
+WEEKLY_RULE = r"^RRULE:FREQ=WEEKLY;(BYDAY=(MO|TU|WE|TH|FR|SA|SU);)?UNTIL=\d{8}(T\d{6}Z)?$"
+
+
 class CalendarCreateHold(Strict):
     """Own calendar only. Fields are an allow-list (KICKOFF 8): anything that
     could notify other people simply has no field here."""
@@ -251,6 +256,9 @@ class CalendarCreateHold(Strict):
     reminders: dict | None = None
     colorId: str | None = Field(default=None, pattern=r"^\d{1,2}$")
     transparency: Literal["opaque", "transparent"] | None = None
+    # Weekly repeat with an end within a year (school timetable). Nothing else: no daily, no count, no RDATE.
+    recurrence: list[Annotated[str, Field(pattern=WEEKLY_RULE)]] | None = Field(default=None, max_length=1)
+    time_zone: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def end_after_start(self):
@@ -258,6 +266,16 @@ class CalendarCreateHold(Strict):
             raise ValueError("end must be after start")
         if self.start.tzinfo is None or self.end.tzinfo is None:
             raise ValueError("start and end need a time zone")
+        if self.recurrence:
+            if not self.time_zone:
+                raise ValueError("a repeating event needs time_zone")
+            try:
+                ZoneInfo(self.time_zone)
+            except Exception:
+                raise ValueError("unknown time_zone")
+            until = re.search(r"UNTIL=(\d{8})", self.recurrence[0]).group(1)
+            if dt.date(int(until[:4]), int(until[4:6]), int(until[6:])) > self.start.date() + dt.timedelta(days=366):
+                raise ValueError("a repeating event must end within a year")
         return self
 
 

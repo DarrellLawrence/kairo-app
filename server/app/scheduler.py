@@ -45,6 +45,7 @@ DEFAULT_CRON = {
     "restore_test": "0 4 * * 0",
     "lerndoku_prompt": "30 17 * * 5",
     "promises": "10 7-21 * * *",
+    "olat": "5 6 * * *",
 }
 # Silent housekeeping: no model, no push unless it fails. Allowed in the quiet window.
 QUIET_EXEMPT = {"backup", "restore_test"}
@@ -65,6 +66,7 @@ JOB_TITLES = {
     "open_loops": "Open loops",
     "promises": "Find promises in sent mail",
     "pa": "PA: birthdays, people, money, tests, patterns",
+    "olat": "School portal (OLAT, read-only)",
 }
 
 
@@ -334,7 +336,7 @@ class Jobs:
             every = ((self.schedule.get("jobs") or {}).get("pa") or {}).get("every_minutes") or PA_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["pa"], id="pa",
                           misfire_grace_time=900)
-        for name in ("backup", "restore_test", "lerndoku_prompt", "promises"):
+        for name in ("backup", "restore_test", "lerndoku_prompt", "promises", "olat"):
             if name in self.bodies:
                 sched.add_job(self.run_job, cron_trigger(self._cron(name), tz), args=[name], id=name)
         if "capture_process" in self.bodies:

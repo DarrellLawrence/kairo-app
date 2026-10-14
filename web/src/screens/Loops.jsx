@@ -46,7 +46,7 @@ function LoopCard({ loop, focus, onChanged }) {
   })
   const close = (reason) => act('close', async () => {
     await api(`/api/loops/${loop.id}/close`, { method: 'POST', body: { reason } })
-    toast.show({ text: reason === 'done' ? 'Done. Off the list.' : 'Dropped. It won’t come back.' })
+    toast.show({ text: { done: 'Done. Off the list.', not_for_me: 'Got it. Mails like this won’t show up here again.' }[reason] || 'Dropped. It won’t come back.' })
     onChanged()
   })
   const draft = () => act('draft', async () => { await api(`/api/loops/${loop.id}/draft`, { method: 'POST', body: {} }); onChanged() })
@@ -94,6 +94,9 @@ function LoopCard({ loop, focus, onChanged }) {
       </div>
       {loop.can_send && text && <button type="button" className="k-loop-link" onClick={() => close('done')}>I did it another way</button>}
       <button type="button" className="k-loop-link" onClick={() => close('dropped')}>Drop it</button>
+      {loop.source === 'email' && loop.who_email && (
+        <button type="button" className="k-loop-link" onClick={() => close('not_for_me')}>Not a real reply · never from this sender</button>
+      )}
 
       <Sheet open={later} onClose={() => setLater(false)} title="When should it come back?">
         <Button variant="primary" block onClick={() => snooze({ when: 'later' })}>

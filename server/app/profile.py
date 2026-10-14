@@ -25,6 +25,7 @@ class Profile(BaseModel):
     quiet_hours: QuietHours
     push_devices: list[str] = []
     places: list[dict] = []   # seeds Settings -> Places on first start
+    school_portal: dict | None = None   # {kind: olat, url, class}: read-only, login in More -> Logins
 
     @property
     def tz(self) -> ZoneInfo:
