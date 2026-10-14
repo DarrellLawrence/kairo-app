@@ -20,8 +20,9 @@ def test_chat_streams_and_persists(migrated):
         assert any(f["type"] == "delta" for f in frames)
         assert frames[-1] == {"type": "done", "text": "echo: hello kairo", "message_id": frames[-1]["message_id"]}
         tid = frames[0]["id"]
-        msgs = client.get(f"/api/threads/{tid}/messages").json()
-        assert [(m["role"], m["text"]) for m in msgs] == [("owner", "hello kairo"), ("kairo", "echo: hello kairo")]
+        r = client.get("/api/chat/messages").json()
+        assert r["thread_id"] == tid
+        assert [(m["role"], m["text"]) for m in r["messages"]] == [("owner", "hello kairo"), ("kairo", "echo: hello kairo")]
 
 
 def test_follow_up_resumes_same_brain_session(migrated, tmp_path, monkeypatch):
@@ -36,16 +37,6 @@ def test_follow_up_resumes_same_brain_session(migrated, tmp_path, monkeypatch):
         assert second[0]["id"] == first[0]["id"]
         argv = json.loads(rec.read_text())["argv"]
         assert "--resume" in argv
-
-
-def test_same_day_reuses_thread_new_thread_endpoint_starts_fresh(migrated):
-    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
-        a = converse(ws, "a")[0]["id"]
-        b = converse(ws, "b")[0]["id"]
-        assert a == b
-        new = client.post("/api/threads").json()["id"]
-        c = converse(ws, "c", thread_id=new)[0]["id"]
-        assert c == new != a
 
 
 def test_usage_limit_is_reported_not_crashed(migrated, monkeypatch):
@@ -79,7 +70,7 @@ def test_hanging_up_mid_answer_still_saves_the_reply(migrated, monkeypatch):
             assert ws.receive_json()["type"] == "delta"
         deadline = time.time() + 15
         while time.time() < deadline:
-            msgs = client.get(f"/api/threads/{tid}/messages").json()
+            msgs = client.get("/api/chat/messages").json()["messages"]
             if any(m["role"] == "kairo" for m in msgs):
                 break
             time.sleep(0.2)

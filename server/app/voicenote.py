@@ -3,7 +3,7 @@
 In:   POST /api/voice-note (iPhone Shortcut, capture token, raw audio body) or
       POST /api/voice-notes (the app, e.g. hanging up a call mid-sentence).
       Answers at once; the work runs in the background.
-Then: transcribe on the PC -> run it like a chat message in today's thread
+Then: transcribe on the PC -> run it like a chat message in the one conversation
       (origin "voice_note", tools as in chat) -> Kairo's short answer is saved
       there and on the capture, shown next time the app opens. Push only when
       the model marks it URGENT.
@@ -22,7 +22,7 @@ import logging
 
 from sqlmodel import Session
 
-from . import capture, chat
+from . import capture, chat, memory
 from .brain import EventKind
 from .db import Capture, ChatThread, utcnow
 from .jobkit import clip
@@ -112,11 +112,16 @@ class VoiceNotes:
             return
 
         with Session(self.engine) as s:
-            thread = chat.today_thread(s, brain_name=self.runner.brain.name, profile=self.profile)
-            chat.add_message(s, thread.id, "owner", f"(voice note) {text}")
+            thread = chat.main_thread(s, brain_name=self.runner.brain.name)   # the one conversation
+            msg_in = chat.add_message(s, thread.id, "owner", f"(voice note) {text}")
+            if memory.take_fresh(s):
+                thread.brain_session_id = None
+                s.add(thread)
+                s.commit()
             tid, session_id = thread.id, thread.brain_session_id
+        system = self.system(thread_id=tid, fresh=session_id is None, before_id=msg_in.id)
         parts, final, error, new_sid = [], None, None, None
-        async for ev in self.runner.stream(f"(voice note) {text}", session_id=session_id, system=self.system() + RULES,
+        async for ev in self.runner.stream(f"(voice note) {text}", session_id=session_id, system=system + RULES,
                                            tools=self.tools, origin="voice_note", thread_id=tid, purpose="voice_note",
                                            model=self.pick_model("voice_note")):
             if ev.kind is EventKind.session and ev.session_id:
