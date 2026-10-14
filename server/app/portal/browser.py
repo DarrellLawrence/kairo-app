@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import sys
 from pathlib import Path
 
@@ -57,6 +58,10 @@ def _use_site(site_dir: Path | None) -> None:
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(site_dir) / "ms-playwright"))
 
 
+ACTIVE = 0                      # open browsers; the auto-updater waits while one is open (fix P2.14)
+_ACTIVE_LOCK = threading.Lock()
+
+
 class PlaywrightDriver:
     def __init__(self, base: str, site_dir: Path | None = None):
         _use_site(site_dir)
@@ -67,7 +72,15 @@ class PlaywrightDriver:
         self.base = base
         self.phase = "login"
         self.blocked: list[str] = []
-        self._pw = sync_playwright().start()
+        global ACTIVE
+        with _ACTIVE_LOCK:
+            ACTIVE += 1
+        self._counted = True
+        try:
+            self._pw = sync_playwright().start()
+        except Exception:
+            self._uncount()
+            raise
         exe = os.environ.get("KAIRO_BROWSER_EXECUTABLE") or None
         self._browser = self._pw.chromium.launch(headless=True, executable_path=exe)
         self._ctx = self._browser.new_context(accept_downloads=False, locale="de-CH")
@@ -126,9 +139,17 @@ class PlaywrightDriver:
             raise PortalError(f"download failed ({r.status}): {url.rsplit('/', 1)[-1]}")
         return r.body(), url.split("?")[0].rsplit("/", 1)[-1]
 
+    def _uncount(self) -> None:
+        global ACTIVE
+        with _ACTIVE_LOCK:
+            if self._counted:
+                ACTIVE -= 1
+                self._counted = False
+
     def close(self) -> None:
         for fn in (self._ctx.close, self._browser.close, self._pw.stop):
             try:
                 fn()
             except Exception:
                 pass
+        self._uncount()

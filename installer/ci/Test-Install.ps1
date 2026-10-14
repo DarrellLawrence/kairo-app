@@ -365,7 +365,7 @@ foreach ($n in @('Kairo Logins', 'Kairo Check', 'Update Kairo')) {
 Check (-not (Test-Path (Join-Path $Root 'installer\bat'))) 'no confusing .bat copies in installer\bat'
 $au = Get-ScheduledTask -TaskName 'Kairo Auto-Update' -TaskPath '\Kairo\'
 Check ($au.Principal.UserId -eq 'SYSTEM' -or $au.Principal.UserId -eq 'S-1-5-18') 'auto-update task runs as SYSTEM'
-Check ([string]$au.Triggers[0].Repetition.Interval -eq 'PT1M') 'auto-update checks every minute'
+Check ([string]$au.Triggers[0].Repetition.Interval -eq 'PT5M') 'auto-update checks every 5 minutes'
 $updIds = @((Get-Acl (Join-Path $Root 'updater')).Access | ForEach-Object { $_.IdentityReference.Value })
 Check (@($updIds | Where-Object { $_ -match 'kairo-svc|\\Users$|runneradmin' }).Count -eq 0) "updater folder: only Windows and admins ($($updIds -join ', '))"
 

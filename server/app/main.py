@@ -127,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.db_url.startswith("sqlite:///"):
         Path(settings.db_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
     engine = make_engine(settings.db_url)
+    _mark_interrupted(engine)
     gate = load_gate(settings.config_dir)   # refuses to start on a broken or weakened permissions.yaml
     tool_token = secrets.token_urlsafe(32)  # new every start; only mcp_kairo gets it
     mcp_config = write_workspace(settings.workspace_dir,
@@ -734,9 +735,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         urgent = bool((body or {}).get("urgent"))
         if runner.busy:
             return {"ready": False, "reason": "busy"}
+        if app.state.jobs.busy():                       # fix P2.14: a job, a call or the browser is never cut off
+            return {"ready": False, "reason": "job running"}
+        with session_for(engine) as s:
+            if voice_calls.live(s):
+                return {"ready": False, "reason": "call live"}
+        if portal_browser.ACTIVE > 0:
+            return {"ready": False, "reason": "browser open"}
         if not urgent and in_quiet_hours(profile):
             return {"ready": False, "reason": "quiet"}
         app.state.maintenance_until = time.time() + 1800
+        app.state.jobs.hold_until = app.state.maintenance_until
         return {"ready": True, "reason": "idle"}
 
     @app.post("/api/update/release")
@@ -744,6 +753,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not is_local_request(request):
             raise HTTPException(403, "only from this PC")
         app.state.maintenance_until = 0.0
+        app.state.jobs.hold_until = 0.0
         return {"ok": True}
 
     # ---------------------------------------------------------------- onboarding interview (v5)
@@ -1948,6 +1958,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 log = logging.getLogger("kairo.main")
+
+
+def _mark_interrupted(engine) -> None:
+    """Runs a restart cut off (an update, a crash) stay "running" forever otherwise (fix P2.14)."""
+    from .db import JobRun, utcnow
+    with session_for(engine) as s:
+        rows = s.exec(select(JobRun).where(JobRun.status == "running")).all()
+        for run in rows:
+            run.status, run.finished_at = "interrupted", utcnow()
+            run.error = "Kairo restarted while this was running"
+            s.add(run)
+        if rows:
+            s.commit()
+            log.warning("marked %d job run(s) as interrupted", len(rows))
 
 
 def _build_config(settings: Settings) -> None:

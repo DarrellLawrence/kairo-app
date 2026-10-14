@@ -81,3 +81,14 @@ def set_option(s: Session, key: str, on: bool) -> dict[str, bool]:
     s.add(row)
     s.commit()
     return options(s)
+
+
+def live(s: Session) -> bool:
+    """A call is ringing or under way (the auto-updater waits, fix P2.14). An answered call that
+    never ended counts for 3 hours at most."""
+    since = utcnow() - dt.timedelta(hours=3)
+    for c in s.exec(select(Call).where(Call.status.in_(("ringing", "answered")))).all():
+        refresh(c)
+        if c.status == "ringing" or (c.status == "answered" and _aware(c.answered_at or c.created_at) > since):
+            return True
+    return False

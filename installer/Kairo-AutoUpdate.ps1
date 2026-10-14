@@ -1,4 +1,4 @@
-# Kairo auto-update. Runs every minute as SYSTEM (task "\Kairo\Kairo Auto-Update").
+# Kairo auto-update. Runs every 5 minutes as SYSTEM (task "\Kairo\Kairo Auto-Update").
 #
 # 1. Asks GitHub for the newest tested release (cheap: an unchanged answer
 #    does not count against GitHub's limits).

@@ -634,14 +634,14 @@ function Register-BootCheckTask($P) {
         -Description 'Checks after every boot that Kairo, Claude, Tailscale and HTTPS came back.')
 }
 
-# Auto-update: every minute, as SYSTEM (it installs programs and restarts
+# Auto-update: every 5 minutes (fix P2.16), as SYSTEM (it installs programs and restarts
 # Kairo). Asks Kairo first; only installs when nothing is running and, unless
 # the release is marked [urgent], not in the quiet hours.
 function Register-AutoUpdateTask($P) {
     $script = Join-Path $P.Installer 'Kairo-AutoUpdate.ps1'
     $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Root `"$($P.Root)`""
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
-    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
     $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 45) -MultipleInstances IgnoreNew
