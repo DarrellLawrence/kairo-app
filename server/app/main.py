@@ -21,10 +21,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote
+from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError
 from .voice import calls as voice_calls
+from pydantic import ValidationError
+
+from .actions import LoopsAdd
 from .audit import audit
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
@@ -82,7 +85,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def google_read() -> GoogleAPI:
         return GoogleAPI(settings.secrets_dir, "read", transport=getattr(app.state, "google_transport", None))
 
-    tools = ToolRunner(engine=engine, vault_dir=settings.vault_dir, google_read=google_read)
+    tools = ToolRunner(engine=engine, vault_dir=settings.vault_dir, google_read=google_read, profile=profile,
+                       schedule=_load_schedule(settings.config_dir))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -184,7 +188,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
                 "capture_process": lambda ctx: app.state.captures.run(ctx),
                 "backup": backup_job, "restore_test": restore_test_job,
-                "lerndoku_prompt": lambda ctx: lerndoku_prompt_job(ctx)})
+                "lerndoku_prompt": lambda ctx: lerndoku_prompt_job(ctx),
+                "open_loops": lambda ctx: app.state.loops.run(ctx),
+                "promises": lambda ctx: app.state.promises.run(ctx)})
+    app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
+                                       calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
+                                       vault_dir=settings.vault_dir, config_dir=settings.config_dir)
+    app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
@@ -665,6 +675,127 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         threading.Thread(target=app.state.jobs.run_job, args=(name,), kwargs={"forced": True},
                          name=f"job-{name}", daemon=True).start()
         return {"started": name}
+
+    # ---------------------------------------------------------------- open loops
+
+    from .db import OpenLoop
+
+    def _loop_now():
+        return dt.datetime.now(profile.tz)
+
+    def _loop_or_404(s, loop_id: int) -> OpenLoop:
+        loop = s.get(OpenLoop, loop_id)
+        if loop is None:
+            raise HTTPException(404, "no such loop")
+        return loop
+
+    @app.get("/api/loops")
+    def loops_get(status: str = "open"):
+        now = _loop_now()
+        with session_for(engine) as s:
+            rows = loops.open_loops(s) if status == "open" else s.exec(
+                select(OpenLoop).where(OpenLoop.status != "open").order_by(OpenLoop.closed_at.desc()).limit(50)).all()
+            return [loops.as_dict(l, now, profile.tz) for l in rows]
+
+    @app.get("/api/loops/{loop_id}")
+    def loop_get(loop_id: int):
+        with session_for(engine) as s:
+            return loops.as_dict(_loop_or_404(s, loop_id), _loop_now(), profile.tz)
+
+    @app.post("/api/loops")
+    def loop_add(body: dict):
+        try:
+            a = LoopsAdd.model_validate(body)
+        except ValidationError as exc:
+            raise HTTPException(400, str(exc.errors()[0].get("msg")))
+        with session_for(engine) as s:
+            loop = loops.add(s, kind=a.kind, what=a.what, who=a.who, due=a.due, now=_loop_now(), tz=profile.tz,
+                             times=loops.good_times(app.state.jobs.schedule))
+            return loops.as_dict(loop, _loop_now(), profile.tz)
+
+    @app.post("/api/loops/{loop_id}/later")
+    def loop_later(loop_id: int, body: dict | None = None):
+        body = body or {}
+        at = None
+        if body.get("at"):
+            try:
+                at = dt.datetime.fromisoformat(str(body["at"]))
+            except ValueError:
+                raise HTTPException(400, "at must be an ISO time")
+        with session_for(engine) as s:
+            try:
+                loop = loops.snooze(s, loop_id, now=_loop_now(), tz=profile.tz, times=loops.good_times(app.state.jobs.schedule),
+                                    when=None if at else (body.get("when") or "later"), at=at)
+            except loops.LoopError as exc:
+                raise HTTPException(400, str(exc))
+            return loops.as_dict(loop, _loop_now(), profile.tz)
+
+    @app.post("/api/loops/{loop_id}/close")
+    def loop_close(loop_id: int, body: dict | None = None):
+        reason = (body or {}).get("reason") or "done"
+        if reason not in ("done", "dropped"):
+            raise HTTPException(400, "reason must be done or dropped")
+        with session_for(engine) as s:
+            try:
+                return loops.as_dict(loops.close(s, loop_id, reason), _loop_now(), profile.tz)
+            except loops.LoopError as exc:
+                raise HTTPException(400, str(exc))
+
+    class _AskCtx:
+        """The bits of a JobContext the drafter needs, for a draft the owner asked for in the app."""
+        def __init__(self, s):
+            self.session = s
+
+        def ask(self, prompt, system, images=None, purpose=None):
+            return app.state.jobs.ask_brain(prompt, system, purpose=purpose or "draft")
+
+    @app.post("/api/loops/{loop_id}/draft")
+    def loop_draft(loop_id: int):
+        with session_for(engine) as s:
+            loop = _loop_or_404(s, loop_id)
+            try:
+                app.state.loops.draft(_AskCtx(s), loop)
+            except (GoogleNotConnected, GoogleError) as exc:
+                raise HTTPException(503, f"Google: {exc}")
+            except Exception as exc:
+                raise HTTPException(503, f"Claude could not write it right now: {exc}")
+            return loops.as_dict(loop, _loop_now(), profile.tz)
+
+    @app.post("/api/loops/{loop_id}/send")
+    def loop_send(loop_id: int, body: dict | None = None):
+        """The owner tapped Send on the ready answer: that tap is the approval. The card stores the
+        exact text; the backend sends it (gate, outbound limit and kill switch as for any card)."""
+        body = body or {}
+        with session_for(engine) as s:
+            loop = _loop_or_404(s, loop_id)
+            if loop.status != "open":
+                raise HTTPException(400, "this loop is already closed")
+            d = loops.draft_of(loop) or {}
+            text_ = str(body.get("text") or d.get("text") or "").strip()
+            if not text_:
+                raise HTTPException(400, "nothing to send yet")
+            if loop.source == "email" and loop.kind in ("reply", "waiting") and loop.source_ref:
+                proposal = {"action": "gmail.reply", "args": {"message_id": loop.source_ref, "body": text_}}
+            elif loop.who_email:
+                subject = str(body.get("subject") or d.get("subject") or loop.what)[:200].replace("\n", " ")
+                proposal = {"action": "gmail.send", "args": {"to": [loop.who_email], "subject": subject, "body": text_}}
+            else:
+                raise HTTPException(400, "Kairo doesn't know where to send this. Do it yourself and tap Done.")
+            decision = gate.decide(TOOL_PREFIX + "propose_action", {**proposal, "reason": f"Open loop #{loop.id}"},
+                                   read_context(engine, "owner_chat"))
+            if decision.verdict != "approve":
+                raise HTTPException(400, decision.reason)
+            try:
+                card = approvals.create_card(s, decision, executor=app.state.executor, google_read=google_read,
+                                             thread_id=None, reason=f"Open loop #{loop.id}: {loop.what}")
+                audit(s, actor="owner", action="loop.send", outcome=f"loop #{loop.id} -> card #{card.id}")
+                card = approvals.approve(s, card.id, executor=app.state.executor, gate=gate)
+            except (approvals.ApprovalError, GoogleNotConnected, GoogleError) as exc:
+                raise HTTPException(400, str(exc))
+            if card.status == "done":
+                loops.close(s, loop.id, "sent")
+            s.refresh(loop)
+            return {"card": approvals.card_dict(card), "loop": loops.as_dict(loop, _loop_now(), profile.tz)}
 
     @app.get("/api/today")
     def today_get():

@@ -130,7 +130,11 @@ def home(s: Session, *, profile, events: list[dict], calendar_error: str | None,
         if replies:
             bits.append(f"{len(replies)} mail{'s' if len(replies) != 1 else ''} to answer")
         summary = "Today: " + ", ".join(bits) + "."
+    from . import loops as loops_mod
+    open_ = loops_mod.open_loops(s)
     return {
+        "loops": {"count": len(open_), "urgent": sum(1 for l in open_ if l.urgency == "urgent"),
+                  "top": [loops_mod.as_dict(l, now, tz) for l in open_[:3]]},
         "name": profile.name.split()[0],
         "date": today.isoformat(),
         "summary": summary,

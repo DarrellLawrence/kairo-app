@@ -360,3 +360,31 @@ class CalendarTag(SQLModel, table=True):
     event_id: str = Field(primary_key=True)
     type: str
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class OpenLoop(SQLModel, table=True):
+    """Something not finished: a mail or question waiting for the owner, a promise
+    the owner made, a deadline, a task. Kairo raises it until it is done, dropped
+    or no longer relevant (open loops)."""
+
+    __tablename__ = "open_loops"
+    __table_args__ = (UniqueConstraint("source", "source_ref", name="uq_open_loops_source"),)
+    id: int | None = Field(default=None, primary_key=True)
+    kind: str = Field(index=True)              # reply / promise / deadline / task / waiting
+    source: str                                # email / task / school / promise / chat
+    source_ref: str | None = None              # message id, task id, ...
+    who: str | None = None                     # the person, as shown
+    who_email: str | None = None
+    what: str
+    since: datetime = Field(default_factory=utcnow)
+    due: datetime | None = None
+    urgency: str = Field(default="normal", index=True)   # urgent / normal / low
+    status: str = Field(default="open", index=True)      # open / done / dropped / stale
+    next_at: datetime | None = Field(default=None, index=True)
+    raised: int = 0                            # how often Kairo brought it up
+    snoozed: int = 0
+    last_raised_at: datetime | None = None
+    draft_json: str | None = Field(default=None, sa_column=Column(Text))   # ready answer {"text","note","level","language"}
+    closed_at: datetime | None = None
+    close_reason: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)

@@ -548,6 +548,22 @@ Target: capture in < 5 s from locked phone.
 
 ---
 
+## 13c. Open loops (owner's request 2026-10-14)
+
+Kairo never forgets and never waits to be asked.
+- Tracked automatically in `open_loops` (who, what, since, urgency, next reminder): mails and
+  questions waiting for the owner (triage), promises the owner made (found in sent mail, or said
+  in chat), deadlines, tasks, school dates.
+- Raised with a ready answer in the owner's voice (`vault/10 Profile/voice.md`, level by context):
+  "Anna asked last week if Thursday 14:00 works. You're free then. Reply 'Thursday works'?"
+  [Send] [Edit] [Later]. Send is the owner's approval tap; the backend sends the stored text.
+- Later never means forgotten: urgent (due today/tomorrow, someone waiting > 3 days) 30 min then
+  hourly; normal next day at a good time; low in 3 days then weekly. A bit more direct each time.
+  Closed only when done, dropped, or no longer relevant (e.g. already answered in Gmail).
+- Voice: "not now" = Later, "tomorrow" / "in an hour" = exact time, "drop it" = close.
+- Today shows the stack ("3 open"); the top 2 go into every morning brief. Max 6 proactive pings
+  a day (schedule.yaml `proactive.max_per_day`), most urgent first, never in quiet hours.
+
 ## 14. CLAUDE.md (write exactly)
 
 ```markdown

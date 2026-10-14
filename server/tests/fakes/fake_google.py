@@ -51,6 +51,7 @@ class FakeGoogle:
         if reply_to:
             headers.append({"name": "Reply-To", "value": reply_to})
         self.messages[mid] = {"id": mid, "threadId": thread or f"t-{mid}", "labelIds": ["INBOX"], "snippet": body[:80],
+                              "internalDate": "1760252400000",   # 2026-10-12
                               "payload": {"mimeType": "text/plain", "headers": headers, "body": {"data": b64(body)}}}
 
     def add_event(self, eid: str, *, summary: str, start: str, attendees: list[dict] | None = None, organizer: str | None = None):
@@ -94,8 +95,16 @@ class FakeGoogle:
         if path == f"{g}/messages/send" and m == "POST":
             self.sent.append(body)
             sid = f"sent{len(self.sent)}"
-            self.messages[sid] = {"id": sid, "threadId": body.get("threadId", "t"), "labelIds": ["SENT"], "payload": {"headers": []}}
+            import time as _t
+            raw = decode_raw(body["raw"])
+            self.messages[sid] = {"id": sid, "threadId": body.get("threadId", "t"), "labelIds": ["SENT"],
+                                  "internalDate": str(int(_t.time() * 1000)),
+                                  "payload": {"headers": [{"name": "From", "value": self.owner}, {"name": "To", "value": raw["To"] or ""}]}}
             return httpx.Response(200, json={"id": sid, "threadId": body.get("threadId", "t")})
+        if path.startswith(f"{g}/threads/") and m == "GET":
+            tid = path[len(f"{g}/threads/"):]
+            msgs = [v for v in self.messages.values() if v.get("threadId") == tid]
+            return httpx.Response(200, json={"id": tid, "messages": msgs}) if msgs else httpx.Response(404, json={"error": {"message": "Not Found"}})
         if path.startswith(f"{g}/messages/"):
             rest = path[len(f"{g}/messages/"):]
             mid, _, action = rest.partition("/")

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14 — build: open loops (owner's request, KICKOFF 13c)
+- Kairo tracks what's unfinished (waiting mails, promises in sent mail, deadlines, tasks, school dates) and raises the most urgent one with a ready answer in your voice. Send is one tap and still an approval.
+- Later brings it back by urgency, more direct each time; it closes itself when you already answered in Gmail.
+- Today: "3 open" stack; brief: top 2. Max 6 proactive pings a day. Voice: "not now", "tomorrow", "in an hour", "drop it".
+
 ## 2026-10-14 — design: ember glass redesign (owner's brief)
 - Warm charcoal, frosted glass, ember glow, serif greetings and numbers; all colours, glows, blur, radii, fonts and springs in the design tokens.
 - Fixed: black band under the tab bar (the app now covers the whole screen; measured height only while typing).

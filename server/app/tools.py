@@ -37,10 +37,12 @@ class ToolError(Exception):
 
 
 class ToolRunner:
-    def __init__(self, *, engine, vault_dir: Path, google_read: Callable[[], GoogleAPI]):
+    def __init__(self, *, engine, vault_dir: Path, google_read: Callable[[], GoogleAPI], profile=None, schedule=None):
         self.engine = engine
         self.vault_dir = Path(vault_dir)
         self.google_read = google_read
+        self.profile = profile          # time zone for open loops
+        self.schedule = schedule or {}
 
     def run(self, decision: Decision) -> str:
         """Run an allowed tier 0-1 decision. Returns text for the model; errors are text too."""
@@ -229,6 +231,51 @@ class ToolRunner:
         from . import life
         with Session(self.engine) as s:
             return json.dumps(life.health_summary(s, a["days"], datetime.now().date()), default=str)
+
+
+    # ---------------------------------------------------------------- open loops
+
+    def _loop_env(self):
+        from zoneinfo import ZoneInfo
+        from . import loops
+        tz = self.profile.tz if self.profile else ZoneInfo("UTC")
+        return loops, tz, datetime.now(tz), loops.good_times(self.schedule)
+
+    def _loops_list(self, a: dict) -> str:
+        loops, tz, now, _ = self._loop_env()
+        with Session(self.engine) as s:
+            rows = [loops.as_dict(l, now, tz) for l in loops.open_loops(s)]
+        keep = ("id", "kind", "who", "what", "since", "due", "waiting_days", "urgency", "next_at", "phrase")
+        return json.dumps([{k: r[k] for k in keep} for r in rows if a["include_snoozed"] or not r["next_at"] or r["next_at"] <= now.isoformat()],
+                          default=str, ensure_ascii=False)
+
+    def _loops_add(self, a: dict) -> str:
+        loops, tz, now, times = self._loop_env()
+        from datetime import date
+        due = date.fromisoformat(a["due"]) if a.get("due") else None
+        with Session(self.engine) as s:
+            loop = loops.add(s, kind=a["kind"], what=a["what"], who=a.get("who"), due=due, now=now, tz=tz, times=times)
+            return f"Open loop #{loop.id} added ({loop.urgency}). Kairo brings it up until it's done."
+
+    def _loops_snooze(self, a: dict) -> str:
+        loops, tz, now, times = self._loop_env()
+        at = datetime.fromisoformat(a["at"]) if a.get("at") else None
+        with Session(self.engine) as s:
+            try:
+                loop = loops.snooze(s, a["id"], now=now, tz=tz, times=times, when=a.get("when"), at=at)
+            except loops.LoopError as exc:
+                raise ToolError(str(exc))
+            back = loops.aware(loop.next_at).astimezone(tz)
+            return f"OK, back {back:%A %H:%M}." if back.date() != now.date() else f"OK, back at {back:%H:%M}."
+
+    def _loops_close(self, a: dict) -> str:
+        loops, _, _, _ = self._loop_env()
+        with Session(self.engine) as s:
+            try:
+                loops.close(s, a["id"], a["reason"])
+            except loops.LoopError as exc:
+                raise ToolError(str(exc))
+        return "Closed." if a["reason"] == "done" else "Dropped. It won't come back."
 
 
 def _task(t: Task) -> dict:

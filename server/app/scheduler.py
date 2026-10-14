@@ -44,10 +44,12 @@ DEFAULT_CRON = {
     "backup": "30 3 * * *",
     "restore_test": "0 4 * * 0",
     "lerndoku_prompt": "30 17 * * 5",
+    "promises": "10 7-21 * * *",
 }
 # Silent housekeeping: no model, no push unless it fails. Allowed in the quiet window.
 QUIET_EXEMPT = {"backup", "restore_test"}
 CAPTURE_EVERY_MIN = 15
+LOOPS_EVERY_MIN = 15
 
 # Shown in the app (More -> Jobs) and runnable on demand.
 JOB_TITLES = {
@@ -59,6 +61,8 @@ JOB_TITLES = {
     "backup": "Backup",
     "restore_test": "Restore test",
     "lerndoku_prompt": "Lerndokumentation reminder",
+    "open_loops": "Open loops",
+    "promises": "Find promises in sent mail",
 }
 
 
@@ -320,7 +324,11 @@ class Jobs:
         if "morning_brief" in self.bodies:
             for k in ("morning_brief.weekdays", "morning_brief.weekends"):
                 sched.add_job(self.run_job, cron_trigger(self._cron(k), tz), args=["morning_brief"], id=k)
-        for name in ("backup", "restore_test", "lerndoku_prompt"):
+        if "open_loops" in self.bodies:
+            every = ((self.schedule.get("jobs") or {}).get("open_loops") or {}).get("every_minutes") or LOOPS_EVERY_MIN
+            sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["open_loops"],
+                          id="open_loops", misfire_grace_time=600)
+        for name in ("backup", "restore_test", "lerndoku_prompt", "promises"):
             if name in self.bodies:
                 sched.add_job(self.run_job, cron_trigger(self._cron(name), tz), args=[name], id=name)
         if "capture_process" in self.bodies:

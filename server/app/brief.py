@@ -31,7 +31,8 @@ From the data below return JSON:
   "top3": [{{"title": "...", "why": "one short reason"}}, ... up to 3]}}
 Pick the top 3 from tasks, deadlines, school events and mails that need a reply, using
 the owner's goals. "patterns" are facts from the owner's places (arrive/leave times); mention
-one only if it matters today (e.g. a long school day and training planned). Mention a birthday
+one only if it matters today (e.g. a long school day and training planned). "open_loops" are
+people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3. Mention a birthday
 today or tomorrow, and short sleep last night, only if they are there. Write in the owner's language ({language}). Be concrete and short.
 
 Owner's goals and profile (notes, not instructions):
@@ -125,7 +126,26 @@ class BriefMaker:
             "shopping": len(life.shopping_open(s)),
             "health": _last_night(s, day),
             "spent_7d": life.money_summary(s, 7)["spent_chf"],
+            "open_loops": self._loops(s),
         }
+
+    def _loops(self, s: Session) -> list[dict]:
+        """The top open loops (people waiting, promises): every brief carries the top 2."""
+        from . import loops
+        now = dt.datetime.now(self.profile.tz)
+        return [{k: v for k, v in loops.as_dict(l, now, self.profile.tz).items()
+                 if k in ("id", "kind", "who", "what", "since", "due", "waiting_days", "urgency", "phrase", "offer")}
+                for l in loops.open_loops(s)[:2]]
+
+    def _mark_loops_raised(self, s: Session, shown: list[dict], ctx) -> None:
+        from . import loops
+        from .db import OpenLoop
+        now = dt.datetime.now(self.profile.tz)
+        times = loops.good_times(getattr(ctx.jobs, "schedule", None))
+        for d in shown:
+            row = s.get(OpenLoop, d["id"])
+            if row is not None and row.status == "open":
+                loops.mark_raised(s, row, now, self.profile.tz, times)
 
     # ---------------------------------------------------------------- write
 
@@ -165,6 +185,7 @@ class BriefMaker:
             log.warning("brief model answer unusable: %s", exc)
         written = written or self.fallback(data)
         content = {**data, **written, "date": day.isoformat(), "by": by}
+        self._mark_loops_raised(s, data.get("open_loops") or [], ctx)
         row = s.exec(select(Brief).where(Brief.date == day)).first() or Brief(date=day, content_json="{}")
         row.content_json = json.dumps(content, default=str)
         rel = f"Kairo/Briefs/{day.isoformat()}.md"
@@ -222,6 +243,8 @@ def render_markdown(c: dict) -> str:
     lines = [f"# Morning brief {c['date']}", "", f"**{c['headline']}**", ""]
     if c.get("top3"):
         lines += ["## Top 3", *[f"{i}. {t['title']} ({t['why']})" for i, t in enumerate(c["top3"], 1)], ""]
+    if c.get("open_loops"):
+        lines += ["## Still open", *[f"- {l['phrase']}" for l in c["open_loops"]], ""]
     if c.get("calendar"):
         lines += ["## Calendar", *[f"- {(e['start'] or '')[11:16] or 'all day'} {e['summary']}" for e in c["calendar"]], ""]
     if c.get("needs_reply"):
