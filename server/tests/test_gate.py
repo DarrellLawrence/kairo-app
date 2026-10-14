@@ -264,3 +264,11 @@ def test_finance_is_read_only_and_money_still_impossible(gate):
     for action in ("finance.pay", "finance.transfer", "twint.send"):
         tool, args = propose(action, {"amount": 10})
         assert gate.decide(tool, args, ctx()).verdict == "deny"
+
+
+def test_voice_notes_act_but_cannot_create_cards(gate):
+    """A Shortcut voice note runs with nobody watching (KICKOFF v7 item 7): own-only actions run,
+    anything that would reach another person waits for the owner in the app."""
+    d = gate.decide(*propose("gmail.reply", {"message_id": "abc", "body": "ok"}), ctx(origin="voice_note"))
+    assert d.verdict == "deny"
+    assert gate.decide(*propose("gmail.label", {"message_id": "a", "add": ["Kairo/FYI"]}), ctx(origin="voice_note")).verdict == "execute"

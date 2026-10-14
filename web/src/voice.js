@@ -51,7 +51,7 @@ function pickType() {
   return ''
 }
 
-/* Starts recording. Returns { stop(): Promise<Blob>, cancel(), level(): 0..1 }.
+/* Starts recording. Returns { stop(): Promise<Blob>, cancel(), level(): 0..1, heard(): speech so far? }.
    With autoStop, it stops by itself after `silenceMs` of quiet once speech was heard,
    or after maxMs, and calls onAutoStop(blob). */
 export async function startRecording({ autoStop = false, silenceMs = 1300, maxMs = 45000, onAutoStop } = {}) {
@@ -102,5 +102,6 @@ export async function startRecording({ autoStop = false, silenceMs = 1300, maxMs
     stop: finish,
     cancel: () => { finish() },
     level: () => current,
+    heard: () => heard,
   }
 }

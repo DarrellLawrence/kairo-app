@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-14 — build: voice first (v7 item 7)
+- **Voice note** Shortcut: record, send, done. The PC writes it down, Kairo does it in today's chat and answers there; push only if urgent. Own-only things just happen; anything for other people waits in the app (voice notes can't make approval cards).
+- **Call Kairo** Shortcut opens a live call with the mic on. Hanging up mid-sentence or while Kairo thinks no longer loses anything.
+- Steps for the lock screen (iOS 18) and Back Tap in More → Capture.
+
 ## 2026-10-14 — build: model per task + usage
 - Haiku for triage, sorting, summaries, reminders and calls; Sonnet for chat, writing, drafts and checks; Opus only for big planning and long reviews. Every run is counted per model; More → Usage shows it.
 

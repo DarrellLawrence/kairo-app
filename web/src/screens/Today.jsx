@@ -4,7 +4,7 @@ import { OnboardingCard } from './Onboarding.jsx'
 import { api, parseTs } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
-  Badge, Button, Card, EmptyState, Expandable, IconCalendar, IconInbox, IconMail, IconPlus, IconPulse, IconShield,
+  Badge, Button, Card, EmptyState, Expandable, IconCalendar, IconInbox, IconMail, IconMic, IconPlus, IconPulse, IconShield,
   IconCloud, IconPin, IconSparkle, IconTrain, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, useToast,
 } from '../ui/index.js'
 
@@ -170,6 +170,7 @@ export default function Today({ openCards, go, onboarding }) {
   const [tri, setTri] = useState({ needs_reply: [], flagged: [] })
   const [asking, setAsking] = useState([])
   const [later, setLater] = useState([])
+  const [notes, setNotes] = useState([])
   const [briefOpen, setBriefOpen] = useState(false)
   const [due, setDue] = useState([])
   const [captureOpen, setCaptureOpen] = useState(false)
@@ -178,9 +179,10 @@ export default function Today({ openCards, go, onboarding }) {
   const [answer, setAnswer] = useState('')
 
   const load = useCallback(async () => {
-    const [h, s, g, b, t, a, l, r] = await Promise.allSettled([
+    const [h, s, g, b, t, a, l, r, v] = await Promise.allSettled([
       fetch('/health').then((x) => x.json()), api('/api/status'), api('/api/setup/google/status'), api('/api/brief'),
       api('/api/triage'), api('/api/captures?status=asking'), api('/api/captures?status=later'), api('/api/reviews?status=open'),
+      api('/api/captures?status=filed&limit=30'),
     ])
     setHealth(h.status === 'fulfilled' ? (h.value.detail ?? h.value) : { status: 'unreachable' })
     setStatus(s.status === 'fulfilled' ? s.value : {})
@@ -190,6 +192,9 @@ export default function Today({ openCards, go, onboarding }) {
     setAsking(a.status === 'fulfilled' ? a.value : [])
     setLater(l.status === 'fulfilled' ? l.value : [])
     setDue(r.status === 'fulfilled' ? r.value : [])
+    const today = new Date().toLocaleDateString('sv-SE')
+    setNotes(v.status === 'fulfilled'
+      ? v.value.filter((c) => c.filed_as === 'voice_note' && parseTs(c.created_at).toLocaleDateString('sv-SE') === today) : [])
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -282,6 +287,16 @@ export default function Today({ openCards, go, onboarding }) {
       )}
 
       <HereNow />
+
+      {notes.length > 0 && (
+        <>
+          <SectionTitle>Your voice notes</SectionTitle>
+          <List>{notes.map((c) => (
+            <ListRow key={c.id} icon={<IconMic />} title={c.result?.reply || c.title} subtitle={`You: “${c.title}”`}
+              onClick={() => { window.location.hash = '#chat' }} />
+          ))}</List>
+        </>
+      )}
 
       <AnimatePresence initial={false}>
         {asking.map((c) => (

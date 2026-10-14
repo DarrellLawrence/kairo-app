@@ -5,28 +5,50 @@ import { IconMic, IconPhone } from '../ui/index.js'
 import { speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
 
 const BYE = /^(bye|goodbye|that'?s all|thanks,? bye|tsch(ü|ue)ss|ciao|adieu|auf wiederh|das war'?s|danke,? das war'?s)\b/i
-const LABEL = { ringing: 'is calling…', speaking: 'Speaking', listening: 'Listening…', thinking: 'Thinking…', muted: 'Muted', ended: 'Call ended', missed: 'Missed call', error: '' }
+const LABEL = { connecting: 'Connecting…', ringing: 'is calling…', speaking: 'Speaking', listening: 'Listening…', thinking: 'Thinking…', muted: 'Muted', ended: 'Call ended', missed: 'Missed call', error: '' }
 
 function wsUrl() {
   return `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/chat`
 }
 
-export default function Call({ callId, onClose }) {
+// Hung up mid-sentence: Kairo still gets it, as a voice note (v7).
+function sendAsVoiceNote(blob) {
+  if (!blob || !blob.size) return
+  fetch('/api/voice-notes', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/mp4' }, body: blob, keepalive: blob.size < 60000 })
+    .catch(() => {})
+}
+
+export default function Call({ callId: initialId, onClose }) {
+  const outgoing = initialId === 'new'   // "Call Kairo" Shortcut: no ringing, mic on at once
   const [call, setCall] = useState(null)
-  const [phase, setPhase] = useState('ringing')
+  const [phase, setPhase] = useState(initialId === 'new' ? 'connecting' : 'ringing')
   const [log, setLog] = useState([])
   const [err, setErr] = useState('')
   const [level, setLevel] = useState(0)
   const live = useRef({ on: false, ringing: false, rec: null, ws: null, empty: 0, abort: null })
+  const idRef = useRef(outgoing ? null : initialId)
   const logRef = useRef(null)
 
   useEffect(() => {
-    api(`/api/voice/calls/${callId}`).then((c) => {
+    if (!outgoing) return
+    api('/api/voice/calls', { method: 'POST', body: { outgoing: true } }).then((c) => {
+      setCall(c)
+      idRef.current = c.id
+      start(false)
+    }).catch((e) => { setErr(e.message); setPhase('error') })
+    // iPhone plays sound only after a tap: the first touch anywhere unlocks Kairo's voice.
+    const unlock = () => unlockAudio()
+    document.addEventListener('touchend', unlock, { once: true })
+    return () => document.removeEventListener('touchend', unlock)
+  }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (outgoing) return
+    api(`/api/voice/calls/${initialId}`).then((c) => {
       setCall(c)
       if (c.status === 'missed' || c.status === 'ended') setPhase(c.status); else live.current.ringing = true
     })
       .catch((e) => { setErr(e.message); setPhase('error') })
-  }, [callId])
+  }, [initialId])   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { logRef.current?.scrollTo(0, 1e6) }, [log])
   useEffect(() => () => hangup(false), [])   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -59,10 +81,11 @@ export default function Call({ callId, onClose }) {
       live.current.rec = await startRecording({
         autoStop: true,
         onAutoStop: async (blob) => {
-          if (!live.current.on) return
+          if (!live.current.on) { sendAsVoiceNote(blob); return }
           setPhase('thinking')
           let heard = ''
           try { heard = (await transcribe(blob)).text?.trim() || '' } catch (e) { setErr(e.message) }
+          if (!live.current.on) { if (heard) sendAsVoiceNote(blob); return }   // hung up while Kairo was listening
           if (!heard) {
             live.current.empty += 1
             if (live.current.empty >= 3) { await say('I can’t hear you. Let’s talk later.'); hangup(true); return }
@@ -85,15 +108,19 @@ export default function Call({ callId, onClose }) {
     }
   }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const answer = async () => {
-    unlockAudio()   // must happen inside the tap
+  const start = async (greet) => {
     live.current.on = true
     const ws = new WebSocket(wsUrl())
     live.current.ws = ws
-    await api(`/api/voice/calls/${callId}/answer`, { method: 'POST', body: {} }).catch(() => {})
+    if (greet) await api(`/api/voice/calls/${idRef.current}/answer`, { method: 'POST', body: {} }).catch(() => {})
     await new Promise((r) => { ws.onopen = r; setTimeout(r, 4000) })
-    await say(call?.opening || 'Hi, it’s Kairo.')
+    if (greet) await say(call?.opening || 'Hi, it’s Kairo.')
     listen()
+  }
+
+  const answer = () => {
+    unlockAudio()   // must happen inside the tap
+    start(true)
   }
 
   // Uses only refs and props: listen() keeps an old copy of this function.
@@ -102,11 +129,12 @@ export default function Call({ callId, onClose }) {
     const wasLive = l.on || l.ringing
     l.on = false
     l.ringing = false
-    l.rec?.cancel()
+    if (l.rec?.heard?.()) l.rec.stop().then(sendAsVoiceNote)   // still talking: keep what was said
+    else l.rec?.cancel()
     l.abort?.abort()
     stopSpeaking()
     l.ws?.close()
-    if (wasLive) api(`/api/voice/calls/${callId}/end`, { method: 'POST', body: {} }).catch(() => {})
+    if (wasLive && idRef.current) api(`/api/voice/calls/${idRef.current}/end`, { method: 'POST', body: {} }).catch(() => {})
     if (goBack) { setPhase('ended'); setTimeout(onClose, 700) }
   }
 
