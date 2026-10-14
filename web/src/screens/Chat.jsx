@@ -3,9 +3,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
-  Button, ChatBubble, GlowChip, IconInbox, IconSpeaker, InputBar, List, ListRow, NavBar, ScrollArea, Sheet, useStickToBottom,
+  Button, ChatBubble, GlowChip, IconSpeaker, InputBar, NavBar, ScrollArea, useStickToBottom,
   useToast,
 } from '../ui/index.js'
+import { CaptureSheet } from './CaptureSheet.jsx'
 import { playLastAgain, speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
 
 const STATUS_TEXT = {
@@ -32,7 +33,6 @@ export default function Chat() {
   const [error, setError] = useState(null)
   const [plus, setPlus] = useState(false)
   const [home, setHome] = useState(null)
-  const fileRef = useRef(null)
   const prefill = useRef((() => { try { const p = sessionStorage.getItem('kairo-chat-prefill'); sessionStorage.removeItem('kairo-chat-prefill'); return p } catch { return null } })())
   const wsRef = useRef(null)
   const scrollRef = useRef(null)
@@ -124,16 +124,6 @@ export default function Chat() {
     }
   })   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const sendFile = async (file) => {
-    if (!file) return
-    setPlus(false)
-    try {
-      const res = await fetch('/api/captures', { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file })
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`)
-      toast.show({ text: 'Sent. Kairo reads it within 15 minutes.' })
-    } catch (e) { toast.show({ text: e.message }) }
-  }
-
   const pressMic = async () => {
     if (mic === 'idle') {
       unlockAudio()
@@ -209,14 +199,7 @@ export default function Chat() {
       <InputBar value={draft} onChange={setDraft} onSend={send} disabled={!connected || busy} placeholder="Ask me anything…"
         onPlus={() => setPlus(true)}
         mic={{ state: mic === 'idle' && (!connected || busy) ? 'busy' : mic, onPress: pressMic }} />
-      <input ref={fileRef} type="file" accept="image/*,application/pdf" hidden onChange={(e) => sendFile(e.target.files?.[0])} />
-
-      <Sheet open={plus} onClose={() => setPlus(false)} title="Kairo">
-        <List>
-          <ListRow icon={<IconInbox />} title="Photo or PDF" subtitle="A letter, a bill, a worksheet" onClick={() => fileRef.current?.click()} />
-          <ListRow icon={<IconSpeaker />} title={speakOn ? 'Stop reading replies aloud' : 'Read replies aloud'} onClick={() => { setPlus(false); toggleSpeak() }} />
-        </List>
-      </Sheet>
+      <CaptureSheet open={plus} onClose={() => setPlus(false)} />
 
     </div>
   )

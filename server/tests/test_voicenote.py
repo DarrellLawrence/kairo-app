@@ -118,3 +118,20 @@ def test_urgent_notes_push(migrated):
     asyncio.run(vn.process(cap.id))
     assert runner.calls[0][1]["origin"] == "voice_note"
     assert pushes == [("Kairo", "Your train leaves in 20 minutes, go now.", "/#chat")]
+
+
+def test_the_plus_sheet_gets_kairos_one_line(client):
+    """A2: + -> hold the mic -> let go: the app sends a voice note and waits for Kairo's one line."""
+    r = client.post("/api/voice-notes", content=b"m4a bytes", headers={"Content-Type": "audio/mp4"})
+    assert r.status_code == 200
+    cap_id = r.json()["id"]
+    wait_for(client, cap_id)
+    one = client.get(f"/api/captures/{cap_id}").json()
+    assert one["id"] == cap_id and one["source"] == "app_voice"
+    assert one["status"] == "filed" and one["result"]["reply"]
+    assert client.get("/api/captures/999999").status_code == 404
+
+
+def test_voice_notes_answer_in_one_line():
+    from app.voicenote import RULES
+    assert "ONE short line" in RULES and "one to three" not in RULES

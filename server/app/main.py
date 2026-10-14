@@ -1320,6 +1320,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 q = q.where(capture.Capture.status == status)
             return [capture.as_dict(c) for c in s.exec(q).all()]
 
+    @app.get("/api/captures/{capture_id}")
+    def captures_get(capture_id: int):
+        """One capture: the + sheet waits here for Kairo's one line about a voice note."""
+        with session_for(engine) as s:
+            cap = s.get(capture.Capture, capture_id)
+            if cap is None:
+                raise HTTPException(404, "no such capture")
+            return capture.as_dict(cap)
+
     @app.post("/api/captures/{capture_id}/answer")
     def captures_answer(capture_id: int, body: dict):
         with session_for(engine) as s:
