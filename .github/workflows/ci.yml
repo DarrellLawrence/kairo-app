@@ -80,6 +80,34 @@ jobs:
       - run: python -m pytest -o addopts="" tests/test_portal.py tests/test_portal_browser.py -s
         working-directory: server
 
+  # The setup zip itself has hands (fix P0): built like the release (with its release check),
+  # extracted, its own requirements in a clean venv, then the shipped app, mcp_kairo and safety
+  # hook driven by the fake CLI: self-test, a proposal that makes a card, one the hook blocks.
+  release-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build setup zip
+        run: scripts/build-release.sh
+      - name: Extract it and install its requirements in a clean venv
+        run: |
+          mkdir -p "$RUNNER_TEMP/rel"
+          unzip -q dist/Kairo-Setup-*.zip -d "$RUNNER_TEMP/rel"
+          app=$(ls -d "$RUNNER_TEMP"/rel/Kairo-Setup-*/app)
+          python -m venv "$RUNNER_TEMP/relvenv"
+          "$RUNNER_TEMP/relvenv/bin/pip" install -q -r "$app/server/requirements.txt"
+          echo "KAIRO_RELEASE_APP=$app" >> "$GITHUB_ENV"
+          echo "KAIRO_RELEASE_PY=$RUNNER_TEMP/relvenv/bin/python" >> "$GITHUB_ENV"
+      - run: pip install -r server/requirements-dev.txt
+      - run: python -m pytest -o addopts="" tests/test_release_tools.py -v
+        working-directory: server
+
   web:
     runs-on: ubuntu-24.04
     steps:
@@ -101,8 +129,9 @@ jobs:
     if: needs.changes.outputs.installer == 'true'
     runs-on: windows-latest
     env:
-      KAIRO_SKIP_VOICE: "1"   # 2 GB of speech packages; the voice job tests them on Linux
-      KAIRO_SKIP_BROWSER: "1" # Chromium; the browser job tests it on Linux
+      # 2 GB of speech packages; the voice job tests them on Linux. The browser is installed for
+      # real: same install path as voice (versioned folder, rights reset), checked as kairo-svc.
+      KAIRO_SKIP_VOICE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -151,9 +180,9 @@ jobs:
   release:
     if: >-
       always() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      needs.server.result == 'success' && needs.web.result == 'success' &&
+      needs.server.result == 'success' && needs.web.result == 'success' && needs.release-tools.result == 'success' &&
       (needs.windows-install.result == 'success' || needs.windows-install.result == 'skipped')
-    needs: [server, web, windows-install]
+    needs: [server, web, release-tools, windows-install]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

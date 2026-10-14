@@ -189,6 +189,21 @@ Check (@($codeAcl | Where-Object { $_.FileSystemRights -match 'Write|Modify|Full
 Check ((Test-Path (Join-Path $Root 'Update Kairo.bat')) -and (Test-Path (Join-Path $Root 'Kairo Check.bat'))) 'Update/Rollback/Uninstall/Check .bat files placed in the Kairo folder'
 Check ((Invoke-Install $s1) -eq 0) 'running the same version again is harmless'
 
+# ---- Kairo has hands (fix P0): the self-test the installer ran after the switch, as kairo-svc
+$stj = Get-Content -Raw (Join-Path $Root 'data\updates\selftest.json') | ConvertFrom-Json
+Check ($stj.version -eq $v1 -and $stj.ok) "the install ran the self-test and it passed ($($stj.reason))"
+$tools = (Invoke-WebRequest 'http://127.0.0.1:8000/api/selftest/tools?notify=0' -Method Post -Body '{}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 900).Content | ConvertFrom-Json
+Check ($tools.ok) "tools self-test passes ($($tools.reason))"
+Check ($tools.checks.hook_deny -and $tools.checks.hook_allow) 'the shipped safety hook blocks a forbidden tool (exit 2) and lets a Kairo tool through'
+Check ($tools.checks.mcp -eq 'connected') "the CLI reports Kairo's tool server as connected"
+Check ($tools.checks.tool_call) 'one real tool call went through mcp_kairo to the backend'
+Check ($tools.checks.browser -eq $true) "Kairo's browser imports and renders a page as kairo-svc ($($tools.details.browser.reason))"
+$siteFile = Join-Path $Root "app\releases\$v1\browser-site.txt"
+$site = if (Test-Path $siteFile) { (Get-Content -Raw $siteFile).Trim() } else { '' }
+Check ($site -match '\\tools\\browser-[0-9a-f]{12}$' -and (Test-Path (Join-Path $site '.complete'))) "the release points to its own complete browser folder ($site)"
+$pwAcl = @((Get-Acl (Join-Path $site 'playwright\__init__.py')).Access | ForEach-Object { $_.IdentityReference.Value })
+Check (@($pwAcl | Where-Object { $_ -match 'kairo-svc' }).Count -ge 1) "kairo-svc may read the installed packages ($($pwAcl -join ', '))"
+
 # ---- what can Kairo's account see? (fake CLI probe, run by the app as kairo-svc)
 $canary = Join-Path $env:USERPROFILE 'kairo-canary.txt'
 Set-Content -Path $canary -Value 'private'
@@ -213,9 +228,11 @@ Check ($null -ne (Wait-Healthy 90)) 'restarted without the probe'
 
 # ---- the boot check (what runs after every reboot), minus the Tailscale parts
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Kairo-BootCheck.ps1') -Root $Root -CI | Out-Host
-Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, Claude answers)'
+Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, tools, Claude, browser)'
 $bc = Get-Content -Raw (Join-Path $Root 'data\logs\boot-check.json') | ConvertFrom-Json
-Check ($bc.all_ok -and @($bc.checks).Count -eq 3) 'boot-check.json written with 3 green checks'
+$names = @($bc.checks | ForEach-Object { $_.name })
+$missing = @(@('Kairo running', 'Own account', 'Kairo tools', 'Claude login', 'Browser') | Where-Object { $names -notcontains $_ })
+Check ($bc.all_ok -and $missing.Count -eq 0) "boot-check.json: all green ($($names -join ', '))"
 $status = (Invoke-WebRequest 'http://127.0.0.1:8000/api/status' -UseBasicParsing).Content | ConvertFrom-Json
 Check ($status.boot_check.all_ok) 'the app shows the boot check result (More screen)'
 
@@ -253,6 +270,17 @@ $tables = Get-Tables
 Check ($tables -contains 'tasks') 'table probe works (sees the tasks table)'
 Check (-not ($tables -contains 'ci_probe')) 'schema change of the broken release was undone'
 
+
+# ---- an update without Kairo's tool bridge (what every release before 2026-10-14 was): the
+#      self-test after the switch fails, the update rolls back by itself and says why
+$v5 = "$v1-ci5-notools"
+$s5 = Copy-Setup $s1 'v5' $v5
+Remove-Item -Recurse -Force (Join-Path $s5 'app\server\mcp_kairo')
+Check ((Invoke-Install $s5) -ne 0) 'an update without the tool bridge reports failure'
+Check ((Get-StateObj).current -eq $v2) 'still on v2 after the tool-less update'
+Check ((Get-HealthObj).status -eq 'ok') 'v2 answers again after rolling back the tool-less update'
+$stj = Get-Content -Raw (Join-Path $Root 'data\updates\selftest.json') | ConvertFrom-Json
+Check ($stj.version -eq $v5 -and -not $stj.ok -and $stj.category -eq 'toolchain') "the reason is recorded for the update note ($($stj.reason))"
 
 # ---- manual rollback
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Rollback-Kairo.ps1') -CI -Root $Root | Out-Host

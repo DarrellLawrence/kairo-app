@@ -34,11 +34,28 @@ $owners = @(Get-KairoProcesses $P | ForEach-Object { (Invoke-CimMethod -InputObj
 $svcOk = $owners.Count -gt 0 -and @($owners | Where-Object { $_ -ne 'kairo-svc' }).Count -eq 0
 Add-Check 'Own account' $svcOk $(if ($owners.Count) { "runs as: $($owners -join ', ')" } else { 'no Kairo process found' })
 
-# 3. Claude login works for that account
-$r = if ($h) { Invoke-SelfTest } else { $null }
-$claudeOk = ($null -ne $r) -and [bool]$r.ok
-$claudeDetail = if ($claudeOk) { "replied in $($r.seconds)s" } elseif ($r) { "$($r.brain): $($r.error)" } else { 'not tested (Kairo not running)' }
-Add-Check 'Claude login' $claudeOk $claudeDetail
+# 3. Kairo has hands, as kairo-svc: the safety hook blocks, the tool server is connected, one
+#    real tool call arrives, Claude answers, voice and the browser work. Kairo pushes a failure.
+$t = if ($h) { Invoke-ToolsSelfTest } else { $null }
+if ($t -and $t.PSObject.Properties['checks'] -and $t.checks) {
+    $c = $t.checks
+    $toolsOk = [bool]$c.hook_deny -and [bool]$c.hook_allow -and [string]$c.mcp -eq 'connected' -and ([bool]$c.tool_call -or [string]$t.category -eq 'model')
+    Add-Check 'Kairo tools' $toolsOk $(if ($toolsOk) { 'safety hook, tool server and a real tool call work' } else { [string]$t.reason })
+    $claudeOk = [string]$c.claude -eq 'ok'
+    Add-Check 'Claude login' $claudeOk $(if ($claudeOk) { "answers ($($t.seconds)s for the whole self-test)" } else { [string]$t.reason })
+    foreach ($kind in @('voice', 'browser')) {
+        if ($c.PSObject.Properties[$kind] -and $null -ne $c.$kind) {
+            $d = $t.details.$kind
+            Add-Check $(if ($kind -eq 'voice') { 'Voice' } else { 'Browser' }) ([bool]$c.$kind) $(if ($c.$kind) { 'imports and works for kairo-svc' } else { [string]$d.reason })
+        }
+    }
+} else {
+    # A release from before the tools self-test: only the Claude login check exists there.
+    $r = if ($h) { Invoke-SelfTest } else { $null }
+    $claudeOk = ($null -ne $r) -and [bool]$r.ok
+    $claudeDetail = if ($claudeOk) { "replied in $($r.seconds)s" } elseif ($r) { "$($r.brain): $($r.error)" } else { 'not tested (Kairo not running)' }
+    Add-Check 'Claude login' $claudeOk $claudeDetail
+}
 
 if (-not $CI) {
     # 4. Tailscale came back by itself

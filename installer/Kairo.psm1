@@ -323,69 +323,114 @@ function Install-ReleaseFiles($P, [string]$SourceApp, [string]$Version, [string]
     return $dest
 }
 
-# Phase 3 voice: the big speech packages (about 2 GB with the NVIDIA runtime)
-# go once into tools\voice, shared by all releases, and are only reinstalled
-# when requirements-voice.txt changes. Models go to data\models. Never a reason
-# for an install or update to fail.
-function Install-Voice($P, [string]$ReleaseDir) {
-    if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return }
-    $req = Join-Path $ReleaseDir 'server\requirements-voice.txt'
-    if (-not (Test-Path $req)) { return }
-    $site = Join-Path $P.Tools 'voice'
-    $stamp = Join-Path $site '.requirements-sha256'
-    $hash = (Get-FileHash -Algorithm SHA256 $req).Hash
+# ---------------------------------------------------------------- voice and browser packages
+
+# pip --target builds in a temp folder that Python 3.12.4+ on Windows makes readable only by
+# the installing account (SYSTEM, admins) and then moves the packages into place, keeping that.
+# Kairo's own account then saw faster_whisper as an empty folder (2026-10-14: "cannot import
+# name 'WhisperModel' from 'faster_whisper' (unknown location)"). So after every install every
+# file and folder inherits C:\Kairo's rights again.
+function Repair-ToolAcl([string]$Dir) {
+    & icacls.exe $Dir /reset /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed on $Dir (exit code $LASTEXITCODE)" }
+}
+
+# One folder per package list: tools\<kind>-<hash>. The release records which one it uses
+# (<release>\<kind>-site.txt), so a rollback also goes back to the matching packages. A folder
+# is only used once it is complete, never half-installed. The record is written first: from
+# then on the release expects <kind>, so a failed install fails the self-test (= rollback).
+function Install-ToolSite($P, [string]$ReleaseDir, [string]$Kind, [string]$What, [scriptblock]$AfterPip) {
+    $req = Join-Path $ReleaseDir "server\requirements-$Kind.txt"
+    $hash = (Get-FileHash -Algorithm SHA256 $req).Hash.Substring(0, 12).ToLower()
+    $site = Join-Path $P.Tools "$Kind-$hash"
+    Set-Content -Path (Join-Path $ReleaseDir "$Kind-site.txt") -Value $site -Encoding ASCII
+    if (Test-Path (Join-Path $site '.complete')) { return $site }
+    foreach ($d in @($site, "$site.new")) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } }
+    $new = "$site.new"
     $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
-    try {
-        if (-not ((Test-Path $stamp) -and ((Get-Content -Raw $stamp).Trim() -eq $hash))) {
-            Write-Note 'Installing voice (speech recognition and voices, about 2 GB, once)...'
-            $new = "$site.new"
-            if (Test-Path $new) { Remove-Item -Recurse -Force $new }
-            Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
-                                 '--target', $new, '-r', $req) 'Installing voice packages'
-            Set-Content -Path (Join-Path $new '.requirements-sha256') -Value $hash -Encoding ASCII
-            if (Test-Path $site) { Remove-Item -Recurse -Force $site }
-            Move-Item $new $site
+    Write-Note "Installing $What (once per package list)..."
+    Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
+                         '--target', $new, '-r', $req) "Installing $What"
+    if ($AfterPip) { & $AfterPip $new $py | Out-Host }
+    Repair-ToolAcl $new
+    Set-Content -Path (Join-Path $new '.complete') -Value (Get-Date -Format o) -Encoding ASCII
+    Move-Item $new $site
+    return $site
+}
+
+# Releases from before 2026-10-14 use the shared tools\voice and tools\browser: repair them once,
+# so a rollback to one of them has working packages too.
+function Repair-LegacyToolSites($P) {
+    foreach ($kind in @('voice', 'browser')) {
+        $old = Join-Path $P.Tools $kind
+        $mark = Join-Path $old '.acl-repaired'
+        if ((Test-Path $old) -and -not (Test-Path $mark)) {
+            try { Repair-ToolAcl $old; Set-Content -Path $mark -Value (Get-Date -Format o) -Encoding ASCII }
+            catch { Write-Warn "Could not repair $old ($($_.Exception.Message.Trim()))" }
         }
-        Use-KairoEnv $P
-        $env:KAIRO_VOICE_SITE = $site
-        Push-Location (Join-Path $ReleaseDir 'server')
-        try { Invoke-Checked $py @('-m', 'app.voice', 'download') 'Downloading voice models' } finally { Pop-Location }
-        Write-Ok 'Voice ready (speech recognition on the graphics card, English and German voices)'
-    } catch {
-        Write-Warn "Voice not set up: $($_.Exception.Message.Trim()). Kairo works without it; the next update tries again."
     }
 }
 
-# Kairo's own headless browser (Playwright + Chromium, about 300 MB) for reading the
-# school portal read-only. Same pattern as voice: tools\browser, shared by all releases,
-# reinstalled only when requirements-browser.txt changes. Never a reason to fail.
+# Package folders no kept release points to any more (2 GB each for voice).
+function Remove-UnusedToolSites($P) {
+    $used = @{}
+    $releases = @(Get-ChildItem $P.Releases -Directory -ErrorAction SilentlyContinue)
+    foreach ($kind in @('voice', 'browser')) {
+        $legacyUsed = $false
+        foreach ($r in $releases) {
+            $f = Join-Path $r.FullName "$kind-site.txt"
+            if (Test-Path $f) { $used[(Get-Content -Raw $f).Trim().ToLower()] = $true } else { $legacyUsed = $true }
+        }
+        if ($legacyUsed) { $used[(Join-Path $P.Tools $kind).ToLower()] = $true }
+    }
+    foreach ($d in @(Get-ChildItem $P.Tools -Directory -ErrorAction SilentlyContinue)) {
+        if ($d.Name -notmatch '^(voice|browser)(-[0-9a-f]{12}(\.new)?)?$') { continue }
+        if ($used.ContainsKey($d.FullName.ToLower())) { continue }
+        try { Remove-Item -Recurse -Force $d.FullName; Write-Note "removed unused $($d.Name)" }
+        catch { Write-Warn "Could not remove $($d.FullName) ($($_.Exception.Message.Trim()))" }
+    }
+}
+
+# Phase 3 voice: the big speech packages (about 2 GB with the NVIDIA runtime) in
+# tools\voice-<hash>; models in data\models. An install problem never stops the install
+# itself: the self-test after the switch finds it and rolls back.
+function Install-Voice($P, [string]$ReleaseDir) {
+    if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return }
+    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-voice.txt'))) { return }
+    try {
+        $site = Install-ToolSite $P $ReleaseDir 'voice' 'voice (speech recognition and voices, about 2 GB)' $null
+        Use-KairoEnv $P
+        $env:KAIRO_VOICE_SITE = $site
+        $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+        Push-Location (Join-Path $ReleaseDir 'server')
+        try { Invoke-Checked $py @('-m', 'app.voice', 'download') 'Downloading voice models' }
+        finally { Pop-Location; Remove-Item Env:KAIRO_VOICE_SITE -ErrorAction SilentlyContinue }
+        $models = Join-Path $P.Data 'models'
+        if (Test-Path $models) { Repair-ToolAcl $models }
+        Write-Ok "Voice ready ($site)"
+    } catch {
+        Write-Warn "Voice not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
+    }
+}
+
+# Kairo's own headless browser (Playwright + Chromium, about 300 MB) for reading the school
+# portal read-only, in tools\browser-<hash> (Chromium inside it, in ms-playwright).
 function Install-Browser($P, [string]$ReleaseDir) {
     if ($env:KAIRO_SKIP_BROWSER -eq '1') { Write-Note 'Browser skipped (KAIRO_SKIP_BROWSER=1).'; return }
-    $req = Join-Path $ReleaseDir 'server\requirements-browser.txt'
-    if (-not (Test-Path $req)) { return }
-    $site = Join-Path $P.Tools 'browser'
-    $stamp = Join-Path $site '.requirements-sha256'
-    $hash = (Get-FileHash -Algorithm SHA256 $req).Hash
-    $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-browser.txt'))) { return }
+    $chromium = {
+        param($new, $py)
+        $old = $env:PYTHONPATH
+        $env:PYTHONPATH = $new
+        $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $new 'ms-playwright'
+        try { Invoke-Checked $py @('-m', 'playwright', 'install', 'chromium') 'Downloading Chromium' }
+        finally { $env:PYTHONPATH = $old; Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue }
+    }
     try {
-        if (-not ((Test-Path $stamp) -and ((Get-Content -Raw $stamp).Trim() -eq $hash))) {
-            Write-Note 'Installing Kairo''s browser (for the school portal, read-only, once)...'
-            $new = "$site.new"
-            if (Test-Path $new) { Remove-Item -Recurse -Force $new }
-            Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
-                                 '--target', $new, '-r', $req) 'Installing browser packages'
-            $old = $env:PYTHONPATH
-            $env:PYTHONPATH = $new
-            $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $new 'ms-playwright'
-            try { Invoke-Checked $py @('-m', 'playwright', 'install', 'chromium') 'Downloading Chromium' }
-            finally { $env:PYTHONPATH = $old; Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue }
-            Set-Content -Path (Join-Path $new '.requirements-sha256') -Value $hash -Encoding ASCII
-            if (Test-Path $site) { Remove-Item -Recurse -Force $site }
-            Move-Item $new $site
-        }
-        Write-Ok 'Browser ready (school portal, read-only)'
+        $site = Install-ToolSite $P $ReleaseDir 'browser' 'Kairo''s browser (school portal, read-only)' $chromium
+        Write-Ok "Browser ready ($site)"
     } catch {
-        Write-Warn "Browser not set up: $($_.Exception.Message.Trim()). Kairo works without it; the next update tries again."
+        Write-Warn "Browser not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
     }
 }
 
@@ -508,7 +553,7 @@ function Register-BootCheckTask($P) {
     $trigger.Delay = 'PT3M'
     $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
     [void](Register-ScheduledTask -TaskName $script:BootCheckTaskName -TaskPath $script:TaskPath -Action $action `
         -Trigger $trigger -Principal $principal -Settings $settings -Force `
         -Description 'Checks after every boot that Kairo, Claude, Tailscale and HTTPS came back.')
@@ -593,6 +638,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     }
 
     $newDir = Install-ReleaseFiles $P $SourceApp $version $Python
+    Repair-LegacyToolSites $P
     Install-Voice $P $newDir
     Install-Browser $P $newDir
     Initialize-Config $P $SourceApp
@@ -611,18 +657,30 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
         Write-Bad 'Database update failed.'
     }
 
+    $selftest = $null
+    $selftestOk = $true
     if ($healthy) {
+        $selftest = Invoke-ToolSelfTest $P $version
+        $selftestOk = Test-SelfTestPassed $selftest
+        if (-not $selftestOk) { Write-Bad "Self-test failed: $(Get-SelfTestReason $selftest)" }
+        elseif ($selftest -and -not $selftest.ok) { Write-Warn "Self-test: $(Get-SelfTestReason $selftest) (no reason to go back; Kairo shows it on Today)" }
+        elseif ($selftest) { Write-Ok 'Self-test passed: tools, safety hook, Claude, voice and browser work for kairo-svc' }
+    }
+
+    if ($healthy -and ($selftestOk -or -not $prev)) {
         $state.previous = $prev
         $state.current = $version
         $state.history = @(@($state.history) + $version | Select-Object -Unique)
         Save-State $P $state
         Remove-OldReleases $P $state
-        Write-Ok "Kairo $version is running"
-        return $true
+        Remove-UnusedToolSites $P
+        if ($selftestOk) { Write-Ok "Kairo $version is running"; return $true }
+        Write-Bad 'There is no earlier version to go back to: Kairo keeps running, but what failed above does not work.'
+        return $false
     }
 
-    Write-Bad "Kairo $version did not start correctly."
-    Show-StartProblem $P
+    if ($healthy) { Write-Bad "Kairo $version started, but its self-test failed." }
+    else { Write-Bad "Kairo $version did not start correctly."; Show-StartProblem $P }
     if (-not $prev) {
         Stop-Kairo $P
         Write-Bad 'There is no earlier version to go back to. See C:\Kairo\data\logs\kairo.log'
@@ -630,7 +688,51 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     }
     Write-Step "Going back to $prev"
     Restore-Release $P $newDir $prev $backup
+    # The version we went back to checks itself too (and clears the new version's red chip if it works).
+    [void](Invoke-ToolSelfTest $P $prev -Quiet)
     return $false
+}
+
+# ---------------------------------------------------------------- self-test after every install/update
+
+# Kairo's own check (server/app/selftest.py), run by the app as kairo-svc: the safety hook
+# denies and allows, the CLI reports Kairo's tool server as connected, one harmless real tool
+# call arrives, and voice and the browser import and work for real. Returns the answer, or a
+# toolchain failure when Kairo doesn't answer. Saved to data\updates\selftest.json for the
+# update note.
+function Invoke-ToolSelfTest($P, [string]$Version, [switch]$Quiet) {
+    if (-not $Quiet) { Write-Note 'Self-test (tools, safety hook, Claude, voice, browser; up to 15 minutes)...' }
+    $r = $null
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$script:Port/api/selftest/tools?notify=0" -Method Post -Body '{}' `
+            -ContentType 'application/json' -UseBasicParsing -TimeoutSec 900
+        $r = $resp.Content | ConvertFrom-Json
+    } catch {
+        $code = $null
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($code -eq 404) { return $null }   # a release from before the self-test existed
+        $r = [pscustomobject]@{ ok = $false; category = 'toolchain'; reason = "the self-test did not answer ($($_.Exception.Message.Trim()))"; checks = $null }
+    }
+    if (-not $Quiet) {
+        $dir = Join-Path $P.Data 'updates'
+        if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+        [pscustomobject]@{ version = $Version; at = (Get-Date).ToString('o'); ok = [bool]$r.ok; category = $r.category; reason = [string]$r.reason } |
+            ConvertTo-Json | Set-Content -Path (Join-Path $dir 'selftest.json') -Encoding ASCII
+    }
+    return $r
+}
+
+# Rolled back for: tools/hook broken, voice or browser broken, no answer. Not for a Claude
+# login or usage limit (an older version can't fix those) or a model that skipped its tool.
+function Test-SelfTestPassed($R) {
+    if ($null -eq $R) { return $true }
+    if ($R.ok) { return $true }
+    return @('claude', 'model') -contains [string]$R.category
+}
+
+function Get-SelfTestReason($R) {
+    if ($null -eq $R) { return 'not available in this version' }
+    return [string]$R.reason
 }
 
 function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [string]$Backup) {

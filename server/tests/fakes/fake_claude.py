@@ -16,13 +16,24 @@ the CLI, whether it is admin, and which of the paths it can read.
 
 If FAKE_CLAUDE_RECORD (or KAIRO_HOOK_FAKE_RECORD) is set, argv, stdin, cwd and
 the environment are written there as JSON.
+
+Tools, like the real CLI (used by the release tool test and the self-test): when the
+prompt contains `[[fake-tool NAME {json args}]]`, the fake starts the MCP servers from
+--mcp-config (stdio JSON-RPC), reports their status in system/init, runs the
+PreToolUse hooks from <cwd>/.claude/settings.json before the call (exit 2 = blocked),
+then calls mcp__<server>__NAME over MCP. The reply says TOOL-RESULT / TOOL-BLOCKED /
+TOOL-UNAVAILABLE NAME: ... for each directive.
 """
 
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import uuid
+
+DIRECTIVE = re.compile(r"\[\[fake-tool (\w+) (\{.*?\})\]\]", re.S)
 
 
 def env(name):
@@ -61,6 +72,101 @@ def write_probe(report_path, paths):
         json.dump({"user": user, "admin": admin, "readable": readable}, fh)
 
 
+class MCPClient:
+    """Minimal stdio MCP client, like the real CLI's: newline-delimited JSON-RPC."""
+
+    def __init__(self, spec):
+        env = {**os.environ, **(spec.get("env") or {})}
+        self.proc = subprocess.Popen([spec["command"], *spec.get("args", [])], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True, encoding="utf-8")
+        self.next_id = 0
+
+    def request(self, method, params=None):
+        self.next_id += 1
+        self.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params or {}}) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError("MCP server closed: " + self.proc.stderr.read()[:300])
+        msg = json.loads(line)
+        if "error" in msg:
+            raise RuntimeError(msg["error"].get("message"))
+        return msg["result"]
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=5)
+        except Exception:
+            self.proc.kill()
+
+
+def start_mcp(args):
+    """Start every server in --mcp-config. Returns ({name: client}, [{name, status}])."""
+    if "--mcp-config" not in args:
+        return {}, []
+    spec = json.load(open(args[args.index("--mcp-config") + 1], encoding="utf-8"))
+    clients, status = {}, []
+    for name, srv in (spec.get("mcpServers") or {}).items():
+        try:
+            c = MCPClient(srv)
+            c.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-claude"}})
+            c.proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+            c.proc.stdin.flush()
+            clients[name] = c
+            status.append({"name": name, "status": "connected"})
+        except Exception:
+            status.append({"name": name, "status": "failed"})
+    return clients, status
+
+
+def run_hooks(tool_name, tool_input):
+    """PreToolUse hooks from <cwd>/.claude/settings.json, exec form, like the real CLI.
+    Returns (allowed, message). A hook that can't start or times out blocks (onFailure: block)."""
+    path = os.path.join(os.getcwd(), ".claude", "settings.json")
+    if not os.path.exists(path):
+        return True, ""
+    settings = json.load(open(path, encoding="utf-8"))
+    for entry in (settings.get("hooks") or {}).get("PreToolUse", []):
+        if entry.get("matcher") not in ("*", tool_name):
+            continue
+        for hook in entry.get("hooks", []):
+            payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool_name, "tool_input": tool_input})
+            try:
+                r = subprocess.run([hook["command"], *hook.get("args", [])], input=payload, capture_output=True,
+                                   text=True, timeout=hook.get("timeout", 60), env=dict(os.environ))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return False, f"hook failed to run: {exc}"
+            if r.returncode == 2:
+                return False, (r.stderr or "").strip()[:300]
+            if r.returncode != 0:
+                return False, f"hook exit {r.returncode}: {(r.stderr or '').strip()[:200]}"
+    return True, ""
+
+
+def tool_calls(prompt, args, clients, sid):
+    """Run every [[fake-tool NAME {json}]] directive. Returns reply lines."""
+    allowed = set(args[args.index("--allowedTools") + 1].split(",")) if "--allowedTools" in args else set()
+    lines = []
+    for name, raw in DIRECTIVE.findall(prompt):
+        tool_input = json.loads(raw)
+        server = next(iter(clients), None)
+        full = f"mcp__{server}__{name}" if server else f"mcp__kairo__{name}"
+        if server is None or full not in allowed:
+            lines.append(f"TOOL-UNAVAILABLE {name}")
+            continue
+        out({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:12], "name": full, "input": tool_input}]}, "session_id": sid})
+        ok, why = run_hooks(full, tool_input)
+        if not ok:
+            lines.append(f"TOOL-BLOCKED {name}: {why}")
+            continue
+        result = clients[server].request("tools/call", {"name": name, "arguments": tool_input})
+        text = " ".join(c.get("text", "") for c in result.get("content", []))
+        lines.append(f"TOOL-{'ERROR' if result.get('isError') else 'RESULT'} {name}: {text}")
+    return lines
+
+
 def main():
     args = sys.argv[1:]
     if "--version" in args:
@@ -92,7 +198,18 @@ def main():
         return 1
 
     sid = args[args.index("--resume") + 1] if "--resume" in args else str(uuid.uuid4())
-    out({"type": "system", "subtype": "init", "session_id": sid, "tools": [], "mcp_servers": []})
+    clients, mcp_status = start_mcp(args) if DIRECTIVE.search(prompt) else ({}, [])
+    out({"type": "system", "subtype": "init", "session_id": sid, "tools": [], "mcp_servers": mcp_status})
+    if clients or mcp_status:
+        try:
+            lines = tool_calls(prompt, args, clients, sid)
+        finally:
+            for c in clients.values():
+                c.close()
+        reply = "\n".join(lines)
+        out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}, "session_id": sid})
+        out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid})
+        return 0
 
     if mode == "slow":
         time.sleep(30)

@@ -112,18 +112,61 @@ class Voice:
 
     # ---------------------------------------------------------------- status
 
+    PACKAGES = {"stt": "faster_whisper", "en": "kokoro_onnx", "de": "piper"}
+
     @staticmethod
     def installed() -> dict[str, bool]:
-        import importlib.util as u
-        return {"stt": u.find_spec("faster_whisper") is not None, "en": u.find_spec("kokoro_onnx") is not None,
-                "de": u.find_spec("piper") is not None}
+        from ..tool_sites import is_real_package
+        return {k: is_real_package(m)[0] for k, m in Voice.PACKAGES.items()}
+
+    @staticmethod
+    def broken() -> list[str]:
+        """Packages that are there but can't be imported (e.g. not readable by Kairo's account)."""
+        from ..tool_sites import is_real_package
+        out = []
+        for m in Voice.PACKAGES.values():
+            ok, detail = is_real_package(m)
+            if not ok and "not installed" not in detail:
+                out.append(detail)
+        return out
 
     def status(self) -> dict:
         inst = self.installed()
         return {"installed": inst, "stt_device": self._stt_device, "stt_loaded": self._stt is not None,
                 "en_ready": inst["en"] and all((self.models_dir / "kokoro" / f).is_file() for f in KOKORO_FILES),
                 "de_ready": inst["de"] and (self.models_dir / "piper" / f"{PIPER_DE}.onnx").is_file(),
-                "last_error": self.last_error}
+                "broken": self.broken(), "last_error": self.last_error}
+
+    def selftest(self) -> dict:
+        """For the installer and the boot check (fix P0): real imports as Kairo's account, Kokoro says a
+        short sentence (~2 s) and Whisper writes it down again; Piper speaks German. {ok, checks, reason}"""
+        checks, problems = {}, []
+        for key, module in (("stt_import", "faster_whisper"), ("en_import", "kokoro_onnx"), ("de_import", "piper")):
+            try:
+                mod = __import__(module)
+                if module == "faster_whisper":
+                    getattr(mod, "WhisperModel")
+                checks[key] = True
+            except Exception as exc:   # ImportError, the namespace-package case, broken DLLs
+                checks[key] = False
+                problems.append(f"{module}: {type(exc).__name__}: {exc}"[:240])
+        if all(checks.values()):
+            try:
+                wav, lang = self.speak("Kairo voice test.", "en")
+                checks["tts_en"] = wav[:4] == b"RIFF" and lang == "en"
+                t = self.transcribe(wav, language="en")
+                checks["stt_roundtrip"] = "test" in t.text.lower()
+                if not checks["stt_roundtrip"]:
+                    problems.append(f"Whisper heard {t.text!r}")
+                de, lang = self.speak("Kairo Test.", "de")
+                checks["tts_de"] = de[:4] == b"RIFF" and lang == "de"
+                if not checks["tts_de"]:
+                    problems.append("the German voice didn't speak")
+            except Exception as exc:
+                problems.append(f"{type(exc).__name__}: {exc}"[:240])
+                checks.setdefault("tts_en", False)
+        ok = not problems and all(checks.values())
+        return {"ok": ok, "checks": checks, "reason": "; ".join(problems)}
 
     # ---------------------------------------------------------------- speech to text
 
