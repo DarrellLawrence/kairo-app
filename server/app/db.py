@@ -264,6 +264,7 @@ class Call(SQLModel, table=True):
     reason: str
     opening: str = Field(sa_column=Column(Text, nullable=False))
     status: str = Field(default="ringing", index=True)  # ringing / answered / ended / missed
+    kind: str = "kairo"                      # kairo: Kairo rang (1 a day, fix plan 21) / owner: "call me now", "Call Kairo"
     created_at: datetime = Field(default_factory=utcnow)
     answered_at: datetime | None = None
     ended_at: datetime | None = None
@@ -323,6 +324,22 @@ class WishItem(SQLModel, table=True):
     capture_id: int | None = None
     status: str = Field(default="open", index=True)   # open / bought / dropped
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class PushLog(SQLModel, table=True):
+    """Fix plan item 20: every push decision (sent / held until morning / dropped) and why."""
+
+    __tablename__ = "push_log"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=utcnow, index=True)
+    source: str = Field(index=True)          # approval / reply / loops / coach / location / backup / call / ...
+    title: str
+    body: str = Field(sa_column=Column(Text, nullable=False))
+    url: str = "/"
+    key: str = Field(index=True)             # same push twice = same key
+    status: str = Field(index=True)          # sent / held / dropped
+    why: str = ""
+    send_after: datetime | None = None       # held: not before this (the end of the quiet hours)
 
 
 class CoachLog(SQLModel, table=True):

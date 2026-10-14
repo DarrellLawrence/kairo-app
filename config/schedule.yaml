@@ -1,6 +1,5 @@
 # Job times (KICKOFF section 12). Used by the scheduler from Milestone C.
 timezone_from_profile: true
-quiet_window: { start: "23:00", end: "06:00" }
 reviews:                      # v5: daily check-in every evening; the biggest due review on Sundays
   daily: "21:00"
   big: "18:00"               # weekly / monthly (last Sun) / quarterly / half-year (Jun, Dec) / yearly (Dec)

@@ -25,7 +25,14 @@ from app.settings import REPO_ROOT
 from tests.fakes.fake_google import FakeGoogle, connect
 
 PROFILE = load_profile(REPO_ROOT / "config")
-NO_QUIET = {"quiet_window": {"start": "00:00", "end": "00:00"}}
+NO_QUIET: dict = {}
+
+
+def quiet_profile(start: str = "00:00", end: str = "00:00"):
+    """Quiet hours live in the profile only (fix plan item 25). 00:00-00:00 = never quiet."""
+    p = PROFILE.model_copy(deep=True)
+    p.quiet_hours.start, p.quiet_hours.end = start, end
+    return p
 
 
 class Pushes:
@@ -70,8 +77,9 @@ def env(migrated):
                 inbox=migrated.data_dir / "inbox", gate=load_gate(REPO_ROOT / "config"))
 
 
-def make_jobs(env, model=None, schedule=NO_QUIET, **bodies):
-    return Jobs(engine=env["engine"], pusher=Pushes(), profile=PROFILE, schedule=schedule, ask=model, bodies=bodies)
+def make_jobs(env, model=None, schedule=NO_QUIET, profile=None, **bodies):
+    return Jobs(engine=env["engine"], pusher=Pushes(), profile=profile or quiet_profile(), schedule=schedule, ask=model,
+                bodies=bodies)
 
 
 # ---------------------------------------------------------------- queue rules
@@ -91,7 +99,7 @@ def test_cron_day_of_week_uses_cron_numbers():
 
 def test_job_skips_when_paused_and_in_quiet_window(env):
     ran = []
-    jobs = make_jobs(env, schedule={"quiet_window": {"start": "00:00", "end": "23:59"}}, demo=lambda ctx: ran.append(1))
+    jobs = make_jobs(env, profile=quiet_profile("00:00", "23:59"), demo=lambda ctx: ran.append(1))
     jobs.bodies["demo"] = lambda ctx: ran.append(1)
     assert jobs.run_job("demo").status == "skipped"        # quiet window
     assert jobs.run_job("demo", forced=True).status == "ok"  # the owner can always start it

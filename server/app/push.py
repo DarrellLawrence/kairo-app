@@ -1,26 +1,37 @@
-"""Web Push to the owner's devices (KICKOFF 4, 11).
+"""Web Push to the owner's devices (KICKOFF 4, 11), with one notification boss (fix plan item 20).
 
-VAPID keys are made on first start and kept in <data>/secrets. Devices
-subscribe from the Kairo app (only reachable over the tailnet). No pushes in
-the quiet hours from profile.yaml; the cards still wait in the app.
+VAPID keys are made on first start and kept in <data>/secrets. Devices subscribe from the Kairo
+app (only reachable over the tailnet). Every push goes through Pusher.notify, which decides:
+- quiet hours (the profile's, the one source): held until they end, then sent as one merged push;
+  a backup failure is not held: it goes to the top of the morning brief instead;
+- the same push (source + text) again within 6 h: dropped;
+- proactive pings (loops, coach, location, Lerndoku) share one daily budget (max_pings);
+  approvals, replies people wait for, calls, security and system problems never wait for it;
+- every decision is logged in push_log (source, text, sent / held / dropped, why).
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import threading
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from sqlmodel import Session, select
 
-from .db import PushSubscription
+from .db import PushLog, PushSubscription
 from .profile import Profile
 
 log = logging.getLogger("kairo.push")
+
+PROACTIVE = {"loops", "coach", "location", "lerndoku"}      # share the daily ping budget
+TO_BRIEF = {"backup"}                                       # at night: the morning brief shows it instead
+DEDUPE = timedelta(hours=6)
+DEFAULT_MAX = 6
 
 
 def _b64url(data: bytes) -> str:
@@ -52,9 +63,12 @@ def in_quiet_hours(profile: Profile, now: datetime | None = None) -> bool:
 
 
 class Pusher:
-    def __init__(self, *, engine, secrets_dir: Path, profile: Profile, sender: Callable | None = None):
+    def __init__(self, *, engine, secrets_dir: Path, profile: Profile, sender: Callable | None = None,
+                 max_per_day: Callable[[], int] | None = None):
         self.engine = engine
         self.profile = profile
+        self.max_per_day = max_per_day or (lambda: DEFAULT_MAX)
+        self._lock = threading.Lock()
         self.pem, self.public_key = ensure_vapid(Path(secrets_dir))
         if sender is None:
             from pywebpush import webpush as sender
@@ -71,14 +85,80 @@ class Pusher:
             s.add(row)
             s.commit()
 
-    def notify(self, title: str, body: str, url: str = "/", *, ignore_quiet: bool = False, wait: bool = False) -> None:
-        if not ignore_quiet and in_quiet_hours(self.profile):
-            log.info("quiet hours: no push for %r", title)
-            return
+    def notify(self, title: str, body: str, url: str = "/", *, source: str = "kairo", ignore_quiet: bool = False,
+               wait: bool = False, now: datetime | None = None) -> str:
+        """Sent, held (quiet hours) or dropped (duplicate, budget, or into the brief). Returns which."""
+        now = (now or datetime.now(self.profile.tz)).astimezone(self.profile.tz)
+        body = (body or "")[:1000]
+        key = hashlib.sha1(f"{source}|{title}|{body}".encode("utf-8")).hexdigest()
+        with self._lock, Session(self.engine) as s:
+            status, why, after = "sent", "", None
+            recent = s.exec(select(PushLog).where(PushLog.key == key).where(PushLog.status.in_(("sent", "held")))
+                            .where(PushLog.ts >= (now - DEDUPE).astimezone(timezone.utc))).first()
+            if recent is not None:
+                status, why = "dropped", "the same push was sent less than 6 h ago"
+            elif not ignore_quiet and in_quiet_hours(self.profile, now):
+                if source in TO_BRIEF:
+                    status, why = "dropped", "quiet hours: shown at the top of the morning brief"
+                else:
+                    status, why, after = "held", "quiet hours", self._quiet_end(now)
+            elif source in PROACTIVE and self.proactive_today(s, now) >= self.max_per_day():
+                status, why = "dropped", f"daily budget of {self.max_per_day()} proactive pings used"
+            s.add(PushLog(ts=now.astimezone(timezone.utc), source=source, title=title[:200], body=body, url=url, key=key,
+                          status=status, why=why, send_after=after.astimezone(timezone.utc) if after else None))
+            s.commit()
+        if status != "sent":
+            log.info("push %s (%s): %r", status, why, title)
+            return status
         worker = threading.Thread(target=self._send_all, args=(title, body, url), daemon=True)
         worker.start()
         if wait:
             worker.join(timeout=30)
+        return status
+
+    def proactive_today(self, s: Session | None = None, now: datetime | None = None) -> int:
+        now = (now or datetime.now(self.profile.tz)).astimezone(self.profile.tz)
+        start = datetime.combine(now.date(), dtime.min, tzinfo=self.profile.tz).astimezone(timezone.utc)
+        own = s is None
+        s = s or Session(self.engine)
+        try:
+            return len(s.exec(select(PushLog.id).where(PushLog.status == "sent").where(PushLog.source.in_(sorted(PROACTIVE)))
+                              .where(PushLog.ts >= start)).all())
+        finally:
+            if own:
+                s.close()
+
+    def _quiet_end(self, now: datetime) -> datetime:
+        end = dtime.fromisoformat(self.profile.quiet_hours.end)
+        at = datetime.combine(now.date(), end, tzinfo=self.profile.tz)
+        return at if at > now else at + timedelta(days=1)
+
+    def flush(self, now: datetime | None = None, wait: bool = False) -> int:
+        """After the quiet hours: what was held goes out, as one push when there is more than one."""
+        now = (now or datetime.now(self.profile.tz)).astimezone(self.profile.tz)
+        if in_quiet_hours(self.profile, now):
+            return 0
+        with self._lock, Session(self.engine) as s:
+            rows = s.exec(select(PushLog).where(PushLog.status == "held")
+                          .where(PushLog.send_after <= now.astimezone(timezone.utc)).order_by(PushLog.id)).all()
+            if not rows:
+                return 0
+            if len(rows) == 1:
+                title, body, url = rows[0].title, rows[0].body, rows[0].url
+                why = "after the quiet hours"
+            else:
+                title = f"While you slept: {len(rows)} things"
+                body = " · ".join(f"{r.body}" if r.title in ("Kairo", "") else f"{r.title}: {r.body}" for r in rows)[:1000]
+                url, why = "/#today", "after the quiet hours (merged)"
+            for r in rows:
+                r.status, r.why = "sent", why
+                s.add(r)
+            s.commit()
+        worker = threading.Thread(target=self._send_all, args=(title, body, url), daemon=True)
+        worker.start()
+        if wait:
+            worker.join(timeout=30)
+        return len(rows)
 
     def _send_all(self, title: str, body: str, url: str) -> None:
         payload = json.dumps({"title": title, "body": body[:240], "url": url})

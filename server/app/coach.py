@@ -293,7 +293,8 @@ def study_today(s: Session, today: dt.date) -> list[dict]:
             continue
         for w in plan.get("weeks", []):
             if today.isoformat() in w.get("days", []):
-                out.append({"subject": plan["subject"], "topic": w["topic"], "minutes": plan["minutes"], "event": plan["event"]})
+                out.append({"subject": plan["subject"], "topic": w["topic"], "minutes": plan["minutes"], "event": plan["event"],
+                            "date": plan["date"]})
     return out
 
 
@@ -485,12 +486,14 @@ class Coacher:
         self._close_stale(s, today, now)
         sent = int(_get(s, WATER_KEY.format(today), 0) or 0)
         found = nudges(cfg, now, plan=planned(s, today - dt.timedelta(days=1), today),
-                       logged=logs(s, today - dt.timedelta(days=1), today), water_sent=sent, study=study_today(s, today),
+                       logged=logs(s, today - dt.timedelta(days=1), today), water_sent=sent,
+                       study=[x for x in study_today(s, today)                 # the last 5 days are pa.py's (one loop)
+                              if (dt.date.fromisoformat(x["date"]) - today).days > STUDY_HORIZON_DAYS[0] - 1],
                        quiet=in_quiet_hours(self.profile, now), snacks_week=snacks_this_week(s, today, self.tz))
         times = loops.good_times(self.schedule)
         for n in found:
             if n.kind == "push":
-                ctx.jobs.pusher.notify("Water", n.what, "/#today")
+                ctx.jobs.pusher.notify("Water", n.what, "/#today", source="coach")
                 _put(s, WATER_KEY.format(today), sent + 1)
                 out["nudges"] += 1
                 continue

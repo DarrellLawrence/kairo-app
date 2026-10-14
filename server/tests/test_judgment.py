@@ -60,6 +60,35 @@ def test_may_call(migrated, now, importance, question, ok):
         assert calls.may_call(s, importance=importance, question=question, now=now)[0] is ok
 
 
+def test_one_kairo_call_a_day_call_me_now_exempt(migrated):
+    """Fix plan item 21: one shared call budget, at most one call Kairo starts a day (check-in, knowledge
+    calls, anything else); the owner's own "call me now" and "Call Kairo" never count and never wait."""
+    from app.db import Call
+    commute = dt.datetime(2026, 10, 14, 7, 0, tzinfo=TZ)
+    with Session(make_engine(migrated.db_url)) as s:
+        s.add(Call(reason="Test call", opening="x", kind="owner", created_at=commute.astimezone(dt.timezone.utc)))
+        s.add(Call(reason="You called Kairo", opening="", kind="owner", created_at=commute.astimezone(dt.timezone.utc)))
+        s.commit()
+        assert calls.may_call(s, importance="high", question=False, now=commute)[0] is True
+        s.add(Call(reason="Evening check-in", opening="x", kind="kairo", created_at=commute.astimezone(dt.timezone.utc)))
+        s.commit()
+        ok, why = calls.may_call(s, importance="critical", question=True, now=commute + dt.timedelta(hours=12))
+        assert ok is False and why == "Kairo already called once today"
+        assert calls.may_call(s, importance="high", question=False, now=commute + dt.timedelta(days=1))[0] is True
+
+
+def test_call_me_now_is_the_owners(migrated):
+    from fastapi.testclient import TestClient
+
+    from app.db import Call
+    from app.main import create_app
+    with TestClient(create_app(migrated)) as c:
+        c.post("/api/voice/calls", json={})
+        c.post("/api/voice/calls", json={"outgoing": True})
+        with Session(make_engine(migrated.db_url)) as s:
+            assert [x.kind for x in s.exec(select(Call)).all()] == ["owner", "owner"]
+
+
 def test_outside_a_window_it_is_a_push_not_a_ring(migrated):
     class Pusher:
         sent = []

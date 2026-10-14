@@ -287,10 +287,14 @@ async def t_call_windows(ctx: Context) -> dict:
         night_ok, _ = calls.may_call(s, importance="high", question=False, now=some)
         small_ok, _ = calls.may_call(s, importance="normal", question=False,
                                      now=dt.datetime.now(ctx.tz).replace(hour=int(wins[0]["start"][:2]), minute=int(wins[0]["start"][3:])))
-    kairo_rang = [c for c in rang if c.reason not in ("You called Kairo", "Test call") and c.opening]
+    kairo_rang = [c for c in rang if c.kind == "kairo"]
+    per_day: dict = {}
+    for c in kairo_rang:
+        per_day[_local(c.created_at, ctx.tz).date()] = per_day.get(_local(c.created_at, ctx.tz).date(), 0) + 1
     outside = [c for c in kairo_rang if calls.in_window(wins, _local(c.created_at, ctx.tz)) is None]
     checks = {"call windows set": bool(wins), "no call at night": not night_ok, "no call for small things": not small_ok,
-              "every call Kairo made was in a window (14 days)": not outside}
+              "every call Kairo made was in a window (14 days)": not outside,
+              "at most one Kairo call a day (14 days)": all(n <= calls.MAX_KAIRO_CALLS_A_DAY for n in per_day.values())}
     return _result(True, checks, f"windows: {', '.join(w['name'] for w in wins)}; {len(kairo_rang)} calls by Kairo checked")
 
 

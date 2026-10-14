@@ -3,18 +3,22 @@ brief and capture processing (Milestone C).
 
 APScheduler in the backend process, in the owner's timezone. Rules for every job:
 - one at a time (a queue: a job waits for the one before it);
-- nothing in the quiet window (schedule.yaml) unless the owner starts it;
+- nothing in the quiet hours (profile.yaml / the quiet_hours setting: the one source, also for
+  pushes) unless the owner starts it; skipped runs are counted, one summary row per night;
 - nothing while the kill switch is on;
 - jobs that need the model stop for the day at the daily run budget, and
   pause when the model reports a usage limit (banner in the app);
 - every run is logged in job_runs; a failed job never crashes Kairo.
-A run that was missed (PC off) still happens when Kairo is back, within the
-grace time.
+Missed runs (PC off or Kairo restarting): APScheduler keeps no schedule across restarts, so
+catch_up() runs what matters when Kairo starts: the brief if it is before 10:00 and today's
+brief is missing, triage, open loops and the PA when their last run is older than their interval,
+and the reviews (fix plan item 23).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import threading
 import time
@@ -33,6 +37,7 @@ log = logging.getLogger("kairo.scheduler")
 
 DEFAULT_TIMES = {"daily": "21:00", "big": "18:00"}
 DEFAULT_QUIET = ("23:00", "06:00")
+QUIET_SKIPS = "jobs.quiet_skips"           # {"since", "jobs": {name: count}}: the night's skips, until the summary row
 DEFAULT_BUDGET = 60
 GRACE_S = 6 * 3600
 QUEUE_WAIT_S = 30 * 60
@@ -85,6 +90,10 @@ def review_times(schedule: dict | None) -> dict[str, str]:
         if k in times and _is_hhmm(v):
             times[k] = v
     return times
+
+
+def _aware(t: dt.datetime) -> dt.datetime:
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
 
 
 def _is_hhmm(v) -> bool:
@@ -140,9 +149,6 @@ class Jobs:
         self.profile = profile
         self.schedule = schedule or {}
         self.times = review_times(schedule)
-        qw = (self.schedule.get("quiet_window") or {})
-        self.quiet = (qw.get("start") if _is_hhmm(qw.get("start")) else DEFAULT_QUIET[0],
-                      qw.get("end") if _is_hhmm(qw.get("end")) else DEFAULT_QUIET[1])
         try:
             self.budget = int(((self.schedule.get("brain") or {}).get("max_runs_per_day")) or DEFAULT_BUDGET)
         except (TypeError, ValueError):
@@ -162,6 +168,13 @@ class Jobs:
 
     def today(self) -> dt.date:
         return self.now().date()
+
+    @property
+    def quiet(self) -> tuple[str, str]:
+        """One source of quiet hours (fix plan item 25): the profile, which the setting changes."""
+        qh = getattr(self.profile, "quiet_hours", None)
+        start, end = getattr(qh, "start", None), getattr(qh, "end", None)
+        return (start if _is_hhmm(start) else DEFAULT_QUIET[0], end if _is_hhmm(end) else DEFAULT_QUIET[1])
 
     def in_quiet(self, now: dt.datetime | None = None) -> bool:
         return in_window((now or self.now()).astimezone(self.profile.tz).time(), *self.quiet)
@@ -229,7 +242,9 @@ class Jobs:
                 if killswitch.is_paused(s):
                     return self._log(name, "skipped", "kill switch is on")
                 if not forced and name not in QUIET_EXEMPT and self.in_quiet():
-                    return self._log(name, "skipped", "quiet window")
+                    self._count_quiet_skip(s, name)              # no row per skip: one summary a night
+                    return JobRun(job=name, status="skipped", error="quiet hours", finished_at=utcnow())
+                self._quiet_summary(s)
                 run = JobRun(job=name)
                 s.add(run)
                 s.commit()
@@ -253,6 +268,24 @@ class Jobs:
                 return run
         finally:
             self._queue.release()
+
+    def _count_quiet_skip(self, s: Session, name: str) -> None:
+        data = json.loads(self._kv(s, QUIET_SKIPS) or "{}")
+        data.setdefault("since", utcnow().isoformat())
+        data.setdefault("jobs", {})[name] = data.get("jobs", {}).get(name, 0) + 1
+        self._set_kv(s, QUIET_SKIPS, json.dumps(data))
+
+    def _quiet_summary(self, s: Session) -> None:
+        """The first run after the quiet hours writes what was skipped overnight, in one row."""
+        raw = self._kv(s, QUIET_SKIPS)
+        if not raw:
+            return
+        data = json.loads(raw)
+        counts = ", ".join(f"{k} {v}" for k, v in sorted(data.get("jobs", {}).items()))
+        s.add(JobRun(job="quiet_hours", status="skipped", error=f"skipped in the quiet hours: {counts}"[:2000],
+                     finished_at=utcnow()))
+        self._set_kv(s, QUIET_SKIPS, None)
+        s.commit()
 
     def _log(self, name: str, status: str, error: str) -> JobRun:
         with Session(self.engine) as s:
@@ -290,7 +323,7 @@ class Jobs:
                                        "Hi, it's Kairo. Time for your evening check-in. How did today go, and how is your energy, one to five?",
                                        self.pusher)
             if rang is None:
-                self.pusher.notify("Evening check-in", "2 minutes: how did today go?", f"/#reviews/{r.id}")
+                self.pusher.notify("Evening check-in", "2 minutes: how did today go?", f"/#reviews/{r.id}", source="review")
 
     def _big_review_body(self, ctx: JobContext, day: dt.date | None = None) -> None:
         day = day or self.today()
@@ -300,7 +333,7 @@ class Jobs:
         r, created = reviews.create(ctx.session, kind, day, self.profile.tz)
         if created:
             self.pusher.notify(reviews.TITLES[kind], f"About {reviews.MINUTES[kind]} minutes. Kairo filled in what it knows.",
-                               f"/#reviews/{r.id}")
+                               f"/#reviews/{r.id}", source="review")
 
     # Old entry points (tests, catch-up); reviews are created even late in the evening.
     def daily_review(self, day: dt.date | None = None) -> None:
@@ -311,12 +344,45 @@ class Jobs:
             self.run_job("review.big", forced=True, day=day)
 
     def catch_up(self, now: dt.datetime | None = None) -> None:
-        """Kairo was off at the scheduled time today: create the review now."""
+        """Kairo was off (or restarting) at a scheduled time: run what matters now (fix plan item 23)."""
         now = (now or self.now()).astimezone(self.profile.tz)
         if now.strftime("%H:%M") >= self.times["big"]:
             self.big_review(now.date())
         if now.strftime("%H:%M") >= self.times["daily"]:
             self.daily_review(now.date())
+        for name in self.missed(now):
+            try:
+                self.run_job(name)
+            except Exception:   # one failed catch-up never stops the rest
+                log.exception("catch-up of %s failed", name)
+
+    CATCH_UP_EVERY_MIN = {"email_triage": 60, "open_loops": LOOPS_EVERY_MIN, "pa": PA_EVERY_MIN}
+
+    def missed(self, now: dt.datetime) -> list[str]:
+        """The brief, if it's before 10:00 and today's is missing; triage, open loops and the PA if their
+        last run is older than their interval. Nothing in the quiet hours (they'd only be skipped)."""
+        if self.in_quiet(now):
+            return []
+        out = []
+        with Session(self.engine) as s:
+            def last(name):
+                row = s.exec(select(JobRun).where(JobRun.job == name).where(JobRun.status.in_(("ok", "skipped", "error")))
+                             .order_by(JobRun.started_at.desc())).first()
+                return _aware(row.started_at) if row else None
+            if "morning_brief" in self.bodies and now.hour < 10:
+                key = "morning_brief.weekends" if now.weekday() >= 5 else "morning_brief.weekdays"
+                minute, hour = self._cron(key).split()[:2]
+                due = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0) if hour.isdigit() and minute.isdigit() else None
+                ran = last("morning_brief")
+                if due and due <= now and (ran is None or ran < due):
+                    out.append("morning_brief")
+            for name, every in self.CATCH_UP_EVERY_MIN.items():
+                if name not in self.bodies or (name == "email_triage" and not 7 <= now.hour <= 21):
+                    continue
+                ran = last(name)
+                if ran is None or now - ran > dt.timedelta(minutes=every):
+                    out.append(name)
+        return out
 
     # ---------------------------------------------------------------- schedule
 
@@ -368,9 +434,6 @@ class Jobs:
     def reload(self) -> None:
         """Settings changed (quiet hours, brief or review times): recompute and re-plan the jobs."""
         self.times = review_times(self.schedule)
-        qw = (self.schedule.get("quiet_window") or {})
-        self.quiet = (qw.get("start") if _is_hhmm(qw.get("start")) else DEFAULT_QUIET[0],
-                      qw.get("end") if _is_hhmm(qw.get("end")) else DEFAULT_QUIET[1])
         if self.scheduler:
             self.scheduler.shutdown(wait=False)
             self.scheduler = None

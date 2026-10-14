@@ -247,14 +247,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return row.type if row else "FIXED"
 
     app.state.executor = Executor(secrets_dir=settings.secrets_dir, owner_email=profile.gmail, event_type=_event_type)
-    app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
+    app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile,
+                              max_per_day=lambda: loops.max_pings(app.state.jobs.schedule))
     app.state.on_new_card = lambda card: None if getattr(app.state, "acceptance_running", False) else app.state.pusher.notify(
-        f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
+        f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals", source="approval")
     inbox_dir = settings.data_dir / "inbox"
     pusher = app.state.pusher
     app.state.triage = triage.Triage(
         engine=engine, gate=gate, executor=lambda: app.state.executor, google_read=google_read,
-        on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today"))
+        on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today",
+                                  source="security"))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
     app.state.voice = Voice(settings.data_dir / "models", site_dir=tool_sites.site("voice", settings.data_dir))
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
@@ -300,7 +302,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                dest_dir=backup_dir)
         except Exception as exc:
             _backup_status(ctx.session, last_error=f"{dt.datetime.now(profile.tz):%Y-%m-%d %H:%M}: {exc}")
-            pusher.notify("Backup failed", str(exc)[:200], "/#more")
+            pusher.notify("Backup failed", str(exc)[:200], "/#more", source="backup")
             raise
         backup.rotate(backup_dir)
         _backup_status(ctx.session, last_backup=path.name, last_backup_at=dt.datetime.now(profile.tz).isoformat(),
@@ -315,7 +317,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             result = backup.verify(z)
         except Exception as exc:
             _backup_status(ctx.session, test_ok=False, test_at=dt.datetime.now(profile.tz).isoformat(), test_detail=str(exc))
-            pusher.notify("Restore test failed", str(exc)[:200], "/#more")
+            pusher.notify("Restore test failed", str(exc)[:200], "/#more", source="backup")
             raise
         _backup_status(ctx.session, test_ok=True, test_at=dt.datetime.now(profile.tz).isoformat(), test_detail=result)
         return json.dumps(result)
@@ -325,7 +327,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         row, created = lerndoku.ensure(ctx.session, week)
         if row.status == "waiting":
             pusher.notify("Lerndokumentation", "2 minutes: what did you do at work this week? Kairo writes the German draft.",
-                          "/#lerndoku")
+                          "/#lerndoku", source="lerndoku")
         return week
 
     def _triage_then_loops(ctx):
@@ -583,7 +585,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/push/test")
     def push_test():
-        app.state.pusher.notify("Kairo", "Notifications work.", "/#more", ignore_quiet=True)
+        app.state.pusher.notify("Kairo", "Notifications work.", "/#more", ignore_quiet=True, source="test")
         return {"ok": True}
 
     # ---------------------------------------------------------------- approvals (owner's app)
@@ -870,7 +872,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             audit(s, actor="backend", action="selftest.tools",
                   outcome="ok" if result["ok"] else f"failed ({result['category']}): {result['reason'][:200]}")
         if notify and not result["ok"] and (prev.get("ok", True) or prev.get("reason") != result["reason"]):
-            pusher.notify("Kairo", f"Self-test failed: {result['reason']}"[:200], "/#today")
+            pusher.notify("Kairo", f"Self-test failed: {result['reason']}"[:200], "/#today", source="selftest")
         return result
 
     # ---------------------------------------------------------------- acceptance tests on the PC (KICKOFF v8)
@@ -965,7 +967,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         failed = [acceptance_mod.BY_ID[i].name for i, r in results.items() if not r["ok"]]
         if failed:
             pusher.notify("Kairo acceptance", f"{len(failed)} of {len(results)} failed: {', '.join(failed)}. More → System → Acceptance.",
-                          "/#more")
+                          "/#more", source="acceptance")
         return results
 
     app.state.run_acceptance = run_acceptance
@@ -1144,7 +1146,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _timetable():
         imp = timetable_mod.Importer(engine=engine, gate=gate, executor=lambda: app.state.executor, tz=profile.tz,
                                      school_class=_portal().get("class"))
-        imp.on_done = lambda msg: pusher.notify("Kairo", msg, "/#today")
+        imp.on_done = lambda msg: pusher.notify("Kairo", msg, "/#today", source="system")
         return imp
 
     app.state.captures.timetable = lambda ctx, data, mt: _timetable().import_file(ctx, data, mt)
@@ -1161,7 +1163,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             driver_factory=lambda: portal_browser.PlaywrightDriver(portal["url"], site_dir=browser_site),
             credentials=_olat_creds)
         reader.on_need_timetable = lambda: pusher.notify(
-            "Kairo", "I couldn't find your timetable in OLAT. Send me a photo or PDF of it once (Share -> Kairo).", "/#chat")
+            "Kairo", "I couldn't find your timetable in OLAT. Send me a photo or PDF of it once (Share -> Kairo).", "/#chat",
+            source="system")
         try:
             report = reader.run()
             tt = report.get("timetable") or {}
@@ -1611,7 +1614,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if row.event == "arrive":
                 msg = location.arrival_reminder(s, row.place)
                 if msg:
-                    app.state.pusher.notify(msg[0], msg[1], "/#today")
+                    app.state.pusher.notify(msg[0], msg[1], "/#today", source="location")
             if row.event == "leave" and row.place.lower() == "home":
                 threading.Thread(target=_leaving_check, daemon=True).start()   # answer the Shortcut fast
             return {"ok": True, "stored": True, "id": row.id}
@@ -1649,11 +1652,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                       to=dest.name if dest else None)
         if not text_:
             return
-        with session_for(engine) as s:
-            if loops.pings_today(s, now, profile.tz) >= loops.max_pings(app.state.jobs.schedule):
-                return
-            audit(s, actor="backend", action="proactive.ping", outcome=f"leaving: {clip_text(text_)}")
-        app.state.pusher.notify("Heads up", text_, "/#today")
+        if app.state.pusher.notify("Heads up", text_, "/#today", source="location") == "sent":   # the budget is the boss's
+            with session_for(engine) as s:
+                audit(s, actor="backend", action="proactive.ping", outcome=f"leaving: {clip_text(text_)}")
 
     @app.get("/api/location")
     def location_get(request: Request, limit: int = 200):
@@ -1979,7 +1980,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return voice_calls.as_dict(voice_calls.set_status(s, c.id, "answered"))
         reason = str(body.get("reason") or "Test call")[:120]
         with session_for(engine) as s:
-            c = voice_calls.start(s, reason, f"Hi, it's Kairo. {reason}. What's on your mind?", app.state.pusher, ignore_quiet=True)
+            c = voice_calls.start(s, reason, f"Hi, it's Kairo. {reason}. What's on your mind?", app.state.pusher,
+                                  ignore_quiet=True, by_owner=True)   # the owner asked: never counts against the budget
             return voice_calls.as_dict(c)
 
     @app.post("/api/voice/selftest")

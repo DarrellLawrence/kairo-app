@@ -206,8 +206,9 @@ def test_daily_ping_limit_quiet_hours_and_calendar(env):
                  "end": (WED + dt.timedelta(hours=1)).isoformat(), "all_day": False}]
         out = json.loads(engine_for(env, pushes, events=busy).run(Ctx(s, DRAFT), now=WED))
         assert out["raised"] is None and out["why"] == "in a calendar event"
-        for _ in range(2):
-            s.add(AuditLog(actor="backend", action="proactive.ping", outcome="x", ts=WED.astimezone(dt.timezone.utc)))
+        from app.db import PushLog
+        for i in range(2):                     # the notification boss's own count (push_log, fix plan item 20)
+            s.add(PushLog(source="loops", title="Kairo", body=f"x{i}", key=f"k{i}", status="sent", ts=WED.astimezone(dt.timezone.utc)))
         s.commit()
         out = json.loads(engine_for(env, pushes, schedule={"proactive": {"max_per_day": 2}}).run(Ctx(s, DRAFT), now=WED))
         assert out["why"] == "daily ping limit" and pushes.sent == []

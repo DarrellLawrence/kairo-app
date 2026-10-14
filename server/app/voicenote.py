@@ -157,4 +157,4 @@ class VoiceNotes:
             s.add(cap)
             s.commit()
         if urgent and error is None:
-            self.state.pusher.notify("Kairo", clip(reply, 160), "/#chat")
+            self.state.pusher.notify("Kairo", clip(reply, 160), "/#chat", source="voicenote")

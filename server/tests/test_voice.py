@@ -102,7 +102,7 @@ def test_voice_without_the_libraries(client, monkeypatch):
 def test_call_flow(client):
     c = client.post("/api/voice/calls", json={"reason": "Test call"}).json()
     assert c["status"] == "ringing" and client.pushes[-1][:3] == ("Kairo is calling", "Test call", f"/#call/{c['id']}")
-    assert client.pushes[-1][3] == {"ignore_quiet": True}   # the owner asked for it right now
+    assert client.pushes[-1][3] == {"ignore_quiet": True, "source": "call"}   # the owner asked for it right now
     assert client.post(f"/api/voice/calls/{c['id']}/answer").json()["status"] == "answered"
     assert client.post(f"/api/voice/calls/{c['id']}/end").json()["status"] == "ended"
     assert client.post(f"/api/voice/calls/{c['id']}/answer").json()["status"] == "ended"   # can't re-answer

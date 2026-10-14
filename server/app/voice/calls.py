@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from ..db import Call, SettingKV, utcnow
 
 RING_MINUTES = 15
+MAX_KAIRO_CALLS_A_DAY = 1
 OPTIONS = {"checkin": "Evening check-in as a call"}
 IMPORTANT = ("high", "critical")
 # v8 D: Kairo calls only for important things or real questions, and only in these windows. Generic
@@ -27,13 +28,13 @@ def _aware(t):
     return t if t is None or t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
 
 
-def start(s: Session, reason: str, opening: str, pusher, *, ignore_quiet: bool = False) -> Call:
-    c = Call(reason=reason[:120], opening=opening[:3000])
+def start(s: Session, reason: str, opening: str, pusher, *, ignore_quiet: bool = False, by_owner: bool = False) -> Call:
+    c = Call(reason=reason[:120], opening=opening[:3000], kind="owner" if by_owner or pusher is None else "kairo")
     s.add(c)
     s.commit()
     s.refresh(c)
     if pusher is not None:   # None: the owner is calling Kairo ("Call Kairo" Shortcut)
-        pusher.notify("Kairo is calling", reason[:120], f"/#call/{c.id}", ignore_quiet=ignore_quiet)
+        pusher.notify("Kairo is calling", reason[:120], f"/#call/{c.id}", ignore_quiet=ignore_quiet, source="call")
     return c
 
 
@@ -70,13 +71,24 @@ def in_window(wins: list[dict], now: dt.datetime) -> dict | None:
     return None
 
 
+def kairo_calls_on(s: Session, day: dt.date, tz) -> int:
+    """Calls Kairo started that day (the owner's "call me now" and "Call Kairo" never count)."""
+    start_ = dt.datetime.combine(day, dt.time.min, tzinfo=tz).astimezone(dt.timezone.utc)
+    end_ = start_ + dt.timedelta(days=1)
+    return len(s.exec(select(Call.id).where(Call.kind == "kairo").where(Call.created_at >= start_)
+                      .where(Call.created_at < end_)).all())
+
+
 def may_call(s: Session, *, importance: str, question: bool, now: dt.datetime) -> tuple[bool, str]:
-    """Kairo rings only for something important or a real question, and only in a call window."""
+    """Kairo rings only for something important or a real question, only in a call window, and at most
+    once a day (fix plan item 21: one call budget for the check-in, knowledge calls and everything else)."""
     if importance not in IMPORTANT and not question:
         return False, "not important enough for a call"
     w = in_window(windows(s), now)
     if w is None:
         return False, "outside the call windows"
+    if kairo_calls_on(s, now.date(), now.tzinfo or dt.timezone.utc) >= MAX_KAIRO_CALLS_A_DAY:
+        return False, "Kairo already called once today"
     return True, w["name"]
 
 
@@ -87,7 +99,7 @@ def proactive(s: Session, reason: str, opening: str, pusher, *, importance: str,
     if ok:
         return start(s, reason, opening, pusher)
     if pusher is not None:
-        pusher.notify("Kairo", reason[:120], url)
+        pusher.notify("Kairo", reason[:120], url, source="loops")
     return None
 
 

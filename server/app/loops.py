@@ -277,8 +277,19 @@ def upsert(s: Session, *, kind: str, source: str, ref: str | None, what: str, no
     return loop, created
 
 
+def promise_ref(who: str | None, what: str) -> str:
+    """One promise = one loop (fix plan item 18): the same key from chat and from sent mail (who + what)."""
+    def norm(x: str | None) -> str:
+        return " ".join(re.sub(r"[^\w\s]", " ", (x or "").lower()).split())
+    return f"p:{norm(who)}|{norm(what)[:60]}"
+
+
 def add(s: Session, *, kind: str, what: str, who: str | None, due: dt.date | None, now: dt.datetime, tz, times: dict) -> OpenLoop:
     due_at = dt.datetime.combine(due, dt.time(18), tzinfo=tz) if due else None
+    if kind == "promise":                                  # told in chat and found in sent mail: still one loop
+        loop, _ = upsert(s, kind="promise", source="promise", ref=promise_ref(who, what), what=what, who=who, due=due_at,
+                         since=now, now=now, tz=tz, times=times)
+        return loop
     loop = OpenLoop(kind=kind, source="chat", source_ref=f"chat:{now.timestamp():.6f}", what=clip(what, 300), who=who,
                     since=now, due=due_at)
     loop.urgency = urgency_of(loop, now, tz)
@@ -491,8 +502,12 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dic
 
     horizon = now + dt.timedelta(days=7)
     tasks = {str(t.id): t for t in s.exec(select(Task)).all()}
+    from_mail = {str(m.task_id) for m in s.exec(select(TriagedEmail).where(TriagedEmail.task_id.is_not(None))
+                                                .where(TriagedEmail.personal_reply == True)).all()}  # noqa: E712
     for tid, t in tasks.items():
         due = aware(t.due)
+        if tid in from_mail:                               # the mail's reply loop is the one loop (fix plan item 18)
+            continue
         if t.status in ("open", "doing") and ((due and due <= horizon) or (not due and t.priority >= 2)):
             _, created = upsert(s, kind="deadline" if due else "task", source="task", ref=tid, what=t.title, due=due,
                                 since=aware(t.created_at), now=now, tz=tz, times=times)
@@ -500,6 +515,9 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dic
     for e in s.exec(select(SchoolEvent).where(SchoolEvent.date >= utcnow() - dt.timedelta(days=1))
                     .where(SchoolEvent.date <= horizon)).all():
         if e.kind in ("test", "deadline"):
+            study = s.exec(select(OpenLoop).where(OpenLoop.source == "study").where(OpenLoop.source_ref == str(e.id))).first()
+            if study is not None:                          # the study plan's loop is the one loop for this test
+                continue
             _, created = upsert(s, kind="deadline", source="school", ref=str(e.id), what=f"{e.subject} {e.kind}",
                                 due=aware(e.date), since=now, now=now, tz=tz, times=times)
             counts["new"] += created
@@ -542,9 +560,12 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dic
 # ---------------------------------------------------------------- the ping budget (shared by everything proactive)
 
 def pings_today(s: Session, now: dt.datetime, tz) -> int:
+    """Proactive pushes sent today: the notification boss's own count (push_log, fix plan item 20)."""
+    from .db import PushLog
+    from .push import PROACTIVE
     start = dt.datetime.combine(now.astimezone(tz).date(), dt.time.min, tzinfo=tz).astimezone(dt.timezone.utc)
-    return len(s.exec(select(AuditLog.id).where(AuditLog.action == "proactive.ping")
-                      .where(AuditLog.ts >= start)).all())
+    return len(s.exec(select(PushLog.id).where(PushLog.status == "sent").where(PushLog.source.in_(sorted(PROACTIVE)))
+                      .where(PushLog.ts >= start)).all())
 
 
 def max_pings(schedule: dict | None) -> int:
@@ -652,7 +673,9 @@ class LoopEngine:
         more = len(due) - 1
         if more:
             body += f" (+{more} more)"
-        self.pusher.notify("Kairo", body, f"/#loops/{pick.id}")
+        status = self.pusher.notify("Kairo", body, f"/#loops/{pick.id}", source="reply" if pick in fresh_replies else "loops")
+        if status not in (None, "sent", "held"):            # dropped by the notification boss: not raised
+            return json.dumps({**counts, "raised": None, "why": f"push {status}"})
         audit(s, actor="backend", action="proactive.ping", outcome=f"loop #{pick.id}: {clip(body, 160)}")
         mark_raised(s, pick, now, tz, self.times)
         return json.dumps({**counts, "raised": pick.id})
@@ -843,7 +866,7 @@ class PromiseFinder:
                 by = dt.datetime.combine(dt.date.fromisoformat(p["by"]), dt.time(18), tzinfo=tz) if p.get("by") else None
             except ValueError:
                 pass
-            _, created = upsert(s, kind="promise", source="promise", ref=f"{p['message_id']}:{clip(p['what'], 40)}",
+            _, created = upsert(s, kind="promise", source="promise", ref=promise_ref(p.get("to_name"), str(p["what"])),
                                 what=str(p["what"]), who=clip(p.get("to_name"), 60) or None,
                                 who_email=_real_recipient(str(p.get("to_email") or ""), real_to[p["message_id"]]), due=by, since=now,
                                 now=now, tz=tz, times=times)

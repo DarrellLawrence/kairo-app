@@ -279,9 +279,8 @@ def public_view(s: Session) -> dict:
 def apply(prefs: dict, *, schedule: dict, profile) -> None:
     """Lay the owner's settings over config (in place, so every holder of these objects sees them)."""
     if prefs.get("quiet_hours"):
-        profile.quiet_hours.start = prefs["quiet_hours"]["start"]
+        profile.quiet_hours.start = prefs["quiet_hours"]["start"]      # the one source (jobs and pushes)
         profile.quiet_hours.end = prefs["quiet_hours"]["end"]
-        schedule["quiet_window"] = dict(prefs["quiet_hours"])
     if prefs.get("language"):
         profile.default_language = prefs["language"]
     if prefs.get("max_pings"):

@@ -565,6 +565,10 @@ class PA:
                     ready.append(f"summary and {cards} flashcards ready")
                 what = f"{test.subject} {test.kind} {when:%A}: " + (", ".join(ready) if ready else "nothing started yet") + "."
                 loop, created = self._upsert(s, now, kind="study", source="study", ref=str(test.id), what=what, due=when)
+                school_loop = s.exec(select(OpenLoop).where(OpenLoop.source == "school")
+                                     .where(OpenLoop.source_ref == str(test.id)).where(OpenLoop.status == "open")).first()
+                if school_loop is not None:               # one test = one loop, the plan attached (fix plan item 18)
+                    loops.close(s, school_loop.id, "merged", now=now)
                 loop.draft_json = json.dumps({"note": f"Summary: {guide}" if guide else "Add your school notes to the vault "
                                                       f"(40 School/{test.subject}) and Kairo makes the summary and cards.",
                                               "blocks": blocks})

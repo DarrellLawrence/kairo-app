@@ -275,7 +275,7 @@ def test_app_start_builds_config_and_notes_new_actions_once(settings, tmp_path):
         assert (s.config_dir / "permissions.yaml").is_file()
         app = c.app
         pushed = []
-        app.state.pusher.notify = lambda title, body, url="/": pushed.append(body)
+        app.state.pusher.notify = lambda title, body, url="/", **kw: pushed.append(body)
         from app.housekeeping import Housekeeping
         hk = Housekeeping(app)
         hk._quiet = lambda: False

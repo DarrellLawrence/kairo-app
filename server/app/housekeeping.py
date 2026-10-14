@@ -45,14 +45,20 @@ class Housekeeping:
         return in_quiet_hours(self.app.state.pusher.profile)
 
     def _push(self, body: str, url: str = "/#more") -> None:
-        self.app.state.pusher.notify("Kairo", body, url)
+        self.app.state.pusher.notify("Kairo", body, url, source="system")
 
     def run_once(self) -> None:
-        for duty in (self.update_notice, self.google_reminder):
+        for duty in (self.update_notice, self.google_reminder, self.held_pushes):
             try:
                 duty()
             except Exception:
                 log.exception("housekeeping: %s failed", duty.__name__)
+
+    def held_pushes(self) -> None:
+        """Fix plan item 20: what the quiet hours held goes out when they end (merged into one push)."""
+        flush = getattr(self.app.state.pusher, "flush", None)
+        if flush is not None:
+            flush()
 
     # ---------------------------------------------------------------- updates
 

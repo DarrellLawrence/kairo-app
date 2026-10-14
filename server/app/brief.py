@@ -38,6 +38,8 @@ top 3, at most one short mention ("not sure if X needs an answer"). "patterns" a
 one only if it matters today (e.g. a long school day and training planned). "open_loops" are
 people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3. "coach_today" is
 today's training/study/faith plan: the app shows it, so mention it only if it changed or a session was skipped.
+"kairo_problems" (a failed backup, no backup for days): if there is one, the headline starts with it. Each thing once:
+never the same item in the headline and in the top 3 twice.
 If "health" shows under 6 h sleep last night: plan a lighter day (move study and hard tasks later)
 and say so in the headline. Use "patterns_known" to adapt the plan; skip routine nobody needs told. Mention a birthday
 today or tomorrow, and short sleep last night, only if they are there. Write in the owner's language ({language}). Be concrete and short.
@@ -114,7 +116,7 @@ class BriefMaker:
             "overdue": [task(t) for t in overdue[:10]],
             "next7": [task(t) for t in upcoming[:15]],
             "other_tasks": [task(t) for t in undated],
-            "school": [{"subject": e.subject, "kind": e.kind, "date": e.date.isoformat()} for e in school],
+            "school": [{"id": e.id, "subject": e.subject, "kind": e.kind, "date": e.date.isoformat()} for e in school],
             "needs_reply": [triage.as_dict(m) for m in triage.needs_reply(s)],
             "maybe_reply": [triage.as_dict(m) for m in triage.maybe_reply(s)],
             "flagged": [triage.as_dict(m) for m in triage.flagged(s)],
@@ -139,6 +141,20 @@ class BriefMaker:
             "patterns_known": [l.what for l in s.exec(select(OpenLoop).where(OpenLoop.kind == "pattern")).all()][:5],
             "coach": _coach(s, day, tz),
         }
+
+    def gather_once(self, s: Session, day: dt.date) -> dict:
+        """Fix plan item 22: each thing once. What the top open loops already say leaves the other lists."""
+        data = self.gather(s, day)
+        shown = [s.get(OpenLoop, lp["id"]) for lp in data.get("open_loops") or []]
+        refs = {(lp.source, lp.source_ref) for lp in shown if lp is not None}
+        tasks = {r for src, r in refs if src == "task"}
+        mails = {r for src, r in refs if src == "email"}
+        events = {r for src, r in refs if src in ("school", "study")}
+        for k in ("overdue", "next7", "other_tasks"):
+            data[k] = [t for t in data[k] if str(t["id"]) not in tasks]
+        data["needs_reply"] = [m for m in data["needs_reply"] if m.get("id") not in mails]
+        data["school"] = [e for e in data["school"] if str(e.get("id")) not in events]
+        return data
 
     def _loops(self, s: Session) -> list[dict]:
         """The top open loops (people waiting, promises): every brief carries the top 2."""
@@ -177,7 +193,7 @@ class BriefMaker:
     def make(self, ctx: JobContext, day: dt.date | None = None) -> str:
         s = ctx.session
         day = day or ctx.jobs.today()
-        data = self.gather(s, day)
+        data = self.gather_once(s, day)
         written, by = None, "fallback"
         try:
             prompt = PROMPT.format(day=day.isoformat(), weekday=day.strftime("%A"), language=self.profile.default_language,
@@ -210,7 +226,7 @@ class BriefMaker:
         s.commit()
         # v8 D: a short push to read, and the brief to listen to on the commute (Today -> Listen). No call:
         # Kairo rings only for important things or real questions.
-        ctx.jobs.pusher.notify("Morning brief", clip(written["headline"], 120), "/#today/listen")
+        ctx.jobs.pusher.notify("Morning brief", clip(written["headline"], 120), "/#today/listen", source="brief")
         return by
 
 
@@ -251,6 +267,7 @@ def _data_for_model(data: dict) -> str:
     own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals", "place_tasks", "patterns",
                                 "chores_due", "people", "health")}
     own["coach_today"] = data.get("coach") or []
+    own["kairo_problems"] = data.get("warnings") or []
     outside = {"calendar": data["calendar"], "mails_needing_reply": [{"from": m["from"], "subject": m["subject"],
                "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]],
                "school_portal_new": [{"course": n["course"], "kind": n["kind"], "title": n["title"], "text": n["snippet"]}
@@ -261,7 +278,10 @@ def _data_for_model(data: dict) -> str:
 
 
 def render_markdown(c: dict) -> str:
-    lines = [f"# Morning brief {c['date']}", "", f"**{c['headline']}**", ""]
+    lines = [f"# Morning brief {c['date']}", ""]
+    if c.get("warnings"):                                  # Kairo itself (a failed backup): first, before anything else
+        lines += ["## Needs attention", *[f"- {w}" for w in c["warnings"]], ""]
+    lines += [f"**{c['headline']}**", ""]
     if c.get("top3"):
         lines += ["## Top 3", *[f"{i}. {t['title']} ({t['why']})" for i, t in enumerate(c["top3"], 1)], ""]
     if c.get("open_loops"):
