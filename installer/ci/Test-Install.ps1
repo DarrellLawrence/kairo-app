@@ -257,6 +257,32 @@ Set-Content -Path $envFile -Value $lines -Encoding UTF8
 Stop-Kairo $KP; Start-Kairo
 Check ($null -ne (Wait-Healthy 90)) 'restarted without the probe'
 
+# ---- nothing Kairo's account writes can run as SYSTEM or in an admin window (fix P1.8)
+$envAcl = @((Get-Acl $envFile).Access | Where-Object { $_.IdentityReference.Value -match 'kairo-svc' })
+Check ($envAcl.Count -ge 1 -and @($envAcl | Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl|Delete' }).Count -eq 0) "kairo.env: Kairo's account can read it, not change it"
+$envTest = Join-Path $work 'envtest.ps1'
+@'
+param([string]$Installer, [string]$TestRoot)
+Import-Module (Join-Path $Installer 'Kairo.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Installer 'KairoSetup.psm1') -Force -DisableNameChecking
+$P = Get-KairoPaths $TestRoot
+[void](New-Item -ItemType Directory -Force (Split-Path $P.EnvFile))
+Set-Content -Path $P.EnvFile -Encoding ASCII -Value @('PYTHONPATH=C:\evil', 'KAIRO_WHISPER_MODEL=small', 'KAIRO_KOKORO_VOICE=x & calc',
+    'KAIRO_DATA_DIR=C:\elsewhere', 'KAIRO_DB_URL=sqlite:///C:/Windows/x.db')
+$env:PYTHONSTARTUP = 'C:\evil.py'
+Use-KairoEnv $P
+$envOk = (-not $env:PYTHONPATH) -and (-not $env:PYTHONSTARTUP) -and $env:KAIRO_WHISPER_MODEL -eq 'small' -and
+    (-not $env:KAIRO_KOKORO_VOICE) -and $env:KAIRO_DATA_DIR -eq $P.Data -and (-not $env:KAIRO_DB_URL)
+$good = Join-Path $P.Tools 'claude\9.9.9\claude.exe'
+$bad = Join-Path $P.Data 'claude.exe'
+foreach ($f in @($good, $bad)) { [void](New-Item -ItemType Directory -Force (Split-Path $f)); Set-Content -Path $f -Value 'x' }
+$exeOk = (Resolve-ClaudeExe $P $bad) -eq $good -and (Resolve-ClaudeExe $P (Join-Path $P.Tools 'claude\..\..\data\claude.exe')) -eq $good
+Write-Host "env ok: $envOk, claude.exe ok: $exeOk"
+if ($envOk -and $exeOk) { exit 0 } else { exit 1 }
+'@ | Set-Content -Path $envTest -Encoding ASCII
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $envTest -Installer (Join-Path $Root 'installer') -TestRoot (Join-Path $work 'envroot') | Out-Host
+Check ($LASTEXITCODE -eq 0) 'the installer takes only model names from kairo.env, and admin windows only start tools\claude\claude.exe'
+
 # ---- the boot check (what runs after every reboot), minus the Tailscale parts
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Kairo-BootCheck.ps1') -Root $Root -CI | Out-Host
 Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, tools, Claude, browser)'
@@ -267,11 +293,21 @@ Check ($bc.all_ok -and $missing.Count -eq 0) "boot-check.json: all green ($($nam
 $status = (Invoke-WebRequest 'http://127.0.0.1:8000/api/status' -UseBasicParsing).Content | ConvertFrom-Json
 Check ($status.boot_check.all_ok) 'the app shows the boot check result (More screen)'
 
+# ---- what Kairo's account encrypted for itself survives an update (fix P1.9)
+$put = Invoke-WebRequest 'http://127.0.0.1:8000/api/logins/olat' -Method Put -Body '{"username": "ci-user", "password": "ci-pass"}' `
+    -ContentType 'application/json' -UseBasicParsing
+Check ($put.StatusCode -eq 200) 'school portal login saved (encrypted for kairo-svc)'
+$pwSet = (Get-LocalUser -Name 'kairo-svc').PasswordLastSet
+Check (Test-Path (Join-Path $Root 'updater\kairo-svc.bin')) "kairo-svc's password is kept machine-encrypted in updater\"
+
 # ---- update keeps owner config
 Add-Content (Join-Path $Root 'data\config\profile.yaml') '# ci-marker'
 $v2 = "$v1-ci2"
 $s2 = Copy-Setup $s1 'v2' $v2
 Check ((Invoke-Install $s2) -eq 0) 'update to v2 exits 0'
+Check ((Get-LocalUser -Name 'kairo-svc').PasswordLastSet -eq $pwSet) "the update did not replace kairo-svc's password"
+$olat = @(((Invoke-WebRequest 'http://127.0.0.1:8000/api/logins' -UseBasicParsing).Content | ConvertFrom-Json) | Where-Object { $_.site -eq 'olat' })[0]
+Check ($olat.username -eq 'ci-user' -and $olat.password_set -and $olat.encrypted) 'the school portal login is still readable after the update'
 $st = Get-StateObj
 Check ($st.current -eq $v2 -and $st.previous -eq $v1) 'v2 running, v1 kept for rollback'
 Check ((Get-Content -Raw (Join-Path $Root 'data\config\profile.yaml')) -match 'ci-marker') 'owner config untouched by the update'

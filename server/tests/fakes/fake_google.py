@@ -13,6 +13,8 @@ from urllib.parse import parse_qs
 
 import httpx
 
+from app.google.client import save_token
+
 
 def b64(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
@@ -44,12 +46,15 @@ class FakeGoogle:
     # ---- seed
 
     def add_message(self, mid: str, *, sender: str, subject: str, body: str, thread: str | None = None,
-                    reply_to: str | None = None, message_id_header: str | None = None) -> None:
-        headers = [{"name": "From", "value": sender}, {"name": "To", "value": self.owner},
+                    reply_to: str | None = None, message_id_header: str | None = None, to: str | None = None,
+                    cc: str | None = None) -> None:
+        headers = [{"name": "From", "value": sender}, {"name": "To", "value": to or self.owner},
                    {"name": "Subject", "value": subject}, {"name": "Date", "value": "Mon, 12 Oct 2026 09:00:00 +0200"},
                    {"name": "Message-ID", "value": message_id_header or f"<{mid}@mail.example>"}]
         if reply_to:
             headers.append({"name": "Reply-To", "value": reply_to})
+        if cc:
+            headers.append({"name": "Cc", "value": cc})
         self.messages[mid] = {"id": mid, "threadId": thread or f"t-{mid}", "labelIds": ["INBOX"], "snippet": body[:80],
                               "internalDate": "1760252400000",   # 2026-10-12
                               "payload": {"mimeType": "text/plain", "headers": headers, "body": {"data": b64(body)}}}
@@ -163,4 +168,4 @@ def connect(secrets_dir, fake: FakeGoogle | None = None) -> None:
     (secrets_dir / "google-client.json").write_text(json.dumps({"installed": {"client_id": "cid", "client_secret": "cs"}}))
     owner = fake.owner if fake else "owner@example.com"
     for kind in ("read", "write"):
-        (secrets_dir / f"google-{kind}.json").write_text(json.dumps({"refresh_token": f"rt-{kind}", "email": owner}))
+        save_token(secrets_dir, kind, {"refresh_token": f"rt-{kind}", "email": owner})

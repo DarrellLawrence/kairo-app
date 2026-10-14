@@ -340,3 +340,35 @@ def test_calendar_tag_and_list_show_the_type(env):
     assert "FIXED" in env["tools"].run(decide("calendar_list", {}))
     env["tools"].run(decide("calendar_tag", {"event_id": "ev1", "type": "SOCIAL"}))
     assert '"kairo_type": "SOCIAL"' in env["tools"].run(decide("calendar_list", {}))
+
+
+# ---------------------------------------------------------------- kill switch (fix P1.5, diagnosis D1.2)
+
+@pytest.mark.parametrize("edit", [None, {"to": ["a@example.com"], "subject": "Hi", "body": "Edited"}])
+def test_kill_switch_blocks_approve_and_edit_approve(env, edit):
+    from app import killswitch
+    card = make_card(env, "gmail.send", {"to": ["a@example.com"], "subject": "Hi", "body": "x"})
+    with Session(env["engine"]) as s:
+        killswitch.set_paused(s, True)
+        with pytest.raises(approvals.ApprovalError, match="paused"):
+            approvals.approve(s, card.id, executor=env["executor"], gate=GATE, edited_args=edit)
+        assert s.get(Approval, card.id).status == "open"          # still waiting, nothing changed
+        assert json.loads(s.get(Approval, card.id).args_json)["body"] == "x"
+        killswitch.set_paused(s, False)
+        assert approvals.approve(s, card.id, executor=env["executor"], gate=GATE, edited_args=edit).status == "done"
+    assert len(env["fake"].sent) == 1
+
+
+def test_kill_switch_blocks_approve_through_the_api(env, migrated):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    card = make_card(env, "gmail.send", {"to": ["a@example.com"], "subject": "Hi", "body": "x"})
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.executor = env["executor"]
+        c.post("/api/kill-switch", json={"paused": True})
+        r = c.post(f"/api/approvals/{card.id}/approve", json={})
+        assert r.status_code == 409 and "paused" in r.json()["detail"]
+        r = c.post(f"/api/approvals/{card.id}/approve", json={"args": {"to": ["a@example.com"], "subject": "Hi", "body": "y"}})
+        assert r.status_code == 409
+    assert env["fake"].sent == []

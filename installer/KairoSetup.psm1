@@ -121,16 +121,16 @@ function Remove-WindowsUpdatePolicy {
 # BEFORE encryption starts. Never written to C: (it would be locked inside).
 # Encryption is nice to have, never a reason for setup to fail: every problem
 # here is a warning.
-function Enable-BitLockerIfPossible {
+function Enable-BitLockerIfPossible([string]$LogFile) {
     Write-Step 'Disk encryption (BitLocker)'
-    try { Enable-BitLockerSteps }
+    try { Enable-BitLockerSteps $LogFile }
     catch {
         Write-Warn "Disk encryption was not turned on ($($_.Exception.Message.Trim()))."
         Write-Note 'Kairo works without it. Nothing else was changed.'
     }
 }
 
-function Enable-BitLockerSteps {
+function Enable-BitLockerSteps([string]$LogFile) {
     $edition = ''
     try { $edition = [string](Get-CimInstance Win32_OperatingSystem).Caption } catch { }
     if ($edition -match 'Home' -or -not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) {
@@ -164,6 +164,10 @@ function Enable-BitLockerSteps {
     $key = $protector.RecoveryPassword
     $id = $protector.KeyProtectorId
     $text = "BitLocker recovery key for $env:COMPUTERNAME ($env:SystemDrive)`r`nKey ID: $id`r`nRecovery key: $key`r`nCreated: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n"
+    # The key never goes into install.log (fix P1.10): the setup log pauses while it is on screen.
+    $paused = $false
+    if ($LogFile) { try { Stop-Transcript | Out-Null; $paused = $true } catch { } }
+    try {
 
     $saved = @()
     $usb = @(Get-Volume | Where-Object { $_.DriveType -eq 'Removable' -and $_.DriveLetter })
@@ -189,6 +193,9 @@ function Enable-BitLockerSteps {
         }
         if ($typed -eq $key.Substring(0, 6)) { break }
         Write-Warn 'That does not match. Look at the key above and try again.'
+    }
+    } finally {
+        if ($paused) { Start-Transcript -Path $LogFile -Append | Out-Null; Write-Note '(the recovery key part is not in this log)' }
     }
     Enable-BitLocker -MountPoint $env:SystemDrive -TpmProtector -UsedSpaceOnly -SkipHardwareTest -EncryptionMethod XtsAes128 -WarningAction SilentlyContinue | Out-Null
     Write-Ok 'BitLocker is on. Encryption runs in the background; the PC stays usable and Kairo keeps running.'
@@ -242,7 +249,37 @@ function Open-ClaudeLogin($P, [string]$ClaudeExe) {
     Write-Note '  3. Back in the window, press Enter when it says "Login successful".'
     Write-Note '  4. Type  /exit  and press Enter. The window closes and setup continues here.'
     Wait-Enter 'Press Enter to open the Claude window'
-    Start-Process -FilePath $ClaudeExe -WorkingDirectory $P.Workspace -Wait
+    # Fix P1.8: a fresh folder only admins can write, for both the settings and the working folder.
+    # Started in data\workspace (or with data\claude-config's settings), this admin window would
+    # load hooks and tool servers Kairo's own account can write. Only the login file is copied over.
+    if (-not (Test-Path $P.Updater)) { Protect-UpdaterFolder $P }
+    $login = Join-Path $P.Updater 'claude-login'
+    if (Test-Path $login) { Remove-Item -Recurse -Force $login }
+    $cfg = Join-Path $login 'config'
+    $work = Join-Path $login 'work'
+    [void](New-Item -ItemType Directory -Path $cfg)
+    [void](New-Item -ItemType Directory -Path $work)
+    $old = $env:CLAUDE_CONFIG_DIR
+    $env:CLAUDE_CONFIG_DIR = $cfg
+    try { Start-Process -FilePath $ClaudeExe -WorkingDirectory $work -Wait }
+    finally { $env:CLAUDE_CONFIG_DIR = $old }
+    $new = Join-Path $cfg '.credentials.json'
+    if (Test-Path $new) { Copy-Item -Force $new (Join-Path $P.ClaudeConfig '.credentials.json') }
+    Remove-Item -Recurse -Force $login -ErrorAction SilentlyContinue
+}
+
+# The Claude Code an admin window may start: only from tools\claude (admins-only), never just a
+# path from kairo.env (fix P1.8).
+function Resolve-ClaudeExe($P, [string]$FromEnv) {
+    $tools = (Join-Path $P.Tools 'claude').TrimEnd('\') + '\'
+    if ($FromEnv) {
+        $full = ''
+        try { $full = [IO.Path]::GetFullPath($FromEnv) } catch { }
+        if ($full.StartsWith($tools, 'OrdinalIgnoreCase') -and $full.EndsWith('\claude.exe', 'OrdinalIgnoreCase') -and (Test-Path $full)) { return $full }
+    }
+    $found = Get-ChildItem $tools -Filter 'claude.exe' -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($found) { return $found.FullName }
+    return $null
 }
 
 # Plain-words reason for a failed Claude check.
@@ -270,6 +307,7 @@ function Test-ClaudeForKairo($P) {
 
 function Connect-Claude($P, [string]$ClaudeExe) {
     Write-Step 'Login 2 of 5: Claude (your Max subscription)'
+    if (-not $ClaudeExe) { Write-Bad 'Claude Code is not installed in C:\Kairo\tools\claude. Run Update Kairo, then Kairo Logins.'; return $false }
     # The login is stored in C:\Kairo\data\claude-config, where Kairo's own account
     # can use it after every reboot, with nobody logged in.
     [Environment]::SetEnvironmentVariable('CLAUDE_CONFIG_DIR', $P.ClaudeConfig, 'Process')

@@ -38,6 +38,7 @@ try {
     Assert-Admin $PSCommandPath $passArgs
 
     if (-not (Test-Path -LiteralPath $Root)) { [void](New-Item -ItemType Directory -Path $Root) }
+    Hide-RecoveryKeys $logFile
     Start-Transcript -Path $logFile -Append | Out-Null
     $logging = $true
 
@@ -64,7 +65,7 @@ try {
 
         # 1. Kairo's own limited Windows account + folders it may use
         Write-Step "Kairo's own Windows account and folders"
-        $svc = Initialize-ServiceAccount
+        $svc = Initialize-ServiceAccount $P
         if ($owner) {
             Set-KairoAcl $P $owner $svc.Name
             if (-not (Test-RunningAsSystem)) { $state0.owner = $owner; Save-State $P $state0 }
@@ -101,7 +102,7 @@ try {
         if (-not $CI) {
             Set-AlwaysOnPower
             Set-WindowsUpdatePolicy
-            if ($interactive) { Enable-BitLockerIfPossible }
+            if ($interactive) { Enable-BitLockerIfPossible $logFile }
         }
 
         # 5. Kairo itself (backup, switch, migrate, health check, auto-rollback), running as kairo-svc
@@ -129,7 +130,7 @@ try {
         if (Test-Path (Join-Path $P.Current 'release.json')) { $repo = [string](Read-ReleaseInfo $P.Current).update_repo }
         $results = [ordered]@{}
         $results['Tailscale'] = Connect-Tailscale 8000
-        $results['Claude'] = Connect-Claude $P ((Read-EnvFile $P)['KAIRO_CLAUDE_BIN'])
+        $results['Claude'] = Connect-Claude $P (Resolve-ClaudeExe $P ((Read-EnvFile $P)['KAIRO_CLAUDE_BIN']))
         if ($repo) { $results['GitHub updates'] = Connect-GitHub $P $repo }
         $results['Google'] = Connect-Google $P
         $results['Vault sync'] = Connect-Sync $P $svc

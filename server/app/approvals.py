@@ -19,6 +19,7 @@ from typing import Callable
 
 from sqlmodel import Session, select
 
+from . import killswitch
 from .audit import audit
 from .db import Approval, ChatMessage, utcnow
 from .executor import Executor, first_address
@@ -115,7 +116,8 @@ def summarize(action: str, a: dict) -> str:
 
 
 def create_card(session: Session, decision: Decision, *, executor: Executor, google_read: Callable[[], GoogleAPI],
-                thread_id: int | None, reason: str = "") -> Approval:
+                thread_id: int | None, reason: str = "", actor: str = "brain") -> Approval:
+    """actor: who asked for it. "brain" for the model's proposals, "owner" for a tap in the app (Loop Send)."""
     if decision.verdict != "approve":
         raise ApprovalError("only approve-verdicts become cards")
     stored = prepare(decision.action, decision.args, google_read)
@@ -124,7 +126,7 @@ def create_card(session: Session, decision: Decision, *, executor: Executor, goo
     session.add(card)
     session.commit()
     session.refresh(card)
-    audit(session, actor="brain", action=decision.action, tier=decision.tier, args=stored, outcome=f"card #{card.id} created")
+    audit(session, actor=actor, action=decision.action, tier=decision.tier, args=stored, outcome=f"card #{card.id} created")
     session.refresh(card)
     return card
 
@@ -161,13 +163,35 @@ def _outbound_last_24h(session: Session) -> int:
     return sum(1 for r in rows if r.decided_at and _aware(r.decided_at) >= since)
 
 
+def check_approvable(session: Session, tier: int, *, gate: Gate, confirm: bool = False) -> None:
+    """Everything approve() checks before it runs a card. Loop Send asks first, so its card
+    is never created just to be refused (fix P1.7)."""
+    if killswitch.is_paused(session):     # fix P1.5: nothing runs while paused, approved by hand or not
+        raise ApprovalError("Kairo is paused (kill switch): nothing is executed. Resume it under More, then approve.")
+    if tier >= 4 and not confirm:
+        raise ApprovalError("this one needs a second confirmation: confirm a second time")
+    if tier == 3 and _outbound_last_24h(session) >= gate.outbound_per_day_max:
+        raise ApprovalError(f"daily limit of {gate.outbound_per_day_max} outbound actions reached")
+
+
+def withdraw(session: Session, card_id: int, why: str) -> Approval:
+    """A card the owner created and approved in one tap that still couldn't run: closed as failed, never left open."""
+    card = session.get(Approval, card_id)
+    if card is not None and card.status == "open":
+        card.status = "failed"
+        card.decided_at = utcnow()
+        card.result_json = json.dumps({"error": why[:1000]})
+        session.add(card)
+        session.commit()
+        audit(session, actor="backend", action=card.tool, tier=card.tier, args=json.loads(card.args_json),
+              outcome=f"card #{card.id} not run: {why[:300]}")
+    return card
+
+
 def approve(session: Session, card_id: int, *, executor: Executor, gate: Gate, confirm: bool = False,
             edited_args: dict | None = None) -> Approval:
     card = _open_card(session, card_id)
-    if card.tier >= 4 and not confirm:
-        raise ApprovalError(f"card #{card_id} deletes something: confirm a second time")
-    if card.tier == 3 and _outbound_last_24h(session) >= gate.outbound_per_day_max:
-        raise ApprovalError(f"daily limit of {gate.outbound_per_day_max} outbound actions reached")
+    check_approvable(session, card.tier, gate=gate, confirm=confirm)
 
     args = json.loads(card.args_json)
     if edited_args is not None:
@@ -177,7 +201,7 @@ def approve(session: Session, card_id: int, *, executor: Executor, gate: Gate, c
             raise ApprovalError(f"can't change {', '.join(bad)} on this card")
         candidate = {k: v for k, v in args.items() if k in _schema_fields(card.tool)}
         candidate.update(edited_args)
-        ctx = GateContext(paused=False, origin="owner_chat", open_approvals=0, outbound_last_24h=0)
+        ctx = GateContext(paused=killswitch.is_paused(session), origin="owner_chat", open_approvals=0, outbound_last_24h=0)
         d = gate.decide("mcp__kairo__propose_action", {"action": card.tool, "args": candidate}, ctx)
         if d.verdict != "approve":
             raise ApprovalError(f"the edit isn't allowed: {d.reason}")

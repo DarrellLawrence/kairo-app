@@ -783,6 +783,11 @@ class LoopEngine:
         return d
 
 
+def _real_recipient(claimed: str, real: list[str]) -> str | None:
+    claimed = claimed.strip().lower()
+    return claimed if claimed in real else (real[0] if len(real) == 1 else None)
+
+
 class PromiseFinder:
     """Job body 'promises' (hourly): the owner's sent mail -> new promise loops, fulfilled ones closed."""
 
@@ -807,8 +812,8 @@ class PromiseFinder:
                 h = _headers(full)
                 body = _body_text(full.get("payload") or {})
                 body = re.split(r"\n(?:On .{5,80} wrote:|Am .{5,80} schrieb.*:|>)", body)[0]   # drop the quoted mail
-                mails.append({"message_id": full["id"], "to": h.get("to"), "subject": h.get("subject"), "date": h.get("date"),
-                              "text": clip(body, 1500)})
+                mails.append({"message_id": full["id"], "to": h.get("to"), "cc": h.get("cc"), "subject": h.get("subject"),
+                              "date": h.get("date"), "text": clip(body, 1500)})
         finally:
             g.close()
         if not mails:
@@ -824,6 +829,10 @@ class PromiseFinder:
         if not isinstance(out, dict):
             raise ValueError("promise answer is not an object")
         valid_ids = {m["message_id"] for m in mails}
+        # The address comes from the mail's real To/Cc, never from the model alone (fix P1.6).
+        from .loop_send import _addresses
+        owner = (self.profile.gmail or "").lower()
+        real_to = {m["message_id"]: [a for a in _addresses(m.get("to"), m.get("cc")) if a != owner] for m in mails}
         times = good_times(self.schedule)
         new = 0
         for p in out.get("new") or []:
@@ -836,7 +845,7 @@ class PromiseFinder:
                 pass
             _, created = upsert(s, kind="promise", source="promise", ref=f"{p['message_id']}:{clip(p['what'], 40)}",
                                 what=str(p["what"]), who=clip(p.get("to_name"), 60) or None,
-                                who_email=(str(p.get("to_email") or "").strip().lower() or None), due=by, since=now,
+                                who_email=_real_recipient(str(p.get("to_email") or ""), real_to[p["message_id"]]), due=by, since=now,
                                 now=now, tz=tz, times=times)
             new += created
         closed = 0

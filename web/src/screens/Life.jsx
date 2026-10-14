@@ -75,7 +75,8 @@ function People() {
   useEffect(() => { load() }, [load])
   const save = async () => {
     await api('/api/people', { method: 'POST', body: { name: edit.name, relation: edit.relation || null, birthday: edit.birthday || null,
-      contact_every_days: edit.contact_every_days ? Number(edit.contact_every_days) : null, notes: edit.notes || null } })
+      contact_every_days: edit.contact_every_days ? Number(edit.contact_every_days) : null, notes: edit.notes || null,
+      ...(edit.emailTouched ? { email: edit.email || null } : {}) } })
     setEdit(null)
     load()
   }
@@ -104,6 +105,16 @@ function People() {
           <label className="k-field" style={{ flex: 1 }}>Relation<input value={edit?.relation || ''} onChange={(e) => setEdit((x) => ({ ...x, relation: e.target.value }))} placeholder="friend, family…" /></label>
           <label className="k-field" style={{ flex: 1 }}>Birthday<input type="date" value={edit?.birthday || ''} onChange={(e) => setEdit((x) => ({ ...x, birthday: e.target.value }))} /></label>
         </div>
+        <label className="k-field">Email (Kairo only sends to addresses you typed or confirmed)
+          <input type="email" inputMode="email" autoCapitalize="off" value={edit?.email || ''}
+            onChange={(e) => setEdit((x) => ({ ...x, email: e.target.value, emailTouched: true }))} placeholder="name@example.com" />
+        </label>
+        {edit?.email && !edit?.email_verified && !edit?.emailTouched && (
+          <Button variant="secondary" size="sm" style={{ marginBottom: 12 }}
+            onClick={() => setEdit((x) => ({ ...x, emailTouched: true, email_verified: true }))}>
+            Kairo noted this address. It's right ({edit.email})
+          </Button>
+        )}
         <label className="k-field">Remind me to get in touch every … days (optional)<input inputMode="numeric" value={edit?.contact_every_days || ''} onChange={(e) => setEdit((x) => ({ ...x, contact_every_days: e.target.value }))} /></label>
         <label className="k-field">Notes<textarea rows={5} value={edit?.notes || ''} onChange={(e) => setEdit((x) => ({ ...x, notes: e.target.value }))} /></label>
         <Button variant="primary" block disabled={!edit?.name?.trim()} onClick={save}>Save</Button>

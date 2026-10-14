@@ -134,6 +134,15 @@ function Set-KairoAcl($P, [string]$Owner, [string]$Service) {
     Protect-UpdaterFolder $P
 }
 
+# Older setups printed a BitLocker recovery key while install.log was recording: blank it out.
+function Hide-RecoveryKeys([string]$LogFile) {
+    if (-not (Test-Path -LiteralPath $LogFile)) { return }
+    $text = Get-Content -Raw -LiteralPath $LogFile
+    $clean = [regex]::Replace($text, '\b\d{6}(-\d{6}){7}\b', '[recovery key removed]')
+    $clean = [regex]::Replace($clean, '(?m)^(.*first 6 digits of the recovery key.*?:)\s*\d{6}\s*$', '$1 [removed]')
+    if ($clean -ne $text) { Set-Content -LiteralPath $LogFile -Value $clean -NoNewline -Encoding UTF8 }
+}
+
 function Test-RunningAsSystem { return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18' }
 
 # ---------------------------------------------------------------- Kairo's own Windows account
@@ -145,21 +154,60 @@ function New-RandomPassword {
     return [Convert]::ToBase64String($bytes) + 'aA1!'   # + one of each class for password policies
 }
 
-# kairo-svc: a standard (non-admin) local account that only Kairo uses. It
-# gets a new random password on every install, which only Task Scheduler
-# keeps (Kairo never stores it), is hidden from the sign-in screen, and can
-# only reach C:\Kairo plus what every Windows user can (not your files).
-function Initialize-ServiceAccount {
+# Secrets only Windows and admins may read (C:\Kairo\updater), machine-encrypted (DPAPI).
+function Save-MachineSecret($P, [string]$Name, [string]$Text) {
+    Add-Type -AssemblyName System.Security
+    if (-not (Test-Path $P.Updater)) { [void](New-Item -ItemType Directory -Path $P.Updater) }
+    Protect-UpdaterFolder $P
+    $enc = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($Text), $null,
+        [Security.Cryptography.DataProtectionScope]::LocalMachine)
+    Set-Content -Path (Join-Path $P.Updater $Name) -Value ([Convert]::ToBase64String($enc)) -Encoding ASCII
+}
+
+function Read-MachineSecret($P, [string]$Name) {
+    $path = Join-Path $P.Updater $Name
+    if (-not (Test-Path $path)) { return $null }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String((Get-Content -Raw $path).Trim()), $null,
+            [Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [Text.Encoding]::UTF8.GetString($bytes)
+    } catch { return $null }
+}
+
+function Test-LocalPassword([string]$Name, [string]$Plain) {
+    try {
+        Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+        $ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext([System.DirectoryServices.AccountManagement.ContextType]::Machine)
+        try { return $ctx.ValidateCredentials($Name, $Plain) } finally { $ctx.Dispose() }
+    } catch { return $false }
+}
+
+# kairo-svc: a standard (non-admin) local account that only Kairo uses. It is hidden from the
+# sign-in screen and can only reach C:\Kairo plus what every Windows user can (not your files).
+# Its random password is made once and kept machine-encrypted in C:\Kairo\updater (Windows and
+# admins only), so updates re-register the tasks with it. Fix P1.9: it used to be replaced on
+# every install and update, and Windows then throws away what the account had encrypted for
+# itself (school portal login, Google tokens).
+function Initialize-ServiceAccount($P) {
     $name = $script:ServiceUser
-    $plain = New-RandomPassword
-    $secure = ConvertTo-SecureString $plain -AsPlainText -Force
     $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
-    if ($user) {
-        Set-LocalUser -Name $name -Password $secure -PasswordNeverExpires $true -AccountNeverExpires
-        Enable-LocalUser -Name $name
+    $plain = Read-MachineSecret $P 'kairo-svc.bin'
+    $secure = $null
+    if ($user -and $plain -and (Test-LocalPassword $name $plain)) {
+        Write-Ok 'kairo-svc keeps its password (what it encrypted stays readable)'
     } else {
+        $plain = New-RandomPassword
+        $secure = ConvertTo-SecureString $plain -AsPlainText -Force
+        Save-MachineSecret $P 'kairo-svc.bin' $plain
+    }
+    if (-not $user) {
         [void](New-LocalUser -Name $name -Password $secure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires `
             -FullName 'Kairo' -Description 'Runs Kairo in the background. No sign-in.')
+    } else {
+        if ($secure) { Set-LocalUser -Name $name -Password $secure }
+        Set-LocalUser -Name $name -PasswordNeverExpires $true -AccountNeverExpires
+        Enable-LocalUser -Name $name
     }
     $usersGroup = (Get-LocalGroup -SID 'S-1-5-32-545').Name
     $adminsGroup = (Get-LocalGroup -SID 'S-1-5-32-544').Name
@@ -215,7 +263,8 @@ function Grant-UserRight([string]$Account, [string]$Right) {
     [KairoLsa]::Grant($Account, $Right)
 }
 
-function Remove-ServiceAccount {
+function Remove-ServiceAccount($P) {
+    if ($P) { Remove-Item -Force (Join-Path $P.Updater 'kairo-svc.bin') -ErrorAction SilentlyContinue }
     $name = $script:ServiceUser
     $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
     if (-not $user) { return }
@@ -258,6 +307,14 @@ function Write-EnvFile($P, [hashtable]$Values) {
     }
     foreach ($k in ($Values.Keys | Sort-Object)) { $lines.Add("$k=$($Values[$k])") }
     Set-Content -Path $P.EnvFile -Value $lines -Encoding UTF8
+    Protect-EnvFile $P
+}
+
+# kairo.env: Kairo's own account may read it, only Windows and admins may change it (fix P1.8).
+# It used to inherit data\'s rights, so the account could add a line the installer then used.
+function Protect-EnvFile($P) {
+    & icacls.exe $P.EnvFile /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "$($script:ServiceUser):R" /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.EnvFile)" }
 }
 
 function Read-EnvFile($P) {
@@ -272,9 +329,23 @@ function Read-EnvFile($P) {
     return $h
 }
 
+# The environment for the pythons the installer runs (as admin or SYSTEM: migrations, voice
+# models). Fix P1.8: never the whole kairo.env (a PYTHONPATH= line there was code execution as
+# SYSTEM). Paths come from the installer itself; from the file only these model names, and only
+# if they look like one; no PYTHON* variable at all.
+$script:EnvFromFile = @('KAIRO_WHISPER_MODEL', 'KAIRO_WHISPER_CPU_MODEL', 'KAIRO_KOKORO_VOICE', 'KAIRO_PIPER_VOICE')
+
 function Use-KairoEnv($P) {
+    $drop = @(Get-ChildItem Env: | Where-Object { $_.Name -like 'PYTHON*' } | ForEach-Object { $_.Name }) +
+            @('KAIRO_DB_URL', 'KAIRO_WORKSPACE_DIR', 'KAIRO_CONFIG_DIR', 'KAIRO_CONFIG_OVERRIDES', 'KAIRO_VOICE_SITE')
+    foreach ($name in $drop) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+    $env:KAIRO_DATA_DIR = $P.Data
     $envs = Read-EnvFile $P
-    foreach ($k in $envs.Keys) { [Environment]::SetEnvironmentVariable($k, $envs[$k], 'Process') }
+    foreach ($k in $script:EnvFromFile) {
+        if ($envs.ContainsKey($k) -and $envs[$k] -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+            [Environment]::SetEnvironmentVariable($k, $envs[$k], 'Process')
+        }
+    }
 }
 
 # ---------------------------------------------------------------- python

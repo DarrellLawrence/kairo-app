@@ -18,6 +18,8 @@ from typing import Any, Literal
 
 import httpx
 
+from .. import secretbox
+
 Kind = Literal["read", "write"]
 
 SCOPES: dict[str, list[str]] = {
@@ -65,19 +67,25 @@ def token_path(secrets_dir: Path, kind: Kind) -> Path:
     return secrets_dir / f"google-{kind}.json"
 
 
+# Tokens are encrypted at rest (fix P1.10): the same box as the school-portal login, i.e. DPAPI
+# for kairo-svc on Windows (the owner's account, a copied file or a backup can't read them).
+# Plain JSON files from before are read once and locked away.
+
 def load_token(secrets_dir: Path, kind: Kind) -> dict | None:
     path = token_path(secrets_dir, kind)
     if not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_bytes()
+    if raw.lstrip().startswith(b"{"):
+        token = json.loads(raw.decode("utf-8"))
+        save_token(Path(secrets_dir), kind, token)
+        return token
+    return secretbox.load(path)
 
 
 def save_token(secrets_dir: Path, kind: Kind, token: dict) -> None:
     secrets_dir.mkdir(parents=True, exist_ok=True)
-    path = token_path(secrets_dir, kind)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(token), encoding="utf-8")
-    tmp.replace(path)
+    secretbox.save(token_path(secrets_dir, kind), token)
 
 
 class GoogleAPI:
