@@ -140,7 +140,7 @@ class Voice:
     def selftest(self) -> dict:
         """For the installer and the boot check (fix P0): real imports as Kairo's account, Kokoro says a
         short sentence (~2 s) and Whisper writes it down again; Piper speaks German. {ok, checks, reason}"""
-        checks, problems = {}, []
+        checks, problems, heard = {}, [], None
         for key, module in (("stt_import", "faster_whisper"), ("en_import", "kokoro_onnx"), ("de_import", "piper")):
             try:
                 mod = __import__(module)
@@ -155,6 +155,7 @@ class Voice:
                 wav, lang = self.speak("Kairo voice test.", "en")
                 checks["tts_en"] = wav[:4] == b"RIFF" and lang == "en"
                 t = self.transcribe(wav, language="en")
+                heard = t.text
                 checks["stt_roundtrip"] = "test" in t.text.lower()
                 if not checks["stt_roundtrip"]:
                     problems.append(f"Whisper heard {t.text!r}")
@@ -166,7 +167,8 @@ class Voice:
                 problems.append(f"{type(exc).__name__}: {exc}"[:240])
                 checks.setdefault("tts_en", False)
         ok = not problems and all(checks.values())
-        return {"ok": ok, "checks": checks, "reason": "; ".join(problems)}
+        return {"ok": ok, "checks": checks, "reason": "; ".join(problems), "heard": heard,
+                "device": self.status().get("stt_device") if heard is not None else None}
 
     # ---------------------------------------------------------------- speech to text
 

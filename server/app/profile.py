@@ -47,6 +47,7 @@ def render_personality(config_dir: Path, profile: Profile) -> str:
     than a crash at startup.
     """
     template = (config_dir / "personality.md").read_text(encoding="utf-8")
+    template = re.sub(r"^<!--\s*kairo-personality v\d+\s*-->\n?", "", template)   # its version (self-test), not prompt text
     values = profile.model_dump()
 
     def sub(match: re.Match[str]) -> str:
