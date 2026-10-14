@@ -43,6 +43,7 @@ DEFAULT_CRON = {
     "morning_brief.weekends": "20 8 * * 6,0",
     "backup": "30 3 * * *",
     "restore_test": "0 4 * * 0",
+    "lerndoku_prompt": "30 17 * * 5",
 }
 # Silent housekeeping: no model, no push unless it fails. Allowed in the quiet window.
 QUIET_EXEMPT = {"backup", "restore_test"}
@@ -57,6 +58,7 @@ JOB_TITLES = {
     "review.big": "Sunday review",
     "backup": "Backup",
     "restore_test": "Restore test",
+    "lerndoku_prompt": "Lerndokumentation reminder",
 }
 
 
@@ -306,7 +308,7 @@ class Jobs:
         if "morning_brief" in self.bodies:
             for k in ("morning_brief.weekdays", "morning_brief.weekends"):
                 sched.add_job(self.run_job, cron_trigger(self._cron(k), tz), args=["morning_brief"], id=k)
-        for name in ("backup", "restore_test"):
+        for name in ("backup", "restore_test", "lerndoku_prompt"):
             if name in self.bodies:
                 sched.add_job(self.run_job, cron_trigger(self._cron(name), tz), args=[name], id=name)
         if "capture_process" in self.bodies:

@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, board, brief, capture, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
+from . import approvals, backup, board, brief, capture, lerndoku, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
 from .audit import audit
 from .executor import Executor
@@ -146,13 +146,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _backup_status(ctx.session, test_ok=True, test_at=dt.datetime.now(profile.tz).isoformat(), test_detail=result)
         return json.dumps(result)
 
+    def lerndoku_prompt_job(ctx):
+        week = lerndoku.week_of(dt.datetime.now(profile.tz).date())
+        row, created = lerndoku.ensure(ctx.session, week)
+        if row.status == "waiting":
+            pusher.notify("Lerndokumentation", "2 minutes: what did you do at work this week? Kairo writes the German draft.",
+                          "/#lerndoku")
+        return week
+
     app.state.jobs = Jobs(
         engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
         ask=lambda prompt, system: chat.ask_sync(runner, prompt, system=system),
         bodies={"email_triage": lambda ctx: app.state.triage.run(ctx),
                 "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
                 "capture_process": lambda ctx: app.state.captures.run(ctx),
-                "backup": backup_job, "restore_test": restore_test_job})
+                "backup": backup_job, "restore_test": restore_test_job,
+                "lerndoku_prompt": lambda ctx: lerndoku_prompt_job(ctx)})
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
@@ -968,6 +977,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             s.delete(c)
             s.commit()
             return {"deleted": 1}
+
+    # ---------------------------------------------------------------- Lerndokumentation (Milestone D)
+
+    def _week(week: str | None) -> str:
+        if not week:
+            return lerndoku.week_of(dt.datetime.now(profile.tz).date())
+        try:
+            lerndoku.week_range(week)
+        except (ValueError, IndexError):
+            raise HTTPException(400, "week must look like 2026-W42")
+        return week
+
+    @app.get("/api/lerndoku")
+    def lerndoku_get(week: str | None = None):
+        wk = _week(week)
+        with session_for(engine) as s:
+            row = s.get(lerndoku.Lerndoku, wk)
+            current = lerndoku.as_dict(row, settings.vault_dir) if row else {
+                "week": wk, "status": "none", "notes": "", "draft": None, "vault_path": None,
+                **dict(zip(("start", "end"), (d.isoformat() for d in lerndoku.week_range(wk))))}
+            return {"current": current, "weeks": lerndoku.listing(s, settings.vault_dir)}
+
+    @app.post("/api/lerndoku/{week}/notes")
+    def lerndoku_notes(week: str, body: dict):
+        wk = _week(week)
+        with session_for(engine) as s:
+            try:
+                row = lerndoku.write_draft(_model_ask, s, settings.vault_dir, wk, str(body.get("notes") or ""))
+            except lerndoku.LerndokuError as exc:
+                raise HTTPException(400, str(exc))
+            return lerndoku.as_dict(row, settings.vault_dir)
+
+    @app.put("/api/lerndoku/{week}")
+    def lerndoku_save(week: str, body: dict):
+        wk = _week(week)
+        with session_for(engine) as s:
+            try:
+                return lerndoku.as_dict(lerndoku.save(s, settings.vault_dir, wk, str(body.get("draft") or "")), settings.vault_dir)
+            except lerndoku.LerndokuError as exc:
+                raise HTTPException(400, str(exc))
+
+    @app.post("/api/lerndoku/{week}/approve")
+    def lerndoku_approve(week: str, body: dict):
+        wk = _week(week)
+        with session_for(engine) as s:
+            try:
+                return lerndoku.as_dict(lerndoku.set_status(s, settings.vault_dir, wk, bool(body.get("approved", True))), settings.vault_dir)
+            except lerndoku.LerndokuError as exc:
+                raise HTTPException(400, str(exc))
 
     @app.get("/api/backups")
     def backups_list():

@@ -10,6 +10,7 @@ import More from './screens/More.jsx'
 import Reviews from './screens/Reviews.jsx'
 import Board from './screens/Board.jsx'
 import School from './screens/School.jsx'
+import Lerndoku from './screens/Lerndoku.jsx'
 import Onboarding from './screens/Onboarding.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
@@ -75,6 +76,7 @@ export default function App() {
     reviews: <Reviews key={param ?? 'list'} openId={param} />,
     board: <Board />,
     school: <School />,
+    lerndoku: <Lerndoku />,
     onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,
     approvals: <Approvals onCount={setOpenCards} />,

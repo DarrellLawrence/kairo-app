@@ -430,6 +430,8 @@ function Root() {
           <List>
             <ListRow icon={<IconSparkle />} title="School" subtitle="Dates, grades, flashcards, study guides" chevron
               onClick={() => { window.location.hash = '#school' }} />
+            <ListRow icon={<IconList />} title="Lerndokumentation" subtitle="Weekly entry, German draft by Kairo" chevron
+              onClick={() => { window.location.hash = '#lerndoku' }} />
             <ListRow icon={<IconRefresh />} title="Reviews" subtitle="Check-ins and weekly to yearly reviews" chevron
               onClick={() => { window.location.hash = '#reviews' }} />
             <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron
