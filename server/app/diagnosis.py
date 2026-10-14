@@ -172,6 +172,20 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
     r.rows([(*k, a["n"], a["fail"], _pct(a["d"], .5), _pct(a["d"], .95), a["tok"], round(a["usd"], 2))
             for k, a in sorted(runs.items(), key=lambda x: -x[1]["n"])])
 
+    r.h(f"G.5a Claude start and first words ({DAYS} d), ms: purpose | warm | n | start p50 | start p95 | "
+        "first words p50 | first words p95")
+    starts: dict[tuple, tuple[list, list]] = {}
+    rows = q("SELECT purpose, warm, startup_ms, first_text_ms FROM model_runs WHERE ts>=? AND "
+             "(startup_ms IS NOT NULL OR first_text_ms IS NOT NULL)", since)
+    for p, warm, st, ft in [] if failed(rows) else rows:
+        a = starts.setdefault((p, "warm" if warm else "cold"), ([], []))
+        if st is not None:
+            a[0].append(st)
+        if ft is not None:
+            a[1].append(ft)
+    r.rows([(*k, max(len(a[0]), len(a[1])), _pct(a[0], .5), _pct(a[0], .95), _pct(a[1], .5), _pct(a[1], .95))
+            for k, a in sorted(starts.items())])
+
     r.h("G.5b reply wall time (owner message -> Kairo reply), s: n | p50 | p95")
     chat, call, last = [], [], {}
     rows = q("SELECT thread_id, role, substr(text,1,7)='(spoken', created_at FROM chat_messages "

@@ -192,12 +192,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tests (fix P0, 2026-10-14: a self-test with its own prompt and tools was green while chat had
         none). via: another runner, only for acceptance's deliberately broken tool-server copy.
         v8 C6: what the owner's notes say about this message goes in too (memory search)."""
-        system = system or system_prompt(thread_id=thread_id, fresh=session_id is None, before_id=before_id)
-        system += await asyncio.to_thread(recall, text)
-        async for event in (via or runner).stream(text, session_id=session_id, system=system, tools=model_tools,
+        model = model or model_table.pick(purpose, app.state.jobs.schedule)
+        hits = await asyncio.to_thread(recall, text)
+        base = system or system_prompt(thread_id=thread_id, fresh=session_id is None, before_id=before_id)
+        warm = call_key(thread_id, model) if purpose == "call" and system is None and via is None else None
+        if warm is not None and getattr(runner.brain, "warm_ready", lambda *a: False)(warm, session_id):
+            # Fix plan 30: the call's warm process keeps the system prompt it started with (the CLI reads
+            # it once), so what the notes say about this message goes with the message. `base` is only
+            # used if that process died meanwhile and the turn runs the normal way.
+            prompt, system = text + hits, base
+        else:
+            prompt, system, warm = text, base + hits, None
+        async for event in (via or runner).stream(prompt, session_id=session_id, system=system, tools=model_tools,
                                                   origin="owner_chat", thread_id=thread_id, purpose=purpose,
-                                                  model=model or model_table.pick(purpose, app.state.jobs.schedule)):
+                                                  model=model, warm=warm):
             yield event
+
+    def call_key(thread_id, model) -> tuple:
+        return ("call", thread_id, model, tuple(model_tools))
+
+    def warm_call() -> None:
+        """Fix plan 30: start Claude for the call's next turn now, while the owner is still talking.
+        Called when a call starts and after each of its turns; a no-op when one is ready."""
+        if getattr(runner.brain, "warm_up", None) is None:
+            return
+        try:
+            with session_for(engine) as s_:
+                if killswitch.is_paused(s_):
+                    return
+                thread = chat.main_thread(s_, brain_name=runner.brain.name)
+                tid, sid = thread.id, thread.brain_session_id
+            model = model_table.pick("call", app.state.jobs.schedule)
+            key = call_key(tid, model)
+            if runner.brain.warm_ready(key, sid):
+                return
+            runner.brain.warm_up(key=key, session_id=sid, system=system_prompt(thread_id=tid, fresh=sid is None),
+                                 tools=model_tools, model=model, origin="owner_chat")
+        except Exception:   # a call works without it, just slower
+            log.exception("warm call process")
+
+    def warm_call_soon() -> None:
+        threading.Thread(target=warm_call, name="warm-call", daemon=True).start()
 
     def recall(text: str) -> str:
         """v8 C6: the best hits for the owner's message (keywords + meaning), with the note they come from."""
@@ -228,6 +263,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
         yield
         app.state.jobs.stop()
+        if getattr(runner.brain, "close_warm", None) is not None:
+            runner.brain.close_warm()
         task.cancel()
         for b in background:
             b.cancel()
@@ -735,6 +772,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             msg = chat.add_message(s, tid, "kairo", final_text or "")
         await send({"type": "done", "text": final_text or "", "message_id": msg.id})
         fold_memory_soon()
+        if chat_purpose == "call":
+            warm_call_soon()
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -952,7 +991,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
             broken_selftests=broken_selftests, schedule=app.state.jobs.schedule,
             memory=app.state.memory, vault_dir=settings.vault_dir, profile=profile, coach=app.state.coach, pa=app.state.pa,
-            share=acceptance_share,
+            share=acceptance_share, runner=runner,
             ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
                 prompt, system, images=images, purpose=purpose))
 
@@ -1975,6 +2014,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def voice_call_now(body: dict):
         """'Call me now' (also how the owner tests it), or {"outgoing": true} when the owner calls Kairo."""
         if body.get("outgoing"):   # "Call Kairo": no ringing, the mic opens at once
+            warm_call_soon()
             with session_for(engine) as s:
                 c = voice_calls.start(s, "You called Kairo", "", None)
                 return voice_calls.as_dict(voice_calls.set_status(s, c.id, "answered"))
@@ -2041,6 +2081,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def voice_call_action(call_id: int, action: str):
         if action not in ("answer", "end"):
             raise HTTPException(404, "unknown action")
+        if action == "answer":
+            warm_call_soon()
+        elif getattr(runner.brain, "close_warm", None) is not None:
+            runner.brain.close_warm()
         with session_for(engine) as s:
             try:
                 return voice_calls.as_dict(voice_calls.set_status(s, call_id, "answered" if action == "answer" else "ended"))

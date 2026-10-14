@@ -156,3 +156,105 @@ def test_images_go_in_as_one_stream_json_message(settings):
     assert "--input-format" not in brain.build_command(session_id=None, system="s", tools=[])
     final = [e for e in events if e.kind.value == "result"][-1].text
     assert "[1 image(s)] What is this letter?" in final
+
+
+# -- fix plan 26, 27, 30: streaming, tool-less runs, warm process --------------------------------
+
+def test_text_streams_as_deltas_and_is_not_sent_twice(tmp_path):
+    rec = tmp_path / "rec.json"
+    events = run(make(tmp_path, KAIRO_HOOK_FAKE_RECORD=rec), "hello there")
+    assert "--include-partial-messages" in json.loads(rec.read_text())["argv"]
+    texts = [e.text for e in events if e.kind is EventKind.text]
+    assert len(texts) == 2                       # two deltas; the full assistant message is not repeated
+    assert "".join(texts) == "echo: hello there"
+
+
+def test_a_run_without_tools_starts_no_mcp_server(tmp_path):
+    rec = tmp_path / "rec.json"
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text('{"mcpServers": {}}')
+    brain = make(tmp_path, KAIRO_HOOK_FAKE_RECORD=rec)
+    brain.mcp_config = cfg
+    run(brain, tools=[])
+    argv = json.loads(rec.read_text())["argv"]
+    assert "--mcp-config" not in argv
+    assert "--strict-mcp-config" in argv          # and still no other MCP server either
+    run(brain, tools=["mcp__kairo__tasks_list"])
+    argv = json.loads(rec.read_text())["argv"]
+    assert argv[argv.index("--mcp-config") + 1] == str(cfg)
+
+
+def test_start_and_first_words_are_measured(tmp_path):
+    usage = run(make(tmp_path))[-1].data["usage"]
+    assert usage["warm"] is False
+    assert isinstance(usage["startup_ms"], int) and isinstance(usage["first_text_ms"], int)
+    assert usage["first_text_ms"] >= usage["startup_ms"] >= 0
+
+
+def warm_brain(tmp_path, rec):
+    brain = make(tmp_path, KAIRO_HOOK_FAKE_RECORD=rec)
+    assert brain.warm_up(key="call", session_id=None, system="Warm system.", tools=[]) is True
+    assert brain.warm_up(key="call", session_id=None, system="Warm system.", tools=[]) is False   # already there
+    return brain
+
+
+def test_a_warm_process_answers_several_turns(tmp_path):
+    rec = tmp_path / "rec.json"
+    brain = warm_brain(tmp_path, rec)
+    try:
+        first = list(brain.run("one", session_id=None, system="unused", tools=[], warm="call"))
+        assert first[-1].kind is EventKind.result and first[-1].text == "echo: one"
+        assert first[-1].data["usage"]["warm"] is True
+        sid = first[-1].session_id
+        assert brain.warm_ready("call", sid)       # the process now holds that conversation
+        second = list(brain.run("two", session_id=sid, system="unused", tools=[], warm="call"))
+        assert second[-1].text == "echo: two"
+        data = json.loads(rec.read_text())
+        assert data["turns"] == ["one", "two"]     # one process, two turns
+        assert data["system"] == "Warm system."    # the system prompt it started with
+        assert data["argv"][data["argv"].index("--input-format") + 1] == "stream-json"
+    finally:
+        brain.close_warm()
+
+
+def test_a_different_key_or_conversation_runs_cold(tmp_path):
+    rec = tmp_path / "rec.json"
+    brain = warm_brain(tmp_path, rec)
+    try:
+        events = list(brain.run("chat", session_id=None, system="Cold system.", tools=[], warm="other"))
+        assert events[-1].data["usage"]["warm"] is False
+        assert json.loads(rec.read_text())["system"] == "Cold system."
+        assert not brain.warm_ready("call", "some-other-session")
+        assert brain.warm_ready("call", None)
+    finally:
+        brain.close_warm()
+
+
+def test_a_cold_turn_on_the_warm_conversation_retires_the_warm_process(tmp_path):
+    """Else the warm process would answer the next turn one turn behind."""
+    brain = make(tmp_path)
+    brain.warm_up(key="call", session_id="abc", system="s", tools=[])
+    assert brain.warm_ready("call", "abc")
+    run(brain, "typed in chat meanwhile", session_id="abc")
+    assert not brain.warm_ready("call", "abc")
+
+
+def test_a_dead_warm_process_falls_back_to_a_normal_run(tmp_path):
+    brain = make(tmp_path)
+    brain.warm_up(key="call", session_id=None, system="s", tools=[])
+    brain._warm.proc.kill()
+    brain._warm.proc.wait()
+    events = list(brain.run("still answered", session_id=None, system="s", tools=[], warm="call"))
+    assert events[-1].kind is EventKind.result and events[-1].text == "echo: still answered"
+    assert events[-1].data["usage"]["warm"] is False
+    assert brain._warm is None
+
+
+def test_the_kill_switch_closes_the_warm_process(tmp_path):
+    from app.chat import BrainRunner
+    brain = make(tmp_path)
+    brain.warm_up(key="call", session_id=None, system="s", tools=[])
+    proc = brain._warm.proc
+    BrainRunner(brain).cancel()
+    assert brain._warm is None
+    proc.wait(timeout=10)

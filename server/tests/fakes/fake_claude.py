@@ -17,7 +17,11 @@ FAKE_CLAUDE_PROBE=<report.json> (+ FAKE_CLAUDE_PROBE_PATHS=a;b): write who ran
 the CLI, whether it is admin, and which of the paths it can read.
 
 If FAKE_CLAUDE_RECORD (or KAIRO_HOOK_FAKE_RECORD) is set, argv, stdin, cwd and
-the environment are written there as JSON.
+the environment are written there as JSON (plus the pid and every turn's prompt).
+
+--include-partial-messages: text also comes as stream_event deltas before the full assistant
+message, like the real CLI (2.1.299). --input-format stream-json: one user message per stdin line,
+one turn each, until stdin closes (a warm process serves several turns).
 
 Tools, like the real CLI (used by the release tool test and the self-test): when the
 prompt contains `[[fake-tool NAME {json args}]]`, the fake starts the MCP servers from
@@ -179,41 +183,28 @@ def tool_calls(prompt, args, clients, sid):
     return lines
 
 
-def main():
-    args = sys.argv[1:]
-    if "--version" in args:
-        print("2.1.296 (Claude Code)")
-        return 0
-    prompt = sys.stdin.read()
-    if "--input-format" in args and args[args.index("--input-format") + 1] == "stream-json":
-        msg = json.loads(prompt.splitlines()[0])   # like the real CLI: one user message per line
-        parts = msg["message"]["content"]
-        images = sum(1 for p in parts if p.get("type") == "image")
-        prompt = f"[{images} image(s)] " + " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
-    record = env("FAKE_CLAUDE_RECORD")
-    if record:
-        system = ""
-        if "--system-prompt-file" in args:
-            with open(args[args.index("--system-prompt-file") + 1], encoding="utf-8") as fh:
-                system = fh.read()
-        with open(record, "w", encoding="utf-8") as fh:
-            json.dump({"argv": args, "stdin": prompt, "cwd": os.getcwd(), "env": dict(os.environ), "system": system}, fh)
+def say(text, sid, partial, pause=0.0):
+    """One assistant text message; with --include-partial-messages first as deltas (two halves)."""
+    if partial:
+        out({"type": "stream_event", "event": {"type": "message_start"}, "session_id": sid})
+        half = len(text) // 2
+        for i, chunk in enumerate((text[:half], text[half:])):
+            if chunk:
+                out({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                                       "delta": {"type": "text_delta", "text": chunk}}, "session_id": sid})
+            if i == 0 and pause:
+                time.sleep(pause)
+        out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}, "session_id": sid})
+        return
+    half = len(text) // 2
+    out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text[:half]}]}, "session_id": sid})
+    if pause:
+        time.sleep(pause)
+    out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text[half:]}]}, "session_id": sid})
 
-    probe = env("FAKE_CLAUDE_PROBE")
-    if probe:
-        write_probe(probe, env("FAKE_CLAUDE_PROBE_PATHS") or "")
 
-    mode = env("FAKE_CLAUDE_MODE") or "ok"
-    if "-p" in args and "stream-json" in args and "--verbose" not in args:
-        mode = "bad_flag"
-    if mode == "bad_flag":
-        sys.stderr.write("Error: When using --print, --output-format=stream-json requires --verbose\n")
-        return 1
-    if mode == "crash":
-        sys.stderr.write("boom: fake crash\n")
-        return 1
-
-    sid = args[args.index("--resume") + 1] if "--resume" in args else str(uuid.uuid4())
+def turn(args, prompt, sid, mode, partial):
+    """One turn: init, the answer, the result. Returns the exit code for a one-turn process."""
     clients, mcp_status = start_mcp(args) if DIRECTIVE.search(prompt) else ({}, [])
     # Like the real CLI (2.1.296): init lists every tool of every connected MCP server.
     listed = [] if env("FAKE_CLAUDE_NO_TOOLS") else list_tools(clients)
@@ -225,7 +216,7 @@ def main():
             for c in clients.values():
                 c.close()
         reply = "\n".join(lines)
-        out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}, "session_id": sid})
+        say(reply, sid, partial)
         out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid})
         return 0
 
@@ -242,14 +233,69 @@ def main():
         return 1
 
     reply = "echo: " + prompt
-    half = len(reply) // 2
-    out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply[:half]}]}, "session_id": sid})
     out({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}, "session_id": sid})
-    if mode == "pause":
-        time.sleep(1.5)
-    out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply[half:]}]}, "session_id": sid})
+    say(reply, sid, partial, pause=1.5 if mode == "pause" else 0.0)
     out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid})
     return 0
+
+
+def user_text(line):
+    msg = json.loads(line)
+    parts = msg["message"]["content"]
+    images = sum(1 for p in parts if p.get("type") == "image")
+    text = " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
+    return f"[{images} image(s)] {text}" if images else text
+
+
+def main():
+    args = sys.argv[1:]
+    if "--version" in args:
+        print("2.1.296 (Claude Code)")
+        return 0
+    stream_in = "--input-format" in args and args[args.index("--input-format") + 1] == "stream-json"
+    partial = "--include-partial-messages" in args
+    record = env("FAKE_CLAUDE_RECORD")
+    system = ""
+    if "--system-prompt-file" in args:
+        with open(args[args.index("--system-prompt-file") + 1], encoding="utf-8") as fh:
+            system = fh.read()   # read once at start, like the real CLI
+    turns = []
+
+    def write_record(prompt):
+        turns.append(prompt)
+        if record:
+            with open(record, "w", encoding="utf-8") as fh:
+                json.dump({"argv": args, "stdin": prompt, "cwd": os.getcwd(), "env": dict(os.environ), "system": system,
+                           "pid": os.getpid(), "turns": turns}, fh)
+
+    probe = env("FAKE_CLAUDE_PROBE")
+    if probe:
+        write_probe(probe, env("FAKE_CLAUDE_PROBE_PATHS") or "")
+
+    mode = env("FAKE_CLAUDE_MODE") or "ok"
+    if "-p" in args and "stream-json" in args and "--verbose" not in args:
+        mode = "bad_flag"
+    if mode == "bad_flag":
+        sys.stderr.write("Error: When using --print, --output-format=stream-json requires --verbose\n")
+        return 1
+    if mode == "crash":
+        sys.stdin.read()
+        sys.stderr.write("boom: fake crash\n")
+        return 1
+
+    sid = args[args.index("--resume") + 1] if "--resume" in args else str(uuid.uuid4())
+    if not stream_in:
+        prompt = sys.stdin.read()
+        write_record(prompt)
+        return turn(args, prompt, sid, mode, partial)
+    code = 0
+    for line in sys.stdin:   # like the real CLI: one user message per line, one turn each
+        if not line.strip():
+            continue
+        prompt = user_text(line)
+        write_record(prompt)
+        code = turn(args, prompt, sid, mode, partial)
+    return code
 
 
 if __name__ == "__main__":

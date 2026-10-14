@@ -14,10 +14,17 @@ Flags verified against Claude Code 2.1.296 (`claude --help` and real runs):
 - `--setting-sources project`: only the workspace's .claude/settings.json
   (where the PreToolUse gate hook is registered), never user settings.
 - `--permission-prompts none`: anything that would prompt is denied.
+- `--include-partial-messages` (fix plan 26, verified with 2.1.299): text also
+  arrives as stream_event content_block_delta/text_delta while the model writes;
+  the full assistant message follows, so its text is not sent twice.
+- `--input-format stream-json` keeps the process alive for one turn per stdin
+  line (fix plan 30, verified with 2.1.299). The CLI reads --system-prompt-file
+  once, at the first turn: a warm process only serves turns that can keep the
+  system prompt, which is why only calls use one (chat rebuilds it per message).
 
-Stream events seen: system/init (session_id), assistant (message.content),
-rate_limit_event (rate_limit_info.status), result (is_error, result,
-api_error_status, session_id).
+Stream events seen: system/init (session_id), stream_event (event.delta),
+assistant (message.content), rate_limit_event (rate_limit_info.status), result
+(is_error, result, api_error_status, session_id).
 """
 
 from __future__ import annotations
@@ -30,6 +37,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -71,6 +80,11 @@ ENV_ALLOWLIST = (
 # Always set for the CLI: Kairo's installer decides the CLI version.
 FIXED_ENV = {"DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1"}
 ENV_PREFIX_ALLOWLIST = ("KAIRO_HOOK_",)  # settings the gate hook needs
+
+# A warm process (fix plan 30) is closed after this long without a turn, and is not used for
+# a turn when it started longer ago than WARM_MAX_AGE_S (its system prompt, e.g. "Right now", is stale).
+WARM_IDLE_S = 180
+WARM_MAX_AGE_S = 900
 
 _LOGGED_OUT_MARKERS = ("/login", "not logged in", "invalid api key", "authentication", "oauth token")
 _USAGE_MARKERS = ("usage limit", "rate limit", "limit reached", "out of credits")
@@ -121,23 +135,30 @@ class ClaudeCLIBrain:
         self.mcp_status: dict[str, str] = {}   # from the CLI's system/init event: server -> connected / failed / ...
         self._proc: subprocess.Popen | None = None
         self._cancelled = threading.Event()
+        self._warm: _Warm | None = None
+        self._warm_lock = threading.Lock()
+        self._streamed = False                 # this message's text already went out as deltas
+        self._t0 = 0.0                         # when this run (or warm turn) started
+        self._timing: dict[str, Any] = {}
 
     # -- command ---------------------------------------------------------
 
     def build_command(self, *, session_id: str | None, system: str, tools: list[str], images: bool = False,
-                      model: str | None = None) -> list[str]:
+                      model: str | None = None, prompt_file: str = "system-prompt.md") -> list[str]:
         cmd = [
             *self._launcher(),
             "-p",
             "--output-format", "stream-json",
             "--verbose",
+            "--include-partial-messages",
             "--tools", "",
             "--strict-mcp-config",
             "--setting-sources", "project",
             "--permission-prompts", "none",
-            "--system-prompt-file", str(self._system_prompt_file(system)),
+            "--system-prompt-file", str(self._system_prompt_file(system, prompt_file)),
         ]
-        if self.mcp_config is not None:
+        if self.mcp_config is not None and tools:
+            # Fix plan 27: a run without tools (jobs) doesn't start Kairo's MCP server at all.
             cmd += ["--mcp-config", str(self.mcp_config)]
         if tools:
             # One comma-separated argument, so the variadic flag can't swallow anything else.
@@ -147,7 +168,8 @@ class ClaudeCLIBrain:
         if session_id:
             cmd += ["--resume", session_id]
         if images:
-            # One JSON user message on stdin (text + base64 images), verified with CLI 2.1.299.
+            # JSON user messages on stdin, one per line (text + base64 images; or a warm process's
+            # turns), verified with CLI 2.1.299.
             cmd += ["--input-format", "stream-json"]
         return cmd
 
@@ -157,19 +179,71 @@ class ClaudeCLIBrain:
             return [sys.executable, self.claude_bin]
         return [self.claude_bin]
 
-    def _system_prompt_file(self, system: str) -> Path:
-        # One brain call at a time (BrainRunner), so one file is enough.
-        path = self.workspace_dir / ".kairo" / "system-prompt.md"
+    def _system_prompt_file(self, system: str, name: str = "system-prompt.md") -> Path:
+        # One brain call at a time (BrainRunner), so one file is enough; the warm process has its own.
+        path = self.workspace_dir / ".kairo" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(system, encoding="utf-8")
         return path
 
     def cancel(self) -> None:
-        """Stop the running call (kill switch). Safe to call when idle."""
+        """Stop the running call (kill switch, or a job making way for the owner). Safe when idle."""
         self._cancelled.set()
         proc = self._proc
         if proc is not None and proc.poll() is None:
             proc.kill()
+
+    # -- warm process (fix plan 30) ----------------------------------------
+
+    def warm_up(self, *, key: Any, session_id: str | None, system: str, tools: list[str], model: str | None = None,
+                origin: str = "owner_chat") -> bool:
+        """Start the CLI for the next turn now, so that turn doesn't wait for it to start (a call).
+        It waits on stdin; nothing reaches the model until run(warm=key) sends the turn. Returns
+        False when a matching warm process is already there."""
+        with self._warm_lock:
+            w = self._warm
+            if w is not None and w.usable(key, session_id):
+                return False
+            self._close_warm_locked()
+            cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=True, model=model,
+                                     prompt_file="system-prompt-warm.md")
+            self.workspace_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                proc = subprocess.Popen(cmd, cwd=self.workspace_dir, env=self.hook_env(origin), stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+            except OSError:
+                return False
+            self._warm = _Warm(proc, key, session_id, on_idle=self._close_if_idle)
+            return True
+
+    def warm_ready(self, key: Any, session_id: str | None) -> bool:
+        with self._warm_lock:
+            return self._warm is not None and self._warm.usable(key, session_id)
+
+    def close_warm(self) -> None:
+        with self._warm_lock:
+            self._close_warm_locked()
+
+    def _close_warm_locked(self) -> None:
+        w, self._warm = self._warm, None
+        if w is not None:
+            w.close()
+
+    def _close_if_idle(self, w: "_Warm") -> None:
+        with self._warm_lock:
+            if self._warm is w and not w.busy:
+                self._close_warm_locked()
+
+    def _take_warm(self, key: Any, session_id: str | None) -> "_Warm | None":
+        with self._warm_lock:
+            w = self._warm
+            if w is not None and w.proc.poll() is not None:
+                self._close_warm_locked()      # died while waiting
+                return None
+            if w is None or not w.usable(key, session_id):
+                return None
+            w.busy = True
+            return w
 
     # -- Brain protocol --------------------------------------------------
 
@@ -202,16 +276,39 @@ class ClaudeCLIBrain:
         origin: str = "owner_chat",
         images: list[tuple[bytes, str]] | None = None,
         model: str | None = None,
+        warm: Any = None,
     ) -> Iterator[BrainEvent]:
-        cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images), model=model)
-        if images:
-            content = [{"type": "document" if mt == "application/pdf" else "image",
-                        "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}
-                       for data, mt in images]
-            prompt = json.dumps({"type": "user", "message": {"role": "user", "content": content + [{"type": "text", "text": prompt}]}}) + "\n"
-        run_env = self.hook_env(origin)
+        """warm: the key of a warm process (warm_up) that may serve this turn. If there is none, or it
+        died before answering, the turn runs the normal way (a new process)."""
+        if warm is not None:
+            w = self._take_warm(warm, session_id)
+            if w is not None:
+                done = yield from self._run_warm(w, prompt, images)
+                if done:
+                    return
+        if session_id is not None:
+            # This turn continues the conversation without the warm process: the warm one's
+            # copy of it would be one turn behind, so it goes.
+            with self._warm_lock:
+                if self._warm is not None and self._warm.session_id == session_id:
+                    self._close_warm_locked()
+        yield from self._run_cold(prompt, session_id=session_id, system=system, tools=tools, origin=origin,
+                                  images=images, model=model)
+
+    def _start_turn(self) -> None:
         self._run_limited = False
         self._cancelled.clear()
+        self._streamed = False
+        self._t0 = time.monotonic()
+        self._timing = {}
+
+    def _run_cold(self, prompt: str, *, session_id, system, tools, origin, images, model) -> Iterator[BrainEvent]:
+        cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images), model=model)
+        if images:
+            prompt = _user_message(prompt, images)
+        run_env = self.hook_env(origin)
+        self._start_turn()
+        self._timing["warm"] = False
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.Popen(
@@ -273,6 +370,66 @@ class ClaudeCLIBrain:
             self._status = classify_error(msg, None)
             yield BrainEvent(EventKind.error, text=msg, status=self._status)
 
+    def _run_warm(self, w: "_Warm", prompt: str, images) -> Iterator[BrainEvent]:
+        """One turn on the warm process. Returns True when the turn is done (answered or failed after
+        it started), False when the process was already gone: then the caller runs it cold."""
+        self._start_turn()
+        self._timing["warm"] = True
+        proc = w.proc
+        timed_out = threading.Event()
+
+        def on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        self._proc = proc
+        timer = threading.Timer(self.timeout_s, on_timeout)
+        finished = started = False
+        try:
+            try:
+                proc.stdin.write(_user_message(prompt, images or []))
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                return False
+            timer.start()
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                for event in self._parse_line(line):
+                    started = True
+                    if event.kind is EventKind.session and event.session_id:
+                        w.session_id = event.session_id
+                    if event.kind in (EventKind.result, EventKind.error):
+                        finished = True
+                    yield event
+                if finished:
+                    break
+        finally:
+            timer.cancel()
+            self._proc = None
+            with self._warm_lock:
+                w.busy = False
+                if not finished or proc.poll() is not None:
+                    if self._warm is w:
+                        self._close_warm_locked()
+                    else:
+                        w.close()
+                else:
+                    w.touch()
+        if finished:
+            return True
+        if not started and not self._cancelled.is_set() and not timed_out.is_set():
+            return False      # gone before it answered: run it cold
+        if self._cancelled.is_set():
+            yield BrainEvent(EventKind.error, text="Stopped by the kill switch.", status=self._status, data={"cancelled": True})
+            return True
+        stderr = "".join(w.stderr).strip()
+        msg = "The Claude CLI timed out." if timed_out.is_set() else (stderr or "The Claude CLI stopped.")
+        self._status = classify_error(msg, None)
+        yield BrainEvent(EventKind.error, text=msg, status=self._status)
+        return True
+
     # -- parsing ---------------------------------------------------------
 
     def _parse_line(self, line: str) -> Iterator[BrainEvent]:
@@ -285,14 +442,28 @@ class ClaudeCLIBrain:
             return  # stray non-JSON output; ignore
         kind = msg.get("type")
         if kind == "system" and msg.get("subtype") == "init":
+            self._timing.setdefault("startup_ms", self._ms())
             servers = [x for x in (msg.get("mcp_servers") or []) if isinstance(x, dict)]
             if servers:
                 self.mcp_status = {str(x.get("name")): str(x.get("status")) for x in servers}
             yield BrainEvent(EventKind.session, session_id=msg.get("session_id"),
                              data={"mcp_servers": servers, "tools": msg.get("tools") or []})
+        elif kind == "stream_event":
+            ev = msg.get("event") or {}
+            if ev.get("type") == "message_start":
+                self._streamed = False
+            elif ev.get("type") == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
+                text = ev["delta"].get("text") or ""
+                if text:
+                    self._streamed = True
+                    self._timing.setdefault("first_text_ms", self._ms())
+                    yield BrainEvent(EventKind.text, text=text)
         elif kind == "assistant":
             for block in (msg.get("message") or {}).get("content") or []:
                 if block.get("type") == "text" and block.get("text"):
+                    if self._streamed:
+                        continue          # already sent, delta by delta
+                    self._timing.setdefault("first_text_ms", self._ms())
                     yield BrainEvent(EventKind.text, text=block["text"])
                 elif block.get("type") == "tool_use":
                     yield BrainEvent(EventKind.tool_use, data={"name": block.get("name"), "input": block.get("input")})
@@ -304,7 +475,7 @@ class ClaudeCLIBrain:
             yield BrainEvent(EventKind.usage, data=info)
         elif kind == "result":
             sid = msg.get("session_id")
-            usage = _usage(msg)
+            usage = {**_usage(msg), **self._timing}
             if msg.get("is_error") or msg.get("subtype") != "success":
                 text = str(msg.get("result") or msg.get("subtype") or "error")
                 self._status = classify_error(text, msg.get("api_error_status"))
@@ -313,6 +484,68 @@ class ClaudeCLIBrain:
                 self._status = BrainStatus.usage_limited if self._run_limited else BrainStatus.ok
                 yield BrainEvent(EventKind.result, text=str(msg.get("result") or ""), session_id=sid, status=self._status,
                                  data={"usage": usage})
+
+
+    def _ms(self) -> int:
+        return int((time.monotonic() - self._t0) * 1000)
+
+
+class _Warm:
+    """A CLI process waiting for its next turn on stdin (fix plan 30)."""
+
+    def __init__(self, proc: subprocess.Popen, key: Any, session_id: str | None, *, on_idle) -> None:
+        self.proc, self.key, self.session_id = proc, key, session_id
+        self.started = time.monotonic()
+        self.busy = False
+        self.stderr: deque[str] = deque(maxlen=40)
+        self._on_idle = on_idle
+        self._idle: threading.Timer | None = None
+        threading.Thread(target=self._drain, name="brain-warm-stderr", daemon=True).start()
+        self.touch()
+
+    def _drain(self) -> None:
+        try:
+            for line in self.proc.stderr:
+                self.stderr.append(line)
+        except (OSError, ValueError):
+            pass
+
+    def touch(self) -> None:
+        if self._idle is not None:
+            self._idle.cancel()
+        self._idle = threading.Timer(WARM_IDLE_S, self._on_idle, args=(self,))
+        self._idle.daemon = True
+        self._idle.start()
+
+    def usable(self, key: Any, session_id: str | None) -> bool:
+        return (not self.busy and self.key == key and self.session_id == session_id and self.proc.poll() is None
+                and time.monotonic() - self.started < WARM_MAX_AGE_S)
+
+    def close(self) -> None:
+        if self._idle is not None:
+            self._idle.cancel()
+        proc = self.proc
+
+        def stop() -> None:   # stdin closed = the CLI ends by itself (and stops its MCP server); else kill
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+        threading.Thread(target=stop, name="brain-warm-close", daemon=True).start()
+
+
+def _user_message(prompt: str, images: list[tuple[bytes, str]]) -> str:
+    """One stream-json user message line: the images (or PDFs) first, then the text."""
+    content = [{"type": "document" if mt == "application/pdf" else "image",
+                "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}
+               for data, mt in images]
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content + [{"type": "text", "text": prompt}]}}) + "\n"
 
 
 def _usage(msg: dict) -> dict:

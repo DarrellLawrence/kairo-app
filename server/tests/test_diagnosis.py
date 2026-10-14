@@ -45,6 +45,8 @@ def seed(settings) -> None:
                    error=f"refresh failed: token={GOOGLE_REFRESH}"),
             ModelRun(purpose="chat", model="sonnet", ok=True, duration_ms=4200, input_tokens=10, output_tokens=5),
             ModelRun(purpose="call", model="haiku", ok=False, duration_ms=900),
+            ModelRun(purpose="call", model="sonnet", ok=True, duration_ms=2100, startup_ms=40, first_text_ms=1300, warm=True),
+            ModelRun(purpose="chat", model="sonnet", ok=True, duration_ms=3900, startup_ms=2400, first_text_ms=3600, warm=False),
             ChatMessage(thread_id=t.id, role="owner", text="add task test tomorrow", created_at=now - dt.timedelta(seconds=7)),
             ChatMessage(thread_id=t.id, role="kairo", text="Done.", created_at=now),
             ChatMessage(thread_id=t.id, role="owner", text="(spoken, on a call) hi", created_at=now - dt.timedelta(seconds=3)),
@@ -84,12 +86,13 @@ def report(settings) -> str:
 def test_every_query_runs_on_the_real_schema(migrated):
     seed(migrated)
     text = report(migrated)
-    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5b", "G.5c", "Last self-test", "G.6", "Logs"):
+    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "Last self-test", "G.6", "Logs"):
         assert f"== {section}" in text, section
     assert "ERROR" not in text and "no such" not in text, text
     assert "  done | 1 | 1" in text and "  open | 1 | 0" in text          # approvals, from loop Send
     assert "reply | email | open | 1" in text
     assert "chat 1 | 7.0 | 7.0" in text and "call 1 | 3.0 | 3.0" in text
+    assert "call | warm | 1 | 40 | 40 | 1300 | 1300" in text and "chat | cold | 1 | 2400 | 2400 | 3600 | 3600" in text
     assert "briefs ok: 1" in text and "ok=True" in text
 
 

@@ -387,6 +387,9 @@ class ModelRun(SQLModel, table=True):
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None          # list price equivalent; the subscription covers it
+    startup_ms: int | None = None          # process start -> Claude ready (0019; cold start cost)
+    first_text_ms: int | None = None       # start -> first words of the answer
+    warm: bool | None = None               # a warm process answered (calls, fix plan 30)
 
 
 class ChatThread(SQLModel, table=True):

@@ -57,7 +57,8 @@ def record(engine, purpose: str, usage: dict | None, ok: bool) -> None:
     u = usage or {}
     with Session(engine) as s:
         s.add(ModelRun(purpose=purpose[:40], model=(u.get("model") or None), ok=ok, duration_ms=u.get("duration_ms"),
-                       input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"), cost_usd=u.get("cost_usd")))
+                       input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"), cost_usd=u.get("cost_usd"),
+                       startup_ms=u.get("startup_ms"), first_text_ms=u.get("first_text_ms"), warm=u.get("warm")))
         s.commit()
 
 

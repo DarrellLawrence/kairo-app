@@ -169,6 +169,12 @@ async function play(buf, { signal, call = false, keepMic = false, viaTap = false
    Throws NeedTap when iOS didn't let it play: show "No sound? Tap to play" -> playLastAgain(). */
 export async function speak(text, { signal, call = false, keepMic = false } = {}) {
   const t0 = performance.now()
+  const buf = await fetchSpeech(text, signal)
+  last = { buf: buf.slice(0), call }
+  return play(buf, { signal, call, keepMic, fetchMs: Math.round(performance.now() - t0) })
+}
+
+async function fetchSpeech(text, signal) {
   const res = await fetch('/api/voice/speak', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }), signal,
   })
@@ -177,9 +183,49 @@ export async function speak(text, { signal, call = false, keepMic = false } = {}
     clientLog('audio.speak_failed', { status: res.status, detail: String(detail).slice(0, 160) })
     throw new Error(detail)
   }
-  const buf = await res.arrayBuffer()
-  last = { buf: buf.slice(0), call }
-  return play(buf, { signal, call, keepMic, fetchMs: Math.round(performance.now() - t0) })
+  return res.arrayBuffer()
+}
+
+/* Fix plan 29: speak an answer while it is still being written. push() each sentence as it
+   comes; the next one's audio is made on the PC while the current one plays. done resolves once
+   everything pushed before end() was spoken, or at once on abort. onNeedTap(): iOS didn't play a
+   sentence; return a promise that resolves after "Tap to play" replayed it, and the rest follows. */
+export function speechQueue({ signal, call = false, onNeedTap } = {}) {
+  const items = []
+  let ended = false
+  let wake = null
+  const poke = () => { const w = wake; wake = null; w?.() }
+  signal?.addEventListener('abort', poke)
+  const push = (text) => {
+    if (!text || ended || signal?.aborted) return
+    const t0 = performance.now()
+    const item = fetchSpeech(text, signal).then((buf) => ({ buf, fetchMs: Math.round(performance.now() - t0) }))
+    item.catch(() => {})   // awaited in order below; an aborted one is never awaited
+    items.push(item)
+    poke()
+  }
+  const end = () => { ended = true; poke() }
+  const done = (async () => {
+    let i = 0
+    for (;;) {
+      if (signal?.aborted) return
+      if (i >= items.length) {
+        if (ended) return
+        await new Promise((resolve) => { wake = resolve })
+        continue
+      }
+      const { buf, fetchMs } = await items[i++]
+      if (signal?.aborted) return
+      last = { buf: buf.slice(0), call }
+      try {
+        await play(buf, { signal, call, fetchMs })
+      } catch (e) {
+        if (e.name !== 'NeedTap' || !onNeedTap) throw e
+        await onNeedTap()
+      }
+    }
+  })()
+  return { push, end, done }
 }
 
 /* "No sound? Tap to play": inside the tap, through the speaker, without the mic. On a call that

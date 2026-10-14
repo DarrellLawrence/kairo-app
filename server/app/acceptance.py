@@ -91,6 +91,9 @@ SPECS = [
          "no money tool; Christmas plan from 1 November with wishlists and the gift budget.", "E"),
     Spec(28, "People, faith, style", "auto", "Gift ideas start from the wishlist; one faith line in the brief only when set; "
          "style inside its budget, second-hand first.", "E"),
+    Spec(29, "Lag", "auto", "With the real Claude: the answer arrives in pieces while it is written; a job's call starts "
+                            "no tool server; a call turn finds Claude already started (warm) and starts faster than a "
+                            "cold one. The numbers are the cold start cost.", "F23"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -122,6 +125,7 @@ class Context:
     coach: object = None                                   # coach.Coacher
     pa: object = None                                      # pa.PA
     share: Callable[[bytes, str, str], int] | None = None  # share a file like the + sheet does: (data, name, type) -> capture id
+    runner: object = None                                  # chat.BrainRunner (fix plan 26-30: lag)
 
 
 class RecordingExecutor:
@@ -663,10 +667,54 @@ def _utc(ts: dt.datetime) -> dt.datetime:
     return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
 
 
+LAG_PROMPT = "Count from one to twelve in words, as one plain sentence."
+
+
+async def _lag_turn(runner, *, warm=None) -> dict:
+    """One small Haiku turn without tools: how it streamed and what it took."""
+    texts, init, usage, error = [], None, {}, None
+    async for ev in runner.stream(LAG_PROMPT, session_id=None, system=f"{MARK} lag check. Plain text, no tools.", tools=[],
+                                  origin="job", model="haiku", purpose="acceptance", warm=warm):
+        if ev.kind.value == "session":
+            init = ev.data
+        elif ev.kind.value == "text":
+            texts.append(ev.text)
+        elif ev.kind.value in ("result", "error"):
+            usage = (ev.data or {}).get("usage") or {}
+            error = ev.text if ev.kind.value == "error" else None
+    return {"pieces": len(texts), "servers": (init or {}).get("mcp_servers") or [], "usage": usage, "error": error}
+
+
+async def t_lag(ctx: Context) -> dict:
+    brain = getattr(ctx.runner, "brain", None)
+    if brain is None or not hasattr(brain, "warm_up"):
+        return _result(False, {"Claude CLI brain": False}, "no Claude CLI brain")
+    cold = await _lag_turn(ctx.runner)
+    key = ("acceptance-lag",)
+    await asyncio.to_thread(brain.warm_up, key=key, session_id=None, system=f"{MARK} lag check. Plain text, no tools.",
+                            tools=[], model="haiku", origin="job")
+    await asyncio.sleep(3)             # like a call: Claude starts while the owner is still talking
+    try:
+        warm = await _lag_turn(ctx.runner, warm=key)
+    finally:
+        brain.close_warm()
+    cu, wu = cold["usage"], warm["usage"]
+    checks = {"the answer streams in pieces": cold["pieces"] >= 2,
+              "a job's call starts no tool server": cold["servers"] == [],
+              "the call turn ran warm": wu.get("warm") is True,
+              "warm starts faster than cold": None not in (wu.get("startup_ms"), cu.get("startup_ms"))
+                                              and wu["startup_ms"] < cu["startup_ms"]}
+    detail = (f"cold: start {cu.get('startup_ms')} ms, first words {cu.get('first_text_ms')} ms; "
+              f"warm: start {wu.get('startup_ms')} ms, first words {wu.get('first_text_ms')} ms")
+    err = cold["error"] or warm["error"]
+    return _result(err is None, checks, err or detail)
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
     20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
+    29: t_lag,
 }
 
 

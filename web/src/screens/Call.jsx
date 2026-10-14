@@ -8,8 +8,10 @@ import { api } from '../api.js'
 import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
+import { takeSentences } from '../sentences.js'
 import {
-  holdMic, listenLevel, playLastAgain, releaseMic, releaseWhileSpeaking, speak, speakingLevel, startRecording, stopSpeaking, transcribe, unlockAudio,
+  holdMic, listenLevel, playLastAgain, releaseMic, releaseWhileSpeaking, speak, speakingLevel, speechQueue, startRecording, stopSpeaking,
+  transcribe, unlockAudio,
 } from '../voice.js'
 
 const BYE = /^(bye|goodbye|that'?s all|thanks,? bye|tsch(ü|ue)ss|ciao|adieu|auf wiederh|das war'?s|danke,? das war'?s)\b/i
@@ -129,25 +131,89 @@ export default function Call({ callId: initialId, onClose }) {
     const l = live.current
     l.monitor?.cancel()
     const abort = new AbortController()
-    l.abort = abort
+    const answer = l.abort   // pausing or hanging up still stops the rest of the answer too
+    l.abort = { abort: () => { abort.abort(); answer?.abort() } }
     const goOn = () => { const go = l.afterTap; l.afterTap = null; go?.() }
     l.replay = playLastAgain({ signal: abort.signal })
       .then(goOn, (e) => { if (e.name === 'NeedTap') setNeedTap(true); else goOn() })
       .finally(() => { l.replay = null })
   }
 
-  const ask = (text) => new Promise((resolve) => {
-    const ws = live.current.ws
-    const onMsg = (ev) => {
-      const m = JSON.parse(ev.data)
-      if (m.type === 'done' || m.type === 'error') {
-        ws.removeEventListener('message', onMsg)
-        resolve(m.type === 'done' ? m.text : (m.message || 'Sorry, something went wrong.'))
+  // One turn at a time on the call's line: a turn that is still being written (you talked over
+  // Kairo) finishes before the next is sent, so each answer's words reach its own listener.
+  const ask = (text, onDelta) => {
+    const l = live.current
+    const mine = (l.turn || Promise.resolve()).then(() => new Promise((resolve) => {
+      const ws = l.ws
+      const onMsg = (ev) => {
+        const m = JSON.parse(ev.data)
+        if (m.type === 'delta') onDelta?.(m.text)
+        else if (m.type === 'done' || m.type === 'error') {
+          ws.removeEventListener('message', onMsg)
+          resolve(m.type === 'done' ? { text: m.text } : { text: m.message || 'Sorry, something went wrong.', error: true })
+        }
       }
+      ws.addEventListener('message', onMsg)
+      ws.send(JSON.stringify({ type: 'message', text: `(spoken, on a call) ${text}` }))
+    }))
+    l.turn = mine.catch(() => {})
+    return mine
+  }
+
+  // Fix plan 29: Kairo starts talking after its first sentence while the rest is still being written.
+  const reply = async (heard) => {
+    const l = live.current
+    const abort = new AbortController()
+    l.abort = abort
+    l.interrupted = false
+    let spoken = ''
+    let buf = ''
+    let at = -1
+    const caption = (text) => setLog((x) => {
+      if (at >= 0 && at < x.length) { const y = x.slice(); y[at] = { who: 'kairo', text }; return y }
+      at = x.length
+      return [...x, { who: 'kairo', text }]
+    })
+    const q = speechQueue({
+      signal: abort.signal, call: true,
+      onNeedTap: () => { stopMonitor(); setNeedTap(true); return new Promise((resolve) => { l.afterTap = resolve }) },
+    })
+    const out = (sentence) => {
+      if (!sentence || abort.signal.aborted || !l.on || l.phase === 'paused') return
+      if (!spoken) {
+        set('speaking')
+        if (!releaseWhileSpeaking()) watchForBargeIn(abort)   // mic paused while Kairo talks: tap the orb instead
+      }
+      spoken = spoken ? `${spoken} ${sentence}` : sentence
+      caption(spoken)
+      q.push(sentence)
     }
-    ws.addEventListener('message', onMsg)
-    ws.send(JSON.stringify({ type: 'message', text: `(spoken, on a call) ${text}` }))
-  })
+    const writing = ask(heard, (delta) => {
+      buf += delta
+      const r = takeSentences(buf, { first: !spoken })
+      buf = r.rest
+      r.sentences.forEach(out)
+    })
+    // Talked over, paused or hung up: stop now, not when the answer is finished.
+    const stopped = new Promise((resolve) => abort.signal.addEventListener('abort', () => resolve(null), { once: true }))
+    const answer = await Promise.race([writing, stopped])
+    if (answer) {
+      if (answer.error) out(answer.text)
+      else if (!spoken) out(answer.text.trim() || buf.trim())   // nothing came in pieces: the whole answer
+      else out(buf.trim())
+      if (!spoken && l.on) caption(answer.text)   // paused meanwhile: the answer waits in the captions
+    } else {
+      writing.then((a) => { if (!spoken && l.on && l.phase === 'paused') caption(a.text) })
+    }
+    q.end()
+    try {
+      await q.done
+    } catch (e) {
+      if (e.name !== 'AbortError') setErr(e.message)
+    }
+    while (l.replay) await l.replay   // tapped "No sound?": let the replay finish first
+    stopMonitor()
+  }
 
   const listen = useCallback(async () => {
     const l = live.current
@@ -172,9 +238,8 @@ export default function Call({ callId: initialId, onClose }) {
           live.current.empty = 0
           setLog((x) => [...x, { who: 'me', text: heard }])
           if (BYE.test(heard)) { await say('Bye!'); hangup(true); return }
-          const reply = await ask(heard)
-          await say(reply)
-          if (live.current.phase === 'speaking' || live.current.interrupted) listen()
+          await reply(heard)
+          if (['speaking', 'thinking'].includes(live.current.phase) || live.current.interrupted) listen()
         },
       })
     } catch {

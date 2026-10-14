@@ -1,15 +1,20 @@
 """Chat: threads, history and streaming replies from the brain.
 
 One brain call at a time (KICKOFF 7): every call goes through BrainRunner,
-which holds a lock for the whole run.
+which holds a lock for the whole run. The owner goes first (fix plan 28): chat,
+calls and voice notes get the brain before any waiting job, and a job's call
+that is running when the owner talks is stopped and redone afterwards (jobs have
+no tools, so a stopped job call changed nothing). A job holds the brain for one
+call at a time, never across calls.
 """
 
 from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import contextmanager
 from datetime import datetime
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 from sqlmodel import Session, select, update
 
@@ -19,10 +24,18 @@ from .profile import Profile
 
 
 
+# A job call is stopped for the owner at most this often; after that it finishes first.
+MAX_JOB_PREEMPTS = 2
+
+
 class BrainRunner:
     def __init__(self, brain: Brain) -> None:
         self.brain = brain
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
+        self._held_by: str | None = None      # "owner" | "job"
+        self._owners_waiting = 0
+        self._job_preemptible = False
+        self._job_preempted = False
         # The run in progress (one at a time): who started it and for which thread.
         # Tool calls arriving through mcp_kairo belong to this run.
         self.current_origin: str | None = None
@@ -38,16 +51,53 @@ class BrainRunner:
 
     @property
     def busy(self) -> bool:
-        return self._lock.locked()
+        return self._held_by is not None
 
-    def cancel(self) -> None:
+    @contextmanager
+    def hold(self, *, owner: bool, preemptible: bool = False) -> Iterator[None]:
+        """The brain, one call at a time. owner=True: before every waiting job, and a running job
+        call that is preemptible gets stopped (re-checked every half second, so a call that was
+        just starting is caught too). Not re-entrant."""
+        with self._cond:
+            if owner:
+                self._owners_waiting += 1
+            try:
+                while self._held_by is not None or (not owner and self._owners_waiting):
+                    if owner and self._held_by == "job" and self._job_preemptible:
+                        self._job_preempted = True
+                        self._stop_brain()
+                    self._cond.wait(0.5)
+                self._held_by = "owner" if owner else "job"
+                self._job_preemptible = preemptible and not owner
+                self._job_preempted = False
+            finally:
+                if owner:
+                    self._owners_waiting -= 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._held_by = None
+                self._job_preemptible = False
+                self._cond.notify_all()
+
+    def _stop_brain(self) -> None:
         cancel = getattr(self.brain, "cancel", None)
         if cancel is not None:
             cancel()
 
+    def cancel(self) -> None:
+        """Kill switch: stop the running call and any warm process."""
+        self._stop_brain()
+        close_warm = getattr(self.brain, "close_warm", None)
+        if close_warm is not None:
+            close_warm()
+
     async def stream(self, prompt: str, *, session_id: str | None, system: str, tools: list[str],
                      origin: str = "owner_chat", thread_id: int | None = None, model: str | None = None,
-                     purpose: str = "chat") -> AsyncIterator[BrainEvent]:
+                     purpose: str = "chat", warm: Any = None) -> AsyncIterator[BrainEvent]:
+        """An owner turn (chat, call, voice note, self-test): first in line for the brain.
+        warm: a warm process key (calls, fix plan 30), see ClaudeCLIBrain.warm_up."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[BrainEvent | None] = asyncio.Queue()
 
@@ -58,10 +108,12 @@ class BrainRunner:
                 pass  # the caller's event loop is gone (shutdown); finish the run anyway
 
         def work() -> None:
-            with self._lock:
+            with self.hold(owner=True):
                 self.current_origin, self.current_thread_id = origin, thread_id
                 try:
                     kwargs = {"model": model} if model else {}
+                    if warm is not None:
+                        kwargs["warm"] = warm
                     for event in self.brain.run(prompt, session_id=session_id, system=system, tools=tools, origin=origin, **kwargs):
                         self._note(purpose, event)
                         post(event)
@@ -90,28 +142,43 @@ class AskResult:
 def ask_sync(runner: BrainRunner, prompt: str, *, system: str, origin: str = "job",
              images: list[tuple[bytes, str]] | None = None, model: str | None = None, purpose: str = "job") -> AskResult:
     """One brain run for a job, blocking (jobs run in scheduler threads). No
-    tools: jobs give the model the data and get JSON back; the backend acts."""
-    with runner._lock:
-        runner.current_origin, runner.current_thread_id = origin, None
-        parts: list[str] = []
-        final, status, error = None, "ok", ""
-        try:
-            kwargs = {"images": images} if images else {}
-            if model:
-                kwargs["model"] = model
-            for ev in runner.brain.run(prompt, session_id=None, system=system, tools=[], origin=origin, **kwargs):
+    tools: jobs give the model the data and get JSON back; the backend acts.
+    Waits while the owner talks; stopped for the owner, it runs again after."""
+    for attempt in range(MAX_JOB_PREEMPTS + 1):
+        with runner.hold(owner=False, preemptible=attempt < MAX_JOB_PREEMPTS):
+            result = _ask_once(runner, prompt, system=system, origin=origin, images=images, model=model, purpose=purpose)
+            preempted = runner._job_preempted
+        if not (preempted and result is None):
+            break
+    return result or AskResult("", "unavailable", "Stopped for the owner too often.")
+
+
+def _ask_once(runner: BrainRunner, prompt: str, *, system, origin, images, model, purpose) -> AskResult | None:
+    """None: stopped before it finished (the owner went first)."""
+    runner.current_origin, runner.current_thread_id = origin, None
+    parts: list[str] = []
+    final, status, error, cancelled = None, "ok", "", False
+    try:
+        kwargs = {"images": images} if images else {}
+        if model:
+            kwargs["model"] = model
+        for ev in runner.brain.run(prompt, session_id=None, system=system, tools=[], origin=origin, **kwargs):
+            if ev.kind == EventKind.text:
+                parts.append(ev.text)
+            elif ev.kind == EventKind.result:
+                final = ev.text
+            elif ev.kind == EventKind.error:
+                error = ev.text or "brain error"
+                status = (ev.status.value if ev.status else "unavailable")
+                cancelled = bool(ev.data.get("cancelled"))
+            if not (cancelled and runner._job_preempted):
                 runner._note(purpose, ev)
-                if ev.kind == EventKind.text:
-                    parts.append(ev.text)
-                elif ev.kind == EventKind.result:
-                    final = ev.text
-                elif ev.kind == EventKind.error:
-                    error = ev.text or "brain error"
-                    status = (ev.status.value if ev.status else "unavailable")
-        except Exception as exc:  # adapter bug: the job fails, Kairo keeps running
-            error, status = f"Brain error: {exc}", "unavailable"
-        finally:
-            runner.current_origin = None
+    except Exception as exc:  # adapter bug: the job fails, Kairo keeps running
+        error, status = f"Brain error: {exc}", "unavailable"
+    finally:
+        runner.current_origin = None
+    if final is None and cancelled and runner._job_preempted:
+        return None
     return AskResult(final if final is not None else "".join(parts), status, error)
 
 

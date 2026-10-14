@@ -96,3 +96,50 @@ def test_every_message_gets_its_own_answer(migrated, tmp_path, monkeypatch):
     system = second["argv"][second["argv"].index("--system-prompt-file") + 1]
     text = open(system, encoding="utf-8").read()
     assert "Morning brief" not in text and "Answer first" in text and "Right now:" in text
+
+
+def test_a_call_runs_on_a_warm_claude_process(migrated, tmp_path, monkeypatch):
+    """Fix plan 30: Claude is started when the call starts and serves every turn of it; hanging up
+    closes it."""
+    import json
+    import time
+
+    rec = tmp_path / "rec.json"
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
+    with TestClient(create_app(migrated)) as client:
+        brain = client.app.state.runner.brain
+        call = client.post("/api/voice/calls", json={"outgoing": True}).json()
+        deadline = time.monotonic() + 15
+        while brain._warm is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert brain._warm is not None
+        with client.websocket_connect("/ws/chat") as ws:
+            one = converse(ws, "(spoken, on a call) one")
+            two = converse(ws, "(spoken, on a call) two")
+        assert one[-1]["text"] == "echo: (spoken, on a call) one"
+        assert two[-1]["text"] == "echo: (spoken, on a call) two"
+        data = json.loads(rec.read_text())
+        assert data["turns"] == ["(spoken, on a call) one", "(spoken, on a call) two"]   # one process
+        assert "--input-format" in data["argv"]
+        client.post(f"/api/voice/calls/{call['id']}/end")
+        assert brain._warm is None
+
+
+def test_typing_during_a_call_retires_the_warm_process(migrated):
+    """A typed message continues the conversation without the warm process, which would then be a
+    turn behind: it goes, and the call's next turn starts a fresh one."""
+    import time
+
+    with TestClient(create_app(migrated)) as client:
+        brain = client.app.state.runner.brain
+        client.post("/api/voice/calls", json={"outgoing": True})
+        deadline = time.monotonic() + 15
+        while brain._warm is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        with client.websocket_connect("/ws/chat") as ws:
+            converse(ws, "(spoken, on a call) one")
+            old = brain._warm
+            assert old is not None and old.session_id
+            converse(ws, "typed meanwhile")
+            assert brain._warm is not old
+            old.proc.wait(timeout=10)

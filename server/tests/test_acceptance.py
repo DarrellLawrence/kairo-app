@@ -183,7 +183,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 29))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 30))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable
@@ -220,3 +220,32 @@ def test_broken_copies_turn_the_selftest_red(migrated):
     assert broken["tool server"]["ok"] is False and "tool server" in broken["tool server"]["reason"]
     assert broken["voice model"]["ok"] is False
     assert (migrated.workspace_dir / ".mcp.json").read_text().count("mcp_kairo_missing") == 0   # live config untouched
+
+
+# ---------------------------------------------------------------- 29 Lag
+
+def _cli_runner(tmp_path):
+    import os
+
+    from app.brain.claude_cli import ClaudeCLIBrain
+    from app.chat import BrainRunner
+    from tests.conftest import FAKE_CLAUDE
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
+    return BrainRunner(ClaudeCLIBrain(claude_bin=str(FAKE_CLAUDE), workspace_dir=tmp_path / "ws", timeout_s=20, env=env))
+
+
+def test_lag_passes_streaming_warm_and_no_tool_server(migrated, tmp_path):
+    ctx = ctx_for(migrated)
+    ctx.runner = _cli_runner(tmp_path)
+    r = run(acceptance.t_lag(ctx))
+    assert r["ok"], r
+    assert "cold: start" in r["detail"] and "warm: start" in r["detail"]
+    assert ctx.runner.brain._warm is None                    # closed afterwards
+
+
+def test_lag_fails_when_the_warm_process_is_not_used(migrated, tmp_path):
+    ctx = ctx_for(migrated)
+    ctx.runner = _cli_runner(tmp_path)
+    ctx.runner.brain.warm_up = lambda **kw: False            # broken: nothing is started ahead
+    r = run(acceptance.t_lag(ctx))
+    assert not r["ok"] and r["checks"]["the call turn ran warm"] is False
