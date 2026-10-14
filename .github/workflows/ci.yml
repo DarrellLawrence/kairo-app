@@ -65,6 +65,21 @@ jobs:
       - run: python -m pytest -o addopts="" tests/test_voice.py -s
         working-directory: server
 
+  # The school portal's read-only rule in a real browser (Chromium) against a fake OLAT.
+  browser:
+    runs-on: ubuntu-24.04
+    env:
+      KAIRO_BROWSER_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r server/requirements-dev.txt -r server/requirements-browser.txt
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest -o addopts="" tests/test_portal.py tests/test_portal_browser.py -s
+        working-directory: server
+
   web:
     runs-on: ubuntu-24.04
     steps:
@@ -87,6 +102,7 @@ jobs:
     runs-on: windows-latest
     env:
       KAIRO_SKIP_VOICE: "1"   # 2 GB of speech packages; the voice job tests them on Linux
+      KAIRO_SKIP_BROWSER: "1" # Chromium; the browser job tests it on Linux
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

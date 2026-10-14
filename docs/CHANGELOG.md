@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-14 — build: school portal (OLAT), read-only (owner's request)
+- More -> Settings -> Logins: OLAT username and password, typed in the app only, encrypted on the PC (Windows DPAPI, bound to kairo-svc). Never in the repo, chat, logs, database or an API answer. The model has no tool for it.
+- Daily at 06:05 Kairo's own browser (Playwright + Chromium, installed into tools\browser) logs in and reads: course folders, pages, announcements, calendar. New files go to vault `40 School/OLAT/<course>/`, new material and dates into the brief.
+- Hard rule, enforced three ways and tested (also in a real browser in CI): never opens tests, quizzes, assignments, surveys, forums or enrollment; never clicks or fills anything but the login; after login the browser aborts every request that isn't a page load, any other site and any test/quiz/assignment address.
+- Timetable: found on OLAT, or from a photo/PDF you send once (Kairo asks if it can't find it). Becomes one weekly FIXED "School" block per school day until the semester ends. Calendar holds may now repeat weekly, only with an end within a year (gate-tested).
+
 ## 2026-10-14 — fix from real use: open loops only for real people
 - A mail becomes a loop only when a real person waits on your own answer. Codes, security alerts, receipts, orders, newsletters, promos, no-reply and test mails never do (rules first, then one Haiku call for the rest; unsure = no loop, one line in the brief).
 - Kairo learns from your taps: Done = a person, "Not a real reply" = never from that sender again, dropped twice = muted.

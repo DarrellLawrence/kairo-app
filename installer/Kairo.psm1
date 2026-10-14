@@ -356,6 +356,39 @@ function Install-Voice($P, [string]$ReleaseDir) {
     }
 }
 
+# Kairo's own headless browser (Playwright + Chromium, about 300 MB) for reading the
+# school portal read-only. Same pattern as voice: tools\browser, shared by all releases,
+# reinstalled only when requirements-browser.txt changes. Never a reason to fail.
+function Install-Browser($P, [string]$ReleaseDir) {
+    if ($env:KAIRO_SKIP_BROWSER -eq '1') { Write-Note 'Browser skipped (KAIRO_SKIP_BROWSER=1).'; return }
+    $req = Join-Path $ReleaseDir 'server\requirements-browser.txt'
+    if (-not (Test-Path $req)) { return }
+    $site = Join-Path $P.Tools 'browser'
+    $stamp = Join-Path $site '.requirements-sha256'
+    $hash = (Get-FileHash -Algorithm SHA256 $req).Hash
+    $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+    try {
+        if (-not ((Test-Path $stamp) -and ((Get-Content -Raw $stamp).Trim() -eq $hash))) {
+            Write-Note 'Installing Kairo''s browser (for the school portal, read-only, once)...'
+            $new = "$site.new"
+            if (Test-Path $new) { Remove-Item -Recurse -Force $new }
+            Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
+                                 '--target', $new, '-r', $req) 'Installing browser packages'
+            $old = $env:PYTHONPATH
+            $env:PYTHONPATH = $new
+            $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $new 'ms-playwright'
+            try { Invoke-Checked $py @('-m', 'playwright', 'install', 'chromium') 'Downloading Chromium' }
+            finally { $env:PYTHONPATH = $old; Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue }
+            Set-Content -Path (Join-Path $new '.requirements-sha256') -Value $hash -Encoding ASCII
+            if (Test-Path $site) { Remove-Item -Recurse -Force $site }
+            Move-Item $new $site
+        }
+        Write-Ok 'Browser ready (school portal, read-only)'
+    } catch {
+        Write-Warn "Browser not set up: $($_.Exception.Message.Trim()). Kairo works without it; the next update tries again."
+    }
+}
+
 # Highest migration revision in a release (files are named NNNN_slug.py; linear history).
 function Get-HeadRevision([string]$ReleaseDir) {
     $dir = Join-Path $ReleaseDir 'server\migrations\versions'
@@ -561,6 +594,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
 
     $newDir = Install-ReleaseFiles $P $SourceApp $version $Python
     Install-Voice $P $newDir
+    Install-Browser $P $newDir
     Initialize-Config $P $SourceApp
     $backup = Backup-Database $P "before-$version" $Python
 

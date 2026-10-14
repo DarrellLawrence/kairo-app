@@ -1,0 +1,3 @@
+# Kairo's own headless browser (KICKOFF: web browsing), read-only. Installed by the
+# installer into C:\Kairo\tools\browser with Chromium; the app runs without it.
+playwright==1.55.0

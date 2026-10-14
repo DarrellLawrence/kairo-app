@@ -114,6 +114,30 @@ def test_hold_that_could_notify_or_leave_own_calendar_is_denied(gate, extra):
     assert d.reason
 
 
+@pytest.mark.parametrize("rule", [
+    "RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20270131T235959Z",          # timetable: one school day, until semester end
+    "RRULE:FREQ=WEEKLY;UNTIL=20270131",
+])
+def test_weekly_hold_with_an_end_is_executed(gate, rule):
+    d = gate.decide(*propose("calendar.create_hold", {**HOLD, "recurrence": [rule], "time_zone": "Europe/Zurich"}), ctx())
+    assert (d.verdict, d.action) == ("execute", "calendar.create_hold")
+
+
+@pytest.mark.parametrize("extra", [
+    {"recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO"], "time_zone": "Europe/Zurich"},                 # never ending
+    {"recurrence": ["RRULE:FREQ=DAILY;UNTIL=20270131"], "time_zone": "Europe/Zurich"},           # weekly only
+    {"recurrence": ["RRULE:FREQ=WEEKLY;COUNT=500"], "time_zone": "Europe/Zurich"},
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131", "RDATE:20270201"], "time_zone": "Europe/Zurich"},
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131;X-ATTENDEE=a@example.com"], "time_zone": "Europe/Zurich"},
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20290131"], "time_zone": "Europe/Zurich"},           # more than a year
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131"]},                                          # needs the zone
+    {"recurrence": ["RRULE:FREQ=WEEKLY;UNTIL=20270131"], "time_zone": "Not/AZone"},
+])
+def test_recurring_hold_must_be_weekly_with_an_end_within_a_year(gate, extra):
+    d = gate.decide(*propose("calendar.create_hold", {**HOLD, **extra}), ctx())
+    assert d.verdict == "deny"
+
+
 def test_hold_must_end_after_start(gate):
     d = gate.decide(*propose("calendar.create_hold", {**HOLD, "end": HOLD["start"]}), ctx())
     assert d.verdict == "deny"

@@ -76,6 +76,9 @@ class Executor:
         for key in ("description", "location", "reminders", "colorId", "transparency"):
             if a.get(key) is not None:
                 event[key] = a[key]
+        if a.get("recurrence"):   # weekly with an end (checked by the schema); Google needs the zone name
+            event["recurrence"] = list(a["recurrence"])
+            event["start"]["timeZone"] = event["end"]["timeZone"] = a["time_zone"]
         created = g.request("POST", "/calendar/v3/calendars/primary/events", params={"sendUpdates": "none"}, json_body=event)
         return {"event_id": created.get("id"), "summary": event["summary"]}
 

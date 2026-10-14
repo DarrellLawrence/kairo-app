@@ -52,7 +52,7 @@ rules:
     calendar: primary
     title_prefix: "[Kairo]"
     deny_if_present: [attendees, guests, sendUpdates, sendNotifications, conferenceData, guestsCanInviteOthers, guestsCanModify]
-    allow_only_fields: [summary, description, start, end, location, reminders, colorId, transparency]
+    allow_only_fields: [summary, description, start, end, location, reminders, colorId, transparency, recurrence, time_zone]   # recurrence: weekly with an end only (actions.py)
 
 limits:
   approvals_open_max: 10

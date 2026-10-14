@@ -15,3 +15,6 @@ places:
   - { name: School, kind: school, station: Schooltown }             # Vocational School, Berufsschule
   - { name: Work (Employer), kind: work, station: Worktown }   # check: Workstreet; until the job changes
   - { name: Work (Employer 2), kind: work, station: Worktown }   # from next year, 2 years: start date to set
+# School portal: read-only (never tests, quizzes, assignments; never posts). Username and
+# password are entered in the app (More -> Logins) and stored encrypted on the PC only.
+school_portal: { kind: olat, url: "https://olat.school.example", class: class-x }

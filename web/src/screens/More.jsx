@@ -588,6 +588,82 @@ function PrefsBlock() {
   )
 }
 
+function LoginsPage() {
+  const toast = useToast()
+  const [rows, setRows] = useState(null)
+  const [edit, setEdit] = useState(null)
+  const [busy, setBusy] = useState('')
+  const load = useCallback(() => api('/api/logins').then(setRows).catch(() => setRows([])), [])
+  useEffect(() => { load() }, [load])
+  const save = async () => {
+    setBusy('save')
+    try {
+      await api(`/api/logins/${edit.site}`, { method: 'PUT', body: { username: edit.username, password: edit.password } })
+      setEdit(null); toast.show({ text: 'Saved, encrypted on your PC.' }); load()
+    } catch (e) { toast.show({ text: e.message }) } finally { setBusy('') }
+  }
+  const remove = async (site) => { await api(`/api/logins/${site}`, { method: 'DELETE' }); setEdit(null); load() }
+  const check = async (site) => {
+    setBusy('check')
+    const before = rows.find((x) => x.site === site)?.report?.at
+    try {
+      await api(`/api/jobs/${site}/run`, { method: 'POST', body: {} })
+      toast.show({ text: 'Checking OLAT (read-only). Takes a minute or two.', duration: 4000 })
+      for (let i = 0; i < 40; i++) {   // up to ~3 minutes
+        await new Promise((r) => setTimeout(r, 4500))
+        const next = await api('/api/logins').catch(() => null)
+        if (next && next.find((x) => x.site === site)?.report?.at !== before) { setRows(next); break }
+      }
+    } catch (e) { toast.show({ text: e.message, duration: 6000 }) } finally { setBusy('') }
+  }
+  if (!rows) return <Page title="Logins"><SkeletonCard lines={3} /></Page>
+  return (
+    <Page title="Logins" onRefresh={load}>
+      <p className="k-hello">Sites Kairo reads for you, read-only. Your password is typed here only (never in chat), encrypted on your PC and never shown again.</p>
+      {rows.map((r) => {
+        const rep = r.report
+        return (
+          <div key={r.site}>
+            <List>
+              <ListRow icon={<IconKey />} title={r.label} chevron
+                subtitle={r.password_set ? `${r.username} · ${r.encrypted ? 'encrypted on the PC' : 'saved (dev)'}` : 'Not set up · tap to add'}
+                onClick={() => setEdit({ site: r.site, label: r.label, username: r.username || '', password: '' })} />
+              {r.password_set && (
+                <ListRow icon={<IconRefresh />} title={busy === 'check' ? 'Checking…' : 'Check now'} subtitle={r.browser_installed ? 'Logs in read-only and looks for new material' : 'Browser not installed yet (comes with the next update)'}
+                  onClick={busy || !r.browser_installed ? undefined : () => check(r.site)} />
+              )}
+            </List>
+            {rep && (
+              <p className="k-muted k-small k-pad selectable" style={{ whiteSpace: 'pre-wrap' }}>
+                {rep.error ? `Last check: ${rep.error}` : [
+                  `Last check ${parseTs(rep.at).toLocaleString()}: ${rep.courses} courses, ${rep.new_files} new files, ${rep.new_pages} new or changed pages.`,
+                  `Read: ${Object.entries(rep.nodes || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'nothing'}.`,
+                  `Never opened (tests, tasks, enrollment…): ${Object.entries(rep.skipped || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}.`,
+                  `Timetable: ${rep.timetable?.found ? rep.timetable.file : 'not found in OLAT'}.`,
+                  ...(rep.errors || []).slice(0, 3),
+                ].join('\n')}
+              </p>
+            )}
+          </div>
+        )
+      })}
+      <Sheet open={!!edit} onClose={() => setEdit(null)} title={edit?.label || 'Login'}>
+        {edit && (
+          <>
+            <label className="k-field">Username<input autoComplete="username" value={edit.username} onChange={(e) => setEdit({ ...edit, username: e.target.value })} /></label>
+            <label className="k-field">Password<input type="password" autoComplete="current-password" value={edit.password} onChange={(e) => setEdit({ ...edit, password: e.target.value })} /></label>
+            <p className="k-muted k-small">Kairo only reads: it never opens tests, quizzes or assignments and never sends anything.</p>
+            <Button variant="primary" block loading={busy === 'save'} disabled={!edit.username.trim() || !edit.password} onClick={save}>Save</Button>
+            {rows.find((x) => x.site === edit.site)?.password_set && (
+              <Button variant="danger" block style={{ marginTop: 8 }} onClick={() => remove(edit.site)}>Remove login</Button>
+            )}
+          </>
+        )}
+      </Sheet>
+    </Page>
+  )
+}
+
 function SettingsPage() {
   const toast = useToast()
   const stack = useStack()
@@ -618,6 +694,8 @@ function SettingsPage() {
           onClick={perm === 'unsupported' ? undefined : enablePush} />
         <ListRow icon={<IconMail />} title="Google account" chevron subtitle={google?.signed_out ? 'Signed out' : google?.read ? 'Connected' : 'Not connected'}
           onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
+        <ListRow icon={<IconKey />} title="Logins" subtitle="School portal (OLAT), read-only" chevron
+          onClick={() => stack.push('Logins', () => <LoginsPage />)} />
       </List>
       <SectionTitle>Developer</SectionTitle>
       <List>

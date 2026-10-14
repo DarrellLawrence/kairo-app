@@ -114,6 +114,24 @@ class ReplySender(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class PortalItem(SQLModel, table=True):
+    """Something Kairo found on the school portal (read-only): a file saved to the vault,
+    a page that changed, the timetable. Content is untrusted data."""
+
+    __tablename__ = "portal_items"
+    id: int | None = Field(default=None, primary_key=True)
+    site: str = Field(index=True)
+    key: str = Field(index=True)
+    kind: str                                   # file / page / timetable
+    course: str | None = None
+    title: str | None = None
+    snippet: str | None = Field(default=None, sa_column=Column(Text))
+    vault_path: str | None = None
+    digest: str | None = None
+    found_at: datetime = Field(default_factory=utcnow)
+    briefed: bool = Field(default=False, index=True)
+
+
 class Brief(SQLModel, table=True):
     __tablename__ = "briefs"
     id: int | None = Field(default=None, primary_key=True)
