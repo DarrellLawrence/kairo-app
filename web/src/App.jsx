@@ -2,7 +2,7 @@ import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { spring, tabVariants } from './design/motion.js'
-import { Badge, IconBoard, IconChat, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
+import { Badge, IconChat, IconMic, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
 import Today from './screens/Today.jsx'
 import Chat from './screens/Chat.jsx'
 import Approvals from './screens/Approvals.jsx'
@@ -20,12 +20,11 @@ const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
 const TABS = [
   { id: 'today', label: 'Today', Icon: IconToday },
   { id: 'chat', label: 'Chat', Icon: IconChat },
-  { id: 'board', label: 'Board', Icon: IconBoard },
   { id: 'approvals', label: 'Approvals', Icon: IconShield },
   { id: 'more', label: 'More', Icon: IconMore },
 ]
 // Screens without their own tab, and the tab that stays lit while they are open.
-const HIDDEN = { reviews: 'more', school: 'more', lerndoku: 'more', life: 'more' }
+const HIDDEN = { reviews: 'more', board: 'more', school: 'more', lerndoku: 'more', life: 'more' }
 
 // Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
 function readRoute() {
@@ -109,7 +108,8 @@ export default function App() {
               </motion.div>
             </AnimatePresence>
           </main>
-          {route !== 'dev' && route !== 'onboarding' && route !== 'call' && <TabBar tabs={tabs} active={HIDDEN[route] || route} onSelect={go} />}
+          {route !== 'dev' && route !== 'onboarding' && route !== 'call' && <TabBar tabs={tabs} active={HIDDEN[route] || route} onSelect={go}
+            onOrb={() => { window.location.hash = '#call/new' }} orbIcon={<IconMic />} />}
         </div>
       </ToastProvider>
     </MotionConfig>

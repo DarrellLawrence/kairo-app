@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-14 — design: ember glass redesign (owner's brief)
+- Warm charcoal, frosted glass, ember glow, serif greetings and numbers; all colours, glows, blur, radii, fonts and springs in the design tokens.
+- Fixed: black band under the tab bar (the app now covers the whole screen; measured height only while typing).
+- Floating glass tab bar (Today, Chat, Approvals, More) with a raised orb that starts a call. Board moved into More.
+- Today: greeting and day summary, check-in streak, snapshot, top 3 with ticks, next up, Talk to Kairo, chips from the real day. System status moved to More → System; Today only shows a warning chip.
+- Chat: greeting and chips when empty, floating input with + and mic. Call: audio-reactive orb, interrupt by talking, tap to pause, captions, mute.
+- Approvals: who, what, full text, big buttons, swipe. New icon and splash.
+
 ## 2026-10-14 — build: chief of staff (v7 items 3, 4, 6)
 - Kairo acts alone on what only touches the owner: trash (30-day undo), mail to his own address (locked to profile.gmail, no recipient field), moving FLEXIBLE events without guests. Sending anything to other people stays an approval card.
 - Calendar types FIXED / SOCIAL / FLEXIBLE (untagged = FIXED); set by voice or chat ("gym is flexible").

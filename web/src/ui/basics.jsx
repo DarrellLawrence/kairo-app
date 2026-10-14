@@ -4,8 +4,8 @@ import { useRef } from 'react'
 import { spring } from '../design/motion.js'
 import { IconChevron } from './icons.jsx'
 
-export function Button({ variant = 'secondary', size, block, icon, loading, children, className = '', ...rest }) {
-  const cls = ['k-btn', variant, size, block && 'block', className].filter(Boolean).join(' ')
+export function Button({ variant = 'secondary', size, block, icon, loading, breathe, children, className = '', ...rest }) {
+  const cls = ['k-btn', variant, variant === 'primary' && 'k-glow', breathe && 'breathe', size, block && 'block', className].filter(Boolean).join(' ')
   return (
     <motion.button
       className={cls}
@@ -13,7 +13,7 @@ export function Button({ variant = 'secondary', size, block, icon, loading, chil
       transition={spring.snappy}
       {...rest}
     >
-      {loading ? <span className="k-typing" aria-label="Working"><i /><i /><i /></span> : <>{icon}{children}</>}
+      {loading ? <span className="k-typing" aria-label="Working"><i /><i /><i /></span> : <>{icon}<span style={{ position: 'relative' }}>{children}</span></>}
     </motion.button>
   )
 }
@@ -70,6 +70,13 @@ export function SkeletonCard({ lines = 3 }) {
   )
 }
 
+// When the last swipe ended: a parent's tap handler ignores the click that a
+// moved finger or mouse produces on a common ancestor right after a swipe.
+// (motion reports the drag end a frame after the click, so a swipe counts from its start.)
+let lastSwipeEnd = 0
+let swiping = false
+export const justSwiped = (ms = 350) => swiping || Date.now() - lastSwipeEnd < ms
+
 /* Horizontal swipe with resistance and snap-back. Past the threshold, release
    triggers the side's action. right = swipe to the right (reveals the left edge). */
 export function Swipeable({ left, right, threshold = 0.45, children }) {
@@ -99,8 +106,8 @@ export function Swipeable({ left, right, threshold = 0.45, children }) {
         dragConstraints={{ left: left ? -10000 : 0, right: right ? 10000 : 0 }}
         dragElastic={0.18}
         dragMomentum={false}
-        onDragStart={() => { dragged.current = true }}
-        onDragEnd={(e, info) => { onDragEnd(e, info); setTimeout(() => { dragged.current = false }, 50) }}
+        onDragStart={() => { dragged.current = true; swiping = true }}
+        onDragEnd={(e, info) => { swiping = false; lastSwipeEnd = Date.now(); onDragEnd(e, info); setTimeout(() => { dragged.current = false }, 50) }}
       >
         {children}
       </motion.div>
@@ -138,4 +145,15 @@ export function List({ children }) {
 
 export function SectionTitle({ children }) {
   return <h2 className="k-section-title">{children}</h2>
+}
+
+/* "Try asking" chip: a glass pill with light bleeding from its left edge.
+   glow: ember | red | teal | green | magenta | blue */
+export function GlowChip({ glow = 'ember', icon, children, onClick, ...rest }) {
+  return (
+    <motion.button type="button" className="k-chip k-glow" style={{ '--g': `var(--glow-${glow})` }} onClick={onClick}
+      whileTap={{ scale: 0.95 }} transition={spring.snappy} {...rest}>
+      {icon}<span>{children}</span>
+    </motion.button>
+  )
 }

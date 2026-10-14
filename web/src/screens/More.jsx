@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, parseTs } from '../api.js'
 import {
-  Badge, Button, EmptyState, IconBell, IconCheck, IconInbox, IconKey, IconList, IconMail, IconPower, IconPulse, IconRefresh,
+  Badge, Button, EmptyState, IconBell, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower, IconPulse, IconRefresh,
   IconPin, IconShield, IconSparkle, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
 } from '../ui/index.js'
 
@@ -451,7 +451,7 @@ function GooglePage({ st }) {
   )
 }
 
-function Root() {
+function SystemPage() {
   const stack = useStack()
   const toast = useToast()
   const [health, setHealth] = useState(null)
@@ -459,8 +459,6 @@ function Root() {
   const [google, setGoogle] = useState(null)
   const [paused, setPaused] = useState(null)
   const [askPause, setAskPause] = useState(false)
-  const [perm, setPerm] = useState(() => (typeof Notification === 'undefined' ? 'unsupported' : Notification.permission))
-  const [todos, setTodos] = useState({})
 
   const load = useCallback(async () => {
     const [h, s, g, k] = await Promise.allSettled([
@@ -470,16 +468,7 @@ function Root() {
     setStatus(s.status === 'fulfilled' ? s.value : {})
     setGoogle(g.status === 'fulfilled' ? g.value : null)
     setPaused(k.status === 'fulfilled' ? k.value.paused : null)
-    api('/api/owner-todos').then(setTodos).catch(() => {})
   }, [])
-
-  const toggleTodo = async (id) => {
-    const next = await api(`/api/owner-todos/${id}`, { method: 'POST', body: { done: !todos[id] } })
-    setTodos(next)
-    stack.pop()
-    toast.show({ text: next[id] ? 'Nice. Ticked off.' : 'Back on the list.' })
-  }
-  const openTodos = TODOS.filter((t) => !todos[t.id])
   useEffect(() => { load() }, [load])
 
   const setKill = async (value) => {
@@ -488,6 +477,57 @@ function Root() {
     toast.show({ text: r.paused ? 'Kairo is paused. Nothing runs.' : 'Kairo is running again.' })
   }
 
+  const boot = status?.boot_check
+  const googleOk = google?.read && google?.write && !google?.signed_out
+  const googleEnd = google && [google.read_may_end, google.write_may_end].filter(Boolean).sort()[0]
+  return (
+    <Page title="System" onRefresh={load}>
+      {health === null ? <SkeletonCard lines={4} /> : (
+        <>
+          <List>
+            <ListRow icon={<IconPower />} title={paused ? 'Paused (kill switch)' : 'Running'}
+              subtitle={paused ? 'Nothing runs until you resume' : 'Tap to pause everything'}
+              value={<Badge tone={paused ? 'danger' : 'ok'} pop={false}>{paused ? 'Paused' : 'On'}</Badge>}
+              onClick={() => (paused ? setKill(false) : setAskPause(true))} />
+            <ListRow icon={<IconPulse />} title="Kairo" subtitle={`API ${health.status} · database ${health.db ?? '–'}`}
+              value={<Badge tone={health.status === 'ok' ? 'ok' : 'danger'} pop={false}>{health.status === 'ok' ? 'OK' : 'Down'}</Badge>} />
+            <ListRow icon={<IconSparkle />} title="Claude" subtitle={health.brain_busy ? 'Working on something' : 'Ready'}
+              value={<Badge tone={health.brain === 'ok' ? 'ok' : 'warn'} pop={false}>{health.brain === 'ok' ? 'OK' : (health.brain ?? '–')}</Badge>} />
+            <ListRow icon={<IconMail />} title="Google" chevron
+              subtitle={!google ? 'Unknown' : google.signed_out ? 'Signed out: sign in again' : google.read ? `Connected${googleEnd ? ` · ends ${new Date(googleEnd * 1000).toLocaleDateString()}` : ''}` : 'Not connected yet'}
+              value={<Badge tone={googleOk ? 'ok' : 'warn'} pop={false}>{googleOk ? 'OK' : 'Fix'}</Badge>}
+              onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
+            <ListRow icon={<IconShield />} title="Last boot check" chevron
+              subtitle={boot ? new Date(boot.time).toLocaleString() : 'Not run yet'}
+              value={boot ? <Badge tone={boot.all_ok ? 'ok' : 'danger'} pop={false}>{boot.all_ok ? 'OK' : 'Failed'}</Badge> : undefined}
+              onClick={() => stack.push('Boot check', () => <BootCheckPage check={boot} />)} />
+          </List>
+          <SectionTitle>Behind the scenes</SectionTitle>
+          <List>
+            <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron
+              onClick={() => stack.push('Jobs', () => <JobsPage />)} />
+            <ListRow icon={<IconList />} title="Activity" subtitle="Everything Kairo did, newest first" chevron
+              onClick={() => stack.push('Activity', () => <ActivityPage />)} />
+            <ListRow icon={<IconShield />} title="Backups" subtitle="Nightly backup and weekly restore test" chevron
+              onClick={() => stack.push('Backups', () => <BackupsPage />)} />
+          </List>
+        </>
+      )}
+      <Sheet open={askPause} onClose={() => setAskPause(false)} title="Pause Kairo?">
+        <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>It stops what it is doing and does nothing until you resume.</p>
+        <Button variant="danger" block onClick={() => { setAskPause(false); setKill(true) }}>Pause all</Button>
+        <Button variant="secondary" block style={{ marginTop: 8 }} onClick={() => setAskPause(false)}>Cancel</Button>
+      </Sheet>
+    </Page>
+  )
+}
+
+function SettingsPage() {
+  const toast = useToast()
+  const stack = useStack()
+  const [perm, setPerm] = useState(() => (typeof Notification === 'undefined' ? 'unsupported' : Notification.permission))
+  const [google, setGoogle] = useState(null)
+  useEffect(() => { api('/api/setup/google/status').then(setGoogle).catch(() => {}) }, [])
   const enablePush = async () => {
     try {
       const p = await Notification.requestPermission()
@@ -502,12 +542,53 @@ function Root() {
       toast.show({ text: 'Done. A test notification is on its way.' })
     } catch (e) { toast.show({ text: `Could not turn on: ${e.message}`, duration: 5000 }) }
   }
+  return (
+    <Page title="Settings">
+      <List>
+        <ListRow icon={<IconBell />} title="Notifications"
+          subtitle={perm === 'unsupported' ? 'Open Kairo from the Home Screen first' : perm === 'granted' ? 'On · tap to reconnect' : 'Tap to turn on'}
+          onClick={perm === 'unsupported' ? undefined : enablePush} />
+        <ListRow icon={<IconMail />} title="Google account" chevron subtitle={google?.signed_out ? 'Signed out' : google?.read ? 'Connected' : 'Not connected'}
+          onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
+      </List>
+      <SectionTitle>Developer</SectionTitle>
+      <List>
+        <ListRow icon={<IconKey />} title="Components" subtitle="Every component and animation" chevron
+          onClick={() => { window.location.hash = '#/dev/components' }} />
+      </List>
+    </Page>
+  )
+}
 
-  const boot = status?.boot_check
-  const googleOk = google?.read && google?.write && !google?.signed_out
+function Root() {
+  const stack = useStack()
+  const toast = useToast()
+  const [todos, setTodos] = useState(null)
+  const [issues, setIssues] = useState([])
+
+  const load = useCallback(async () => {
+    api('/api/owner-todos').then(setTodos).catch(() => setTodos({}))
+    api('/api/today').then((t) => setIssues(t.issues || [])).catch(() => {})
+  }, [])
+  useEffect(() => { load() }, [load])
+  // Today's warning chip opens System straight away.
+  useEffect(() => {
+    let open = null
+    try { open = sessionStorage.getItem('kairo-more-open'); sessionStorage.removeItem('kairo-more-open') } catch { /* private */ }
+    if (open === 'system') stack.push('System', () => <SystemPage />)
+  }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleTodo = async (id) => {
+    const next = await api(`/api/owner-todos/${id}`, { method: 'POST', body: { done: !todos[id] } })
+    setTodos(next)
+    stack.pop()
+    toast.show({ text: next[id] ? 'Nice. Ticked off.' : 'Back on the list.' })
+  }
+  const openTodos = TODOS.filter((t) => !(todos || {})[t.id])
+  const doneTodos = TODOS.filter((t) => (todos || {})[t.id])
   return (
     <Page title="More" onRefresh={load}>
-      {health === null ? <SkeletonCard lines={3} /> : (
+      {todos === null ? <SkeletonCard lines={3} /> : (
         <>
           {openTodos.length > 0 && (
             <>
@@ -521,79 +602,49 @@ function Root() {
             </>
           )}
 
-          <SectionTitle>Kairo</SectionTitle>
           <List>
-            <ListRow icon={<IconPower />} title={paused ? 'Paused (kill switch)' : 'Running'}
-              subtitle={paused ? 'Nothing runs until you resume' : 'Tap to pause everything'}
-              value={<Badge tone={paused ? 'danger' : 'ok'} pop={false}>{paused ? 'Paused' : 'On'}</Badge>}
-              onClick={() => (paused ? setKill(false) : setAskPause(true))} />
-            <ListRow icon={<IconPulse />} title="System" subtitle={`API ${health.status} · database ${health.db ?? '–'}`}
-              value={<Badge tone={health.status === 'ok' ? 'ok' : 'danger'} pop={false}>{health.status === 'ok' ? 'OK' : 'Down'}</Badge>} />
-            <ListRow icon={<IconSparkle />} title="Claude" subtitle={health.brain_busy ? 'Working' : 'Ready'}
-              value={<Badge tone={health.brain === 'ok' ? 'ok' : 'warn'} pop={false}>{health.brain === 'ok' ? 'OK' : (health.brain ?? '–')}</Badge>} />
-            <ListRow icon={<IconShield />} title="Last boot check" chevron
-              subtitle={boot ? new Date(boot.time).toLocaleString() : 'Not run yet'}
-              value={boot ? <Badge tone={boot.all_ok ? 'ok' : 'danger'} pop={false}>{boot.all_ok ? 'OK' : 'Failed'}</Badge> : undefined}
-              onClick={() => stack.push('Boot check', () => <BootCheckPage check={boot} />)} />
-          </List>
-
-          <SectionTitle>Accounts</SectionTitle>
-          <List>
-            <ListRow icon={<IconMail />} title="Google" chevron subtitle={google?.signed_out ? 'Signed out' : google?.read ?? 'Not connected'}
-              value={<Badge tone={googleOk ? 'ok' : 'warn'} pop={false}>{googleOk ? 'OK' : 'Fix'}</Badge>}
-              onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
-            <ListRow icon={<IconBell />} title="Notifications"
-              subtitle={perm === 'unsupported' ? 'Open Kairo from the Home Screen first' : perm === 'granted' ? 'On · tap to reconnect' : 'Tap to turn on'}
-              onClick={perm === 'unsupported' ? undefined : enablePush} />
-          </List>
-
-          <SectionTitle>Work</SectionTitle>
-          <List>
-            <ListRow icon={<IconList />} title="Life" subtitle="Shopping, chores, people, money, health" chevron
+            <ListRow icon={<IconMic />} title="Voice" subtitle="Calls, voice notes, test" chevron
+              onClick={() => stack.push('Voice', () => <VoicePage />)} />
+            <ListRow icon={<IconHeart />} title="Life" subtitle="Shopping, chores, people, money, health" chevron
               onClick={() => { window.location.hash = '#life' }} />
+            <ListRow icon={<IconInbox />} title="Capture" subtitle="Shortcuts, lock screen, Back Tap" chevron
+              onClick={() => stack.push('Capture', () => <CapturePage />)} />
+            <ListRow icon={<IconPin />} title="Location" subtitle="Places, history, pause" chevron
+              onClick={() => stack.push('Location', () => <LocationPage />)} />
+            <ListRow icon={<IconChart />} title="Usage" subtitle="Claude runs per model and job" chevron
+              onClick={() => stack.push('Usage', () => <UsagePage />)} />
+            <ListRow icon={<IconPulse />} title="System" subtitle={issues.length ? issues.join(' · ') : 'Kairo, Claude, Google, backups'} chevron
+              value={issues.length ? <Badge tone="warn" pop={false}>{issues.length}</Badge> : <Badge tone="ok" pop={false}>OK</Badge>}
+              onClick={() => stack.push('System', () => <SystemPage />)} />
+            <ListRow icon={<IconGear />} title="Settings" subtitle="Notifications, account" chevron
+              onClick={() => stack.push('Settings', () => <SettingsPage />)} />
+          </List>
+
+          <SectionTitle>Plans and school</SectionTitle>
+          <List>
+            <ListRow icon={<IconList />} title="Board" subtitle="Goals, projects, tasks" chevron
+              onClick={() => { window.location.hash = '#board' }} />
             <ListRow icon={<IconSparkle />} title="School" subtitle="Dates, grades, flashcards, study guides" chevron
               onClick={() => { window.location.hash = '#school' }} />
             <ListRow icon={<IconList />} title="Lerndokumentation" subtitle="Weekly entry, German draft by Kairo" chevron
               onClick={() => { window.location.hash = '#lerndoku' }} />
             <ListRow icon={<IconRefresh />} title="Reviews" subtitle="Check-ins and weekly to yearly reviews" chevron
               onClick={() => { window.location.hash = '#reviews' }} />
-            <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron
-              onClick={() => stack.push('Jobs', () => <JobsPage />)} />
-            <ListRow icon={<IconPulse />} title="Usage" subtitle="Claude runs per model and job" chevron
-              onClick={() => stack.push('Usage', () => <UsagePage />)} />
-            <ListRow icon={<IconInbox />} title="Capture" subtitle="Action button and share sheet setup" chevron
-              onClick={() => stack.push('Capture', () => <CapturePage />)} />
-            <ListRow icon={<IconSparkle />} title="Voice" subtitle="Talk to Kairo, calls, test" chevron
-              onClick={() => stack.push('Voice', () => <VoicePage />)} />
-            <ListRow icon={<IconPin />} title="Location" subtitle="Places, history, pause" chevron
-              onClick={() => stack.push('Location', () => <LocationPage />)} />
           </List>
 
-          <SectionTitle>History</SectionTitle>
-          <List>
-            <ListRow icon={<IconList />} title="Activity" subtitle="Everything Kairo did, newest first" chevron
-              onClick={() => stack.push('Activity', () => <ActivityPage />)} />
-            <ListRow icon={<IconShield />} title="Backups" subtitle="Nightly backup and weekly restore test" chevron
-              onClick={() => stack.push('Backups', () => <BackupsPage />)} />
-            {TODOS.filter((t) => todos[t.id]).map((t) => (
-              <ListRow key={t.id} icon={<IconCheck />} title={t.title} subtitle="Done" chevron
-                onClick={() => stack.push(t.title, () => <TodoPage todo={t} done onToggle={() => toggleTodo(t.id)} />)} />
-            ))}
-          </List>
-
-          <SectionTitle>Developer</SectionTitle>
-          <List>
-            <ListRow icon={<IconKey />} title="Components" subtitle="Every component and animation" chevron
-              onClick={() => { window.location.hash = '#/dev/components' }} />
-          </List>
+          {doneTodos.length > 0 && (
+            <>
+              <SectionTitle>Done</SectionTitle>
+              <List>
+                {doneTodos.map((t) => (
+                  <ListRow key={t.id} icon={<IconCheck />} title={t.title} subtitle="Done" chevron
+                    onClick={() => stack.push(t.title, () => <TodoPage todo={t} done onToggle={() => toggleTodo(t.id)} />)} />
+                ))}
+              </List>
+            </>
+          )}
         </>
       )}
-
-      <Sheet open={askPause} onClose={() => setAskPause(false)} title="Pause Kairo?">
-        <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>It stops what it is doing and does nothing until you resume.</p>
-        <Button variant="danger" block onClick={() => { setAskPause(false); setKill(true) }}>Pause all</Button>
-        <Button variant="secondary" block style={{ marginTop: 8 }} onClick={() => setAskPause(false)}>Cancel</Button>
-      </Sheet>
     </Page>
   )
 }
