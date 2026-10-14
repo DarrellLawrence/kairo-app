@@ -837,16 +837,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (OSError, ValueError, KeyError):
             return "dev"
 
-    async def acceptance_turn(text: str) -> acceptance_mod.Turn:
-        """An owner message through owner_turn(), like chat, but not saved in the one conversation."""
-        out = acceptance_mod.Turn()
+    async def acceptance_turn(text: str, session: str | None = None) -> acceptance_mod.Turn:
+        """An owner message through owner_turn(), like chat, but not saved in the one conversation.
+        session: continue the conversation of an earlier test turn (leave it, language)."""
+        out = acceptance_mod.Turn(session=session)
         parts = []
         chat_model = model_table.pick("chat", app.state.jobs.schedule)   # tested like chat, counted as acceptance
-        async for event in owner_turn(text, session_id=None, thread_id=None, purpose="acceptance", model=chat_model):
-            if event.kind is EventKind.text:
+        async for event in owner_turn(text, session_id=session, thread_id=None, purpose="acceptance", model=chat_model):
+            if event.kind is EventKind.session and event.session_id:
+                out.session = event.session_id
+            elif event.kind is EventKind.text:
                 parts.append(event.text)
             elif event.kind is EventKind.result:
                 out.reply = (event.text or "".join(parts)).strip()
+                out.session = event.session_id or out.session
             elif event.kind is EventKind.tool_use:
                 out.tools.append(str((event.data or {}).get("name", "")))
             elif event.kind is EventKind.error:
@@ -890,7 +894,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return acceptance_mod.Context(
             engine=engine, tz=profile.tz, turn=acceptance_turn, classify_mail=acceptance_classify, gate=gate,
             selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
-            broken_selftests=broken_selftests)
+            broken_selftests=broken_selftests, schedule=app.state.jobs.schedule)
 
     async def run_acceptance(ids: list[int] | None = None) -> dict:
         if app.state.acceptance_running:

@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { OnboardingCard } from './Onboarding.jsx'
 import { CaptureSheet } from './CaptureSheet.jsx'
+import { playLastAgain, speak, stopSpeaking, unlockAudio } from '../voice.js'
 import { api, parseTs } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
@@ -183,6 +184,22 @@ export default function Today({ go, onboarding }) {
   const [due, setDue] = useState([])
   const [ticked, setTicked] = useState({})
   const [captureOpen, setCaptureOpen] = useState(false)
+  const [listening, setListening] = useState(null)   // null | loading | playing
+  const listenAsked = window.location.hash === '#today/listen'   // the brief push: listen on the commute
+  // v8 D: the brief is a short push to read and this to listen to (no call). iPhone plays sound only after a tap.
+  const listenToBrief = async (b) => {
+    if (listening === 'playing') { stopSpeaking(); setListening(null); return }
+    unlockAudio()
+    const spoken = [b.headline, ...(b.top3 || []).map((t, i) => `${i + 1}: ${t.title}.`)].join(' ')
+    setListening('loading')
+    try {
+      const p = speak(spoken)
+      setListening('playing')
+      await p
+    } catch (e) {
+      if (e.name === 'NeedTap') { try { await playLastAgain() } catch { /* the sound check explains */ } }
+    } finally { setListening(null) }
+  }
   const [answering, setAnswering] = useState(null)
   const [answer, setAnswer] = useState('')
 
@@ -434,6 +451,10 @@ export default function Today({ go, onboarding }) {
             }
             detail={(p) => <BriefDetail b={brief} onDone={markDone} {...p} />}
           />
+          <div className="k-pad" style={{ marginBottom: 12 }}>
+            <Button variant={listenAsked ? 'primary' : 'secondary'} size="sm" block loading={listening === 'loading'}
+              onClick={() => listenToBrief(brief)}>{listening === 'playing' ? 'Stop' : 'Listen to the brief'}</Button>
+          </div>
           {!briefIsToday && <div className="k-pad" style={{ marginBottom: 12 }}><Button variant="secondary" size="sm" block loading={making} onClick={makeBrief}>Make today's brief now</Button></div>}
         </>
       ) : (

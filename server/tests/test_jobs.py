@@ -235,7 +235,7 @@ def test_brief_by_the_model(env):
     assert b["calendar"][0]["summary"] == "Berufsschule"
     note = (env["vault"] / "Kairo" / "Briefs" / "2026-10-14.md").read_text(encoding="utf-8")
     assert "Mathe-Test Freitag" in note and "Berufsschule" in note
-    assert jobs.pusher.sent == [("Morning brief", "Mathe-Test Freitag: heute lernen.", "/#today")]
+    assert jobs.pusher.sent == [("Morning brief", "Mathe-Test Freitag: heute lernen.", "/#today/listen")]   # v8 D: push + listen, no call
     assert "UNTRUSTED DATA" in model.prompts[0][0]   # calendar + mail go in as untrusted
 
 

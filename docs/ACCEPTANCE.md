@@ -32,3 +32,6 @@ Google account and the owner's real iPhone. Green CI is not done.
 | 18 | Semantic memory | Tell Kairo a fact; days later ask in different words | Correct answer naming the source note |
 | 19 | Leave it | Discuss two things, then say "leave it" | Only the last one is dropped, and Kairo says which |
 | 20 | Profile import | Attach the fake profile in chat: "save this to my profile" | Stored as-is in `10 Profile/`; loops, calendar tags and people created; summary in a few lines |
+| 21 | Language | A German message, then an English one in the same conversation | German answer, then English answer |
+| 22 | Model routing | Settings and the last 14 days of model runs | Judgment calls (re-plan, push/call, how hard) never on Haiku; money coaching and reviews on Opus |
+| 23 | Call windows | The call rules and the last 14 days of calls | Kairo rings only for important things or real questions, only inside the call windows; never at night |

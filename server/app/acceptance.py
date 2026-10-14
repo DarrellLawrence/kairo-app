@@ -62,7 +62,8 @@ SPECS = [
     Spec(11, "Self-test honesty", "auto", "The self-test is green now, and red when the tool server or the voice model is "
          "broken (tested on throwaway copies, never on the live install).", "P2"),
     Spec(12, "Update safety", "ci", "A release whose self-test fails rolls back by itself.", "P2"),
-    Spec(13, "Proactive", "later", "Bus to training delayed or cancelled: one push with the backup route.", "D"),
+    Spec(13, "Proactive", "manual", "Real life: the bus to training is delayed or cancelled: one push with the backup "
+         "route; on a normal day no push.", "D"),
     Spec(14, "Calendar", "later", "\"training is fixed, study blocks are flexible\", then \"I have a test Friday\".", "D"),
     Spec(15, "Sound", "manual", "More → System → Sound check: silent switch on and off, with and without AirPods.", "A1"),
     Spec(16, "Capture", "manual", "+ → hold the mic → \"buy protein powder\" → let go: filed, one line back, no reply needed.", "A2"),
@@ -70,8 +71,13 @@ SPECS = [
          "notification says where it went (Files/<category>/ on the PC), a gift idea lands on the wishlist or comes back "
          "as a quick question the next time you talk to Kairo.", "B"),
     Spec(18, "Semantic memory", "later", "A fact told days ago, asked in other words: right answer naming the note.", "C6"),
-    Spec(19, "Leave it", "later", "Two topics, then \"leave it\": only the last one is dropped, and Kairo says which.", "D"),
+    Spec(19, "Leave it", "auto", "Two open things talked about one after the other, then \"leave it\": only the last one "
+         "is dropped, the other stays, and Kairo says which.", "D"),
     Spec(20, "Profile import", "later", "Attach a profile in chat: stored as-is, loops/tags/people created, summary.", "G"),
+    Spec(21, "Language", "auto", "A German message gets a German answer; the next English one an English answer.", "D"),
+    Spec(22, "Model routing", "auto", "Judgment calls never on Haiku, money on Opus: in the settings and in the last 14 days of runs.", "D"),
+    Spec(23, "Call windows", "auto", "Kairo rings only for important things or real questions, and only in the call windows "
+         "(checked on the rules and on the last 14 days of calls).", "D"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -83,17 +89,19 @@ class Turn:
     reply: str = ""
     tools: list[str] = field(default_factory=list)
     error: str | None = None
+    session: str | None = None      # pass it back to continue the same conversation
 
 
 @dataclass
 class Context:
     engine: object
     tz: dt.tzinfo
-    turn: Callable[[str], Awaitable[Turn]]                 # owner_turn, no thread, purpose "acceptance"
+    turn: Callable[..., Awaitable[Turn]]                   # owner_turn(text, session=None), no thread, purpose "acceptance"
     classify_mail: Callable[[dict], list[dict]]            # triage classifier, real model
     gate: object
     selftest: Callable[[], Awaitable[dict]]                # the real tools self-test
     broken_selftests: Callable[[], Awaitable[dict]]        # {"tool server": result, "voice model": result}
+    schedule: dict = field(default_factory=dict)           # the live schedule (model overrides)
 
 
 class RecordingExecutor:
@@ -197,8 +205,78 @@ async def t_selftest(ctx: Context) -> dict:
     return _result(True, checks, f"now: {real.get('reason') or 'green'}; broken → {reasons}")
 
 
+async def t_leave_it(ctx: Context) -> dict:
+    from .db import OpenLoop
+    with Session(ctx.engine) as s:
+        a = OpenLoop(kind="task", source="chat", source_ref=f"{MARK}-a", what=f"{MARK}: hand in the lab report", urgency="normal")
+        b = OpenLoop(kind="task", source="chat", source_ref=f"{MARK}-b", what=f"{MARK}: return the library book", urgency="normal")
+        s.add_all([a, b])
+        s.commit()
+        ids = (a.id, b.id)
+    try:
+        t1 = await ctx.turn(f"What's still open with the {MARK} lab report?")
+        t2 = await ctx.turn(f"And the {MARK} library book?", session=t1.session)
+        t3 = await ctx.turn("leave it", session=t2.session or t1.session)
+        with Session(ctx.engine) as s:
+            la, lb = s.get(OpenLoop, ids[0]), s.get(OpenLoop, ids[1])
+            checks = {"the last one (library book) dropped": lb.status != "open", "the other one still open": la.status == "open",
+                      "says which in one line": "book" in t3.reply.lower() and len([x for x in t3.reply.splitlines() if x.strip()]) <= 2}
+    finally:
+        with Session(ctx.engine) as s:
+            for i in ids:
+                row = s.get(OpenLoop, i)
+                if row is not None:
+                    s.delete(row)
+            s.commit()
+    err = t1.error or t2.error or t3.error
+    return _result(err is None, checks, err or f"Kairo said: {t3.reply[:200]}")
+
+
+async def t_language(ctx: Context) -> dict:
+    from .voice import language_of
+    t1 = await ctx.turn("Was steht morgen an? Bitte ganz kurz.")
+    t2 = await ctx.turn("Thanks. And this weekend, in one line?", session=t1.session)
+    checks = {"German answer to German": language_of(t1.reply) == "de", "English answer to English": language_of(t2.reply) == "en"}
+    err = t1.error or t2.error
+    return _result(err is None, checks, err or f"de: {t1.reply[:80]} | en: {t2.reply[:80]}")
+
+
+async def t_routing(ctx: Context) -> dict:
+    from . import models
+    from .db import ModelRun
+    picks = {p: models.pick(p, ctx.schedule) for p in models.NEVER_HAIKU | models.OPUS_ONLY}
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=14)
+    with Session(ctx.engine) as s:
+        runs = s.exec(select(ModelRun).where(ModelRun.ts >= since).where(ModelRun.purpose.in_(sorted(models.NEVER_HAIKU)))).all()
+    weak = [f"{r.purpose}:{r.model}" for r in runs if models.family(r.model) == "haiku"]
+    money = [f"{r.purpose}:{r.model}" for r in runs if r.purpose in models.OPUS_ONLY and models.family(r.model) not in ("opus", "unknown")]
+    checks = {"judgment never set to Haiku": all(v != "haiku" for v in picks.values()),
+              "money and important judgment on Opus": all(picks[p] == "opus" for p in models.OPUS_ONLY),
+              "no judgment run on Haiku (14 days)": not weak, "no money run below Opus (14 days)": not money}
+    return _result(True, checks, f"{len(runs)} judgment/money runs checked" + (f"; wrong: {', '.join((weak + money)[:5])}" if weak or money else ""))
+
+
+async def t_call_windows(ctx: Context) -> dict:
+    from .db import Call
+    from .voice import calls
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=14)
+    with Session(ctx.engine) as s:
+        wins = calls.windows(s)
+        rang = s.exec(select(Call).where(Call.created_at >= since)).all()
+        some = dt.datetime.now(ctx.tz).replace(hour=3, minute=0)   # 03:00: never a call window
+        night_ok, _ = calls.may_call(s, importance="high", question=False, now=some)
+        small_ok, _ = calls.may_call(s, importance="normal", question=False,
+                                     now=dt.datetime.now(ctx.tz).replace(hour=int(wins[0]["start"][:2]), minute=int(wins[0]["start"][3:])))
+    kairo_rang = [c for c in rang if c.reason not in ("You called Kairo", "Test call") and c.opening]
+    outside = [c for c in kairo_rang if calls.in_window(wins, _local(c.created_at, ctx.tz)) is None]
+    checks = {"call windows set": bool(wins), "no call at night": not night_ok, "no call for small things": not small_ok,
+              "every call Kairo made was in a window (14 days)": not outside}
+    return _result(True, checks, f"windows: {', '.join(w['name'] for w in wins)}; {len(kairo_rang)} calls by Kairo checked")
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
-    1: t_tools, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest,
+    1: t_tools, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 19: t_leave_it, 21: t_language,
+    22: t_routing, 23: t_call_windows,
 }
 
 

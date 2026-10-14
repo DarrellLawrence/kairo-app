@@ -89,7 +89,7 @@ def test_voice_api(client):
     assert client.post("/api/voice/transcribe", content=b"broken", headers={"Content-Type": "audio/mp4"}).status_code == 400
     r = client.post("/api/voice/speak", json={"text": "Hallo, du hast heute einen Test."})
     assert r.headers["content-type"] == "audio/wav" and r.headers["x-kairo-language"] == "de" and r.content[:4] == b"RIFF"
-    assert client.get("/api/voice/status").json()["call_options"] == {"brief": False, "checkin": False}
+    assert client.get("/api/voice/status").json()["call_options"] == {"checkin": False}   # v8 D: the brief is never a call
 
 
 def test_voice_without_the_libraries(client, monkeypatch):
@@ -118,17 +118,17 @@ def test_unanswered_call_is_missed(migrated):
         assert calls.get(s, c.id).status == "missed"
 
 
-def test_brief_comes_as_a_call_when_switched_on(client):
-    client.post("/api/voice/options/brief", json={"on": True})
+def test_the_brief_is_a_push_to_read_and_listen_never_a_call(client):
+    """v8 D: Kairo rings only for important things or real questions; the brief is a short push."""
+    assert client.post("/api/voice/options/brief", json={"on": True}).status_code in (400, 404)
     app = client.app_
     app.state.jobs._ask = lambda p, s: __import__("app.chat", fromlist=["AskResult"]).AskResult(
         '{"headline": "Maths test Friday.", "top3": [{"title": "Study maths", "why": "test"}]}')
     run = app.state.jobs.run_job("morning_brief", forced=True)
     assert run.status == "ok"
     title, body, url, _ = client.pushes[-1]
-    assert (title, body) == ("Kairo is calling", "Your morning brief") and url.startswith("/#call/")
-    call = client.get(f"/api/voice/calls/{url.rsplit('/', 1)[1]}").json()
-    assert call["opening"] == "Good morning. Maths test Friday. Number 1: Study maths. Anything you want to change?"
+    assert (title, body, url) == ("Morning brief", "Maths test Friday.", "/#today/listen")
+    assert client.get("/api/voice/calls").json() == []
 
 
 def test_voice_memos_are_transcribed_then_sorted(migrated, tmp_path):

@@ -340,7 +340,7 @@ class PA:
         ideas = []
         try:
             out = self._ask_json(ctx, REVIEW_PROMPT.format(month=month, language=self.profile.default_language,
-                                                           data=json.dumps(data)), "summary")
+                                                           data=json.dumps(data)), "money_review")   # v8 D: money on Opus
             ideas = [clip(str(i), 300) for i in (out or {}).get("ideas", [])][:3]
         except Exception as exc:
             log.info("money review ideas: %s", exc)

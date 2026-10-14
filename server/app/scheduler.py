@@ -280,11 +280,14 @@ class Jobs:
         r, created = reviews.create(ctx.session, "daily", day, self.profile.tz)
         if created:
             from .voice import calls
-            if calls.options(ctx.session)["checkin"]:
-                calls.start(ctx.session, "Evening check-in",
-                            "Hi, it's Kairo. Time for your evening check-in. How did today go, and how is your energy, one to five?",
-                            self.pusher)
-            else:
+            rang = None
+            if calls.options(ctx.session)["checkin"]:   # a real question, but still only in a call window (v8 D)
+                ok, _ = calls.may_call(ctx.session, importance="normal", question=True, now=dt.datetime.now(self.profile.tz))
+                if ok:
+                    rang = calls.start(ctx.session, "Evening check-in",
+                                       "Hi, it's Kairo. Time for your evening check-in. How did today go, and how is your energy, one to five?",
+                                       self.pusher)
+            if rang is None:
                 self.pusher.notify("Evening check-in", "2 minutes: how did today go?", f"/#reviews/{r.id}")
 
     def _big_review_body(self, ctx: JobContext, day: dt.date | None = None) -> None:

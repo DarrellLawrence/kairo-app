@@ -751,7 +751,7 @@ start the next until its checks pass and the owner says go.
 - [ ] A2 Voice-first capture on + (test 16)
 - [ ] F22 P1/P2 proven on the PC; Acceptance page runs the automated tests (tests 1, 6, 7, 11, 12)
 - [ ] B Shortcuts, share sheet, quick questions, wishlists, files (tests 5, 17)
-- [ ] D Leave it, language per message, model routing, call windows, brief, push style (tests 10, 13, 19)
+- [ ] D Leave it, language per message, model routing, call windows, brief, push style (tests 10, 13, 19, 21, 22, 23)
 - [ ] C6 Semantic memory (tests 2, 18)
 - [ ] E Coaching modules: training, food and water, study, money, people, faith, style
 - [ ] G Profile import (test 20)

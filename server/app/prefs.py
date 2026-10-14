@@ -95,6 +95,18 @@ class ReviewTimes(_Strict):
         return None if v is None else _hhmm(v)
 
 
+class CallWindow(_Strict):
+    name: str = Field(min_length=1, max_length=40)
+    days: Literal["weekdays", "weekend", "all"] = "all"
+    start: str
+    end: str
+
+    @field_validator("start", "end")
+    @classmethod
+    def t(cls, v):
+        return _hhmm(v)
+
+
 SETTINGS = {
     # key: (validator, what it means)
     "quiet_hours": (QuietHours, "No pushes and no background work between these times."),
@@ -103,7 +115,9 @@ SETTINGS = {
     "good_times": (GoodTimes, "When 'later' things come back: after_work, weekend, morning, morning_weekend."),
     "review_times": (ReviewTimes, "Evening check-in (daily) and Sunday review (big) times."),
     "language": (str, "Default language: English or German."),
-    "models": (dict, "Model per job, e.g. {\"brief\": \"sonnet\"} (haiku / sonnet / opus)."),
+    "models": (dict, "Model per job, e.g. {\"brief\": \"sonnet\"} (haiku / sonnet / opus). Judgment never Haiku, money stays Opus."),
+    "call_windows": (list, "When Kairo may ring (important things and real questions only): a list of "
+                           "{name, days: weekdays|weekend|all, start, end}, e.g. morning commute 06:00-08:00."),
 }
 
 
@@ -139,6 +153,13 @@ def validate(key: str, value):
             if not isinstance(value, dict) or any(v not in ("haiku", "sonnet", "opus") for v in value.values()):
                 raise ValueError("models are haiku, sonnet or opus")
             return {str(k)[:40]: v for k, v in value.items()}
+        if key == "call_windows":
+            if not isinstance(value, list) or not 1 <= len(value) <= 6:
+                raise ValueError("a list of 1-6 windows")
+            out = [CallWindow.model_validate(w).model_dump(mode="json") for w in value]
+            if any(w["start"] >= w["end"] for w in out):
+                raise ValueError("each window starts before it ends (no windows over midnight)")
+            return out
         return kind.model_validate(value).model_dump(mode="json", exclude_none=True)
     except (ValidationError, ValueError, TypeError) as exc:
         msg = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc)

@@ -12,7 +12,15 @@ from sqlmodel import Session, select
 from ..db import Call, SettingKV, utcnow
 
 RING_MINUTES = 15
-OPTIONS = {"brief": "Morning brief as a call", "checkin": "Evening check-in as a call"}
+OPTIONS = {"checkin": "Evening check-in as a call"}
+IMPORTANT = ("high", "critical")
+# v8 D: Kairo calls only for important things or real questions, and only in these windows. Generic
+# defaults; the owner's own windows are a setting (More -> Settings, or by voice: settings_set call_windows).
+DEFAULT_WINDOWS = [
+    {"name": "morning commute", "days": "weekdays", "start": "06:00", "end": "08:00"},
+    {"name": "evening commute", "days": "weekdays", "start": "15:30", "end": "18:30"},
+    {"name": "evening at home", "days": "all", "start": "19:00", "end": "21:30"},
+]
 
 
 def _aware(t):
@@ -44,6 +52,43 @@ def get(s: Session, call_id: int) -> Call | None:
             s.add(c)
             s.commit()
     return c
+
+
+def windows(s: Session) -> list[dict]:
+    from .. import prefs
+    return prefs.load(s).get("call_windows") or DEFAULT_WINDOWS
+
+
+def in_window(wins: list[dict], now: dt.datetime) -> dict | None:
+    hhmm, weekday = now.strftime("%H:%M"), now.weekday()
+    for w in wins:
+        days = w.get("days", "all")
+        if (days == "weekdays" and weekday >= 5) or (days == "weekend" and weekday < 5):
+            continue
+        if w["start"] <= hhmm < w["end"]:
+            return w
+    return None
+
+
+def may_call(s: Session, *, importance: str, question: bool, now: dt.datetime) -> tuple[bool, str]:
+    """Kairo rings only for something important or a real question, and only in a call window."""
+    if importance not in IMPORTANT and not question:
+        return False, "not important enough for a call"
+    w = in_window(windows(s), now)
+    if w is None:
+        return False, "outside the call windows"
+    return True, w["name"]
+
+
+def proactive(s: Session, reason: str, opening: str, pusher, *, importance: str, question: bool = False,
+              now: dt.datetime, url: str = "/#today") -> Call | None:
+    """Kairo wants to talk: a call if may_call() says so, else a plain push (never a ring outside the windows)."""
+    ok, why = may_call(s, importance=importance, question=question, now=now)
+    if ok:
+        return start(s, reason, opening, pusher)
+    if pusher is not None:
+        pusher.notify("Kairo", reason[:120], url)
+    return None
 
 
 def set_status(s: Session, call_id: int, status: str) -> Call:

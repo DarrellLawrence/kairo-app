@@ -28,10 +28,11 @@ log = logging.getLogger("kairo.brief")
 
 PROMPT = """Write the owner's morning brief for {day} ({weekday}).
 From the data below return JSON:
-{{"headline": "one sentence: what matters most today",
+{{"headline": "one short sentence (max 120 characters): the most unusual or important thing today",
   "top3": [{{"title": "...", "why": "one short reason"}}, ... up to 3]}}
 Pick the top 3 from tasks, deadlines, school events and mails that need a reply, using
-the owner's goals. "school_portal_new": new material, announcements and dates from the school portal; a new
+the owner's goals. Unusual things first: what changed, what's new, what's at risk. Never tell the owner their fixed
+routine (training, school, work hours) unless something about it changed today. "school_portal_new": new material, announcements and dates from the school portal; a new
 test or deadline date matters, new files are one short mention. "mails_maybe_needing_reply": Kairo couldn't tell if someone waits on these; never in the
 top 3, at most one short mention ("not sure if X needs an answer"). "patterns" are facts from the owner's places (arrive/leave times); mention
 one only if it matters today (e.g. a long school day and training planned). "open_loops" are
@@ -205,14 +206,9 @@ class BriefMaker:
             log.warning("brief note not written: %s", exc)
         s.add(row)
         s.commit()
-        from .voice import calls
-        if calls.options(s)["brief"]:
-            spoken = " ".join([f"Good morning. {written['headline']}"] +
-                              [f"Number {i}: {t['title']}." for i, t in enumerate(written["top3"], 1)] +
-                              ["Anything you want to change?"])
-            calls.start(s, "Your morning brief", spoken, ctx.jobs.pusher)
-        else:
-            ctx.jobs.pusher.notify("Morning brief", written["headline"], "/#today")
+        # v8 D: a short push to read, and the brief to listen to on the commute (Today -> Listen). No call:
+        # Kairo rings only for important things or real questions.
+        ctx.jobs.pusher.notify("Morning brief", clip(written["headline"], 120), "/#today/listen")
         return by
 
 

@@ -1,9 +1,13 @@
-"""Which Claude model does which job (v7): the cheapest one that does it well.
+"""Which Claude model does which job (v7, v8 D): the cheapest one that does it well, never a weak
+one for judgment.
 
 Haiku: triage, classification, summaries, reminders, simple replies.
-Sonnet: writing, drafts, documents, self-check loops.
-Opus: big planning and weekly-or-longer reviews only.
-schedule.yaml can override any purpose under `models:`.
+Sonnet: writing, drafts, documents, self-check loops, training/food plans (coach), and judgment
+        calls: re-planning after a change, whether to push or call, how hard to push.
+Opus: important judgment calls, money coaching, investing and the monthly money review, big
+      planning and weekly-or-longer reviews.
+schedule.yaml / More -> Settings can override a purpose under `models:`, but never down to Haiku
+for judgment, and never below Opus for money.
 """
 
 from __future__ import annotations
@@ -18,20 +22,35 @@ ALIASES = ("haiku", "sonnet", "opus")
 DEFAULTS = {
     "chat": "sonnet", "call": "haiku", "voice_note": "sonnet",
     "triage": "haiku", "capture": "haiku", "letters": "haiku", "brief": "haiku", "reminder": "haiku",
-    "proactive": "haiku", "summary": "haiku", "promises": "haiku", "reply_check": "haiku",
+    "summary": "haiku", "promises": "haiku", "reply_check": "haiku",
     "draft": "sonnet", "document": "sonnet", "gauntlet": "sonnet", "study": "sonnet", "lerndoku": "sonnet",
-    "voice_check": "sonnet",
+    "voice_check": "sonnet", "acceptance": "sonnet", "coach": "sonnet",
+    "proactive": "sonnet", "judgment": "sonnet", "judgment_high": "opus",
+    "money": "opus", "money_review": "opus",
     "plan": "opus", "review_big": "opus",
 }
 JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
-               "open_loops": "draft", "promises": "promises", "pa": "draft"}
+               "open_loops": "draft", "promises": "promises", "pa": "judgment"}
+NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review", "coach", "plan", "review_big"}
+OPUS_ONLY = {"judgment_high", "money", "money_review"}
+RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
+
+
+def judgment(importance: str | None) -> str:
+    """The purpose for a judgment call: Opus when it matters a lot, else Sonnet. Never Haiku."""
+    return "judgment_high" if importance in ("high", "critical") else "judgment"
 
 
 def pick(purpose: str, schedule: dict | None = None) -> str:
+    default = DEFAULTS.get(purpose, "sonnet")
     override = ((schedule or {}).get("models") or {}).get(purpose)
-    if override in ALIASES:
-        return override
-    return DEFAULTS.get(purpose, "sonnet")
+    if override not in ALIASES:
+        return default
+    if purpose in OPUS_ONLY and RANK[override] < RANK["opus"]:
+        return default                     # money and important judgment stay on Opus
+    if purpose in NEVER_HAIKU and override == "haiku":
+        return default                     # judgment is never Haiku's
+    return override
 
 
 def record(engine, purpose: str, usage: dict | None, ok: bool) -> None:
