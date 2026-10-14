@@ -121,3 +121,41 @@ def test_review_times_from_schedule():
     assert review_times({"reviews": {"daily": "20:30"}}) == {"daily": "20:30", "big": "18:00"}
     assert review_times({"reviews": {"daily": "bad"}})["daily"] == "21:00"
     assert review_times(None) == {"daily": "21:00", "big": "18:00"}
+
+
+def test_a_whole_year_of_reviews_fires_on_the_right_days(db):
+    """Simulate every day of 2026 at the scheduled times: 365 check-ins and the six kinds on the right Sundays."""
+    import datetime as dt
+    from collections import Counter
+    from sqlmodel import Session, select
+    from app.db import Review
+    from app.profile import load_profile
+    from app.scheduler import Jobs
+    from app.settings import REPO_ROOT
+
+    pushes = []
+
+    class P:
+        def notify(self, *a, **k):
+            pushes.append(a)
+
+    engine = db
+    jobs = Jobs(engine=engine, pusher=P(), profile=load_profile(REPO_ROOT / "config"), schedule={})
+    day = dt.date(2026, 1, 1)
+    while day.year == 2026:
+        jobs.big_review(day)
+        jobs.daily_review(day)
+        day += dt.timedelta(days=1)
+    with Session(engine) as s:
+        rows = s.exec(select(Review)).all()
+    kinds = Counter(r.kind for r in rows)
+    assert kinds["daily"] == 365
+    big = {r.period_end: r.kind for r in rows if r.kind != "daily"}
+    assert big[dt.date(2026, 12, 27)] == "yearly"            # last Sunday of December
+    assert big[dt.date(2026, 6, 28)] == "half_year"          # last Sunday of June
+    assert big[dt.date(2026, 3, 29)] == "quarterly" and big[dt.date(2026, 9, 27)] == "quarterly"
+    assert big[dt.date(2026, 10, 25)] == "monthly"
+    assert big[dt.date(2026, 10, 18)] == "weekly"
+    assert kinds["yearly"] == 1 and kinds["half_year"] == 1 and kinds["quarterly"] == 2 and kinds["monthly"] == 8
+    assert kinds["weekly"] == 52 - 12                        # every Sunday except the 12 last Sundays
+    assert len(pushes) == len(rows)                          # one push each, no duplicates
