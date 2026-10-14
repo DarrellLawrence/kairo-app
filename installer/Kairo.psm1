@@ -334,7 +334,8 @@ function Install-ReleaseFiles($P, [string]$SourceApp, [string]$Version, [string]
 # the installing account (SYSTEM, admins) and then moves the packages into place, keeping that.
 # Kairo's own account then saw faster_whisper as an empty folder (2026-10-14: "cannot import
 # name 'WhisperModel' from 'faster_whisper' (unknown location)"). So after every install every
-# file and folder inherits C:\Kairo's rights again.
+# file and folder inherits C:\Kairo's rights again. Only for folders under tools\ (admins-only):
+# never as SYSTEM in a folder Kairo's account can write (a planted junction would redirect it).
 function Repair-ToolAcl([string]$Dir) {
     & icacls.exe $Dir /reset /T /C /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed on $Dir (exit code $LASTEXITCODE)" }
@@ -410,8 +411,6 @@ function Install-Voice($P, [string]$ReleaseDir) {
         Push-Location (Join-Path $ReleaseDir 'server')
         try { Invoke-Checked $py @('-m', 'app.voice', 'download') 'Downloading voice models' }
         finally { Pop-Location; Remove-Item Env:KAIRO_VOICE_SITE -ErrorAction SilentlyContinue }
-        $models = Join-Path $P.Data 'models'
-        if (Test-Path $models) { Repair-ToolAcl $models }
         Write-Ok "Voice ready ($site)"
     } catch {
         Write-Warn "Voice not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
