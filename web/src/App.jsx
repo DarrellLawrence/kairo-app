@@ -14,6 +14,7 @@ import Lerndoku from './screens/Lerndoku.jsx'
 import Call from './screens/Call.jsx'
 import Life from './screens/Life.jsx'
 import Onboarding from './screens/Onboarding.jsx'
+import Loops from './screens/Loops.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
 
@@ -24,7 +25,7 @@ const TABS = [
   { id: 'more', label: 'More', Icon: IconMore },
 ]
 // Screens without their own tab, and the tab that stays lit while they are open.
-const HIDDEN = { reviews: 'more', board: 'more', school: 'more', lerndoku: 'more', life: 'more' }
+const HIDDEN = { loops: 'today', reviews: 'more', board: 'more', school: 'more', lerndoku: 'more', life: 'more' }
 
 // Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
 function readRoute() {
@@ -37,7 +38,7 @@ function readRoute() {
 }
 
 function readParam() {
-  const m = window.location.hash.match(/^#\/?(?:reviews|call)\/(\d+|new)$/)
+  const m = window.location.hash.match(/^#\/?(?:reviews|call|loops)\/(\d+|new)$/)
   return m ? (m[1] === 'new' ? 'new' : Number(m[1])) : null
 }
 
@@ -76,6 +77,7 @@ export default function App() {
   const screen = {
     today: <Today openCards={openCards} go={go} onboarding={() => { window.location.hash = '#onboarding' }} />,
     reviews: <Reviews key={param ?? 'list'} openId={param} />,
+    loops: <Loops focusId={param} />,
     board: <Board />,
     school: <School />,
     lerndoku: <Lerndoku />,

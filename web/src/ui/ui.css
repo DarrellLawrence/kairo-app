@@ -406,3 +406,19 @@
 .k-call-btn.mute, .k-call-btn.side { width: 60px; height: 60px; background: rgba(255, 255, 255, 0.09); color: var(--text); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1); }
 .k-call-btn.mute.on { background: #fff; color: #111; }
 .k-call-btn.side svg, .k-call-btn.mute svg { width: 24px; height: 24px; }
+
+/* ---------------------------------------------------------------- open loops */
+.k-loop { position: relative; margin: 0 var(--gutter) var(--s-4); padding: var(--s-5); border-radius: var(--r-lg);
+  background: linear-gradient(165deg, #232026, #19181c 60%); box-shadow: var(--glass-edge), var(--glass-shadow); }
+.k-loop-phrase { font: 400 21px/1.3 var(--font-serif); margin: 0 0 var(--s-3); }
+.k-loop-link { display: block; margin: var(--s-3) auto 0; border: 0; background: none; color: var(--text-3); font: var(--t-caption); padding: 4px 8px; }
+.k-loop .k-approval-actions .k-btn { padding: 0 var(--s-3); }
+
+/* Today: the open-loops stack (cards peeking out underneath) */
+.k-stack { position: relative; margin: 0 var(--gutter) var(--s-5); padding-bottom: 14px; }
+.k-stack-layer { position: absolute; left: 16px; right: 16px; bottom: 0; height: 40px; border-radius: var(--r-lg);
+  background: rgba(255, 255, 255, 0.04); box-shadow: var(--glass-edge); }
+.k-stack-layer.l2 { left: 32px; right: 32px; bottom: -8px; opacity: 0.6; }
+.k-stack .k-card { margin: 0; position: relative; z-index: 1; background: linear-gradient(165deg, #25211f, #1a1819 65%); }
+.k-stack-count { display: inline-flex; align-items: baseline; gap: 6px; }
+.k-stack-count b { font: var(--t-hero-num); font-size: 30px; color: var(--ember-3); }

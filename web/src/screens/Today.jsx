@@ -42,6 +42,15 @@ function BriefDetail({ b, startDrag, close, onDone }) {
       </div>
       <div>
         {b.top3?.length > 0 && <><SectionTitle>Top 3</SectionTitle><div className="k-pad"><Top3 items={b.top3} /></div></>}
+        {b.open_loops?.length > 0 && (
+          <>
+            <SectionTitle>Still open</SectionTitle>
+            <List>{b.open_loops.map((l) => (
+              <ListRow key={l.id} icon={<IconWarn />} title={l.phrase} subtitle={l.offer || undefined} wrap chevron
+                onClick={() => { close(); window.location.hash = `#loops/${l.id}` }} />
+            ))}</List>
+          </>
+        )}
         <SectionTitle>Calendar</SectionTitle>
         <List>
           {b.calendar_error && <ListRow icon={<IconWarn />} title="Calendar not available" subtitle={b.calendar_error} wrap />}
@@ -270,6 +279,21 @@ export default function Today({ go, onboarding }) {
           </motion.button>
         )}
       </motion.header>
+
+      {h?.loops?.count > 0 && (
+        <motion.div className="k-stack" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ ...spring.smooth, delay: 0.08 }}>
+          {h.loops.count > 2 && <span className="k-stack-layer l2" />}
+          {h.loops.count > 1 && <span className="k-stack-layer" />}
+          <Card interactive onClick={() => { window.location.hash = `#loops/${h.loops.top[0].id}` }}>
+            <div className="k-approval-head">
+              <span className="k-stack-count"><b>{h.loops.count}</b><span className="k-muted k-small">open</span></span>
+              {h.loops.urgent > 0 && <Badge tone="danger" pop={false}>{h.loops.urgent} urgent</Badge>}
+            </div>
+            <p className="k-loop-phrase" style={{ fontSize: 19, marginBottom: 6 }}>{h.loops.top[0].phrase}</p>
+            {h.loops.top[0].offer && <p className="k-card-sub">{h.loops.top[0].offer}</p>}
+          </Card>
+        </motion.div>
+      )}
 
       {due.map((r) => (
         <Card key={r.id} accent interactive onClick={() => { window.location.hash = `#reviews/${r.id}` }}>
