@@ -97,6 +97,8 @@ SPECS = [
                             "cold one. The numbers are the cold start cost.", "F23"),
     Spec(30, "Health", "auto", "Google answers a real call, Kairo's tailnet address answers, 10 GB free; a note changed on "
                                "two devices is reported, kept out of the chat, and sorted out with one tap.", "F23"),
+    Spec(31, "Obsidian graph", "auto", "A note Kairo writes links the people, places, subjects, projects and goals it names "
+                                       "with [[wikilinks]]; a missing one gets its own note with aliases.", "C7"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -752,11 +754,46 @@ async def t_health(ctx: Context) -> dict:
             shutil.rmtree(stash, ignore_errors=True)
 
 
+async def t_graph(ctx: Context) -> dict:
+    from . import vault
+    from .db import Person
+    if ctx.vault_dir is None:
+        return _result(False, {"vault": False}, "no vault")
+    name = f"{MARK} Person"
+    rel = f"Kairo/{MARK} graph.md"
+    person_note = ctx.vault_dir / "60 People" / f"{name}.md"
+    linker = vault.LINKERS.get(ctx.vault_dir.resolve())
+    with Session(ctx.engine) as s:
+        s.add(Person(name=name))
+        s.commit()
+    try:
+        if linker is not None:
+            linker.invalidate()                # see the new person now, not in a minute
+        await asyncio.to_thread(vault.write_section, ctx.vault_dir, rel, "acceptance",
+                                f"Met {name} today; a second mention of {name} stays plain.")
+        text = (ctx.vault_dir / rel).read_text(encoding="utf-8")
+        made = person_note.read_text(encoding="utf-8") if person_note.exists() else ""
+        checks = {"the note links the person": f"[[{name}]]" in text,
+                  "only the first mention": text.count("[[") == 1,
+                  "the person got a note": made.startswith("---\naliases:"),
+                  "Kairo links its notes (linker on)": linker is not None}
+        return _result(True, checks, text.split("-->", 1)[-1].strip()[:200])
+    finally:
+        (ctx.vault_dir / rel).unlink(missing_ok=True)
+        person_note.unlink(missing_ok=True)
+        with Session(ctx.engine) as s:
+            for p in s.exec(select(Person).where(Person.name == name)).all():
+                s.delete(p)
+            s.commit()
+        if linker is not None:
+            linker.invalidate()
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
     20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
-    29: t_lag, 30: t_health,
+    29: t_lag, 30: t_health, 31: t_graph,
 }
 
 

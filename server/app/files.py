@@ -75,7 +75,9 @@ def ensure_stignore(vault_dir: Path) -> list[str]:
                    if p.is_file() and not p.name.startswith(".stignore") and ROOT not in p.relative_to(vault_dir).parts[:1]
                    and p.stat().st_size > SYNC_MAX_BYTES)
     (vault_dir / LARGE_LIST).write_text("".join(f"{p}\n" for p in large), encoding="utf-8")
-    block = f"{STIGNORE_BEGIN}\n/{ROOT}\n#include {LARGE_LIST}\n{STIGNORE_END}"
+    # v8 C7: Obsidian's window layout is per device; synced, it only makes conflict copies.
+    block = (f"{STIGNORE_BEGIN}\n/{ROOT}\n/.obsidian/workspace*.json\n/.obsidian/workspaces.json\n"
+             f"#include {LARGE_LIST}\n{STIGNORE_END}")
     path = vault_dir / ".stignore"
     old = path.read_text(encoding="utf-8") if path.exists() else ""
     pattern = re.compile(re.escape(STIGNORE_BEGIN) + r".*?" + re.escape(STIGNORE_END), re.S)

@@ -32,6 +32,22 @@ class VaultError(Exception):
     pass
 
 
+# v8 C7: vault root -> links.Linker, registered at start; every note Kairo writes goes through it.
+LINKERS: dict[Path, object] = {}
+
+
+def linked(root: Path, text: str, rel: str | None = None) -> str:
+    linker = LINKERS.get(Path(root).resolve())
+    if linker is None:
+        return text
+    try:
+        return linker(text, rel)
+    except Exception:   # a note is never lost over its links
+        import logging
+        logging.getLogger("kairo.vault").exception("wikilinks")
+        return text
+
+
 def is_conflict(path: Path | str) -> bool:
     return bool(CONFLICT.search(PurePosixPath(str(path).replace("\\", "/")).name))
 
@@ -113,7 +129,7 @@ def write_section(root: Path, rel: str, key: str, content: str) -> Path:
     """Replace (or append) Kairo's section `key` in the file; owner text stays."""
     target = _target(root, rel)
     start, end = _markers(key)
-    block = f"{start}\n{content.rstrip()}\n{end}"
+    block = f"{start}\n{linked(root, content, rel).rstrip()}\n{end}"
     old = target.read_text(encoding="utf-8") if target.exists() else ""
     pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
     new = pattern.sub(lambda _m: block, old, count=1) if pattern.search(old) else (old.rstrip() + "\n\n" + block + "\n").lstrip()

@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
+from . import vault
 from .db import CalendarTag, Task, utcnow
 from .gate import Decision
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
@@ -143,11 +144,12 @@ class ToolRunner:
         base = self.vault_dir / KAIRO_NOTES_DIR
         target = self._inside(base, a["path"])
         target.parent.mkdir(parents=True, exist_ok=True)
+        content = vault.linked(self.vault_dir, a["content"], target.relative_to(self.vault_dir.resolve()).as_posix())   # v8 C7
         if a["mode"] == "append" and target.exists():
             with target.open("a", encoding="utf-8") as fh:
-                fh.write(a["content"])
+                fh.write(content)
         else:
-            target.write_text(a["content"], encoding="utf-8")
+            target.write_text(content, encoding="utf-8")
         return json.dumps({"written": f"{KAIRO_NOTES_DIR}/{PurePosixPath(a['path'].replace(chr(92), '/'))}"})
 
     @staticmethod

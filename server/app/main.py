@@ -38,7 +38,7 @@ from . import memory
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
-from . import conflicts as conflicts_mod, health as health_mod
+from . import conflicts as conflicts_mod, health as health_mod, links as links_mod
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError, wav_problems
@@ -298,6 +298,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine, gate=gate, executor=lambda: app.state.executor, google_read=google_read,
         on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today",
                                   source="security"))
+    vault.LINKERS[Path(settings.vault_dir).resolve()] = links_mod.Linker(engine, settings.vault_dir)   # v8 C7: [[wikilinks]]
     app.state.health = health_mod.HealthWatch(settings=settings, engine=engine, runner=runner, pusher=app.state.pusher,
                                               transport=lambda: getattr(app.state, "google_transport", None))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)

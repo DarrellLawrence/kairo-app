@@ -46,6 +46,7 @@ def test_stignore_keeps_files_and_big_ones_off_the_phone_and_the_owners_lines(tm
     files.ensure_stignore(vault)   # idempotent: one managed block
     text = (vault / ".stignore").read_text(encoding="utf-8")
     assert text.startswith("// mine\n*.tmp\n") and text.count(files.STIGNORE_BEGIN) == 1 and "\n/Files\n" in text
+    assert "\n/.obsidian/workspace*.json\n" in text       # v8 C7: per-device layout never syncs
     assert (vault / files.LARGE_LIST).read_text(encoding="utf-8") == "/40 School/big lecture.mp4\n"
 
 

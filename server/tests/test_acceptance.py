@@ -183,7 +183,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 31))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 32))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable
@@ -300,3 +300,32 @@ def test_health_fails_when_the_tailnet_is_down_or_the_disk_full(migrated, monkey
     assert not r["ok"]
     assert r["checks"]["the tailnet address answers"] is False and r["checks"]["at least 10 GB free"] is False
     assert "can't reach Kairo" in r["detail"]
+
+
+# ---------------------------------------------------------------- 31 Obsidian graph
+
+def test_graph_passes_and_cleans_up(migrated):
+    from app import links, vault
+    from app.db import Person
+    ctx = ctx_for(migrated)
+    ctx.vault_dir = migrated.vault_dir
+    vault.ensure_structure(ctx.vault_dir)
+    vault.LINKERS[ctx.vault_dir.resolve()] = links.Linker(ctx.engine, ctx.vault_dir)
+    try:
+        r = run(acceptance.t_graph(ctx))
+        assert r["ok"], r
+        assert not list(ctx.vault_dir.rglob(f"{MARK}*"))
+        with Session(ctx.engine) as s:
+            assert s.exec(select(Person)).all() == []
+    finally:
+        vault.LINKERS.pop(ctx.vault_dir.resolve(), None)
+
+
+def test_graph_fails_without_the_linker(migrated):
+    from app import vault
+    ctx = ctx_for(migrated)
+    ctx.vault_dir = migrated.vault_dir
+    vault.ensure_structure(ctx.vault_dir)
+    vault.LINKERS.pop(ctx.vault_dir.resolve(), None)
+    r = run(acceptance.t_graph(ctx))
+    assert not r["ok"] and r["checks"]["the note links the person"] is False
