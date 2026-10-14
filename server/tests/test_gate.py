@@ -344,3 +344,13 @@ def test_loop_tools_are_internal(gate, tool, args, tier):
 ])
 def test_bad_loop_calls_are_denied(gate, tool, args):
     assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+@pytest.mark.parametrize("args", [{}, {"scope": "everything"}, {"scope": "auto", "topic": "school"}, {"scope": "week"}])
+def test_debrief_is_a_read_tool(gate, args):
+    d = gate.decide(P + "debrief", args, ctx(origin="voice_note"))
+    assert (d.verdict, d.tier) == ("allow", 0)
+
+
+def test_debrief_rejects_unknown_topics(gate):
+    assert gate.decide(P + "debrief", {"topic": "bank_transfer"}, ctx()).verdict == "deny"

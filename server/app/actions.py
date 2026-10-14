@@ -134,6 +134,13 @@ class CalendarTag(Strict):
     type: Literal["FIXED", "SOCIAL", "FLEXIBLE"]
 
 
+class Debrief(Strict):
+    """'debrief me' / 'what's going on': scope by time of day unless asked; a topic narrows it."""
+
+    scope: Literal["auto", "today", "week", "everything"] = "auto"
+    topic: Literal["calendar", "mail", "school", "tasks", "people", "money", "health", "loops"] | None = None
+
+
 class LoopsList(Strict):
     include_snoozed: bool = True
 
@@ -303,6 +310,7 @@ SCHEMAS: dict[str, type[Strict]] = {
     "finance.list": FinanceList,
     "health.list": HealthList,
     "calendar.tag": CalendarTag,
+    "debrief": Debrief,
     "loops.list": LoopsList,
     "loops.add": LoopsAdd,
     "loops.snooze": LoopsSnooze,
@@ -328,7 +336,7 @@ MIN_TIER: dict[str, int] = {
     "shopping.add": 1, "people.note": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
-    "calendar.tag": 1, "loops.list": 0, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
+    "calendar.tag": 1, "loops.list": 0, "debrief": 0, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
     "gmail.send_self": 2, "calendar.move": 2,
     "gmail.trash": 2,   # v7: Gmail keeps trash 30 days
     "calendar.delete": 4,
@@ -352,6 +360,7 @@ DIRECT_TOOLS: dict[str, str] = {
     "finance_list": "finance.list",
     "health_list": "health.list",
     "calendar_tag": "calendar.tag",
+    "debrief": "debrief",
     "loops_list": "loops.list",
     "loops_add": "loops.add",
     "loops_snooze": "loops.snooze",
