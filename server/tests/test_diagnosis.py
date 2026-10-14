@@ -141,6 +141,7 @@ TAILNET = "https://kairo-home.tail1234.ts.net"
 
 def test_owner_only(migrated, monkeypatch):
     monkeypatch.setattr(main_mod, "LOCAL_HOSTS", {"testclient", "127.0.0.1"})
+    migrated = migrated.model_copy(update={"owner_check": True})
     me = {"tailscale-user-login": "Owner@Example.com"}
     with TestClient(create_app(migrated), base_url="http://127.0.0.1:8000") as c:
         r = c.post("/api/diagnosis")                                   # on the PC

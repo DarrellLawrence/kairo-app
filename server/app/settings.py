@@ -27,6 +27,8 @@ class Settings(BaseModel):
     # Config in layers (fix P0.4): the owner's changes only. Set -> config_dir is built at start
     # from the release's config/ plus these (app/config_layers.py). Unset (dev, tests): config_dir as is.
     config_overrides: Path | None = None
+    # Owner only, app-wide (main.OwnerOnly). Only the test fixtures turn it off; no env variable can.
+    owner_check: bool = True
 
     @property
     def db_path(self) -> Path:
