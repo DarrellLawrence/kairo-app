@@ -219,8 +219,11 @@ $envText = Get-Content -Raw (Join-Path $Root 'data\kairo.env')
 Check ($envText -match 'KAIRO_CONFIG_OVERRIDES=.*data\\config\r?\n' -and $envText -match 'KAIRO_CONFIG_DIR=.*config-legacy') 'kairo.env: owner changes for this version, the full copy for older ones'
 
 # ---- Kairo has hands (fix P0): the self-test the installer ran after the switch, as kairo-svc
-$stj = Get-Content -Raw (Join-Path $Root 'data\updates\selftest.json') | ConvertFrom-Json
+$stj = Get-Content -Raw (Join-Path $Root 'status\selftest.json') | ConvertFrom-Json
 Check ($stj.version -eq $v1 -and $stj.ok) "the install ran the self-test and it passed ($($stj.reason))"
+Check (-not (Test-Path (Join-Path $Root 'data\updates\selftest.json'))) 'fix F24: the installer''s notes are in status\, not in data\'
+$stIds = @((Get-Acl (Join-Path $Root 'status')).Access | Where-Object { $_.IdentityReference -match 'kairo-svc' -and $_.FileSystemRights -match 'Write|Modify|FullControl|Delete' })
+Check ($stIds.Count -eq 0) "fix F24: Kairo's account can read status\, not change it"
 $tools = (Invoke-WebRequest 'http://127.0.0.1:8000/api/selftest/tools?notify=0' -Method Post -Body '{}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 900).Content | ConvertFrom-Json
 Check ($tools.ok) "tools self-test passes ($($tools.reason))"
 Check ($tools.checks.hook_deny -and $tools.checks.hook_allow) 'the shipped safety hook blocks a forbidden tool (exit 2) and lets a Kairo tool through'
@@ -283,10 +286,17 @@ if ($envOk -and $exeOk) { exit 0 } else { exit 1 }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $envTest -Installer (Join-Path $Root 'installer') -TestRoot (Join-Path $work 'envroot') | Out-Host
 Check ($LASTEXITCODE -eq 0) 'the installer takes only model names from kairo.env, and admin windows only start tools\claude\claude.exe'
 
+# ---- fix F24: a data lock an update left behind (power cut) is undone by the next boot check
+Stop-ScheduledTask -TaskName 'Kairo' -TaskPath '\Kairo\'
+Disable-LocalUser -Name 'kairo-svc'
+@{ pid = 2147483646; at = (Get-Date).AddMinutes(-5).ToString('o'); restart = @('Kairo') } | ConvertTo-Json |
+    Set-Content -Path (Join-Path $Root 'updater\data-lock.json') -Encoding ASCII
+
 # ---- the boot check (what runs after every reboot), minus the Tailscale parts
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Kairo-BootCheck.ps1') -Root $Root -CI | Out-Host
 Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, tools, Claude, browser)'
-$bc = Get-Content -Raw (Join-Path $Root 'data\logs\boot-check.json') | ConvertFrom-Json
+Check ((Get-LocalUser -Name 'kairo-svc').Enabled -and -not (Test-Path (Join-Path $Root 'updater\data-lock.json'))) 'fix F24: the boot check undid the stale data lock (account on, Kairo started)'
+$bc = Get-Content -Raw (Join-Path $Root 'status\boot-check.json') | ConvertFrom-Json
 $names = @($bc.checks | ForEach-Object { $_.name })
 $missing = @(@('Kairo running', 'Own account', 'Kairo tools', 'Context', 'Claude login', 'Browser') | Where-Object { $names -notcontains $_ })
 Check ($bc.all_ok -and $missing.Count -eq 0) "boot-check.json: all green ($($names -join ', '))"
@@ -300,11 +310,21 @@ Check ($put.StatusCode -eq 200) 'school portal login saved (encrypted for kairo-
 $pwSet = (Get-LocalUser -Name 'kairo-svc').PasswordLastSet
 Check (Test-Path (Join-Path $Root 'updater\kairo-svc.bin')) "kairo-svc's password is kept machine-encrypted in updater\"
 
+# ---- fix F24: links Kairo's account could plant in data\ are gone before any elevated write
+$target = Join-Path $work 'f24-target'
+[void](New-Item -ItemType Directory -Force $target)
+Set-Content -Path (Join-Path $target 'canary.txt') -Value 'untouched' -Encoding ASCII
+$planted = @((Join-Path $Root 'data\backups\ci-link'), (Join-Path $Root 'data\db\ci-link'), (Join-Path $Root 'data\ci-link'))
+foreach ($l in $planted) { [void](New-Item -ItemType Junction -Path $l -Target $target) }
+
 # ---- update keeps owner config
 Add-Content (Join-Path $Root 'data\config\profile.yaml') '# ci-marker'
 $v2 = "$v1-ci2"
 $s2 = Copy-Setup $s1 'v2' $v2
 Check ((Invoke-Install $s2) -eq 0) 'update to v2 exits 0'
+Check (@($planted | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'fix F24: the update removed the links planted in data\'
+Check ((Get-Content -Raw (Join-Path $target 'canary.txt')).Trim() -eq 'untouched' -and @(Get-ChildItem $target).Count -eq 1) 'fix F24: nothing was written or deleted where the links pointed'
+Check ((Get-LocalUser -Name 'kairo-svc').Enabled -and -not (Test-Path (Join-Path $Root 'updater\data-lock.json'))) "fix F24: Kairo's account is on again after the data lock"
 Check ((Get-LocalUser -Name 'kairo-svc').PasswordLastSet -eq $pwSet) "the update did not replace kairo-svc's password"
 $olat = @(((Invoke-WebRequest 'http://127.0.0.1:8000/api/logins' -UseBasicParsing).Content | ConvertFrom-Json) | Where-Object { $_.site -eq 'olat' })[0]
 Check ($olat.username -eq 'ci-user' -and $olat.password_set -and $olat.encrypted) 'the school portal login is still readable after the update'
@@ -390,7 +410,7 @@ Remove-Item -Recurse -Force (Join-Path $s5 'app\server\mcp_kairo')
 Check ((Invoke-Install $s5) -ne 0) 'an update without the tool bridge reports failure'
 Check ((Get-StateObj).current -eq $v2) 'still on v2 after the tool-less update'
 Check ((Get-HealthObj).status -eq 'ok') 'v2 answers again after rolling back the tool-less update'
-$stj = Get-Content -Raw (Join-Path $Root 'data\updates\selftest.json') | ConvertFrom-Json
+$stj = Get-Content -Raw (Join-Path $Root 'status\selftest.json') | ConvertFrom-Json
 Check ($stj.version -eq $v5 -and -not $stj.ok -and $stj.category -eq 'toolchain') "the reason is recorded for the update note ($($stj.reason))"
 
 # ---- manual rollback
@@ -434,7 +454,7 @@ Compress-Archive -Path $s4 -DestinationPath $zip4
 # [urgent] so the test does not depend on the time of day (quiet hours).
 Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0) 'auto-update exits 0'
 Check ((Get-StateObj).current -eq $v4) "auto-update installed $v4"
-$note = Get-Content -Raw (Join-Path $Root 'data\updates\last-update.json') | ConvertFrom-Json
+$note = Get-Content -Raw (Join-Path $Root 'status\last-update.json') | ConvertFrom-Json
 Check ($note.message -eq "Kairo updated to $v4." -and -not $note.notified) 'one-line update note left for the iPhone push'
 Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0 -and (Get-StateObj).current -eq $v4) 'already up to date: nothing happens'
 function Get-UpdaterStateObj { return (Get-Content -Raw (Join-Path $Root 'updater\state.json') | ConvertFrom-Json) }
@@ -449,7 +469,7 @@ $zip6 = Join-Path $work "Kairo-Setup-$v6.zip"
 Compress-Archive -Path $s6 -DestinationPath $zip6
 Check ((Invoke-AutoUpdate "v$v6" '[urgent] CI' $zip6) -ne 0) 'a broken release fails'
 Check ((Get-StateObj).current -eq $v4) "still on $v4 after the broken auto-update"
-$note = Get-Content -Raw (Join-Path $Root 'data\updates\last-update.json') | ConvertFrom-Json
+$note = Get-Content -Raw (Join-Path $Root 'status\last-update.json') | ConvertFrom-Json
 Check ($note.message -match 'failed and was undone') 'the failure is noted for the iPhone push'
 Check (@((Get-UpdaterStateObj).failed) -contains $v6) 'a release that ran and failed is blacklisted'
 $logLines = @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count

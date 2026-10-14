@@ -47,9 +47,27 @@ def _starts_path(data_dir: Path) -> Path:
     return Path(data_dir) / "logs" / "starts.json"
 
 
+PLANNED_S = 15 * 60   # a start this soon after the installer stopped Kairo on purpose is not a crash
+
+
+def _planned(data_dir: Path, now: dt.datetime) -> bool:
+    """The installer noted a stop it made on purpose (update, Kairo Logins: status\\planned-restart.json)."""
+    from . import status_files
+    note = status_files.read_json(data_dir, "planned-restart.json")
+    try:
+        at = dt.datetime.fromisoformat(str(note["at"]).replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    at = at if at.tzinfo else at.replace(tzinfo=dt.timezone.utc)
+    return dt.timedelta(0) <= now - at <= dt.timedelta(seconds=PLANNED_S)
+
+
 def record_start(data_dir: Path, now: dt.datetime | None = None) -> int:
-    """Note this start; returns how many starts there were in the last hour (this one included)."""
+    """Note this start; returns how many starts there were in the last hour (this one included).
+    A start right after a stop the installer made on purpose is not counted."""
     now = now or _now()
+    if _planned(data_dir, now):
+        return starts_last_hour(data_dir, now)
     path = _starts_path(data_dir)
     try:
         starts = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
@@ -85,10 +103,9 @@ def crash_loop_text(n: int) -> str:
 
 def kairo_url(data_dir: Path) -> str | None:
     """Kairo's tailnet address, recorded by the boot check (boot-check.json, kairo_url)."""
-    try:
-        url = json.loads((Path(data_dir) / "logs" / "boot-check.json").read_text(encoding="utf-8-sig")).get("kairo_url")
-    except (OSError, ValueError, AttributeError):
-        return None
+    from . import status_files
+    data = status_files.read_json(data_dir, "boot-check.json")
+    url = data.get("kairo_url") if isinstance(data, dict) else None
     return url if isinstance(url, str) and url.startswith("https://") else None
 
 

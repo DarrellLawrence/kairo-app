@@ -1,6 +1,6 @@
 # Kairo boot check. Runs 3 minutes after every boot as SYSTEM (task
 # "\Kairo\Kairo Boot Check"), with nobody logged in. "Kairo Check.bat" runs
-# the same checks on demand. Result: C:\Kairo\data\logs\boot-check.json,
+# the same checks on demand. Result: C:\Kairo\status\boot-check.json (fix F24: not data\),
 # shown on the iPhone under More -> Last boot check.
 param([string]$Root = 'C:\Kairo', [switch]$Interactive, [switch]$CI)
 
@@ -16,6 +16,8 @@ if ($Interactive) {
 }
 
 $P = Get-KairoPaths $Root
+# Fix F24: an update interrupted by the power cut that caused this boot must not leave Kairo's account off.
+try { Clear-StaleDataLock $P } catch { Write-Warn "Data lock: $($_.Exception.Message)" }
 $checks = New-Object System.Collections.Generic.List[object]
 $tailnetLogin = ''
 $url = $null
@@ -112,8 +114,8 @@ $report = [pscustomobject]@{
 if ($tailnetLogin) { $report | Add-Member -NotePropertyName tailnet_login -NotePropertyValue $tailnetLogin }
 # Fix plan 32: Kairo checks this address itself every hour (is the tailnet path to the iPhone up?).
 if ($url) { $report | Add-Member -NotePropertyName kairo_url -NotePropertyValue $url }
-if (-not (Test-Path $P.Logs)) { [void](New-Item -ItemType Directory -Path $P.Logs) }
-$report | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $P.Logs 'boot-check.json') -Encoding UTF8
+if (-not (Test-Path $P.Status)) { [void](New-Item -ItemType Directory -Path $P.Status) }
+$report | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $P.Status 'boot-check.json') -Encoding UTF8
 
 if ($Interactive) {
     if ($allOk) { Write-Ok 'Everything came back by itself.' } else { Write-Warn 'Something is not right; the lines marked XX say what.' }

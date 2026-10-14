@@ -38,10 +38,10 @@ from . import memory
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
-from . import conflicts as conflicts_mod, health as health_mod, links as links_mod
+from . import conflicts as conflicts_mod, health as health_mod, links as links_mod, status_files
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
-from .voice import NotInstalled, Voice, VoiceError, wav_problems
+from .voice import NotInstalled, Voice, VoiceError, models_dir as voice_models_dir, wav_problems
 from .voice import calls as voice_calls
 from pydantic import ValidationError
 
@@ -302,7 +302,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.health = health_mod.HealthWatch(settings=settings, engine=engine, runner=runner, pusher=app.state.pusher,
                                               transport=lambda: getattr(app.state, "google_transport", None))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
-    app.state.voice = Voice(settings.data_dir / "models", site_dir=tool_sites.site("voice", settings.data_dir))
+    _voice_site = tool_sites.site("voice", settings.data_dir)
+    app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site)
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
@@ -2404,13 +2405,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/status")
     def status():
         """Last boot check (written by the boot-check task on kairo-home), for the More screen."""
-        path = settings.data_dir / "logs" / "boot-check.json"
-        boot = None
-        if path.is_file():
-            try:
-                boot = json.loads(path.read_text(encoding="utf-8-sig"))
-            except (OSError, ValueError):
-                boot = {"error": "boot-check.json unreadable"}
+        boot = status_files.read_json(settings.data_dir, "boot-check.json")
         with session_for(engine) as s:
             row = s.get(SettingKV, "selftest.tools")
             selftest_last = json.loads(row.value) if row and row.value else None
@@ -2567,7 +2562,7 @@ OPEN_PATHS = {"/health"}       # the boot check and the updater poll it; nothing
 
 def pinned_owner_login(data_dir: Path, _cache: dict = {}) -> str | None:
     """The PC's own Tailscale account, recorded by the boot check (boot-check.json, tailnet_login)."""
-    path = data_dir / "logs" / "boot-check.json"
+    path = status_files.path(data_dir, "boot-check.json")
     try:
         stamp = path.stat().st_mtime_ns
     except OSError:

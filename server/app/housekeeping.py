@@ -1,7 +1,7 @@
 """Small background duties, once a minute (Milestone C brings the job scheduler).
 
 - After an automatic update (installer/Kairo-AutoUpdate.ps1 writes
-  data/updates/last-update.json) and when an update brought new actions
+  C:\\Kairo\\status\\last-update.json) and when an update brought new actions
   (data/updates/config-update.json): one push to the owner's devices.
 - Google "Testing" mode ends sign-ins after 7 days: push a reminder a day
   before, and once if Google has signed Kairo out. Tokens that outlive 7 days
@@ -31,6 +31,7 @@ log = logging.getLogger("kairo.housekeeping")
 DAY = 86400
 TESTING_DAYS = 7
 UNKNOWN_AGE_CHECK_S = 6 * 3600   # tokens from before issue times were kept
+NOTIFIED_KEY = "updates.notified"  # which updater note was pushed (its "at")
 
 
 class Housekeeping:
@@ -84,22 +85,40 @@ class Housekeeping:
     # ---------------------------------------------------------------- updates
 
     def update_notice(self) -> None:
-        """One push for the update note and the config note (new actions, fix P0.4) together."""
+        """One push for the update note and the config note (new actions, fix P0.4) together.
+        Fix F24: the updater's note is in C:\\Kairo\\status (Kairo may only read it): which one was
+        pushed is remembered in the database; Kairo's own config note it marks itself."""
         if self._quiet():
             return
-        pending = []
-        for name in ("last-update.json", "config-update.json"):
-            path = self.settings.data_dir / "updates" / name
-            if path.is_file():
-                data = json.loads(path.read_text(encoding="utf-8-sig"))
-                if not data.get("notified"):
-                    pending.append((path, data))
+        from sqlmodel import Session
+        from . import status_files
+        from .db import SettingKV
+        pending, note_at = [], None
+        note = status_files.read_json(self.settings.data_dir, "last-update.json")
+        with Session(self.app.state.health.engine) as s:
+            row = s.get(SettingKV, NOTIFIED_KEY)
+            if isinstance(note, dict) and note.get("message") and not note.get("notified"):
+                note_at = str(note.get("at") or note.get("message"))
+                if not row or row.value != note_at:
+                    pending.append((None, note))
+        own = self.settings.data_dir / "updates" / "config-update.json"
+        if own.is_file():
+            data = json.loads(own.read_text(encoding="utf-8-sig"))
+            if not data.get("notified"):
+                pending.append((own, data))
         if not pending:
             return
         self._push(" ".join(str(d.get("message") or "Kairo was updated.") for _, d in pending)[:200])
         for path, data in pending:
-            data["notified"] = True
-            path.write_text(json.dumps(data), encoding="utf-8")
+            if path is None:
+                with Session(self.app.state.health.engine) as s:
+                    row = s.get(SettingKV, NOTIFIED_KEY) or SettingKV(key=NOTIFIED_KEY)
+                    row.value = note_at
+                    s.add(row)
+                    s.commit()
+            else:
+                data["notified"] = True
+                path.write_text(json.dumps(data), encoding="utf-8")
 
     # ---------------------------------------------------------------- Google
 

@@ -19,8 +19,8 @@ try {
     Write-Step "Going back from $($state.current) to $($state.previous)"
     $currentDir = Get-ReleaseDir $P $state.current
     $python = Join-Path $currentDir 'venv\Scripts\python.exe'
-    $backup = Backup-Database $P "before-rollback" $python
-    Restore-Release $P $currentDir $state.previous $backup
+    # The backup is taken inside the data lock, with Kairo stopped (fix F24).
+    Restore-Release $P $currentDir $state.previous $null -BackupWith $python
     if (-not (Get-Health)) { throw 'Kairo is not answering after the rollback. See C:\Kairo\data\logs\kairo.log' }
     $was = $state.current
     $state.current = $state.previous

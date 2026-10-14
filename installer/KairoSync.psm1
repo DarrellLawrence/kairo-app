@@ -164,12 +164,17 @@ function Unregister-Sync {
     Get-NetFirewallRule -DisplayName $script:SyncFirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 }
 
-# Install or update: binary, settings, task, firewall, (re)start.
+# Install or update: binary, settings (data\syncthing: inside the data lock, fix F24), task,
+# firewall, (re)start. The installer does the settings in its own lock and then Start-SyncTask.
 function Install-Sync($P, $Svc) {
-    Write-Step 'Vault sync (Syncthing, only through Tailscale)'
     [void](Install-Syncthing $P)
     Stop-Sync
-    Initialize-SyncConfig $P
+    Invoke-DataLocked $P { Initialize-SyncConfig $P }
+    Start-SyncTask $P $Svc
+}
+
+function Start-SyncTask($P, $Svc) {
+    Write-Step 'Vault sync (Syncthing, only through Tailscale)'
     Register-SyncTask $P $Svc
     Start-Sync
     Write-Ok 'Sync is running as Kairo''s account and shares only the vault folder'
@@ -221,7 +226,7 @@ function Connect-Sync($P, $Svc) {
     }
     $ip = Get-TailscaleIPv4
     if (-not $ip) { Write-Warn 'Tailscale is not connected, so sync can not be set up yet. Finish the Tailscale step first.'; return $false }
-    Stop-Sync; Initialize-SyncConfig $P; Start-Sync
+    Stop-Sync; Invoke-DataLocked $P { Initialize-SyncConfig $P }; Start-Sync
     $st = Wait-SyncApi $P
     if (-not $st) { Write-Bad 'Syncthing did not start. Run Kairo Check.'; return $false }
     $tsName = ''

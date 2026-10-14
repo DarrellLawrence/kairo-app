@@ -1,16 +1,24 @@
-"""python -m app.voice download | selftest   (run by the installer on kairo-home)"""
+"""python -m app.voice download [--to <models folder>] | selftest   (run by the installer on kairo-home)
+
+Fix F24: the installer passes --to <tools\\voice-<hash>\\models> (admins only), never data\\."""
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from ..settings import get_settings
-from . import Voice
+from . import Voice, models_dir
 
 
 def main(argv: list[str]) -> int:
     data = get_settings().data_dir
-    v = Voice(data / "models", site_dir=data.parent / "tools" / "voice")
+    site = data.parent / "tools" / "voice"
+    to = None
+    if "--to" in argv:
+        i = argv.index("--to")
+        to, argv = Path(argv[i + 1]), argv[:i] + argv[i + 2:]
+    v = Voice(to or models_dir(data, site), site_dir=site)
     cmd = argv[0] if argv else "download"
     if cmd == "download":
         for item in v.download():

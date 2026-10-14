@@ -160,3 +160,17 @@ def test_todays_chip_and_housekeeping(migrated, monkeypatch):
     with TestClient(app) as c:
         issues = c.get("/api/today").json()["issues"]
     assert any("GB free" in i for i in issues)
+
+
+def test_starts_the_installer_planned_are_not_a_crash_loop(watch):
+    now = dt.datetime.now(dt.timezone.utc)
+    note = watch.settings.data_dir.parent / "status" / "planned-restart.json"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_bytes(b"\xef\xbb\xbf" + json.dumps({"at": (now - dt.timedelta(minutes=2)).isoformat()}).encode())
+    for _ in range(6):                                   # Kairo Logins stops and starts Kairo a few times
+        health.record_start(watch.settings.data_dir, now)
+    assert "crash_loop" not in watch.run(full=False, now=now)
+    later = now + dt.timedelta(minutes=20)               # the note is old: a start now is a real one
+    for _ in range(4):
+        health.record_start(watch.settings.data_dir, later)
+    assert "restarted 4 times" in watch.run(full=False, now=later)["crash_loop"]

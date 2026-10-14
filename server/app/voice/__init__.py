@@ -325,7 +325,9 @@ class Voice:
     # ---------------------------------------------------------------- downloads (installer)
 
     def download(self) -> list[str]:
-        """Fetch every model once, into <data>/models. Returns what was done."""
+        """Fetch every model once, into models_dir (fix F24: the installer's tools\\voice-<hash>\\models,
+        only admins can change it; it used to be data\\models). Returns what was done; marks the folder
+        complete at the end, so Kairo only switches to it once every model is there."""
         import urllib.request
         done = []
         kd = self.models_dir / "kokoro"
@@ -349,7 +351,19 @@ class Voice:
             for name in (WHISPER_CPU, WHISPER_GPU):
                 download_model(name, cache_dir=str(self.models_dir / "whisper"))
                 done.append(f"whisper {name}")
+        (self.models_dir / COMPLETE).write_text("ok\n", encoding="ascii")
         return done
+
+
+COMPLETE = ".complete"
+
+
+def models_dir(data_dir: Path, site_dir: Path | None) -> Path:
+    """Fix F24: the models next to the packages (tools\\voice-<hash>\\models) once the installer has
+    them all there; until then the old data\\models."""
+    if site_dir is not None and (Path(site_dir) / "models" / COMPLETE).is_file():
+        return Path(site_dir) / "models"
+    return Path(data_dir) / "models"
 
 
 def _clean_for_speech(text: str) -> str:

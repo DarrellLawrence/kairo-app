@@ -71,6 +71,7 @@ function Get-KairoPaths([string]$Root) {
         State        = Join-Path $app 'state.json'
         Installer    = Join-Path $Root 'installer'
         Updater      = Join-Path $Root 'updater'
+        Status       = Join-Path $Root 'status'          # fix F24: what elevated scripts write for Kairo to read
         Vault        = Join-Path $data 'vault'
         Tools        = Join-Path $Root 'tools'
         Downloads    = Join-Path $Root 'downloads'
@@ -158,8 +159,8 @@ function Read-ReleaseInfo([string]$AppDir) {
 # ---------------------------------------------------------------- folders & permissions
 
 function Initialize-Folders($P) {
-    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Data, $P.Vault, $P.Config, $P.Secrets,
-                     $P.Logs, $P.Backups, $P.Workspace, $P.ClaudeConfig, (Split-Path $P.Db))) {
+    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Status, $P.Data, $P.Vault, $P.Config,
+                     $P.Secrets, $P.Logs, $P.Backups, $P.Workspace, $P.ClaudeConfig, (Split-Path $P.Db))) {
         if (-not (Test-Path $d)) { [void](New-Item -ItemType Directory -Path $d) }
     }
 }
@@ -183,6 +184,117 @@ function Set-KairoAcl($P, [string]$Owner, [string]$Service) {
     & icacls.exe $P.Data /grant:r "${Owner}:(OI)(CI)M" "${Service}:(OI)(CI)M" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "icacls failed on $($P.Data)" }
     Protect-UpdaterFolder $P
+}
+
+# ---------------------------------------------------------------- data lock (fix F24)
+
+# data\ is Kairo's own account's to change (Modify). A link (junction or symbolic link) it put
+# there could steer a write made with admin or SYSTEM rights anywhere on this PC. So every
+# elevated write into data\ happens inside this lock: Kairo's tasks stopped, its account
+# disabled (no new logon), none of its programs running, and every link under data\ removed
+# (Kairo never makes one). Nothing can then redirect the write or race it. A lock a power cut
+# left behind is undone by the next auto-update or boot check (Clear-StaleDataLock).
+# Elevated scripts never write into data\ outside it: their notes go to C:\Kairo\status.
+function Get-DataLockPath($P) { return Join-Path $P.Updater 'data-lock.json' }
+
+function Get-ServiceTasks {
+    return @(Get-ScheduledTask -TaskPath $script:TaskPath -ErrorAction SilentlyContinue |
+        Where-Object { ([string]$_.Principal.UserId) -like "*$($script:ServiceUser)" })
+}
+
+function Stop-ServiceAccountProcesses {
+    for ($i = 0; $i -lt 30; $i++) {
+        $left = @(Get-Process -IncludeUserName -ErrorAction SilentlyContinue |
+            Where-Object { $_.UserName -and (([string]$_.UserName -split '\\')[-1] -eq $script:ServiceUser) })
+        if ($left.Count -eq 0) { return }
+        $left | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+    }
+    throw "Programs of Kairo's account $($script:ServiceUser) keep running, so nothing was changed in data\."
+}
+
+# Every junction or symbolic link under $Dir, found without following one. A file that is a
+# reparse point for another reason (compressed by Windows) is not a link and stays.
+function Find-DataLinks([string]$Dir) {
+    $found = New-Object System.Collections.Generic.List[string]
+    $todo = New-Object System.Collections.Generic.Stack[string]
+    $todo.Push($Dir)
+    while ($todo.Count -gt 0) {
+        $d = $todo.Pop()
+        $entries = @()
+        try { $entries = @((New-Object IO.DirectoryInfo $d).GetFileSystemInfos()) }
+        catch { Write-Warn "Could not look inside $d ($($_.Exception.Message.Trim()))"; continue }
+        foreach ($e in $entries) {
+            $isDir = ($e.Attributes -band [IO.FileAttributes]::Directory) -ne 0
+            if (($e.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $link = $isDir
+                if (-not $isDir) {
+                    try { $link = ([string](Get-Item -LiteralPath $e.FullName -Force).LinkType) -eq 'SymbolicLink' } catch { $link = $true }
+                }
+                if ($link) { $found.Add($e.FullName) }
+            } elseif ($isDir) { $todo.Push($e.FullName) }
+        }
+    }
+    return ,$found
+}
+
+function Remove-DataLinks($P) {
+    if (-not (Test-Path -LiteralPath $P.Data)) { return }
+    $top = Get-Item -LiteralPath $P.Data -Force
+    if (($top.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "$($P.Data) itself is a link: refusing to write through it." }
+    foreach ($l in (Find-DataLinks $P.Data)) {
+        # Removes the link itself, never what it points to.
+        if (([IO.File]::GetAttributes($l) -band [IO.FileAttributes]::Directory) -ne 0) { [IO.Directory]::Delete($l) }
+        else { [IO.File]::Delete($l) }
+        Write-Warn "Removed a link from Kairo's data folder (Kairo never makes one): $l"
+    }
+}
+
+# Returns the names of Kairo's tasks that were running (Exit-DataLock starts them again).
+function Enter-DataLock($P) {
+    if (-not (Test-Path $P.Updater)) { Protect-UpdaterFolder $P }
+    $tasks = Get-ServiceTasks
+    $running = @($tasks | Where-Object { [string]$_.State -eq 'Running' } | ForEach-Object { [string]$_.TaskName })
+    [pscustomobject]@{ pid = $PID; at = (Get-Date).ToString('o'); restart = $running } |
+        ConvertTo-Json | Set-Content -Path (Get-DataLockPath $P) -Encoding ASCII
+    try {
+        Write-PlannedRestart $P
+        foreach ($t in $tasks) { Stop-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction SilentlyContinue }
+        if (Get-LocalUser -Name $script:ServiceUser -ErrorAction SilentlyContinue) { Disable-LocalUser -Name $script:ServiceUser }
+        Stop-ServiceAccountProcesses
+        Remove-DataLinks $P
+    } catch {
+        Exit-DataLock $P $running
+        throw
+    }
+    return ,$running
+}
+
+function Exit-DataLock($P, [string[]]$Restart = @()) {
+    if (Get-LocalUser -Name $script:ServiceUser -ErrorAction SilentlyContinue) { Enable-LocalUser -Name $script:ServiceUser }
+    Remove-Item -Force (Get-DataLockPath $P) -ErrorAction SilentlyContinue
+    foreach ($name in @($Restart | Where-Object { $_ })) {
+        Start-ScheduledTask -TaskName $name -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
+    }
+}
+
+# For short elevated writes (Kairo Logins): $Do runs inside the lock; Kairo's tasks start again after.
+function Invoke-DataLocked($P, [scriptblock]$Do) {
+    $restart = Enter-DataLock $P
+    try { & $Do } finally { Exit-DataLock $P $restart }
+}
+
+# A lock its installer no longer holds (power cut, killed window): Kairo's account back on.
+function Clear-StaleDataLock($P) {
+    $f = Get-DataLockPath $P
+    if (-not (Test-Path $f)) { return }
+    $j = $null
+    try { $j = Get-Content -Raw $f | ConvertFrom-Json } catch { }
+    if ($j -and (Get-Process -Id ([int]$j.pid) -ErrorAction SilentlyContinue) -and ([datetime]$j.at -gt (Get-Date).AddHours(-2))) { return }
+    Write-Warn "A data lock was left behind by an interrupted install or update: Kairo's account is on again."
+    $restart = @()
+    if ($j -and $j.restart) { $restart = @($j.restart) }
+    Exit-DataLock $P $restart
 }
 
 # Older setups printed a BitLocker recovery key while install.log was recording: blank it out.
@@ -520,19 +632,23 @@ function Remove-UnusedToolSites($P) {
 }
 
 # Phase 3 voice: the big speech packages (about 2 GB with the NVIDIA runtime) in
-# tools\voice-<hash>; models in data\models. An install problem never stops the install
-# itself: the self-test after the switch finds it and rolls back.
+# tools\voice-<hash>, the models next to them in tools\voice-<hash>\models (fix F24: admins-only,
+# never as SYSTEM into data\; Kairo uses them once complete, data\models until then). An install
+# problem never stops the install itself: the self-test after the switch finds it and rolls back.
 function Install-Voice($P, [string]$ReleaseDir) {
     if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return $true }
     if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-voice.txt'))) { return $true }
     try {
         $site = Install-ToolSite $P $ReleaseDir 'voice' 'voice (speech recognition and voices, about 2 GB)' $null
-        Use-KairoEnv $P
-        $env:KAIRO_VOICE_SITE = $site
-        $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
-        Push-Location (Join-Path $ReleaseDir 'server')
-        try { Invoke-Checked $py @('-m', 'app.voice', 'download') 'Downloading voice models' }
-        finally { Pop-Location; Remove-Item Env:KAIRO_VOICE_SITE -ErrorAction SilentlyContinue }
+        $models = Join-Path $site 'models'
+        if (-not (Test-Path (Join-Path $models '.complete'))) {
+            Use-KairoEnv $P
+            $env:KAIRO_VOICE_SITE = $site
+            $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+            Push-Location (Join-Path $ReleaseDir 'server')
+            try { Invoke-Checked $py @('-m', 'app.voice', 'download', '--to', $models) 'Downloading voice models' }
+            finally { Pop-Location; Remove-Item Env:KAIRO_VOICE_SITE -ErrorAction SilentlyContinue }
+        }
         Write-Ok "Voice ready ($site)"
         return $true
     } catch {
@@ -650,7 +766,16 @@ function Get-KairoProcesses($P) {
     })
 }
 
+# Kairo counts its starts to tell a crash loop (fix plan 32); a stop the installer makes on purpose
+# is noted in C:\Kairo\status, so the start after it doesn't count.
+function Write-PlannedRestart($P) {
+    if (-not (Test-Path $P.Status)) { [void](New-Item -ItemType Directory -Path $P.Status) }
+    @{ at = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json |
+        Set-Content -Path (Join-Path $P.Status 'planned-restart.json') -Encoding ASCII
+}
+
 function Stop-Kairo($P) {
+    Write-PlannedRestart $P
     $task = Get-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
     if ($task) { Stop-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue }
     foreach ($proc in (Get-KairoProcesses $P)) {
@@ -705,7 +830,7 @@ function Register-KairoTask($P, $Svc) {
 
 # Boot check: 3 minutes after every boot, as SYSTEM, checks that Kairo, the
 # Claude login, Tailscale and the HTTPS address all came back, and writes
-# data\logs\boot-check.json (shown on the More screen).
+# C:\Kairo\status\boot-check.json (shown on the More screen; fix F24: not data\).
 function Register-BootCheckTask($P) {
     $script = Join-Path $P.Installer 'Kairo-BootCheck.ps1'
     $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Root `"$($P.Root)`""
@@ -782,7 +907,9 @@ function Show-StartProblem($P) {
 # Installs $SourceApp as the running release. On any failure after the switch:
 # schema downgrade (with the new code, which knows every migration), back to
 # the previous release, restart. Returns $true on success.
-function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$Force) {
+# $InLock: the installer's own writes into data\ (rights, kairo.env, sync settings), run inside the
+# data lock with the backup and the migration (fix F24), so Kairo stops only once.
+function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$Force, [scriptblock]$InLock) {
     $info = Read-ReleaseInfo $SourceApp
     $version = [string]$info.version
     $state = Read-State $P
@@ -791,6 +918,11 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     Write-Step "Installing Kairo $version"
     if ($prev -eq $version -and -not $Force) {
         Write-Ok "Kairo $version is already the installed version"
+        if ($InLock) {
+            Stop-Kairo $P
+            $restart = Enter-DataLock $P
+            try { & $InLock | Out-Host } finally { Exit-DataLock $P $restart }
+        }
         Register-KairoTask $P $Svc
         if (-not (Get-Health)) { Start-Kairo }
         if (Wait-Healthy 90) { Write-Ok 'Kairo is running'; return $true }
@@ -805,14 +937,20 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     if (-not (Install-Voice $P $newDir)) { $warnings += 'voice' }
     if (-not (Install-Browser $P $newDir)) { $warnings += 'browser' }
     if (-not (Install-Memory $P $newDir)) { $warnings += 'memory' }
-    $backup = Backup-Database $P "before-$version" $Python
 
     Write-Step 'Switching to the new version'
     Write-DeployResult $P $version 'switched' $null '' '' $warnings
     Stop-Kairo $P
+    $backup = $null
+    $migrated = $false
+    $restart = Enter-DataLock $P
+    try {
+        if ($InLock) { & $InLock | Out-Host }
+        $backup = Backup-Database $P "before-$version" $Python
+        $migrated = Invoke-Alembic $P $newDir @('upgrade', 'head')
+    } finally { Exit-DataLock $P $restart }
     Set-CurrentRelease $P $version
     Register-KairoTask $P $Svc
-    $migrated = Invoke-Alembic $P $newDir @('upgrade', 'head')
     $healthy = $null
     if ($migrated) {
         Start-Kairo
@@ -868,8 +1006,8 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
 # Kairo's own check (server/app/selftest.py), run by the app as kairo-svc: the safety hook
 # denies and allows, the CLI reports Kairo's tool server as connected, one harmless real tool
 # call arrives, and voice and the browser import and work for real. Returns the answer, or a
-# toolchain failure when Kairo doesn't answer. Saved to data\updates\selftest.json for the
-# update note.
+# toolchain failure when Kairo doesn't answer. Saved to C:\Kairo\status\selftest.json for the
+# update note (fix F24: not into data\, Kairo is running).
 function Invoke-ToolSelfTest($P, [string]$Version, [switch]$Quiet) {
     if (-not $Quiet) { Write-Note 'Self-test (tools, safety hook, Claude, voice, browser, memory; up to 15 minutes)...' }
     $r = $null
@@ -884,10 +1022,9 @@ function Invoke-ToolSelfTest($P, [string]$Version, [switch]$Quiet) {
         $r = [pscustomobject]@{ ok = $false; category = 'toolchain'; reason = "the self-test did not answer ($($_.Exception.Message.Trim()))"; checks = $null }
     }
     if (-not $Quiet) {
-        $dir = Join-Path $P.Data 'updates'
-        if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+        if (-not (Test-Path $P.Status)) { [void](New-Item -ItemType Directory -Path $P.Status) }
         [pscustomobject]@{ version = $Version; at = (Get-Date).ToString('o'); ok = [bool]$r.ok; category = $r.category; reason = [string]$r.reason } |
-            ConvertTo-Json | Set-Content -Path (Join-Path $dir 'selftest.json') -Encoding ASCII
+            ConvertTo-Json | Set-Content -Path (Join-Path $P.Status 'selftest.json') -Encoding ASCII
     }
     return $r
 }
@@ -906,21 +1043,26 @@ function Get-SelfTestReason($R) {
     return [string]$R.reason
 }
 
-function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [string]$Backup, [switch]$UseBackup) {
+# $BackupWith: a python to take a database backup first (Rollback Kairo), inside the data lock.
+function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [string]$Backup, [switch]$UseBackup, [string]$BackupWith = '') {
     Stop-Kairo $P
-    $ok = $false
-    if (-not $UseBackup) {
-        $rev = Get-HeadRevision (Get-ReleaseDir $P $Version)
-        $ok = $true
-        if ($rev) { $ok = Invoke-Alembic $P $CodeDirForDowngrade @('downgrade', $rev) }
-        if (-not $ok) { Write-Warn 'Schema downgrade failed.' }
-    }
-    if (-not $ok) {
-        if ($Backup -and (Test-Path $Backup)) {
-            Write-Warn "Restoring the database backup taken before the update ($Backup)."
-            Restore-DatabaseBackup $P $Backup
-        } else { Write-Bad 'There is no database backup from before the update to restore.' }
-    }
+    $restart = Enter-DataLock $P
+    try {
+        if ($BackupWith) { $Backup = Backup-Database $P 'before-rollback' $BackupWith }
+        $ok = $false
+        if (-not $UseBackup) {
+            $rev = Get-HeadRevision (Get-ReleaseDir $P $Version)
+            $ok = $true
+            if ($rev) { $ok = Invoke-Alembic $P $CodeDirForDowngrade @('downgrade', $rev) }
+            if (-not $ok) { Write-Warn 'Schema downgrade failed.' }
+        }
+        if (-not $ok) {
+            if ($Backup -and (Test-Path $Backup)) {
+                Write-Warn "Restoring the database backup taken before the update ($Backup)."
+                Restore-DatabaseBackup $P $Backup
+            } else { Write-Bad 'There is no database backup from before the update to restore.' }
+        }
+    } finally { Exit-DataLock $P $restart }
     Set-CurrentRelease $P $Version
     Start-Kairo
     if (Wait-Healthy 90) { Write-Ok "Kairo $Version is running again" }

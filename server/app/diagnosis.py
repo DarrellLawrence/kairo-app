@@ -273,7 +273,9 @@ def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
         r.add(f"  running: {app_root.name} (no release.json: a dev checkout)")
     if app_root.parent.name.lower() == "releases":
         r.add("  installed:", ", ".join(sorted(p.name for p in app_root.parent.iterdir() if p.is_dir())))
-    for f in sorted((data_dir / "updates").glob("*.json")) + [data_dir / "logs" / "boot-check.json"]:
+    from . import status_files   # fix F24: the installer's files moved to C:\Kairo\status
+    written = sorted({status_files.path(data_dir, n) for n in status_files.LEGACY} | set((data_dir / "updates").glob("*.json")))
+    for f in written:
         try:
             body = f.read_text(encoding="utf-8-sig", errors="replace")
         except OSError:

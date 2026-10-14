@@ -99,10 +99,15 @@ SPECS = [
                                "two devices is reported, kept out of the chat, and sorted out with one tap.", "F23"),
     Spec(31, "Obsidian graph", "auto", "A note Kairo writes links the people, places, subjects, projects and goals it names "
                                        "with [[wikilinks]]; a missing one gets its own note with aliases.", "C7"),
+    Spec(32, "Data lock", "ci", "An update removes links planted in Kairo's data folder, writes nothing where they point and "
+                                "turns Kairo's account back on; a lock a power cut left is undone at the next boot.", "F24"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
-               "one keeps running). Not forced on the live PC: it would take Kairo down."}
+               "one keeps running). Not forced on the live PC: it would take Kairo down.",
+           32: "Proven in CI (windows-install: junctions planted in data\\ are removed by the update, the folder they "
+               "pointed to is untouched, kairo-svc is on again; a stale lock is undone by the boot check). Not forced on "
+               "the live PC: it would stop Kairo and switch its account off."}
 
 
 @dataclass

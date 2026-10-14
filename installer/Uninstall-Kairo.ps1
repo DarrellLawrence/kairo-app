@@ -42,6 +42,7 @@ try {
     Write-Step 'Removing files'
     foreach ($d in @($P.App, $P.Downloads)) { if (Test-Path $d) { & cmd.exe /c rmdir /s /q "$d" | Out-Null } }
     if ($DeleteData) {
+        Remove-DataLinks $P   # fix F24: only Kairo's own files go, never what a link points to
         & cmd.exe /c rmdir /s /q "$($P.Data)" | Out-Null
         Write-Ok 'Data deleted'
     } else {

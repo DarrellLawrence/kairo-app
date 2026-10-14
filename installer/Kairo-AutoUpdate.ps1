@@ -58,16 +58,16 @@ function Request-Kairo([string]$Path, $Body) {
     return Invoke-RestMethod -Uri "http://127.0.0.1:8000$Path" -Method Post -Body $json -ContentType 'application/json' -TimeoutSec 10 -UseBasicParsing
 }
 
+# Fix F24: in C:\Kairo\status (Kairo reads it, only admins change it), never data\: Kairo runs.
 function Write-UpdateNote([string]$Message, [bool]$Ok, [string]$From, [string]$To) {
-    $dir = Join-Path $P.Data 'updates'
-    if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+    if (-not (Test-Path $P.Status)) { [void](New-Item -ItemType Directory -Path $P.Status) }
     @{ message = $Message; ok = $Ok; from = $From; to = $To; at = (Get-Date).ToString('o'); notified = $false } |
-        ConvertTo-Json | Set-Content -Path (Join-Path $dir 'last-update.json') -Encoding ASCII
+        ConvertTo-Json | Set-Content -Path (Join-Path $P.Status 'last-update.json') -Encoding ASCII
 }
 
 # The self-test result of this install (Deploy-Release writes it), for the note on the iPhone.
 function Read-SelfTest([string]$Version, [datetime]$Since) {
-    $f = Join-Path $P.Data 'updates\selftest.json'
+    $f = Join-Path $P.Status 'selftest.json'
     if (-not (Test-Path $f)) { return $null }
     try { $j = Get-Content -Raw $f | ConvertFrom-Json } catch { return $null }
     if ([string]$j.version -ne $Version -or [datetime]$j.at -lt $Since) { return $null }
@@ -84,6 +84,7 @@ $exitCode = 0
 $held = $false
 try {
     Protect-UpdaterFolder $P
+    Clear-StaleDataLock $P   # fix F24: an interrupted update must not leave Kairo's account off
     $installed = (Read-State $P).current
     if (-not $installed) { exit 0 }
     $s = Read-UpdaterState $P

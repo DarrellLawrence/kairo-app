@@ -264,7 +264,11 @@ function Open-ClaudeLogin($P, [string]$ClaudeExe) {
     try { Start-Process -FilePath $ClaudeExe -WorkingDirectory $work -Wait }
     finally { $env:CLAUDE_CONFIG_DIR = $old }
     $new = Join-Path $cfg '.credentials.json'
-    if (Test-Path $new) { Copy-Item -Force $new (Join-Path $P.ClaudeConfig '.credentials.json') }
+    # Fix F24: data\ is Kairo's account's to change; an admin's write there only inside the data lock.
+    if (Test-Path $new) {
+        Invoke-DataLocked $P { Copy-Item -Force $new (Join-Path $P.ClaudeConfig '.credentials.json') }
+        [void](Wait-KairoUp)   # the next step tests Claude through Kairo
+    }
     Remove-Item -Recurse -Force $login -ErrorAction SilentlyContinue
 }
 
@@ -338,6 +342,9 @@ function Invoke-ToolsSelfTest {
 }
 
 # ---------------------------------------------------------------- Google
+
+# After a data lock Kairo starts again: the Google steps talk to it.
+function Wait-KairoUp { return [bool](Wait-Healthy 90) }
 
 function Get-GoogleStatus {
     try { return (Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/setup/google/status' -UseBasicParsing -TimeoutSec 10).Content | ConvertFrom-Json }
@@ -414,7 +421,7 @@ function Connect-GooglePhone($P) {
         Write-Bad "The file does not list $redirect as a redirect URI. Fix step 3 and download it again."
         return $false
     }
-    Copy-Item -Force $file (Join-Path $P.Secrets 'google-web-client.json')
+    Invoke-DataLocked $P { Copy-Item -Force $file (Join-Path $P.Secrets 'google-web-client.json') }
     Write-Ok 'iPhone sign-in ready: Kairo app -> More -> Google -> Sign in to Google again'
     return $true
 }
@@ -433,7 +440,8 @@ function Connect-Google($P) {
             Write-Note 'Fix for good: console.cloud.google.com/auth/audience -> Publish app, then sign in again once.'
         }
         if (Read-YesNo 'Sign in to Google again now? (needed once after you publish the app)' $false) {
-            foreach ($k in @('read', 'write')) { $f = Join-Path $P.Secrets "google-$k.json"; if (Test-Path $f) { Remove-Item -Force $f } }
+            Invoke-DataLocked $P { foreach ($k in @('read', 'write')) { $f = Join-Path $P.Secrets "google-$k.json"; if (Test-Path $f) { Remove-Item -Force $f } } }
+            [void](Wait-KairoUp)
             $st = Get-GoogleStatus
         } else {
             if (-not $st.phone_client -and (Read-YesNo 'Set up signing in again from the iPhone? (only needed in Testing mode)' $false)) {
@@ -455,7 +463,8 @@ function Connect-Google($P) {
             Write-Bad 'That is not a Desktop-app client file. In step 6, pick "Desktop app" and download its JSON.'
             return $false
         }
-        Copy-Item -Force $file (Join-Path $P.Secrets 'google-client.json')
+        Invoke-DataLocked $P { Copy-Item -Force $file (Join-Path $P.Secrets 'google-client.json') }
+        [void](Wait-KairoUp)
         Write-Ok 'Google client saved (only Kairo and admins can read it)'
     }
 
@@ -471,7 +480,7 @@ function Connect-Google($P) {
         Write-Note '  - tick every box -> Continue. The page then says "Done".'
         Wait-Enter 'Press Enter to open the browser'
         $kindFile = Join-Path $P.Secrets "google-$($s.kind).json"
-        if (Test-Path $kindFile) { Remove-Item -Force $kindFile }
+        if (Test-Path $kindFile) { Invoke-DataLocked $P { Remove-Item -Force $kindFile }; [void](Wait-KairoUp) }
         Start-Process "http://127.0.0.1:8000/setup/google/start?kind=$($s.kind)"
         $email = Wait-GoogleKind $s.kind
         if (-not $email) { Write-Bad 'No sign-in seen within 10 minutes. Run "Kairo Logins" later to finish Google.'; return $false }
@@ -502,7 +511,7 @@ function Save-GitHubToken($P, [string]$Token) {
     $enc = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, [Security.Cryptography.DataProtectionScope]::LocalMachine)
     Set-Content -Path (Get-TokenPath $P) -Value ([Convert]::ToBase64String($enc)) -Encoding ASCII
     $legacy = Get-LegacyTokenPath $P
-    if (Test-Path $legacy) { Remove-Item -Force $legacy }
+    if (Test-Path $legacy) { Invoke-DataLocked $P { Remove-Item -Force $legacy } }
 }
 
 function Get-GitHubToken($P) {

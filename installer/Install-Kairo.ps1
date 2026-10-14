@@ -63,11 +63,12 @@ try {
     if (-not $loginsOnly) {
         $info = Read-ReleaseInfo $sourceApp
 
-        # 1. Kairo's own limited Windows account + folders it may use
+        # 1. Kairo's own limited Windows account + folders it may use. The rights on data\ are set
+        #    inside the data lock (fix F24); a first install sets them here too (nothing runs yet).
         Write-Step "Kairo's own Windows account and folders"
         $svc = Initialize-ServiceAccount $P
         if ($owner) {
-            Set-KairoAcl $P $owner $svc.Name
+            if (-not $state0.current) { Set-KairoAcl $P $owner $svc.Name }
             if (-not (Test-RunningAsSystem)) { $state0.owner = $owner; Save-State $P $state0 }
         }
         Write-Ok "account kairo-svc ready (no admin rights, hidden from the sign-in screen)"
@@ -88,14 +89,28 @@ try {
 
         # 3. Settings file. Config: release defaults + data\config (owner changes only);
         #    KAIRO_CONFIG_DIR is for releases from before that (see Save-LegacyConfig).
-        Save-LegacyConfig $P
-        Write-EnvFile $P @{
+        #    Written inside the data lock with the rights and the sync settings (step 5).
+        $envValues = @{
             KAIRO_DATA_DIR    = $P.Data
+            KAIRO_STATUS_DIR  = $P.Status
             KAIRO_CONFIG_DIR  = $P.ConfigLegacy
             KAIRO_CONFIG_OVERRIDES = $P.Config
             KAIRO_CLAUDE_BIN  = $claudeExe
             CLAUDE_CONFIG_DIR = $P.ClaudeConfig
             KAIRO_PORT        = '8000'
+        }
+        # Vault sync: nice to have, never a reason for the install to fail.
+        $sync = @{ ready = $false }
+        try { [void](Install-Syncthing $P); $sync.ready = $true } catch { Write-Warn "Vault sync not set up: $($_.Exception.Message.Trim())" }
+        # Everything the installer itself writes into data\, run inside the data lock (fix F24).
+        $inLock = {
+            if ($owner) { Set-KairoAcl $P $owner $svc.Name }
+            Save-LegacyConfig $P
+            Write-EnvFile $P $envValues
+            if ($sync.ready) {
+                try { Initialize-SyncConfig $P }
+                catch { $sync.ready = $false; Write-Warn "Vault sync not set up: $($_.Exception.Message.Trim())" }
+            }
         }
 
         # 4. Windows settings (real PC only)
@@ -106,7 +121,7 @@ try {
         }
 
         # 5. Kairo itself (backup, switch, migrate, health check, auto-rollback), running as kairo-svc
-        $ok = Deploy-Release $P $sourceApp $python $svc -Force:$Force
+        $ok = Deploy-Release $P $sourceApp $python $svc -Force:$Force -InLock $inLock
         if (-not $ok) { $exitCode = 1 }
 
         # 6. Newest installer, boot check, and the double-click files in C:\Kairo
@@ -120,8 +135,9 @@ try {
         Install-StartMenu $P
         Register-BootCheckTask $P
         Register-AutoUpdateTask $P
-        # Vault sync: nice to have, never a reason for the install to fail.
-        try { Install-Sync $P $svc } catch { Write-Warn "Vault sync not set up: $($_.Exception.Message.Trim())" }
+        if ($sync.ready) {
+            try { Start-SyncTask $P $svc } catch { Write-Warn "Vault sync not set up: $($_.Exception.Message.Trim())" }
+        }
     }
 
     # 7. One-time logins
