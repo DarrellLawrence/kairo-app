@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { Badge, Button, Card, List, ListRow, Page, SectionTitle, SkeletonCard, useToast } from '../ui/index.js'
+import { Badge, Button, Card, IconMic, List, ListRow, Page, SectionTitle, SkeletonCard, useToast } from '../ui/index.js'
+import { startRecording, transcribe } from '../voice.js'
 
 const TONE = { approved: 'ok', draft: 'warn', waiting: 'accent', none: 'neutral' }
 const LABEL = { approved: 'Approved', draft: 'Draft', waiting: 'Waiting for you', none: 'Not started' }
@@ -13,6 +14,21 @@ export default function Lerndoku() {
   const [notes, setNotes] = useState('')
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  const [rec, setRec] = useState('idle')   // idle | recording | busy
+  const recRef = useRef(null)
+
+  const toggleRec = async () => {
+    if (rec === 'idle') {
+      try { recRef.current = await startRecording(); setRec('recording') } catch { toast.show({ text: 'Microphone not allowed.' }) }
+      return
+    }
+    if (rec !== 'recording') return
+    setRec('busy')
+    try {
+      const { text } = await transcribe(await recRef.current.stop(), 'de')
+      if (text) setNotes((n) => (n.trim() ? `${n.trim()}\n${text}` : text))
+    } catch (e) { toast.show({ text: e.message, duration: 6000 }) } finally { setRec('idle') }
+  }
 
   const load = useCallback(async () => {
     const r = await api(`/api/lerndoku${week ? `?week=${week}` : ''}`)
@@ -59,6 +75,9 @@ export default function Lerndoku() {
               <div className="k-field" style={{ marginTop: 10 }}>
                 <textarea rows={6} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Diese Woche habe ich…" />
               </div>
+              <Button variant="secondary" block icon={<IconMic />} loading={rec === 'busy'} onClick={toggleRec} style={{ marginBottom: 8 }}>
+                {rec === 'recording' ? 'Stop recording' : 'Record a voice note (on the PC, private)'}
+              </Button>
               <Button variant={c.draft ? 'secondary' : 'primary'} block loading={busy} disabled={notes.trim().length < 20} onClick={write}>
                 {c.draft ? 'Write the draft again' : 'Write the German draft'}
               </Button>

@@ -44,6 +44,27 @@ jobs:
       - run: python -m pytest -o addopts=""
         working-directory: server
 
+  # Phase 3 voice, for real: Kokoro and Piper speak, Whisper (CPU) writes it down again.
+  voice:
+    runs-on: ubuntu-24.04
+    env:
+      KAIRO_VOICE_TEST: "1"
+      KAIRO_WHISPER_MODEL: base
+      KAIRO_WHISPER_CPU_MODEL: base
+      KAIRO_VOICE_MODELS: ${{ github.workspace }}/voice-models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: voice-models
+          key: voice-models-v1
+      - run: pip install -r server/requirements-dev.txt -r server/requirements-voice.txt
+      - run: python -m pytest -o addopts="" tests/test_voice.py -s
+        working-directory: server
+
   web:
     runs-on: ubuntu-24.04
     steps:
@@ -64,6 +85,8 @@ jobs:
     needs: [changes, server, web]
     if: needs.changes.outputs.installer == 'true'
     runs-on: windows-latest
+    env:
+      KAIRO_SKIP_VOICE: "1"   # 2 GB of speech packages; the voice job tests them on Linux
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

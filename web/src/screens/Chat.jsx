@@ -1,8 +1,10 @@
 import { AnimatePresence } from 'motion/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Button, ChatBubble, EmptyState, IconChat, IconPlus, InputBar, List, ListRow, NavBar, ScrollArea, Sheet, useStickToBottom,
+  Button, ChatBubble, EmptyState, IconChat, IconPlus, IconSpeaker, InputBar, List, ListRow, NavBar, ScrollArea, Sheet, useStickToBottom,
+  useToast,
 } from '../ui/index.js'
+import { speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
 
 const STATUS_TEXT = {
   usage_limited: 'Usage limit reached. Kairo pauses until it resets.',
@@ -29,6 +31,12 @@ export default function Chat() {
   const wsRef = useRef(null)
   const threadRef = useRef(null)
   const scrollRef = useRef(null)
+  const toast = useToast()
+  const [mic, setMic] = useState('idle')   // idle | recording | busy
+  const recRef = useRef(null)
+  const [speakOn, setSpeakOn] = useState(() => { try { return localStorage.getItem('chat.speak') === '1' } catch { return false } })
+  const speakRef = useRef(speakOn)
+  speakRef.current = speakOn
 
   threadRef.current = threadId
 
@@ -64,6 +72,7 @@ export default function Chat() {
         } else if (msg.type === 'done') {
           setChunks(null)
           setMessages((m) => [...m, { id: msg.message_id, role: 'kairo', text: msg.text }])
+          if (speakRef.current) speak(msg.text).catch(() => {})
         } else if (msg.type === 'error') {
           setChunks(null)
           setError(STATUS_TEXT[msg.status] ?? msg.message)
@@ -81,14 +90,42 @@ export default function Chat() {
   useStickToBottom(scrollRef, [messages, chunks])
 
   const busy = chunks !== null
-  const send = () => {
-    const text = draft.trim()
+  const send = (spoken) => {
+    const text = (typeof spoken === 'string' ? spoken : draft).trim()
     if (!text || !connected || busy) return
     setError(null)
     setMessages((m) => [...m, { id: `o${Date.now()}`, role: 'owner', text }])
     setChunks([])
     wsRef.current.send(JSON.stringify({ type: 'message', text, thread_id: threadId }))
-    setDraft('')
+    if (typeof spoken !== 'string') setDraft('')
+  }
+
+  const pressMic = async () => {
+    if (mic === 'idle') {
+      unlockAudio()
+      stopSpeaking()
+      try {
+        recRef.current = await startRecording()
+        setMic('recording')
+      } catch { toast.show({ text: 'Microphone not allowed. iPhone Settings → Safari → Microphone.' }) }
+      return
+    }
+    if (mic === 'recording') {
+      setMic('busy')
+      try {
+        const blob = await recRef.current.stop()
+        const { text } = await transcribe(blob)
+        if (text) send(text); else toast.show({ text: 'Did not catch that.' })
+      } catch (e) { toast.show({ text: e.message, duration: 5000 }) } finally { setMic('idle') }
+    }
+  }
+
+  const toggleSpeak = () => {
+    const next = !speakOn
+    setSpeakOn(next)
+    try { localStorage.setItem('chat.speak', next ? '1' : '0') } catch { /* private mode */ }
+    if (next) unlockAudio(); else stopSpeaking()
+    toast.show({ text: next ? 'Kairo reads replies out loud.' : 'Replies are silent.' })
   }
 
   const newThread = async () => {
@@ -110,6 +147,7 @@ export default function Chat() {
             {current?.title ?? 'Today'} <span className="k-muted" style={{ marginLeft: 4 }}>▾</span>
           </button>
         }
+        left={<Button variant="ghost" size="sm" icon={<IconSpeaker style={{ opacity: speakOn ? 1 : 0.45 }} />} onClick={toggleSpeak} aria-label="Read replies aloud" />}
         right={<Button variant="ghost" size="sm" icon={<IconPlus />} onClick={newThread} aria-label="New chat" />}
       />
       <ScrollArea tabbar={false} innerRef={scrollRef} onRefresh={async () => { await loadThreads(); await loadMessages(threadId) }}>
@@ -124,7 +162,8 @@ export default function Chat() {
           </AnimatePresence>
         </div>
       </ScrollArea>
-      <InputBar value={draft} onChange={setDraft} onSend={send} disabled={!connected || busy} placeholder="Message Kairo" />
+      <InputBar value={draft} onChange={setDraft} onSend={send} disabled={!connected || busy} placeholder="Message Kairo"
+        mic={{ state: mic === 'idle' && (!connected || busy) ? 'busy' : mic, onPress: pressMic }} />
 
       <Sheet open={picker} onClose={() => setPicker(false)} title="Chats">
         <Button variant="primary" block icon={<IconPlus />} onClick={newThread} style={{ marginBottom: 12 }}>New chat</Button>

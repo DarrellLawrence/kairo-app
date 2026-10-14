@@ -110,6 +110,64 @@ function CapturePage() {
   )
 }
 
+function VoicePage() {
+  const toast = useToast()
+  const [st, setSt] = useState(null)
+  const [test, setTest] = useState(null)
+  const [testing, setTesting] = useState(false)
+  const load = useCallback(() => api('/api/voice/status').then(setSt).catch(() => setSt(null)), [])
+  useEffect(() => { load() }, [load])
+  const runTest = async () => {
+    setTesting(true)
+    try { setTest(await api('/api/voice/selftest', { method: 'POST', body: {} })) } catch (e) { setTest({ ok: false, error: e.message }) } finally { setTesting(false) }
+  }
+  const callNow = async () => {
+    const c = await api('/api/voice/calls', { method: 'POST', body: { reason: 'Test call' } })
+    toast.show({ text: 'Calling you now. Lock the phone to see the push, or open it here.' })
+    setTimeout(() => { window.location.hash = `#call/${c.id}` }, 1200)
+  }
+  const setOpt = async (key, on) => {
+    const opts = await api(`/api/voice/options/${key}`, { method: 'POST', body: { on } })
+    setSt((x) => ({ ...x, call_options: opts }))
+  }
+  const ok = (b) => <Badge tone={b ? 'ok' : 'warn'} pop={false}>{b ? 'Ready' : 'Missing'}</Badge>
+  return (
+    <Page title="Voice" onRefresh={load}>
+      <p className="k-hello">Speech runs on your PC: nothing you say leaves it. Talk in Chat with the mic, or let Kairo call you.</p>
+      {!st && <SkeletonCard />}
+      {st && (
+        <>
+          <List>
+            <ListRow icon={<IconSparkle />} title="Speech recognition" subtitle={st.stt_device ? `On the ${st.stt_device === 'cuda' ? 'graphics card' : 'processor (slower)'}` : 'Loads on first use'}
+              value={ok(st.installed?.stt)} />
+            <ListRow icon={<IconSparkle />} title="English voice" subtitle="Kokoro" value={ok(st.en_ready)} />
+            <ListRow icon={<IconSparkle />} title="German voice" subtitle="Piper (Thorsten)" value={ok(st.de_ready)} />
+          </List>
+          {st.last_error && <p className="k-muted k-small k-pad">Last problem: {st.last_error}</p>}
+          <div className="k-pad" style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+            <Button variant="secondary" block loading={testing} onClick={runTest}>Test voice</Button>
+            <Button variant="primary" block onClick={callNow}>Call me now</Button>
+          </div>
+          {test && (
+            <p className={test.ok ? 'k-small k-pad' : 'k-small k-pad'} style={{ color: test.ok ? 'var(--ok)' : 'var(--danger)', marginTop: 8 }}>
+              {test.ok ? `Works. Heard “${test.heard}” in ${test.took}s on the ${test.device === 'cuda' ? 'graphics card' : 'processor'}.` : `Not working: ${test.error || `heard “${test.heard}”`}`}
+            </p>
+          )}
+          <SectionTitle>Kairo calls you for</SectionTitle>
+          <List>
+            {Object.entries(st.call_option_titles || {}).map(([k, title]) => (
+              <ListRow key={k} title={title} subtitle={st.call_options?.[k] ? 'On: a push “Kairo is calling”' : 'Off: a normal push'}
+                value={<Badge tone={st.call_options?.[k] ? 'ok' : 'neutral'} pop={false}>{st.call_options?.[k] ? 'On' : 'Off'}</Badge>}
+                onClick={() => setOpt(k, !st.call_options?.[k])} />
+            ))}
+          </List>
+          <p className="k-muted k-small k-pad">A real ringing phone needs a small native iPhone app (CallKit) and an Apple Developer account. Later, if you want it.</p>
+        </>
+      )}
+    </Page>
+  )
+}
+
 function BackupsPage() {
   const toast = useToast()
   const [d, setD] = useState(null)
@@ -438,6 +496,8 @@ function Root() {
               onClick={() => stack.push('Jobs', () => <JobsPage />)} />
             <ListRow icon={<IconInbox />} title="Capture" subtitle="Action button and share sheet setup" chevron
               onClick={() => stack.push('Capture', () => <CapturePage />)} />
+            <ListRow icon={<IconSparkle />} title="Voice" subtitle="Talk to Kairo, calls, test" chevron
+              onClick={() => stack.push('Voice', () => <VoicePage />)} />
             <ListRow icon={<IconPin />} title="Location" subtitle="Places, history, pause" chevron
               onClick={() => stack.push('Location', () => <LocationPage />)} />
           </List>

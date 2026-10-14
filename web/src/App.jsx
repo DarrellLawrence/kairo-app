@@ -11,6 +11,7 @@ import Reviews from './screens/Reviews.jsx'
 import Board from './screens/Board.jsx'
 import School from './screens/School.jsx'
 import Lerndoku from './screens/Lerndoku.jsx'
+import Call from './screens/Call.jsx'
 import Onboarding from './screens/Onboarding.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
@@ -30,12 +31,13 @@ function readRoute() {
   const hash = window.location.hash.replace(/^#\/?/, '')
   if (hash === 'dev/components' || window.location.pathname === '/dev/components') return 'dev'
   if (hash === 'onboarding') return 'onboarding'
+  if (/^call\/\d+$/.test(hash)) return 'call'
   const base = hash.split('/')[0]
   return TABS.some((t) => t.id === base) || base in HIDDEN ? base : 'today'
 }
 
 function readParam() {
-  const m = window.location.hash.match(/^#\/?reviews\/(\d+)$/)
+  const m = window.location.hash.match(/^#\/?(?:reviews|call)\/(\d+)$/)
   return m ? Number(m[1]) : null
 }
 
@@ -77,6 +79,7 @@ export default function App() {
     board: <Board />,
     school: <School />,
     lerndoku: <Lerndoku />,
+    call: <Call key={param} callId={param} onClose={() => { window.location.hash = '#chat' }} />,
     onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,
     approvals: <Approvals onCount={setOpenCards} />,
@@ -104,7 +107,7 @@ export default function App() {
               </motion.div>
             </AnimatePresence>
           </main>
-          {route !== 'dev' && route !== 'onboarding' && <TabBar tabs={tabs} active={HIDDEN[route] || route} onSelect={go} />}
+          {route !== 'dev' && route !== 'onboarding' && route !== 'call' && <TabBar tabs={tabs} active={HIDDEN[route] || route} onSelect={go} />}
         </div>
       </ToastProvider>
     </MotionConfig>

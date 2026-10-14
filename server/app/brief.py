@@ -169,7 +169,14 @@ class BriefMaker:
             log.warning("brief note not written: %s", exc)
         s.add(row)
         s.commit()
-        ctx.jobs.pusher.notify("Morning brief", written["headline"], "/#today")
+        from .voice import calls
+        if calls.options(s)["brief"]:
+            spoken = " ".join([f"Good morning. {written['headline']}"] +
+                              [f"Number {i}: {t['title']}." for i, t in enumerate(written["top3"], 1)] +
+                              ["Anything you want to change?"])
+            calls.start(s, "Your morning brief", spoken, ctx.jobs.pusher)
+        else:
+            ctx.jobs.pusher.notify("Morning brief", written["headline"], "/#today")
         return by
 
 

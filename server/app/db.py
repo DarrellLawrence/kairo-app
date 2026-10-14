@@ -222,6 +222,19 @@ class Lerndoku(SQLModel, table=True):
     status: str = "draft"  # draft / approved
 
 
+class Call(SQLModel, table=True):
+    """Kairo "calls" the owner: a push opens a voice session that starts with `opening`."""
+
+    __tablename__ = "calls"
+    id: int | None = Field(default=None, primary_key=True)
+    reason: str
+    opening: str = Field(sa_column=Column(Text, nullable=False))
+    status: str = Field(default="ringing", index=True)  # ringing / answered / ended / missed
+    created_at: datetime = Field(default_factory=utcnow)
+    answered_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
 class ChatThread(SQLModel, table=True):
     __tablename__ = "chat_threads"
     id: int | None = Field(default=None, primary_key=True)

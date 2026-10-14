@@ -256,7 +256,13 @@ class Jobs:
         day = day or self.today()
         r, created = reviews.create(ctx.session, "daily", day, self.profile.tz)
         if created:
-            self.pusher.notify("Evening check-in", "2 minutes: how did today go?", f"/#reviews/{r.id}")
+            from .voice import calls
+            if calls.options(ctx.session)["checkin"]:
+                calls.start(ctx.session, "Evening check-in",
+                            "Hi, it's Kairo. Time for your evening check-in. How did today go, and how is your energy, one to five?",
+                            self.pusher)
+            else:
+                self.pusher.notify("Evening check-in", "2 minutes: how did today go?", f"/#reviews/{r.id}")
 
     def _big_review_body(self, ctx: JobContext, day: dt.date | None = None) -> None:
         day = day or self.today()

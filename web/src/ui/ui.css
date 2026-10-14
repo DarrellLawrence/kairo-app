@@ -266,3 +266,27 @@
 .k-flash-tag.ok { right: 16px; background: var(--ok-soft); color: var(--ok); }
 .k-flash-tag.no { left: 16px; background: var(--danger-soft); color: var(--danger); }
 .k-guide { white-space: pre-wrap; font: var(--t-sub); color: var(--text); max-height: 60vh; overflow-y: auto; margin-bottom: var(--s-3); }
+
+/* Voice: mic in the input bar, call screen */
+.k-mic { background: var(--surface-strong); color: var(--accent-2); }
+.k-mic.recording { background: var(--danger); color: #fff; animation: k-pulse 1.2s ease-in-out infinite; }
+.k-mic-stop { width: 12px; height: 12px; border-radius: 3px; background: #fff; display: block; }
+.k-spin-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; display: block; animation: k-spin 0.8s linear infinite; }
+@keyframes k-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); } 50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); } }
+.k-call { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+  padding: calc(var(--safe-top) + 48px) var(--s-5) calc(var(--safe-bottom) + 40px);
+  background: radial-gradient(120% 80% at 50% 0%, var(--accent-soft, rgba(139,92,246,.35)), var(--bg) 70%); color: var(--text); }
+.k-call-orb { width: 140px; height: 140px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #c4b5fd, var(--accent) 55%, #4c1d95);
+  box-shadow: 0 0 60px rgba(139, 92, 246, 0.55); }
+.k-call-name { font: var(--t-large); margin: var(--s-4) 0 var(--s-1); text-align: center; }
+.k-call-sub { font: var(--t-sub); color: var(--text-2); text-align: center; min-height: 1.4em; }
+.k-call-log { width: 100%; max-height: 32vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; font: var(--t-sub); }
+.k-call-log p { margin: 0; padding: 8px 12px; border-radius: 14px; background: var(--surface-strong); }
+.k-call-log p.me { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
+.k-call-buttons { display: flex; gap: 56px; }
+.k-call-btn { width: 72px; height: 72px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #fff; }
+.k-call-btn svg { width: 30px; height: 30px; }
+.k-call-btn.answer { background: #22c55e; }
+.k-call-btn.hangup { background: #ef4444; }
+.k-call-btn.hangup svg { transform: rotate(135deg); }
+.k-call-btn.mute { background: var(--surface-strong); color: var(--text); }

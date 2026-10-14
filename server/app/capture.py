@@ -172,17 +172,36 @@ def dismiss(s: Session, capture_id: int) -> Capture:
 # ---------------------------------------------------------------- process
 
 class Processor:
-    def __init__(self, *, engine, vault_dir: Path, profile, on_question=None):
+    def __init__(self, *, engine, vault_dir: Path, profile, on_question=None, transcribe=None):
         self.engine = engine
         self.vault_dir = Path(vault_dir)
         self.profile = profile
         self.on_question = on_question
+        self.transcribe = transcribe   # local speech to text (phase 3), or None
+
+    def transcribe_memos(self, s: Session) -> int:
+        """Voice memos waiting as 'later' become text captures once speech-to-text works."""
+        if self.transcribe is None:
+            return 0
+        n = 0
+        for cap in s.exec(select(Capture).where(Capture.status == "later").where(Capture.kind == "audio")).all():
+            try:
+                text = self.transcribe(Path(cap.raw_path).read_bytes()).strip()
+            except Exception:   # not installed / unreadable: stays 'later'
+                return n
+            note = f"{cap.text}\n" if cap.text else ""
+            cap.text, cap.status = (note + text).strip() or "(empty voice memo)", "new"
+            s.add(cap)
+            s.commit()
+            n += 1
+        return n
 
     def waiting(self, s: Session) -> list[Capture]:
         return list(s.exec(select(Capture).where(Capture.status == "new").order_by(Capture.id).limit(BATCH)).all())
 
     def run(self, ctx: JobContext) -> str:
         s = ctx.session
+        self.transcribe_memos(s)
         caps = self.waiting(s)
         if not caps:
             raise Skipped("inbox empty")

@@ -23,6 +23,8 @@ from sqlmodel import select
 
 from . import approvals, backup, board, brief, capture, lerndoku, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
+from .voice import NotInstalled, Voice, VoiceError
+from .voice import calls as voice_calls
 from .audit import audit
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
@@ -106,8 +108,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine, gate=gate, executor=lambda: app.state.executor, google_read=google_read,
         on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today"))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
+    app.state.voice = Voice(settings.data_dir / "models", site_dir=settings.data_dir.parent / "tools" / "voice")
+
+    def _transcribe_for_capture(data: bytes) -> str:
+        return app.state.voice.transcribe(data).text
+
     app.state.captures = capture.Processor(
-        engine=engine, vault_dir=settings.vault_dir, profile=profile,
+        engine=engine, vault_dir=settings.vault_dir, profile=profile, transcribe=_transcribe_for_capture,
         on_question=lambda c: pusher.notify("Kairo has a question", c.question or "About your capture", "/#today"))
     backup_dir = settings.data_dir / "backups" / "nightly"
 
@@ -1026,6 +1033,97 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return lerndoku.as_dict(lerndoku.set_status(s, settings.vault_dir, wk, bool(body.get("approved", True))), settings.vault_dir)
             except lerndoku.LerndokuError as exc:
                 raise HTTPException(400, str(exc))
+
+    # ---------------------------------------------------------------- voice (phase 3)
+
+    from fastapi import Response
+
+    @app.get("/api/voice/status")
+    def voice_status():
+        with session_for(engine) as s:
+            return {**app.state.voice.status(), "call_options": voice_calls.options(s),
+                    "call_option_titles": voice_calls.OPTIONS}
+
+    @app.post("/api/voice/transcribe")
+    async def voice_transcribe(request: Request):
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not ctype.startswith(("audio/", "video/")):   # Safari records audio/mp4
+            raise HTTPException(400, "send the recording as the request body (audio/*)")
+        body = await request.body()
+        lang = request.query_params.get("language") or None
+        try:
+            t = await asyncio.to_thread(app.state.voice.transcribe, body, lang)
+        except NotInstalled as exc:
+            raise HTTPException(503, str(exc))
+        except VoiceError as exc:
+            raise HTTPException(400, str(exc))
+        return {"text": t.text, "language": t.language, "seconds": t.seconds, "took": t.took}
+
+    @app.post("/api/voice/speak")
+    async def voice_speak(body: dict):
+        text = str(body.get("text") or "")
+        lang = body.get("language") if body.get("language") in ("de", "en") else None
+        try:
+            wav, used = await asyncio.to_thread(app.state.voice.speak, text, lang)
+        except NotInstalled as exc:
+            raise HTTPException(503, str(exc))
+        except VoiceError as exc:
+            raise HTTPException(400, str(exc))
+        return Response(content=wav, media_type="audio/wav", headers={"X-Kairo-Language": used, "Cache-Control": "no-store"})
+
+    @app.post("/api/voice/calls")
+    def voice_call_now(body: dict):
+        """'Call me now' (also how the owner tests it)."""
+        reason = str(body.get("reason") or "Test call")[:120]
+        with session_for(engine) as s:
+            c = voice_calls.start(s, reason, f"Hi, it's Kairo. {reason}. What's on your mind?", app.state.pusher, ignore_quiet=True)
+            return voice_calls.as_dict(c)
+
+    @app.post("/api/voice/selftest")
+    async def voice_selftest():
+        """More -> Voice -> Test: speak a sentence, then recognise it again, on the PC."""
+        def run():
+            wav, lang = app.state.voice.speak("Kairo voice test. Please call the dentist tomorrow.", "en")
+            t = app.state.voice.transcribe(wav, "en")
+            return {"ok": "dentist" in t.text.lower(), "heard": t.text, "took": t.took,
+                    "device": app.state.voice.status()["stt_device"]}
+        try:
+            return await asyncio.to_thread(run)
+        except NotInstalled as exc:
+            raise HTTPException(503, str(exc))
+        except VoiceError as exc:
+            return {"ok": False, "heard": "", "error": str(exc)}
+
+    @app.get("/api/voice/calls")
+    def voice_calls_list():
+        with session_for(engine) as s:
+            return [voice_calls.as_dict(c) for c in voice_calls.recent(s)]
+
+    @app.get("/api/voice/calls/{call_id}")
+    def voice_call_get(call_id: int):
+        with session_for(engine) as s:
+            c = voice_calls.get(s, call_id)
+            if c is None:
+                raise HTTPException(404, "no such call")
+            return voice_calls.as_dict(c)
+
+    @app.post("/api/voice/calls/{call_id}/{action}")
+    def voice_call_action(call_id: int, action: str):
+        if action not in ("answer", "end"):
+            raise HTTPException(404, "unknown action")
+        with session_for(engine) as s:
+            try:
+                return voice_calls.as_dict(voice_calls.set_status(s, call_id, "answered" if action == "answer" else "ended"))
+            except KeyError:
+                raise HTTPException(404, "no such call")
+
+    @app.post("/api/voice/options/{key}")
+    def voice_option(key: str, body: dict):
+        with session_for(engine) as s:
+            try:
+                return voice_calls.set_option(s, key, bool(body.get("on")))
+            except KeyError:
+                raise HTTPException(404, "unknown option")
 
     @app.get("/api/backups")
     def backups_list():

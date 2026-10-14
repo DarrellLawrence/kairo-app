@@ -3,7 +3,7 @@ import { motion } from 'motion/react'
 import { memo, useEffect, useLayoutEffect, useRef } from 'react'
 import { spring } from '../design/motion.js'
 import { Badge, Button, Swipeable } from './basics.jsx'
-import { IconSend } from './icons.jsx'
+import { IconMic, IconSend } from './icons.jsx'
 
 export function TypingDots() {
   return <span className="k-typing" role="status" aria-label="Kairo is typing"><i /><i /><i /></span>
@@ -26,7 +26,7 @@ export const ChatBubble = memo(function ChatBubble({ role, text, chunks, typing 
 })
 
 /* Grows with the text (up to ~5 lines). Enter sends, Shift+Enter is a new line. */
-export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Message' }) {
+export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Message', mic }) {
   const ref = useRef(null)
   useLayoutEffect(() => {
     const ta = ref.current
@@ -48,10 +48,18 @@ export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Mes
         enterKeyHint="send"
         aria-label={placeholder}
       />
-      <motion.button type="submit" className="k-send" disabled={!canSend} whileTap={canSend ? { scale: 0.85 } : undefined}
-        animate={{ scale: canSend ? 1 : 0.92 }} transition={spring.snappy} aria-label="Send">
-        <IconSend />
-      </motion.button>
+      {mic && (!value.trim() || mic.state !== 'idle') ? (
+        <motion.button type="button" className={`k-send k-mic ${mic.state}`} disabled={mic.state === 'busy'}
+          onClick={mic.onPress} whileTap={{ scale: 0.85 }} transition={spring.snappy}
+          aria-label={mic.state === 'recording' ? 'Stop and send' : 'Talk'}>
+          {mic.state === 'recording' ? <span className="k-mic-stop" /> : mic.state === 'busy' ? <span className="k-spin-dot" /> : <IconMic />}
+        </motion.button>
+      ) : (
+        <motion.button type="submit" className="k-send" disabled={!canSend} whileTap={canSend ? { scale: 0.85 } : undefined}
+          animate={{ scale: canSend ? 1 : 0.92 }} transition={spring.snappy} aria-label="Send">
+          <IconSend />
+        </motion.button>
+      )}
     </form>
   )
 }
