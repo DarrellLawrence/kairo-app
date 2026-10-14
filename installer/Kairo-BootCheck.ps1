@@ -17,6 +17,7 @@ if ($Interactive) {
 
 $P = Get-KairoPaths $Root
 $checks = New-Object System.Collections.Generic.List[object]
+$tailnetLogin = ''
 
 # Level 'warn': nothing is broken, but there is something to do (yellow on the More screen).
 function Add-Check([string]$Name, [bool]$Ok, [string]$Detail, [string]$Level = '') {
@@ -73,6 +74,11 @@ if (-not $CI) {
     $ts = Get-TailscaleStatus
     $tsOk = ($null -ne $ts) -and ($ts.BackendState -eq 'Running')
     Add-Check 'Tailscale' $tsOk $(if ($ts) { "state: $($ts.BackendState)" } else { 'Tailscale not answering' })
+    # The PC's own Tailscale account is the owner's: only it may run the diagnosis from the phone.
+    try {
+        $u = $ts.User.PSObject.Properties[[string]$ts.Self.UserID]
+        if ($u -and [string]$u.Value.LoginName -and [string]$u.Value.LoginName -ne 'tagged-devices') { $tailnetLogin = [string]$u.Value.LoginName }
+    } catch { }
 
     # 5. The HTTPS address is still published to Kairo
     $serve = ''
@@ -100,6 +106,7 @@ $report = [pscustomobject]@{
     all_ok = $allOk
     checks = $checks
 }
+if ($tailnetLogin) { $report | Add-Member -NotePropertyName tailnet_login -NotePropertyValue $tailnetLogin }
 if (-not (Test-Path $P.Logs)) { [void](New-Item -ItemType Directory -Path $P.Logs) }
 $report | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $P.Logs 'boot-check.json') -Encoding UTF8
 
