@@ -11,6 +11,8 @@ because the adapter only passes allow-listed variables through):
   pause        1.5 s pause in the middle of the answer (hang-up tests)
   bad_flag     exit 1 like the real CLI does on a missing --verbose
 
+FAKE_CLAUDE_NO_TOOLS=1: init lists no tools although MCP connected. FAKE_CLAUDE_SKIP_TOOLS=1: the
+"model" ignores [[fake-tool]] directives (asks instead of acting).
 FAKE_CLAUDE_PROBE=<report.json> (+ FAKE_CLAUDE_PROBE_PATHS=a;b): write who ran
 the CLI, whether it is admin, and which of the paths it can read.
 
@@ -120,6 +122,16 @@ def start_mcp(args):
     return clients, status
 
 
+def list_tools(clients):
+    names = []
+    for server, c in clients.items():
+        try:
+            names += [f"mcp__{server}__{t['name']}" for t in c.request("tools/list").get("tools", [])]
+        except Exception:
+            pass
+    return names
+
+
 def run_hooks(tool_name, tool_input):
     """PreToolUse hooks from <cwd>/.claude/settings.json, exec form, like the real CLI.
     Returns (allowed, message). A hook that can't start or times out blocks (onFailure: block)."""
@@ -180,8 +192,12 @@ def main():
         prompt = f"[{images} image(s)] " + " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
     record = env("FAKE_CLAUDE_RECORD")
     if record:
+        system = ""
+        if "--system-prompt-file" in args:
+            with open(args[args.index("--system-prompt-file") + 1], encoding="utf-8") as fh:
+                system = fh.read()
         with open(record, "w", encoding="utf-8") as fh:
-            json.dump({"argv": args, "stdin": prompt, "cwd": os.getcwd(), "env": dict(os.environ)}, fh)
+            json.dump({"argv": args, "stdin": prompt, "cwd": os.getcwd(), "env": dict(os.environ), "system": system}, fh)
 
     probe = env("FAKE_CLAUDE_PROBE")
     if probe:
@@ -199,10 +215,12 @@ def main():
 
     sid = args[args.index("--resume") + 1] if "--resume" in args else str(uuid.uuid4())
     clients, mcp_status = start_mcp(args) if DIRECTIVE.search(prompt) else ({}, [])
-    out({"type": "system", "subtype": "init", "session_id": sid, "tools": [], "mcp_servers": mcp_status})
+    # Like the real CLI (2.1.296): init lists every tool of every connected MCP server.
+    listed = [] if env("FAKE_CLAUDE_NO_TOOLS") else list_tools(clients)
+    out({"type": "system", "subtype": "init", "session_id": sid, "tools": listed, "mcp_servers": mcp_status})
     if clients or mcp_status:
         try:
-            lines = tool_calls(prompt, args, clients, sid)
+            lines = ["I'd rather not do that."] if env("FAKE_CLAUDE_SKIP_TOOLS") else tool_calls(prompt, args, clients, sid)
         finally:
             for c in clients.values():
                 c.close()

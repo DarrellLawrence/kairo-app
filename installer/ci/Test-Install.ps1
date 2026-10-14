@@ -88,6 +88,12 @@ $s1 = (Get-ChildItem -LiteralPath $downloads -Directory | Select-Object -First 1
 $v1 = (Get-Content -Raw (Join-Path $s1 'app\release.json') | ConvertFrom-Json).version
 # What kairo-home has: full config copies from its first install (fewer actions), one owner edit.
 # (-Encoding UTF8: Windows PowerShell would read the umlauts in profile.yaml as ANSI.)
+# And a vault with a Profile and Goals, like after the onboarding interview (the self-test checks they reach the model).
+foreach ($f in @(@('10 Profile', 'me.md', 'CI owner: apprentice, likes short answers.'), @('20 Goals', '2026.md', 'Finish the apprenticeship.'))) {
+    $d = Join-Path $Root "data\vault\$($f[0])"
+    [void](New-Item -ItemType Directory -Force $d)
+    Set-Content -Path (Join-Path $d $f[1]) -Value $f[2] -Encoding UTF8
+}
 $cfg = Join-Path $Root 'data\config'
 [void](New-Item -ItemType Directory -Force $cfg)
 Get-Content -Encoding UTF8 (Join-Path $s1 'app\config\permissions.yaml') | Where-Object { $_ -notmatch '^\s+(calendar\.tag|gmail\.send_self):' } |
@@ -219,7 +225,9 @@ $tools = (Invoke-WebRequest 'http://127.0.0.1:8000/api/selftest/tools?notify=0' 
 Check ($tools.ok) "tools self-test passes ($($tools.reason))"
 Check ($tools.checks.hook_deny -and $tools.checks.hook_allow) 'the shipped safety hook blocks a forbidden tool (exit 2) and lets a Kairo tool through'
 Check ($tools.checks.mcp -eq 'connected') "the CLI reports Kairo's tool server as connected"
-Check ($tools.checks.tool_call) 'one real tool call went through mcp_kairo to the backend'
+Check ($tools.checks.tool_call -and $tools.checks.task_added -and @($tools.checks.tools_missing).Count -eq 0) 'like a chat message: all tools listed, a real task added through mcp_kairo (and removed again)'
+Check ($tools.proof.task.title -like 'Kairo self-test*' -and $tools.proof.task.removed) "proof: $($tools.proof.task.title), due $($tools.proof.task.due)"
+Check ($tools.checks.profile -and $tools.checks.goals -and $tools.checks.personality -eq 'current') 'Profile, Goals and the current personality reach the model'
 Check ($tools.checks.browser -eq $true) "Kairo's browser imports and renders a page as kairo-svc ($($tools.details.browser.reason))"
 $siteFile = Join-Path $Root "app\releases\$v1\browser-site.txt"
 $site = if (Test-Path $siteFile) { (Get-Content -Raw $siteFile).Trim() } else { '' }
@@ -254,7 +262,7 @@ Check ($null -ne (Wait-Healthy 90)) 'restarted without the probe'
 Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, tools, Claude, browser)'
 $bc = Get-Content -Raw (Join-Path $Root 'data\logs\boot-check.json') | ConvertFrom-Json
 $names = @($bc.checks | ForEach-Object { $_.name })
-$missing = @(@('Kairo running', 'Own account', 'Kairo tools', 'Claude login', 'Browser') | Where-Object { $names -notcontains $_ })
+$missing = @(@('Kairo running', 'Own account', 'Kairo tools', 'Context', 'Claude login', 'Browser') | Where-Object { $names -notcontains $_ })
 Check ($bc.all_ok -and $missing.Count -eq 0) "boot-check.json: all green ($($names -join ', '))"
 $status = (Invoke-WebRequest 'http://127.0.0.1:8000/api/status' -UseBasicParsing).Content | ConvertFrom-Json
 Check ($status.boot_check.all_ok) 'the app shows the boot check result (More screen)'

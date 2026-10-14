@@ -725,12 +725,13 @@ function Invoke-ToolSelfTest($P, [string]$Version, [switch]$Quiet) {
     return $r
 }
 
-# Rolled back for: tools/hook broken, voice or browser broken, no answer. Not for a Claude
-# login or usage limit (an older version can't fix those) or a model that skipped its tool.
+# Rolled back for: tools/hook broken, voice or browser broken, no answer. Not for what an older
+# version can't fix either: Claude login or usage limit, a model that didn't act, an empty vault,
+# an old personality.md the owner kept. Those stay red on Today and are pushed.
 function Test-SelfTestPassed($R) {
     if ($null -eq $R) { return $true }
     if ($R.ok) { return $true }
-    return @('claude', 'model') -contains [string]$R.category
+    return @('claude', 'model', 'context', 'config') -contains [string]$R.category
 }
 
 function Get-SelfTestReason($R) {

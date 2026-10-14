@@ -39,8 +39,14 @@ Add-Check 'Own account' $svcOk $(if ($owners.Count) { "runs as: $($owners -join 
 $t = if ($h) { Invoke-ToolsSelfTest } else { $null }
 if ($t -and $t.PSObject.Properties['checks'] -and $t.checks) {
     $c = $t.checks
-    $toolsOk = [bool]$c.hook_deny -and [bool]$c.hook_allow -and [string]$c.mcp -eq 'connected' -and ([bool]$c.tool_call -or [string]$t.category -eq 'model')
-    Add-Check 'Kairo tools' $toolsOk $(if ($toolsOk) { 'safety hook, tool server and a real tool call work' } else { [string]$t.reason })
+    $missing = @(if ($c.PSObject.Properties['tools_missing']) { $c.tools_missing } else { @() })
+    $toolsOk = [bool]$c.hook_deny -and [bool]$c.hook_allow -and [string]$c.mcp -eq 'connected' -and $missing.Count -eq 0 -and
+        ($(if ($c.PSObject.Properties['task_added']) { [bool]$c.task_added } else { [bool]$c.tool_call }))
+    Add-Check 'Kairo tools' $toolsOk $(if ($toolsOk) { 'safety hook, tool server, all tools, and a real task added like a chat message' } else { [string]$t.reason })
+    if ($c.PSObject.Properties['profile']) {
+        $ctxOk = [bool]$c.profile -and [bool]$c.goals -and [string]$c.personality -ne 'older'
+        Add-Check 'Context' $ctxOk $(if ($ctxOk) { 'Profile, Goals and the current personality reach the model' } else { [string]$t.reason })
+    }
     $claudeOk = [string]$c.claude -eq 'ok'
     Add-Check 'Claude login' $claudeOk $(if ($claudeOk) { "answers ($($t.seconds)s for the whole self-test)" } else { [string]$t.reason })
     foreach ($kind in @('voice', 'browser')) {

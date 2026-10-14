@@ -32,19 +32,31 @@ def free_port() -> int:
 # ---------------------------------------------------------------- the verdict
 
 HOOKS_OK = {"deny": True, "allow": True, "detail": ""}
+CTX_OK = {"profile": True, "goals": True, "personality": "current", "detail": ""}
+EXPECTED = ["mcp__kairo__tasks_create", "mcp__kairo__vault_read"]
 
 
-@pytest.mark.parametrize("hooks,mcp,used,arrived,error,category", [
-    (HOOKS_OK, "connected", True, True, None, None),
-    ({"deny": False, "allow": True, "detail": "hook script missing"}, "connected", True, True, None, "toolchain"),
-    (HOOKS_OK, "failed", False, False, None, "toolchain"),               # the real 2.1.296 init when mcp_kairo is missing
-    (HOOKS_OK, "connected", True, False, None, "toolchain"),             # called, never arrived
-    (HOOKS_OK, "connected", False, False, None, "model"),                # wired, the model just didn't call it
-    (HOOKS_OK, "unknown", False, False, "Invalid API key · Please run /login", "claude"),
+def v(hooks=HOOKS_OK, mcp="connected", listed=EXPECTED, used=True, arrived=True, task=True, error=None, ctx=CTX_OK):
+    return selftest.verdict(hooks=hooks, mcp=mcp, listed=listed, expected=EXPECTED, tool_used=used, tool_arrived=arrived,
+                            task_found=task, claude_error=error, claude_status="logged_out" if error else "ok", context=ctx)
+
+
+@pytest.mark.parametrize("kw,category", [
+    ({}, None),
+    ({"hooks": {"deny": False, "allow": True, "detail": "hook script missing"}}, "toolchain"),
+    ({"mcp": "failed", "listed": [], "used": False, "arrived": False, "task": False}, "toolchain"),   # 2026-10-14 on kairo-home
+    ({"listed": [], "used": False, "arrived": False, "task": False}, "toolchain"),     # "connected" but no Kairo tools
+    ({"listed": ["mcp__kairo__vault_read"]}, "toolchain"),                             # some tools missing
+    ({"arrived": False, "task": False}, "toolchain"),                                 # called, never arrived
+    ({"task": False}, "toolchain"),                                                   # arrived, no task in the database
+    ({"used": False, "arrived": False, "task": False}, "model"),                      # wired, model didn't act ("want me to...?")
+    ({"ctx": {**CTX_OK, "profile": False, "goals": False, "detail": "no Profile"}}, "context"),
+    ({"ctx": {**CTX_OK, "personality": "older", "detail": "v3 < v6"}}, "config"),
+    ({"error": "Invalid API key · Please run /login", "listed": [], "used": False, "arrived": False, "task": False}, "claude"),
 ])
-def test_verdict_categories(hooks, mcp, used, arrived, error, category):
-    v = selftest.verdict(hooks, mcp, used, arrived, error, "logged_out" if error else "ok")
-    assert v["category"] == category and v["ok"] is (category is None)
+def test_verdict_categories(kw, category):
+    r = v(**kw)
+    assert r["category"] == category and r["ok"] is (category is None), r
 
 
 def test_hook_checks_find_a_missing_hook_script(tmp_path):
@@ -60,7 +72,43 @@ def test_hook_checks_no_settings(tmp_path):
     assert selftest.hook_checks(tmp_path, {})["deny"] is False
 
 
-# ---------------------------------------------------------------- end to end
+def test_context_checks(tmp_path):
+    from app.settings import REPO_ROOT
+    prompt = "x\n## 10 Profile/me.md\nThe owner\n## 20 Goals/2026.md\nFinish\n"
+    ok = selftest.context_checks(prompt, REPO_ROOT / "config", REPO_ROOT / "config")
+    assert ok["profile"] and ok["goals"] and ok["personality"] == "current"
+    empty = selftest.context_checks("(Empty so far. Suggest the onboarding interview", REPO_ROOT / "config", REPO_ROOT / "config")
+    assert not empty["profile"] and not empty["goals"] and "Profile" in empty["detail"]
+    old = tmp_path / "cfg"
+    old.mkdir()
+    text = (REPO_ROOT / "config" / "personality.md").read_text(encoding="utf-8")
+    (old / "personality.md").write_text(text.replace(selftest.personality_version_line(text), "<!-- kairo-personality v1 -->"),
+                                        encoding="utf-8")
+    assert selftest.context_checks(prompt, old, REPO_ROOT / "config")["personality"] == "older"
+    (old / "personality.md").write_text("You are Kairo. (a copy from before versions)", encoding="utf-8")
+    assert selftest.context_checks(prompt, old, REPO_ROOT / "config")["personality"] == "older"
+
+
+def test_personality_version_counts_every_change():
+    """Change personality.md -> bump its version line and run scripts/config_history.py."""
+    from app import config_layers as cl
+    from app.settings import REPO_ROOT
+    text = (REPO_ROOT / "config" / "personality.md").read_text(encoding="utf-8")
+    history = json.loads((REPO_ROOT / "config" / cl.HISTORY).read_text(encoding="utf-8"))
+    assert selftest.personality_version(text) == len(history["text"]["personality.md"])
+
+
+# ---------------------------------------------------------------- end to end: the owner-chat path, really
+
+def vault(data_dir: Path, profile=True, goals=True) -> None:
+    v = Path(data_dir) / "vault"
+    if profile:
+        (v / "10 Profile").mkdir(parents=True, exist_ok=True)
+        (v / "10 Profile" / "me.md").write_text("Apprentice, Boxing, likes short answers.", encoding="utf-8")
+    if goals:
+        (v / "20 Goals").mkdir(parents=True, exist_ok=True)
+        (v / "20 Goals" / "2026.md").write_text("Finish the apprenticeship with a 5.", encoding="utf-8")
+
 
 def serve(tmp_path, migrated, extra: str = ""):
     port = free_port()
@@ -85,22 +133,92 @@ def post(port, path):
         return json.loads(r.read())
 
 
-def test_selftest_passes_with_the_real_hook_and_mcp_kairo(tmp_path, migrated):
+def stop(proc):
+    proc.terminate()
+    proc.wait(timeout=10)
+
+
+def tasks(migrated) -> list:
+    from sqlmodel import Session, select
+
+    from app.db import Task, make_engine
+    with Session(make_engine(migrated.db_url)) as s:
+        return s.exec(select(Task)).all()
+
+
+def test_selftest_adds_a_real_task_through_the_owner_chat_path(tmp_path, migrated):
+    vault(migrated.data_dir)
     proc, port = serve(tmp_path, migrated)
     try:
         r = post(port, "/api/selftest/tools?notify=0")
         assert r["ok"] is True, r
-        assert r["checks"] == {"hook_deny": True, "hook_allow": True, "mcp": "connected", "tool_call": True, "claude": "ok",
-                               "voice": None, "browser": None}    # not set up in dev: skipped, not failed
-        health = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/health").read())
-        assert health["tools"] == "connected"
+        c = r["checks"]
+        assert c["hook_deny"] and c["hook_allow"] and c["mcp"] == "connected" and c["tools_missing"] == []
+        assert c["task_added"] is True and c["profile"] and c["goals"] and c["personality"] == "current"
+        assert c["voice"] is None and c["browser"] is None                 # not set up in dev: skipped, not failed
+        proof = r["proof"]["task"]
+        assert proof["title"].startswith("Kairo self-test") and proof["due"] and proof["removed"] is True
+        assert tasks(migrated) == []                                       # the test task is gone again
+        assert json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/health").read())["tools"] == "connected"
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        stop(proc)
+
+
+def test_selftest_and_owner_chat_send_the_same_prompt_and_tools(tmp_path, migrated):
+    """The self-test can't drift from what the owner's messages get (the false green of 2026-10-14)."""
+    from websockets.sync.client import connect
+    vault(migrated.data_dir)
+    rec = tmp_path / "rec.json"
+    proc, port = serve(tmp_path, migrated, f"KAIRO_HOOK_FAKE_RECORD={rec}\n")
+    try:
+        post(port, "/api/selftest/tools?notify=0&voice=0&browser=0")
+        test_run = json.loads(rec.read_text())
+        with connect(f"ws://127.0.0.1:{port}/ws/chat") as ws:
+            ws.send(json.dumps({"type": "message", "text": "add task test tomorrow", "thread_id": None}))
+            while json.loads(ws.recv(timeout=60))["type"] not in ("done", "error"):
+                pass
+        chat_run = json.loads(rec.read_text())
+    finally:
+        stop(proc)
+
+    def flag(run, name):
+        return run["argv"][run["argv"].index(name) + 1]
+
+    for name in ("--mcp-config", "--allowedTools"):
+        assert flag(test_run, name) == flag(chat_run, name), name
+    strip = lambda t: "\n".join(l for l in t.splitlines() if not l.startswith("Right now:"))   # noqa: E731
+    assert strip(test_run["system"]) == strip(chat_run["system"])
+    assert "## 10 Profile/me.md" in chat_run["system"] and "## 20 Goals/2026.md" in chat_run["system"]
+
+
+@pytest.mark.parametrize("extra,category,words", [
+    ("KAIRO_HOOK_FAKE_NO_TOOLS=1\n", "toolchain", "no Kairo tools"),
+    ("KAIRO_HOOK_FAKE_SKIP_TOOLS=1\n", "model", "didn't add"),
+])
+def test_selftest_fails_when_the_model_has_no_tools_or_does_not_act(tmp_path, migrated, extra, category, words):
+    vault(migrated.data_dir)
+    proc, port = serve(tmp_path, migrated, extra)
+    try:
+        r = post(port, "/api/selftest/tools?notify=0&voice=0&browser=0")
+        assert r["ok"] is False and r["category"] == category and words in r["reason"], r
+        today = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/today").read())
+        assert any("Self-test failed" in i for i in today.get("issues", [])), today.get("issues")
+    finally:
+        stop(proc)
+
+
+def test_selftest_fails_without_profile_and_goals(tmp_path, migrated):
+    proc, port = serve(tmp_path, migrated)
+    try:
+        r = post(port, "/api/selftest/tools?notify=0&voice=0&browser=0")
+        assert r["ok"] is False and r["category"] == "context" and "Profile" in r["reason"], r
+    finally:
+        stop(proc)
 
 
 def test_selftest_catches_a_release_without_the_tool_bridge(tmp_path, migrated):
     """What every release so far looked like: no server/hooks, no server/mcp_kairo."""
+    vault(migrated.data_dir)
     shipped = tmp_path / "server"
     shutil.copytree(SERVER_DIR / "app", shipped / "app", ignore=shutil.ignore_patterns("__pycache__"))
     for f in ("alembic.ini",):
@@ -125,8 +243,7 @@ def test_selftest_catches_a_release_without_the_tool_bridge(tmp_path, migrated):
         assert r["ok"] is False and r["category"] == "toolchain", r
         assert r["checks"]["hook_deny"] is False
     finally:
-        proc.terminate()
-        proc.wait(timeout=10)
+        stop(proc)
 
 
 # ---------------------------------------------------------------- voice/browser packages Kairo's account can't read

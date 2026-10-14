@@ -45,7 +45,7 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
+from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import REPO_ROOT, Settings, get_settings
 
@@ -133,6 +133,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from . import models as model_table
     runner.on_usage = lambda purpose, usage, ok: model_table.record(engine, purpose, usage, ok)
     model_tools = tool_names(gate)
+
+    def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
+                   system: str | None = None):
+        """The one way an owner message reaches the model: chat, calls and the self-test (fix P0,
+        2026-10-14: a self-test with its own prompt and tools was green while chat had none)."""
+        return runner.stream(text, session_id=session_id, system=system or system_prompt(), tools=model_tools,
+                             origin="owner_chat", thread_id=thread_id, purpose=purpose,
+                             model=model or model_table.pick(purpose, app.state.jobs.schedule))
 
     def google_read() -> GoogleAPI:
         return GoogleAPI(settings.secrets_dir, "read", transport=getattr(app.state, "google_transport", None))
@@ -612,9 +620,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        async for event in runner.stream(text_in, session_id=session_id, system=system_prompt(), tools=model_tools,
-                                         origin="owner_chat", thread_id=tid, purpose=chat_purpose,
-                                         model=model_table.pick(chat_purpose, app.state.jobs.schedule)):
+        async for event in owner_turn(text_in, session_id=session_id, thread_id=tid, purpose=chat_purpose):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
@@ -663,36 +669,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "error": error.text[:500] if error else None,
                 "seconds": round(time.monotonic() - started, 1)}
 
-    async def _tools_run() -> tuple[bool, bool, str | None, str]:
-        """One real CLI run that may only use vault_read. Returns (tool_used, arrived, error, mcp)."""
+    async def _owner_path_run(token: str, due_iso: str, system: str) -> dict:
+        """The self-test's turn, through owner_turn() exactly like an owner message (fix P0, 2026-10-14)."""
         before = app.state.tool_calls.get(selftest_mod.TOOL, 0)
-        used, error, mcp = False, None, "unknown"
-        async for event in runner.stream(selftest_mod.PROMPT, session_id=None, system=selftest_mod.SYSTEM,
-                                         tools=[TOOL_PREFIX + selftest_mod.TOOL], origin="job", model="haiku",
-                                         purpose="selftest"):
+        out = {"used": False, "error": None, "mcp": "unknown", "listed": []}
+        async for event in owner_turn(selftest_mod.prompt(token, due_iso), session_id=None, thread_id=None,
+                                      purpose="selftest", model="haiku", system=system):
             if event.kind is EventKind.session:
-                servers = {x.get("name"): x.get("status") for x in (event.data or {}).get("mcp_servers") or []}
-                mcp = servers.get("kairo") or ("not listed" if servers or event.data.get("mcp_servers") is not None else "unknown")
+                data = event.data or {}
+                servers = {x.get("name"): x.get("status") for x in data.get("mcp_servers") or []}
+                out["mcp"] = servers.get("kairo") or ("not listed" if data.get("mcp_servers") is not None else "unknown")
+                out["listed"] = [str(t) for t in data.get("tools") or []]
             elif event.kind is EventKind.tool_use and str((event.data or {}).get("name", "")).startswith(TOOL_PREFIX):
-                used = True
+                out["used"] = True
             elif event.kind is EventKind.error:
-                error = event.text or "error"
-        return used, app.state.tool_calls.get(selftest_mod.TOOL, 0) > before, error, mcp
+                out["error"] = event.text or "error"
+        out["arrived"] = app.state.tool_calls.get(selftest_mod.TOOL, 0) > before
+        return out
+
+    def _take_test_task(token: str) -> dict | None:
+        """The task the self-test asked for: proof it exists, then it goes again."""
+        with session_for(engine) as s:
+            t = s.exec(select(Task).where(Task.title.contains(token))).first()
+            if t is None:
+                return None
+            proof = {"id": t.id, "title": t.title, "due": t.due.isoformat() if t.due else None, "removed": True}
+            s.delete(t)
+            s.commit()
+            audit(s, actor="backend", action="selftest.task", outcome=f"test task #{proof['id']} found and removed")
+            return proof
 
     @app.post("/api/selftest/tools")
     async def selftest_tools(request: Request, notify: int = 1, voice: int = 1, browser: int = 1):
-        """Kairo proves it has hands (fix P0): the real hook, the real MCP server, one real tool call.
-        Only from this PC (installer after every install/update, boot check). notify=0: the installer
-        reports instead (it may roll back)."""
+        """Kairo proves it has hands (fix P0, app/selftest.py): the real hook, the owner-chat path with
+        its prompt, MCP server and tools adding a real task, Profile/Goals and personality version,
+        a real transcription, a real browser page. Only from this PC (installer after every
+        install/update, boot check). notify=0: the installer reports instead (it may roll back)."""
         if not is_local_request(request):
             raise HTTPException(403, "self-test only from this PC")
         started = time.monotonic()
-        env = runner.brain.hook_env("job") if hasattr(runner.brain, "hook_env") else {}
+        env = runner.brain.hook_env("owner_chat") if hasattr(runner.brain, "hook_env") else {}
         hooks = await asyncio.to_thread(selftest_mod.hook_checks, settings.workspace_dir, env)
-        used, arrived, error, mcp = await _tools_run()
-        if not error and mcp == "connected" and not arrived and not used:
-            used, arrived, error, mcp = await _tools_run()   # the model skipped the tool once: one more try
-        result = selftest_mod.verdict(hooks, mcp, used, arrived, error, runner.brain.health().value)
+        system = system_prompt()
+        context = selftest_mod.context_checks(system, settings.config_dir, REPO_ROOT / "config")
+        due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        token = secrets.token_hex(4)
+        run = await _owner_path_run(token, due.isoformat(), system)
+        task = await asyncio.to_thread(_take_test_task, token)
+        if not run["error"] and run["mcp"] == "connected" and not run["used"] and task is None:
+            token = secrets.token_hex(4)
+            run = await _owner_path_run(token, due.isoformat(), system)   # the model skipped it once: one more try
+            task = await asyncio.to_thread(_take_test_task, token)
+        result = selftest_mod.verdict(hooks=hooks, mcp=run["mcp"], listed=run["listed"], expected=list(model_tools),
+                                      tool_used=run["used"], tool_arrived=run["arrived"], task_found=task is not None,
+                                      claude_error=run["error"], claude_status=runner.brain.health().value, context=context)
+        result["proof"] = {"task": task}
         # Voice and browser: only where the installer set them up for this release (else "skipped").
         extras = {}
         if voice:
@@ -703,20 +734,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if tool_sites.configured("browser") else {"ok": None, "reason": "not set up for this release"}
         result["checks"].update({k: v.get("ok") for k, v in extras.items()})
         result["details"] = extras
+        if extras.get("voice", {}).get("heard"):
+            result["proof"]["transcription"] = extras["voice"]["heard"]
+        problems = [] if result["ok"] else [result["reason"]]
         for kind, r in extras.items():
-            if r.get("ok") is False and (result["ok"] or result["category"] == "model"):
-                result.update(ok=False, category=kind, reason=f"{kind}: {r.get('reason')}")
+            if r.get("ok") is False:
+                problems.append(f"{kind}: {r.get('reason')}")
+                if result["category"] not in ("toolchain", "claude"):   # a broken install outranks the rest (rollback)
+                    result.update(ok=False, category=kind, reason=f"{kind}: {r.get('reason')}")
+        result["problems"] = problems
         result["seconds"] = round(time.monotonic() - started, 1)
         result["at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        log.info("self-test: %s", json.dumps({k: result[k] for k in ("ok", "category", "reason", "checks", "proof")}, default=str))
         with session_for(engine) as s:
             row = s.get(SettingKV, "selftest.tools") or SettingKV(key="selftest.tools")
             prev = json.loads(row.value) if row.value else {}
-            row.value = json.dumps(result)
+            row.value = json.dumps(result, default=str)
             s.add(row)
             audit(s, actor="backend", action="selftest.tools",
                   outcome="ok" if result["ok"] else f"failed ({result['category']}): {result['reason'][:200]}")
-        if notify and not result["ok"] and result["category"] != "model" and (prev.get("ok", True) or prev.get("reason") != result["reason"]):
-            pusher.notify("Kairo", f"Self-test failed: {result['reason']}", "/#today")
+        if notify and not result["ok"] and (prev.get("ok", True) or prev.get("reason") != result["reason"]):
+            pusher.notify("Kairo", f"Self-test failed: {result['reason']}"[:200], "/#today")
         return result
 
     # ---------------------------------------------------------------- auto-update (installer/Kairo-AutoUpdate.ps1)
@@ -1100,7 +1138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             last = s.get(SettingKV, "selftest.tools")
             last = json.loads(last.value) if last and last.value else None
-            if last and not last.get("ok") and last.get("category") != "model":
+            if last and not last.get("ok"):
                 issues.append(f"Self-test failed: {last.get('reason')}")
             issues += brief._warnings(s)
             return today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
@@ -1905,7 +1943,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 boot = json.loads(path.read_text(encoding="utf-8-sig"))
             except (OSError, ValueError):
                 boot = {"error": "boot-check.json unreadable"}
-        return {"brain": runner.brain.health().value, "boot_check": boot}
+        with session_for(engine) as s:
+            row = s.get(SettingKV, "selftest.tools")
+            selftest_last = json.loads(row.value) if row and row.value else None
+        return {"brain": runner.brain.health().value, "boot_check": boot, "selftest": selftest_last}
 
     _mount_web(app, settings.web_dist_dir)
     return app
