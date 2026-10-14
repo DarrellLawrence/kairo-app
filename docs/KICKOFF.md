@@ -5,6 +5,8 @@
 - **Location (new, section 13b).** iPhone Shortcut automations send arrive/leave for named places to `POST /api/location/event` (own token). Only place name + time, only on kairo-home, 365 days, pause and delete in the app. Used for place reminders, the brief, reviews and patterns. "Use my current location" (weather, SBB) only on tap: coordinates rounded, sent only to the weather and timetable services, never stored.
 - **App tabs (section 11):** Today, Chat, Board, Approvals, More. Reviews, School, Lerndokumentation, Location, Capture, Jobs, Backups open from More (pushes link straight to them).
 - **More → Your to-dos:** Google app publish (stops the 7-day sign-out), BIOS power-on after power loss, GitHub two-factor login.
+- **Finance:** Apple Pay Wallet trigger + UBS camt.053 import now; Finch (read-only, through the backend, never the model directly) once its MCP server is public. CLAUDE.md updated for this one exception.
+- **Letters:** Claude reads captured photos/PDFs in a job run with no tools; bills become "Pay …" tasks. Kairo still cannot pay.
 - **Phase 3 voice:** local speech on the RTX 3060 (Whisper/Moonshine + Kokoro/Piper, Pipecat), a talk button, "calls" by push. A native iOS app with CallKit stays a later option; it needs an Apple Developer account (ask first).
 
 ### Changelog v4 → v5 (memory first; owner's request 2026-10-14)
@@ -567,7 +569,9 @@ start the next until its checks pass and the owner says go.
 - The model's only MCP server is mcp_kairo, which forwards every call to the
   backend. Both Google tokens live only in the backend (read-only token for
   reads, write token only in executor.py), never in the CLI's environment or
-  workspace. No third-party MCP servers.
+  workspace. No third-party MCP servers for the model. Only exception (owner's
+  decision 2026-10-14): the backend may read bank data read-only from Finch once
+  its MCP is public; it reaches the model only as the tier-0 finance.list tool.
 - The gate fails closed: any hook error, crash, timeout or failure to start
   blocks the call (catch-all + exit 2, onFailure: block). Never weaken this.
 - A tier-2 action that would notify another person (attendees, invites,
