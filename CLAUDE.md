@@ -70,3 +70,5 @@ start the next until its checks pass and the owner says go.
 - Gate, approvals, hooks: write the failing test first.
 - Ask before adding a dependency.
 - Explain any manual step the owner must do, in plain words.
+- Done = passes docs/ACCEPTANCE.md on kairo-home with the real Claude and the real iPhone. Green CI is not done.
+- Clean while you build: every PR removes what it replaces and lists what it removed.
