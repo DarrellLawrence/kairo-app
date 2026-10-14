@@ -75,6 +75,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  tool_url=f"http://127.0.0.1:{settings.port}/internal/tools", token=tool_token)
     hook_env = {"KAIRO_HOOK_CONFIG_DIR": str(settings.config_dir), "KAIRO_HOOK_DB_URL": settings.db_url}
     runner = chat.BrainRunner(make_brain(settings, mcp_config=mcp_config, hook_env=hook_env))
+    from . import models as model_table
+    runner.on_usage = lambda purpose, usage, ok: model_table.record(engine, purpose, usage, ok)
     model_tools = tool_names(gate)
 
     def google_read() -> GoogleAPI:
@@ -163,7 +165,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.jobs = Jobs(
         engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
-        ask=lambda prompt, system, images=None: chat.ask_sync(runner, prompt, system=system, images=images),
+        ask=lambda prompt, system, images=None, purpose="summary", model=None: chat.ask_sync(
+            runner, prompt, system=system, images=images, purpose=purpose, model=model),
         bodies={"email_triage": lambda ctx: app.state.triage.run(ctx),
                 "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
                 "capture_process": lambda ctx: app.state.captures.run(ctx),
@@ -468,13 +471,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session_id = thread.brain_session_id
             tid = thread.id
         await ws.send_json({"type": "thread", "id": tid})
+        chat_purpose = "call" if text_in.startswith("(spoken, on a call)") else "chat"   # calls want speed: Haiku
 
         parts: list[str] = []
         final_text: str | None = None
         error = None
         new_sid = None
         async for event in runner.stream(text_in, session_id=session_id, system=system_prompt(), tools=model_tools,
-                                         origin="owner_chat", thread_id=tid):
+                                         origin="owner_chat", thread_id=tid, purpose=chat_purpose,
+                                         model=model_table.pick(chat_purpose, app.state.jobs.schedule)):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
@@ -511,7 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reply, error = "", None
         async for event in runner.stream(
             "Reply with exactly: OK", session_id=None,
-            system="You are a health check. Reply with exactly: OK", tools=[],
+            system="You are a health check. Reply with exactly: OK", tools=[], model="haiku", purpose="selftest",
         ):
             if event.kind is EventKind.result:
                 reply = event.text
@@ -865,9 +870,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _today():
         return dt.datetime.now(profile.tz).date()
 
-    def _model_ask(prompt, system):
+    def _model_ask(prompt, system, purpose="study"):
         try:
-            return app.state.jobs.ask_brain(prompt, system)
+            return app.state.jobs.ask_brain(prompt, system, purpose=purpose)
         except Exception as exc:   # budget reached / usage limit / no model
             raise HTTPException(503, f"Claude is not available right now: {exc}")
 
@@ -1011,7 +1016,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         wk = _week(week)
         with session_for(engine) as s:
             try:
-                row = lerndoku.write_draft(_model_ask, s, settings.vault_dir, wk, str(body.get("notes") or ""))
+                row = lerndoku.write_draft(lambda p, sy: _model_ask(p, sy, "lerndoku"), s, settings.vault_dir, wk, str(body.get("notes") or ""))
             except lerndoku.LerndokuError as exc:
                 raise HTTPException(400, str(exc))
             return lerndoku.as_dict(row, settings.vault_dir)
@@ -1307,6 +1312,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health_get(days: int = 30):
         with session_for(engine) as s:
             return life.health_summary(s, max(1, min(days, 366)), _today())
+
+    @app.get("/api/usage")
+    def usage_get(days: int = 7):
+        with session_for(engine) as s:
+            return {**model_table.usage(s, max(1, min(days, 366))), "models": {p: model_table.pick(p, app.state.jobs.schedule)
+                                                                              for p in model_table.DEFAULTS}}
 
     @app.get("/api/backups")
     def backups_list():

@@ -292,6 +292,21 @@ class ShoppingItem(SQLModel, table=True):
     source: str = "app"
 
 
+class ModelRun(SQLModel, table=True):
+    """One model run: which model, for what, how long (More -> Usage)."""
+
+    __tablename__ = "model_runs"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=utcnow, index=True)
+    purpose: str = Field(index=True)       # chat / call / triage / brief / ...
+    model: str | None = Field(default=None, index=True)
+    ok: bool = True
+    duration_ms: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None          # list price equivalent; the subscription covers it
+
+
 class ChatThread(SQLModel, table=True):
     __tablename__ = "chat_threads"
     id: int | None = Field(default=None, primary_key=True)
