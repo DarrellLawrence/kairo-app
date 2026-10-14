@@ -273,9 +273,16 @@ export default function Today({ go, onboarding }) {
         <h1>{greeting()}{name ? <>,<br /><em>{name}</em></> : ''}</h1>
         {h ? <p>{h.summary}</p> : <Skeleton w="80%" h={16} />}
         {h?.issues?.length > 0 && (
-          <motion.button className="k-warnchip" onClick={() => { window.location.hash = '#more'; sessionStorage.setItem('kairo-more-open', 'system') }}
+          <motion.button className="k-warnchip danger" onClick={() => { window.location.hash = '#more'; sessionStorage.setItem('kairo-more-open', 'system') }}
             whileTap={{ scale: 0.95 }} title={h.issues.join(' · ')}>
             <IconWarn />{h.issues.length === 1 ? h.issues[0] : `${h.issues.length} things need a look`}
+          </motion.button>
+        )}
+        {/* Yellow: nothing is broken, there is something to do (e.g. no context yet: do the onboarding). */}
+        {h?.notices?.length > 0 && (
+          <motion.button className="k-warnchip" onClick={() => { window.location.hash = '#onboarding' }}
+            whileTap={{ scale: 0.95 }} title={h.notices.join(' · ')}>
+            <IconWarn />{h.notices[0]}
           </motion.button>
         )}
       </motion.header>

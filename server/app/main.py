@@ -747,7 +747,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             main_id = chat.main_thread(s, brain_name=runner.brain.name).id
         system = system_prompt(thread_id=main_id, fresh=True)
-        context = selftest_mod.context_checks(system, settings.config_dir, REPO_ROOT / "config")
+        context = selftest_mod.context_checks(system, settings.config_dir, REPO_ROOT / "config", settings.vault_dir)
         due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
         token = secrets.token_hex(4)
         run = await _owner_path_run(token, due.isoformat(), system)
@@ -1174,10 +1174,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             last = s.get(SettingKV, "selftest.tools")
             last = json.loads(last.value) if last and last.value else None
+            notices = []
             if last and not last.get("ok"):
                 issues.append(f"Self-test failed: {last.get('reason')}")
+            elif last:
+                notices += last.get("warnings") or []          # yellow: not broken, something to do
             issues += brief._warnings(s)
-            return today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
+            out = today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
+            out["notices"] = notices
+            return out
 
     @app.get("/api/brief")
     def brief_get(date: str | None = None):
@@ -2006,11 +2011,16 @@ def _build_config(settings: Settings) -> None:
     for note in report["ignored"]:
         log.warning("config: ignored %s", note)
     n = len(report["new_actions"])
-    if not n and not report["migrated"]:
+    merged = report.get("merged") or []
+    if not n and not report["migrated"] and not merged:
         return
     msg = f"Config updated: {n} new action{'s' if n != 1 else ''}." if n else "Config updated."
     if report["migrated"]:
         msg += " Your settings were kept; data/config now holds only your changes."
+    if merged:
+        both = sum(m["conflicts"] for m in merged)
+        msg += (f" Your edits in {', '.join(m['file'] for m in merged)} were carried into the new version"
+                + (f" ({both} spot{'s' if both != 1 else ''} changed on both sides: yours kept)." if both else "."))
     if report["ignored"]:
         msg += f" {len(report['ignored'])} of them would loosen the rules and are ignored (see kairo.log)."
     path = settings.data_dir / "updates" / "config-update.json"

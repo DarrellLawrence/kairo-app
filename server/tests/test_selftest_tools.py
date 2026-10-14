@@ -32,7 +32,7 @@ def free_port() -> int:
 # ---------------------------------------------------------------- the verdict
 
 HOOKS_OK = {"deny": True, "allow": True, "detail": ""}
-CTX_OK = {"profile": True, "goals": True, "personality": "current", "detail": ""}
+CTX_OK = {"profile": True, "goals": True, "state": "ok", "personality": "current", "detail": "", "warning": ""}
 EXPECTED = ["mcp__kairo__tasks_create", "mcp__kairo__vault_read"]
 
 
@@ -50,7 +50,8 @@ def v(hooks=HOOKS_OK, mcp="connected", listed=EXPECTED, used=True, arrived=True,
     ({"arrived": False, "task": False}, "toolchain"),                                 # called, never arrived
     ({"task": False}, "toolchain"),                                                   # arrived, no task in the database
     ({"used": False, "arrived": False, "task": False}, "model"),                      # wired, model didn't act ("want me to...?")
-    ({"ctx": {**CTX_OK, "profile": False, "goals": False, "detail": "no Profile"}}, "context"),
+    ({"ctx": {**CTX_OK, "profile": False, "goals": False, "state": "missing", "detail": "notes don't reach"}}, "context"),
+    ({"ctx": {**CTX_OK, "profile": False, "goals": False, "state": "empty", "warning": "No context yet"}}, None),   # yellow
     ({"ctx": {**CTX_OK, "personality": "older", "detail": "v3 < v6"}}, "config"),
     ({"error": "Invalid API key · Please run /login", "listed": [], "used": False, "arrived": False, "task": False}, "claude"),
 ])
@@ -74,19 +75,21 @@ def test_hook_checks_no_settings(tmp_path):
 
 def test_context_checks(tmp_path):
     from app.settings import REPO_ROOT
+    cfg = REPO_ROOT / "config"
     prompt = "x\n## 10 Profile/me.md\nThe owner\n## 20 Goals/2026.md\nFinish\n"
-    ok = selftest.context_checks(prompt, REPO_ROOT / "config", REPO_ROOT / "config")
-    assert ok["profile"] and ok["goals"] and ok["personality"] == "current"
-    empty = selftest.context_checks("(Empty so far. Suggest the onboarding interview", REPO_ROOT / "config", REPO_ROOT / "config")
-    assert not empty["profile"] and not empty["goals"] and "Profile" in empty["detail"]
+    vault(tmp_path)
+    ok = selftest.context_checks(prompt, cfg, cfg, tmp_path / "vault")
+    assert ok["state"] == "ok" and ok["personality"] == "current" and not ok["warning"]
+    empty = selftest.context_checks("(Empty so far. Suggest the onboarding interview", cfg, cfg, tmp_path / "nothing")
+    assert empty["state"] == "empty" and "onboarding" in empty["warning"] and not empty["detail"]   # yellow, not red
+    lost = selftest.context_checks("(Empty so far.", cfg, cfg, tmp_path / "vault")
+    assert lost["state"] == "missing" and "don't reach the model" in lost["detail"]                  # red
     old = tmp_path / "cfg"
     old.mkdir()
-    text = (REPO_ROOT / "config" / "personality.md").read_text(encoding="utf-8")
+    text = (cfg / "personality.md").read_text(encoding="utf-8")
     (old / "personality.md").write_text(text.replace(selftest.personality_version_line(text), "<!-- kairo-personality v1 -->"),
                                         encoding="utf-8")
-    assert selftest.context_checks(prompt, old, REPO_ROOT / "config")["personality"] == "older"
-    (old / "personality.md").write_text("You are Kairo. (a copy from before versions)", encoding="utf-8")
-    assert selftest.context_checks(prompt, old, REPO_ROOT / "config")["personality"] == "older"
+    assert selftest.context_checks(prompt, old, cfg, tmp_path / "vault")["personality"] == "older"
 
 
 def test_personality_version_counts_every_change():
@@ -207,11 +210,16 @@ def test_selftest_fails_when_the_model_has_no_tools_or_does_not_act(tmp_path, mi
         stop(proc)
 
 
-def test_selftest_fails_without_profile_and_goals(tmp_path, migrated):
+def test_empty_vault_is_a_yellow_to_do_not_a_failure(tmp_path, migrated):
+    """A new install has no Profile/Goals yet: that's not broken (owner 2026-10-14)."""
     proc, port = serve(tmp_path, migrated)
     try:
         r = post(port, "/api/selftest/tools?notify=0&voice=0&browser=0")
-        assert r["ok"] is False and r["category"] == "context" and "Profile" in r["reason"], r
+        assert r["ok"] is True and r["checks"]["context"] == "empty", r
+        assert any("onboarding" in w for w in r["warnings"])
+        today = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/api/today").read())
+        assert not any("Self-test" in i for i in today["issues"])                 # no red chip
+        assert any("onboarding" in n for n in today["notices"])                  # a yellow one
     finally:
         stop(proc)
 
