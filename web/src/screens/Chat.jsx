@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
-  Button, ChatBubble, GlowChip, IconInbox, IconPlus, IconSpeaker, InputBar, List, ListRow, NavBar, ScrollArea, Sheet, useStickToBottom,
+  Button, ChatBubble, GlowChip, IconInbox, IconSpeaker, InputBar, List, ListRow, NavBar, ScrollArea, Sheet, useStickToBottom,
   useToast,
 } from '../ui/index.js'
 import { speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
@@ -21,21 +21,20 @@ function wsUrl() {
   return `${proto}://${window.location.host}/ws/chat`
 }
 
+// One conversation with Kairo, forever: chat, calls and voice notes. No threads, no "new chat";
+// what's older lives in Kairo's conversation memory (server/app/memory.py).
 export default function Chat() {
-  const [threads, setThreads] = useState([])
-  const [threadId, setThreadId] = useState(null)
   const [messages, setMessages] = useState([])
+  const [hasMore, setHasMore] = useState(false)
   const [draft, setDraft] = useState('')
   const [chunks, setChunks] = useState(null)   // streaming reply, piece by piece; null = idle
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState(null)
-  const [picker, setPicker] = useState(false)
   const [plus, setPlus] = useState(false)
   const [home, setHome] = useState(null)
   const fileRef = useRef(null)
   const prefill = useRef((() => { try { const p = sessionStorage.getItem('kairo-chat-prefill'); sessionStorage.removeItem('kairo-chat-prefill'); return p } catch { return null } })())
   const wsRef = useRef(null)
-  const threadRef = useRef(null)
   const scrollRef = useRef(null)
   const toast = useToast()
   const [mic, setMic] = useState('idle')   // idle | recording | busy
@@ -44,18 +43,23 @@ export default function Chat() {
   const speakRef = useRef(speakOn)
   speakRef.current = speakOn
 
-  threadRef.current = threadId
-
-  const loadThreads = useCallback(async () => {
-    const res = await fetch('/api/threads')
-    if (res.ok) setThreads(await res.json())
+  const loadMessages = useCallback(async () => {
+    const res = await fetch('/api/chat/messages?limit=60')
+    if (!res.ok) return
+    const r = await res.json()
+    setMessages(r.messages)
+    setHasMore(r.has_more)
   }, [])
 
-  const loadMessages = useCallback(async (id) => {
-    if (!id) return setMessages([])
-    const res = await fetch(`/api/threads/${id}/messages`)
-    if (res.ok) setMessages(await res.json())
-  }, [])
+  const loadEarlier = async () => {
+    const first = messages.find((m) => typeof m.id === 'number')
+    if (!first) return
+    const res = await fetch(`/api/chat/messages?limit=60&before=${first.id}`)
+    if (!res.ok) return
+    const r = await res.json()
+    setMessages((m) => [...r.messages, ...m])
+    setHasMore(r.has_more)
+  }
 
   useEffect(() => {
     let closed = false
@@ -72,7 +76,7 @@ export default function Chat() {
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data)
         if (msg.type === 'thread') {
-          if (msg.id !== threadRef.current) { setThreadId(msg.id); loadThreads() }
+          // one conversation: nothing to switch
         } else if (msg.type === 'delta') {
           setChunks((c) => [...(c ?? []), msg.text])
         } else if (msg.type === 'done') {
@@ -88,12 +92,10 @@ export default function Chat() {
     }
     connect()
     return () => { closed = true; clearTimeout(retry); wsRef.current?.close() }
-  }, [loadThreads])
+  }, [])
 
-  useEffect(() => { loadThreads() }, [loadThreads])
   useEffect(() => { api('/api/today').then(setHome).catch(() => {}) }, [])
-  useEffect(() => { if (threadId === null && threads.length) setThreadId(threads[0].id) }, [threads, threadId])
-  useEffect(() => { loadMessages(threadId) }, [threadId, loadMessages])
+  useEffect(() => { loadMessages() }, [loadMessages])
   useStickToBottom(scrollRef, [messages, chunks])
 
   const busy = chunks !== null
@@ -103,7 +105,7 @@ export default function Chat() {
     setError(null)
     setMessages((m) => [...m, { id: `o${Date.now()}`, role: 'owner', text }])
     setChunks([])
-    wsRef.current.send(JSON.stringify({ type: 'message', text, thread_id: threadId }))
+    wsRef.current.send(JSON.stringify({ type: 'message', text }))
     if (typeof spoken !== 'string') setDraft('')
   }
 
@@ -154,31 +156,23 @@ export default function Chat() {
     toast.show({ text: next ? 'Kairo reads replies out loud.' : 'Replies are silent.' })
   }
 
-  const newThread = async () => {
-    const res = await fetch('/api/threads', { method: 'POST' })
-    if (!res.ok) return
-    const t = await res.json()
-    await loadThreads()
-    setThreadId(t.id)
-    setPicker(false)
-  }
-
-  const current = threads.find((t) => t.id === threadId)
   const empty = messages.length === 0 && !busy
   return (
     <div className="k-layer k-chat">
       <NavBar
         bgOpacity={empty ? 0 : 1}
         title={
-          <button className="k-back" style={{ color: 'var(--text)', fontWeight: 600 }} onClick={() => setPicker(true)}>
-            <span className={connected ? 'k-dot on' : 'k-dot'} style={{ marginRight: 8 }} />
-            {current?.title ?? 'Today'} <span className="k-muted" style={{ marginLeft: 4 }}>▾</span>
-          </button>
+          <span style={{ color: 'var(--text)', fontWeight: 600, display: 'inline-flex', alignItems: 'center' }}>
+            <span className={connected ? 'k-dot on' : 'k-dot'} style={{ marginRight: 8 }} />Kairo
+          </span>
         }
         right={<Button variant="ghost" size="sm" icon={<IconSpeaker style={{ opacity: speakOn ? 1 : 0.45 }} />} onClick={toggleSpeak} aria-label="Read replies aloud" />}
       />
-      <ScrollArea tabbar={false} innerRef={scrollRef} onRefresh={async () => { await loadThreads(); await loadMessages(threadId) }}>
+      <ScrollArea tabbar={false} innerRef={scrollRef} onRefresh={hasMore ? loadEarlier : loadMessages}>
         {error && <div className="k-banner" style={{ marginTop: 8 }}>{error}</div>}
+        {hasMore && (
+          <Button variant="ghost" size="sm" block onClick={loadEarlier} style={{ margin: '8px 0' }}>Earlier messages</Button>
+        )}
         {empty && (
           <>
             <motion.div className="k-chat-hello" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={spring.smooth}>
@@ -213,22 +207,11 @@ export default function Chat() {
 
       <Sheet open={plus} onClose={() => setPlus(false)} title="Kairo">
         <List>
-          <ListRow icon={<IconPlus />} title="New chat" onClick={() => { setPlus(false); newThread() }} />
           <ListRow icon={<IconInbox />} title="Photo or PDF" subtitle="A letter, a bill, a worksheet" onClick={() => fileRef.current?.click()} />
           <ListRow icon={<IconSpeaker />} title={speakOn ? 'Stop reading replies aloud' : 'Read replies aloud'} onClick={() => { setPlus(false); toggleSpeak() }} />
         </List>
       </Sheet>
 
-      <Sheet open={picker} onClose={() => setPicker(false)} title="Chats">
-        <Button variant="primary" block icon={<IconPlus />} onClick={newThread} style={{ marginBottom: 12 }}>New chat</Button>
-        <List>
-          {threads.map((t) => (
-            <ListRow key={t.id} title={t.title ?? `Chat ${t.id}`} chevron
-              value={t.id === threadId ? '✓' : undefined}
-              onClick={() => { setThreadId(t.id); setPicker(false) }} />
-          ))}
-        </List>
-      </Sheet>
     </div>
   )
 }

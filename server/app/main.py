@@ -20,9 +20,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from . import config_layers
+from . import memory
 from . import selftest as selftest_mod
 from . import tool_sites
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
@@ -72,9 +74,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     base_prompt = render_personality(settings.config_dir, profile)
     vault.ensure_structure(settings.vault_dir)
 
-    def system_prompt() -> str:
-        """Personality + the vault's Profile and Goals + "Right now", fresh for every chat message."""
-        return base_prompt + "\n\n" + right_now() + "\n\n" + vault.context(settings.vault_dir)
+    def system_prompt(*, thread_id: int | None = None, fresh: bool = False, before_id: int | None = None) -> str:
+        """Personality + the vault's Profile and Goals + "Right now" + the conversation memory, fresh
+        for every message. fresh: a new CLI session starts, so the newest messages go in too."""
+        try:
+            with session_for(engine) as s_:
+                mem = memory.block(s_, thread_id, fresh=fresh, before_id=before_id)
+        except Exception:   # never lose a turn over the memory block
+            log.exception("conversation memory unavailable")
+            mem = ""
+        return base_prompt + "\n\n" + right_now() + "\n\n" + vault.context(settings.vault_dir) + "\n\n" + mem
 
     _cal_cache = {"at": 0.0, "events": []}
 
@@ -133,12 +142,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from . import models as model_table
     runner.on_usage = lambda purpose, usage, ok: model_table.record(engine, purpose, usage, ok)
     model_tools = tool_names(gate)
+    try:
+        with session_for(engine) as _s:
+            if chat.consolidate(_s, brain_name=runner.brain.name):
+                log.info("chat: older day threads merged into the one conversation")
+    except OperationalError:   # not migrated yet: /health says so
+        pass
 
     def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
-                   system: str | None = None):
+                   system: str | None = None, before_id: int | None = None):
         """The one way an owner message reaches the model: chat, calls and the self-test (fix P0,
         2026-10-14: a self-test with its own prompt and tools was green while chat had none)."""
-        return runner.stream(text, session_id=session_id, system=system or system_prompt(), tools=model_tools,
+        system = system or system_prompt(thread_id=thread_id, fresh=session_id is None, before_id=before_id)
+        return runner.stream(text, session_id=session_id, system=system, tools=model_tools,
                              origin="owner_chat", thread_id=thread_id, purpose=purpose,
                              model=model or model_table.pick(purpose, app.state.jobs.schedule))
 
@@ -264,7 +280,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "open_loops": lambda ctx: app.state.loops.run(ctx),
                 "promises": lambda ctx: app.state.promises.run(ctx),
                 "pa": lambda ctx: app.state.pa.run(ctx),
-                "olat": lambda ctx: _olat_job(ctx)})
+                "olat": lambda ctx: _olat_job(ctx),
+                "chat_memory": lambda ctx: _memory_job(ctx)})
     app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                                        calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
                                        vault_dir=settings.vault_dir, config_dir=settings.config_dir)
@@ -527,25 +544,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except approvals.ApprovalError as exc:
                 raise HTTPException(409, str(exc))
 
-    @app.get("/api/threads")
-    def list_threads(limit: int = 30):
+    @app.get("/api/chat/messages")
+    def chat_messages(before: int | None = None, limit: int = 60):
+        """The one conversation (no threads, no "new chat"), newest page first in time order."""
+        limit = max(1, min(limit, 200))
         with session_for(engine) as s:
-            rows = s.exec(select(ChatThread).order_by(ChatThread.started_at.desc(), ChatThread.id.desc()).limit(limit)).all()
-            return [{"id": t.id, "title": t.title, "started_at": t.started_at, "brain": t.brain} for t in rows]
-
-    @app.post("/api/threads")
-    def create_thread():
-        with session_for(engine) as s:
-            t = chat.new_thread(s, brain_name=runner.brain.name, profile=profile)
-            return {"id": t.id, "title": t.title, "started_at": t.started_at, "brain": t.brain}
-
-    @app.get("/api/threads/{thread_id}/messages")
-    def thread_messages(thread_id: int):
-        with session_for(engine) as s:
-            if s.get(ChatThread, thread_id) is None:
-                raise HTTPException(404, "thread not found")
-            rows = s.exec(select(ChatMessage).where(ChatMessage.thread_id == thread_id).order_by(ChatMessage.id)).all()
-            return [{"id": m.id, "role": m.role, "text": m.text, "created_at": m.created_at} for m in rows]
+            tid = chat.main_thread(s, brain_name=runner.brain.name).id
+            q = select(ChatMessage).where(ChatMessage.thread_id == tid)
+            if before is not None:
+                q = q.where(ChatMessage.id < before)
+            rows = s.exec(q.order_by(ChatMessage.id.desc()).limit(limit + 1)).all()
+            more, rows = len(rows) > limit, list(reversed(rows[:limit]))
+            return {"thread_id": tid, "has_more": more,
+                    "messages": [{"id": m.id, "role": m.role, "text": m.text, "created_at": m.created_at} for m in rows]}
 
     _turns: set[asyncio.Task] = set()   # chat turns still running after the socket went away
     app.state.chat_turns = _turns
@@ -607,10 +618,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                     "message": "Kairo is paused (kill switch). Resume it under More."})
                 return
         with session_for(engine) as s:
-            thread = s.get(ChatThread, thread_id) if isinstance(thread_id, int) else None
-            if thread is None:
-                thread = chat.today_thread(s, brain_name=runner.brain.name, profile=profile)
-            chat.add_message(s, thread.id, "owner", text_in)
+            thread = chat.main_thread(s, brain_name=runner.brain.name)   # one conversation: thread_id is ignored
+            msg_in = chat.add_message(s, thread.id, "owner", text_in)
+            if memory.take_fresh(s):           # the memory caught up: a new CLI session, memory + recent in the prompt
+                thread.brain_session_id = None
+                s.add(thread)
+                s.commit()
             session_id = thread.brain_session_id
             tid = thread.id
         await send({"type": "thread", "id": tid})
@@ -620,7 +633,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        async for event in owner_turn(text_in, session_id=session_id, thread_id=tid, purpose=chat_purpose):
+        async for event in owner_turn(text_in, session_id=session_id, thread_id=tid, purpose=chat_purpose, before_id=msg_in.id):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
@@ -646,6 +659,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return
             msg = chat.add_message(s, tid, "kairo", final_text or "")
         await send({"type": "done", "text": final_text or "", "message_id": msg.id})
+        fold_memory_soon()
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -668,6 +682,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": ok, "brain": status, "reply": reply.strip()[:200],
                 "error": error.text[:500] if error else None,
                 "seconds": round(time.monotonic() - started, 1)}
+
+    _folding = threading.Event()
+
+    def fold_memory_soon() -> None:
+        """Older messages into the conversation memory, in the background (app/memory.py)."""
+        if _folding.is_set():
+            return
+        with session_for(engine) as s:
+            if not memory.due(s):
+                return
+        _folding.set()
+
+        def work() -> None:
+            try:
+                app.state.jobs.run_job("chat_memory", forced=True)
+            finally:
+                _folding.clear()
+        threading.Thread(target=work, name="chat-memory", daemon=True).start()
+
+    app.state.fold_memory_soon = fold_memory_soon
 
     async def _owner_path_run(token: str, due_iso: str, system: str) -> dict:
         """The self-test's turn, through owner_turn() exactly like an owner message (fix P0, 2026-10-14)."""
@@ -710,7 +744,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         started = time.monotonic()
         env = runner.brain.hook_env("owner_chat") if hasattr(runner.brain, "hook_env") else {}
         hooks = await asyncio.to_thread(selftest_mod.hook_checks, settings.workspace_dir, env)
-        system = system_prompt()
+        with session_for(engine) as s:
+            main_id = chat.main_thread(s, brain_name=runner.brain.name).id
+        system = system_prompt(thread_id=main_id, fresh=True)
         context = selftest_mod.context_checks(system, settings.config_dir, REPO_ROOT / "config", settings.vault_dir)
         due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
         token = secrets.token_hex(4)
@@ -1958,6 +1994,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 log = logging.getLogger("kairo.main")
+
+
+def _memory_job(ctx) -> str:
+    from .scheduler import Skipped
+    if not memory.fold(ctx.session, ctx.jobs.ask_brain):
+        raise Skipped("nothing to fold yet")
+    return "conversation memory updated"
 
 
 def _build_config(settings: Settings) -> None:
