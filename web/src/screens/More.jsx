@@ -482,6 +482,55 @@ function GooglePage({ st }) {
   )
 }
 
+/* Run diagnosis: the numbers the fix plan needs, from the phone. Read-only on the PC; secrets redacted there. */
+function DiagnosisPage() {
+  const toast = useToast()
+  const [state, setState] = useState({ busy: false, text: null, error: null })
+  const run = async () => {
+    setState({ busy: true, text: null, error: null })
+    try {
+      const r = await api('/api/diagnosis', { method: 'POST', body: {} })
+      setState({ busy: false, text: r.text, error: null })
+    } catch (e) {
+      setState({ busy: false, text: null, error: e.message })
+    }
+  }
+  const share = async () => {
+    const name = `kairo-diagnosis-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt`
+    const file = typeof File === 'function' ? new File([state.text], name, { type: 'text/plain' }) : null
+    try {
+      if (file && navigator.canShare?.({ files: [file] })) await navigator.share({ files: [file], title: 'Kairo diagnosis' })
+      else if (navigator.share) await navigator.share({ title: 'Kairo diagnosis', text: state.text })
+      else copy(state.text, toast)
+    } catch (e) {
+      if (e?.name !== 'AbortError') copy(state.text, toast)
+    }
+  }
+  return (
+    <Page title="Diagnosis">
+      <p className="k-hello">
+        Counts and timings from the last 14 days, the self-test, the boot check and the log. It only reads: nothing changes.
+        Passwords, tokens and keys are removed, addresses shortened.
+      </p>
+      <div className="k-pad">
+        <Button variant="primary" block loading={state.busy} disabled={state.busy} onClick={run}>
+          {state.text ? 'Run again' : 'Run diagnosis'}
+        </Button>
+        {state.error && <p className="k-small" style={{ color: 'var(--danger)', marginTop: 12 }}>{state.error}</p>}
+      </div>
+      {state.text && (
+        <>
+          <div className="k-pad" style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <Button block onClick={() => copy(state.text, toast)}>Copy</Button>
+            <Button block onClick={share}>Share</Button>
+          </div>
+          <div className="k-pad"><pre className="k-pre selectable" style={{ fontSize: 11 }}>{state.text}</pre></div>
+        </>
+      )}
+    </Page>
+  )
+}
+
 function SystemPage() {
   const stack = useStack()
   const toast = useToast()
@@ -545,6 +594,8 @@ function SystemPage() {
               onClick={() => stack.push('Activity', () => <ActivityPage />)} />
             <ListRow icon={<IconShield />} title="Backups" subtitle="Nightly backup and weekly restore test" chevron
               onClick={() => stack.push('Backups', () => <BackupsPage />)} />
+            <ListRow icon={<IconChart />} title="Run diagnosis" subtitle="Read-only report to copy or share" chevron
+              onClick={() => stack.push('Diagnosis', () => <DiagnosisPage />)} />
           </List>
         </>
       )}

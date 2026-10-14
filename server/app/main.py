@@ -26,6 +26,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from . import config_layers
+from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
 from . import memory
 from . import selftest as selftest_mod
@@ -2035,6 +2036,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             selftest_last = json.loads(row.value) if row and row.value else None
         return {"brain": runner.brain.health().value, "boot_check": boot, "selftest": selftest_last}
 
+    @app.post("/api/diagnosis")
+    def run_diagnosis(request: Request):
+        """Run diagnosis (More -> System): DIAGNOSIS section G from the phone. Owner only, read-only,
+        secrets redacted (app/diagnosis.py). A plain def: FastAPI runs it off the event loop."""
+        boot = status().get("boot_check") or {}
+        if not owner_request(request, boot.get("tailnet_login") if isinstance(boot, dict) else None):
+            raise HTTPException(403, "Run diagnosis is only for the owner: on the PC, or through Kairo's address "
+                                     "signed in to Tailscale as the same account as the PC.")
+        return diagnosis_mod.run(db_url=settings.db_url, data_dir=settings.data_dir, app_root=REPO_ROOT)
+
     _mount_web(app, settings.web_dist_dir)
     return app
 
@@ -2126,6 +2137,20 @@ def is_local_request(request: Request) -> bool:
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].strip("[]")
     forwarded = any(h in request.headers for h in ("x-forwarded-for", "x-forwarded-host", "tailscale-user-login"))
     return client in LOCAL_HOSTS and host in {"127.0.0.1", "localhost", "::1"} and not forwarded
+
+
+def owner_request(request: Request, owner_login: str | None) -> bool:
+    """The owner: on the PC itself, or through tailscale serve (Kairo's .ts.net address) as a signed-in
+    Tailscale person (tailscale serve sets Tailscale-User-Login and drops one a client sends). Once the
+    boot check has recorded the PC's own Tailscale account (owner_login), only that account."""
+    if is_local_request(request):
+        return True
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip().lower()
+    host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    login = request.headers.get("tailscale-user-login", "").strip().lower()
+    if not host.endswith(".ts.net") or not login:
+        return False
+    return not owner_login or login == owner_login.strip().lower()
 
 
 def _mount_web(app: FastAPI, dist: Path) -> None:
