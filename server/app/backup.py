@@ -162,7 +162,11 @@ def restore(zip_path: Path, data_dir: Path) -> Path:
         cur = data_dir / rel
         if cur.exists():
             (saved / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(cur), str(saved / rel))
+            try:
+                shutil.move(str(cur), str(saved / rel))
+            except PermissionError as exc:
+                raise BackupError(f"{rel} is in use. Stop Kairo first (admin PowerShell: Stop-ScheduledTask -TaskPath '\\Kairo\\' -TaskName 'Kairo'), then try again. "
+                                  f"Anything already moved is in {saved}.") from exc
     with zipfile.ZipFile(zip_path) as z:
         for name in z.namelist():
             if name.startswith(("db/", "vault/", "inbox/")):

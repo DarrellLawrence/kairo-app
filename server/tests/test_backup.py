@@ -23,6 +23,7 @@ def data(migrated):
         for i in range(5):
             s.add(Task(title=f"task {i}"))
         s.commit()
+    engine.dispose()   # Windows locks open database files
     vault = migrated.data_dir / "vault"
     (vault / "20 Goals").mkdir(parents=True, exist_ok=True)
     (vault / "20 Goals" / "2026.md").write_text("Finish the apprenticeship. äöü", encoding="utf-8")
