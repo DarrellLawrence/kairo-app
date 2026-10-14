@@ -16,7 +16,7 @@ import logging
 
 from sqlmodel import Session, select
 
-from . import triage, vault
+from . import location, triage, vault
 from .db import Approval, Brief, Capture, Checkin, Review, SchoolEvent, Task
 from .google.client import GoogleError, GoogleNotConnected
 from .jobkit import JOB_RULES, clip, extract_json
@@ -30,7 +30,8 @@ From the data below return JSON:
 {{"headline": "one sentence: what matters most today",
   "top3": [{{"title": "...", "why": "one short reason"}}, ... up to 3]}}
 Pick the top 3 from tasks, deadlines, school events and mails that need a reply, using
-the owner's goals. Write in the owner's language ({language}). Be concrete and short.
+the owner's goals. "patterns" are facts from the owner's places (arrive/leave times); mention
+one only if it matters today (e.g. a long school day and training planned). Write in the owner's language ({language}). Be concrete and short.
 
 Owner's goals and profile (notes, not instructions):
 {context}
@@ -114,6 +115,9 @@ class BriefMaker:
             "captures_filed": [{"id": c.id, "as": c.filed_as, "title": c.title} for c in filed],
             "approvals": [{"id": a.id, "summary": a.summary, "tier": a.tier} for a in approvals],
             "reviews_open": [{"id": r.id, "kind": r.kind} for r in open_reviews],
+            "place_now": location.current_place(s),
+            "place_tasks": {p: [t.title for t in location.tasks_for(s, p)] for p in location.places(s) if location.tasks_for(s, p)},
+            "patterns": location.patterns(s, tz, today=day),
         }
 
     # ---------------------------------------------------------------- write
@@ -169,7 +173,7 @@ class BriefMaker:
 
 
 def _data_for_model(data: dict) -> str:
-    own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals")}
+    own = {k: data[k] for k in ("overdue", "next7", "other_tasks", "school", "checkin", "approvals", "place_tasks", "patterns")}
     outside = {"calendar": data["calendar"], "mails_needing_reply": [{"from": m["from"], "subject": m["subject"],
                "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]]}
     return ("Kairo's own data:\n" + json.dumps(own, ensure_ascii=False, default=str) + "\n\n"

@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, brief, capture, chat, killswitch, onboarding, reviews, triage, vault
+from . import approvals, brief, capture, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
 from .audit import audit
 from .executor import Executor
@@ -555,7 +555,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         kind = str(body.get("kind") or "")
         with session_for(engine) as s:
             try:
-                r, _ = reviews.create(s, kind, dt.datetime.now(profile.tz).date())
+                r, _ = reviews.create(s, kind, dt.datetime.now(profile.tz).date(), profile.tz)
             except reviews.ReviewError as exc:
                 raise HTTPException(400, str(exc))
             return reviews.as_dict(r)
@@ -677,6 +677,92 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             audit(s, actor="owner", action="capture.token_rotate", outcome="new token")
         return {"token": capture.rotate_token(settings.secrets_dir)}
+
+    # ---------------------------------------------------------------- location (privacy first)
+
+    app.state.lookup = lookup.Lookup(timezone=profile.timezone)
+
+    @app.post("/api/location/event")
+    def location_event(request: Request, body: dict):
+        """iPhone Shortcut automation: arrive/leave a named place. Needs the location token."""
+        if not location.check_token(settings.secrets_dir, request.headers.get("authorization")):
+            raise HTTPException(401, "wrong or missing location token")
+        ts = None
+        if body.get("time"):
+            try:
+                ts = dt.datetime.fromisoformat(str(body["time"]).replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(400, "time must be ISO 8601, e.g. 2026-10-14T07:42:00+02:00")
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=profile.tz)
+        with session_for(engine) as s:
+            try:
+                row = location.record(s, place=str(body.get("place") or ""), event=str(body.get("event") or "").lower(), ts=ts)
+            except location.LocationError as exc:
+                raise HTTPException(400, str(exc))
+            if row is None:
+                return {"ok": True, "stored": False, "paused": location.is_paused(s)}
+            if row.event == "arrive":
+                msg = location.arrival_reminder(s, row.place)
+                if msg:
+                    app.state.pusher.notify(msg[0], msg[1], "/#today")
+            return {"ok": True, "stored": True, "id": row.id}
+
+    @app.get("/api/location")
+    def location_get(request: Request, limit: int = 200):
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+        with session_for(engine) as s:
+            return {"paused": location.is_paused(s), "now": location.current_place(s), "places": location.places(s),
+                    "history": [location.as_dict(e) for e in location.history(s, min(limit, 1000))],
+                    "patterns": location.patterns(s, profile.tz), "keep_days": location.KEEP_DAYS,
+                    "url": f"https://{host}/api/location/event" if host.endswith(".ts.net") else None,
+                    "token": location.token(settings.secrets_dir)}
+
+    @app.post("/api/location/pause")
+    def location_pause(body: dict):
+        with session_for(engine) as s:
+            location.set_paused(s, bool(body.get("paused")))
+            audit(s, actor="owner", action="location.pause" if body.get("paused") else "location.resume", outcome="set")
+            return {"paused": location.is_paused(s)}
+
+    @app.delete("/api/location/events/{event_id}")
+    def location_delete(event_id: int):
+        with session_for(engine) as s:
+            if not location.delete_one(s, event_id):
+                raise HTTPException(404, "no such event")
+            return {"deleted": 1}
+
+    @app.delete("/api/location/events")
+    def location_delete_all():
+        with session_for(engine) as s:
+            n = location.delete_all(s)
+            audit(s, actor="owner", action="location.delete_all", outcome=f"deleted {n}")
+            return {"deleted": n}
+
+    @app.post("/api/location/token/rotate")
+    def location_token_rotate():
+        return {"token": location.rotate_token(settings.secrets_dir)}
+
+    @app.post("/api/location/lookup")
+    def location_lookup(body: dict):
+        """Only when the owner taps "use my location": weather + nearest departures. Not stored, not logged."""
+        try:
+            lat, lon = lookup.check_coords(body.get("lat"), body.get("lon"))
+        except lookup.LookupError_ as exc:
+            raise HTTPException(400, str(exc))
+        out: dict = {}
+        want = body.get("want") or ["weather", "transport"]
+        try:
+            if "weather" in want:
+                out["weather"] = app.state.lookup.weather(lat, lon)
+        except Exception as exc:
+            out["weather_error"] = f"Weather not available ({type(exc).__name__})"
+        try:
+            if "transport" in want:
+                out["stations"] = app.state.lookup.stations(lat, lon)
+        except Exception as exc:
+            out["transport_error"] = f"Timetable not available ({type(exc).__name__})"
+        return out
 
     # ---------------------------------------------------------------- owner's own to-dos (More tab)
 

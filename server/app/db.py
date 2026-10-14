@@ -49,6 +49,19 @@ class Task(SQLModel, table=True):
     source: str = "chat"  # capture / review / chat / email
     created_at: datetime = Field(default_factory=utcnow)
     done_at: datetime | None = None
+    place: str | None = Field(default=None, index=True)  # remind on arrival there (Home, School, Work, Gym)
+
+
+class LocationEvent(SQLModel, table=True):
+    """Arrive/leave at one of the owner's named places (iPhone Shortcut
+    automations). Stored only on kairo-home; the owner sees and deletes it."""
+
+    __tablename__ = "location_events"
+    id: int | None = Field(default=None, primary_key=True)
+    place: str = Field(index=True)
+    event: str  # arrive / leave
+    ts: datetime = Field(index=True)
+    received_at: datetime = Field(default_factory=utcnow)
 
 
 class Capture(SQLModel, table=True):

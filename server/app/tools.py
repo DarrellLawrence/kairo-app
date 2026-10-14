@@ -154,7 +154,8 @@ class ToolRunner:
 
     def _tasks_create(self, a: dict) -> str:
         with Session(self.engine) as s:
-            task = Task(title=a["title"], due=_dt(a.get("due")), priority=a["priority"], project_id=a.get("project_id"), source="chat")
+            task = Task(title=a["title"], due=_dt(a.get("due")), priority=a["priority"], project_id=a.get("project_id"),
+                        place=_place(a.get("place")), source="chat")
             s.add(task)
             s.commit()
             s.refresh(task)
@@ -168,6 +169,8 @@ class ToolRunner:
             for key in ("title", "priority", "status"):
                 if a.get(key) is not None:
                     setattr(task, key, a[key])
+            if a.get("place") is not None:
+                task.place = _place(a["place"]) or None
             if a.get("due") is not None:
                 task.due = _dt(a["due"])
             if a.get("status") == "done" and task.done_at is None:
@@ -179,7 +182,12 @@ class ToolRunner:
 
 
 def _task(t: Task) -> dict:
-    return {"id": t.id, "title": t.title, "due": t.due, "priority": t.priority, "status": t.status, "project_id": t.project_id}
+    return {"id": t.id, "title": t.title, "due": t.due, "priority": t.priority, "status": t.status, "project_id": t.project_id,
+            "place": t.place}
+
+
+def _place(value):
+    return (value[:1].upper() + value[1:]) if value else None
 
 
 def _dt(value):

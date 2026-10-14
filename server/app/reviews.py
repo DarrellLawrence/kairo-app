@@ -25,7 +25,7 @@ from dataclasses import asdict, dataclass
 
 from sqlmodel import Session, select
 
-from . import vault
+from . import location, vault
 from .db import Approval, Checkin, OnboardingAnswer, Review, Task, utcnow
 
 BIG = ["weekly", "monthly", "quarterly", "half_year", "yearly"]   # smallest -> biggest
@@ -134,7 +134,7 @@ def _between(col, start: dt.date, end: dt.date):
     return (col >= a) & (col < b)
 
 
-def prefill(session: Session, kind: str, start: dt.date, end: dt.date) -> dict:
+def prefill(session: Session, kind: str, start: dt.date, end: dt.date, tz=None) -> dict:
     """What Kairo already knows about the period, shown above the questions."""
     done = session.exec(select(Task).where(Task.status == "done").where(_between(Task.done_at, start, end))).all()
     open_tasks = session.exec(select(Task).where(Task.status == "open")).all()
@@ -157,6 +157,8 @@ def prefill(session: Session, kind: str, start: dt.date, end: dt.date) -> dict:
         facts.append(f"{len(overdue)} overdue: {', '.join(t.title for t in overdue[:5])}")
     if open_tasks:
         facts.append(f"{len(open_tasks)} open tasks")
+    if kind != "daily":
+        facts += location.patterns(session, tz or dt.timezone.utc, weeks=max(1, (end - start).days // 7 + 1), today=end)
     return {
         "facts": facts,
         "last_commitments": json.loads(prev.commitments_json) if prev and prev.commitments_json else [],
@@ -167,7 +169,7 @@ def prefill(session: Session, kind: str, start: dt.date, end: dt.date) -> dict:
 # ---------------------------------------------------------------- lifecycle
 
 
-def create(session: Session, kind: str, day: dt.date) -> tuple[Review, bool]:
+def create(session: Session, kind: str, day: dt.date, tz=None) -> tuple[Review, bool]:
     """Idempotent: one review per kind and period. Returns (review, created)."""
     if kind not in QUESTIONS:
         raise ReviewError(f"unknown review kind {kind}")
@@ -176,7 +178,7 @@ def create(session: Session, kind: str, day: dt.date) -> tuple[Review, bool]:
     if existing:
         return existing, False
     r = Review(kind=kind, period_start=start, period_end=end, status="open",
-               prefill_json=json.dumps(prefill(session, kind, start, end)))
+               prefill_json=json.dumps(prefill(session, kind, start, end, tz)))
     session.add(r)
     session.commit()
     session.refresh(r)

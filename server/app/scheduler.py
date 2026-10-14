@@ -246,7 +246,7 @@ class Jobs:
 
     def _daily_review_body(self, ctx: JobContext, day: dt.date | None = None) -> None:
         day = day or self.today()
-        r, created = reviews.create(ctx.session, "daily", day)
+        r, created = reviews.create(ctx.session, "daily", day, self.profile.tz)
         if created:
             self.pusher.notify("Evening check-in", "2 minutes: how did today go?", f"/#reviews/{r.id}")
 
@@ -255,7 +255,7 @@ class Jobs:
         kind = reviews.big_kind_due(day)
         if not kind:
             raise Skipped("no review due today")
-        r, created = reviews.create(ctx.session, kind, day)
+        r, created = reviews.create(ctx.session, kind, day, self.profile.tz)
         if created:
             self.pusher.notify(reviews.TITLES[kind], f"About {reviews.MINUTES[kind]} minutes. Kairo filled in what it knows.",
                                f"/#reviews/{r.id}")

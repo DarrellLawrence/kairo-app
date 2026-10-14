@@ -12,7 +12,7 @@ DESCRIPTIONS = {
     "calendar_list": "List upcoming events on the owner's primary calendar.",
     "vault_read": "Read a file or list a folder in the owner's Obsidian vault (path relative to the vault).",
     "tasks_list": "List Kairo tasks.",
-    "tasks_create": "Create a task.",
+    "tasks_create": "Create a task. Set place (e.g. Gym, School) to remind the owner when they arrive there.",
     "tasks_update": "Change a task (title, due, priority, status).",
     "notes_write": "Write a Markdown note in the vault's Kairo/ folder (Kairo-owned files only).",
 }

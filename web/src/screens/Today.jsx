@@ -5,7 +5,7 @@ import { api, parseTs } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
   Badge, Button, Card, EmptyState, Expandable, IconCalendar, IconInbox, IconMail, IconPlus, IconPulse, IconShield,
-  IconSparkle, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, useToast,
+  IconCloud, IconPin, IconSparkle, IconTrain, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, useToast,
 } from '../ui/index.js'
 
 function greeting(d = new Date()) {
@@ -103,6 +103,62 @@ function useJobRunner(name, onDone) {
     }, 2000)
   }
   return [running, run]
+}
+
+function HereNow() {
+  const [state, setState] = useState('idle')   // idle | locating | loading | done | error
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  const use = () => {
+    if (!navigator.geolocation) { setState('error'); setErr('This browser has no location.'); return }
+    setState('locating')
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      setState('loading')
+      try {
+        setData(await api('/api/location/lookup', { method: 'POST', body: { lat: pos.coords.latitude, lon: pos.coords.longitude } }))
+        setState('done')
+      } catch (e) { setErr(e.message); setState('error') }
+    }, (e) => { setErr(e.code === 1 ? 'Location not allowed. iPhone Settings → Privacy → Location Services → Safari Websites.' : 'Could not get your location.'); setState('error') },
+    { enableHighAccuracy: false, timeout: 15000, maximumAge: 120000 })
+  }
+  const w = data?.weather
+  const hm = (iso) => (iso ? new Date(iso.replace(/([+-]\d\d)(\d\d)$/, '$1:$2')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '')
+  if (state !== 'done') {
+    return (
+      <div className="k-pad" style={{ marginBottom: 12 }}>
+        <Button variant="secondary" size="sm" block icon={<IconPin />} loading={state === 'locating' || state === 'loading'} onClick={use}>
+          Weather and trains here
+        </Button>
+        {state === 'error' && <p className="k-muted k-small" style={{ marginTop: 6 }}>{err}</p>}
+        {state === 'idle' && <p className="k-muted k-small" style={{ marginTop: 6, textAlign: 'center' }}>Uses your location once. Not stored.</p>}
+      </div>
+    )
+  }
+  return (
+    <Card glass>
+      {w && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <IconCloud width={28} height={28} />
+          <div>
+            <p className="k-card-title" style={{ margin: 0 }}>{Math.round(w.now_c)}° · {w.now}</p>
+            <p className="k-card-sub">Today {Math.round(w.min_c)}–{Math.round(w.max_c)}°, {w.today}{w.rain_pct != null ? `, rain ${w.rain_pct}%` : ''}</p>
+          </div>
+        </div>
+      )}
+      {data.weather_error && <p className="k-card-sub">{data.weather_error}</p>}
+      {(data.stations || []).map((st) => (
+        <div key={st.name} style={{ marginTop: 12 }}>
+          <p className="k-eyebrow" style={{ display: 'flex', gap: 6, alignItems: 'center' }}><IconTrain width={14} height={14} />{st.name}{st.distance_m ? ` · ${st.distance_m} m` : ''}</p>
+          {st.departures.map((dep, i) => (
+            <p key={i} className="k-small" style={{ margin: '2px 0' }}>
+              <b>{hm(dep.time)}</b> {dep.line} → {dep.to}{dep.platform ? ` · Pl. ${dep.platform}` : ''}{dep.delay ? <span style={{ color: 'var(--warn)' }}> +{dep.delay}'</span> : ''}
+            </p>
+          ))}
+        </div>
+      ))}
+      {data.transport_error && <p className="k-card-sub">{data.transport_error}</p>}
+    </Card>
+  )
 }
 
 export default function Today({ openCards, go, onboarding }) {
@@ -224,6 +280,8 @@ export default function Today({ openCards, go, onboarding }) {
       {brief && !briefIsToday && (
         <div className="k-pad" style={{ marginBottom: 12 }}><Button variant="secondary" size="sm" block loading={making} onClick={makeBrief}>Make today's brief now</Button></div>
       )}
+
+      <HereNow />
 
       <AnimatePresence initial={false}>
         {asking.map((c) => (

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, parseTs } from '../api.js'
 import {
   Badge, Button, EmptyState, IconBell, IconCheck, IconInbox, IconKey, IconList, IconMail, IconPower, IconPulse, IconRefresh,
-  IconShield, IconSparkle, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
+  IconPin, IconShield, IconSparkle, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
 } from '../ui/index.js'
 
 const STATUS_TONE = { ok: 'ok', skipped: 'neutral', error: 'danger', running: 'warn' }
@@ -104,6 +104,87 @@ function CapturePage() {
       <Sheet open={confirm} onClose={() => setConfirm(false)} title="New key?">
         <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>The old key stops working. You have to paste the new one into both Shortcuts.</p>
         <Button variant="danger" block onClick={rotate}>Make a new key</Button>
+        <Button variant="secondary" block style={{ marginTop: 8 }} onClick={() => setConfirm(false)}>Cancel</Button>
+      </Sheet>
+    </Page>
+  )
+}
+
+function LocationPage() {
+  const toast = useToast()
+  const [d, setD] = useState(null)
+  const [confirm, setConfirm] = useState(false)
+  const load = useCallback(() => api('/api/location').then(setD).catch(() => setD(null)), [])
+  useEffect(() => { load() }, [load])
+  const setPause = async (paused) => {
+    await api('/api/location/pause', { method: 'POST', body: { paused } })
+    toast.show({ text: paused ? 'Location paused. Nothing is stored.' : 'Location on again.' })
+    load()
+  }
+  const del = async (id) => {
+    await api(`/api/location/events/${id}`, { method: 'DELETE' })
+    setD((x) => ({ ...x, history: x.history.filter((e) => e.id !== id) }))
+  }
+  const delAll = async () => {
+    const r = await api('/api/location/events', { method: 'DELETE' })
+    setConfirm(false)
+    toast.show({ text: `Deleted ${r.deleted} entries.` })
+    load()
+  }
+  const url = d?.url || `${window.location.origin}/api/location/event`
+  return (
+    <Page title="Location" onRefresh={load}>
+      <p className="k-hello">Only the place name and the time, only on your PC. Never sent anywhere. Kept {d?.keep_days ?? 365} days.</p>
+      {!d && <SkeletonCard />}
+      {d && (
+        <>
+          <List>
+            <ListRow icon={<IconPower />} title={d.paused ? 'Paused' : 'On'} subtitle={d.paused ? 'Nothing is stored. Tap to turn on.' : `Tap to pause${d.now ? ` · now: ${d.now}` : ''}`}
+              value={<Badge tone={d.paused ? 'warn' : 'ok'} pop={false}>{d.paused ? 'Paused' : 'On'}</Badge>}
+              onClick={() => setPause(!d.paused)} />
+          </List>
+
+          {d.patterns.length > 0 && (
+            <>
+              <SectionTitle>What Kairo noticed</SectionTitle>
+              <List>{d.patterns.map((f) => <ListRow key={f} title={f.split(':')[0]} subtitle={f.includes(':') ? f.slice(f.indexOf(':') + 1).trim() : ''} wrap />)}</List>
+            </>
+          )}
+
+          <SectionTitle>History ({d.history.length})</SectionTitle>
+          {d.history.length === 0 ? <p className="k-muted k-small k-pad">Nothing stored.</p> : (
+            <>
+              <List>
+                {d.history.slice(0, 100).map((e) => (
+                  <ListRow key={e.id} title={`${e.event === 'arrive' ? 'Arrived at' : 'Left'} ${e.place}`}
+                    subtitle={new Date(e.ts).toLocaleString()} swipe={{ left: { label: 'Delete', onAction: () => del(e.id) } }} />
+                ))}
+              </List>
+              <p className="k-muted k-small k-pad">Swipe left to delete one.</p>
+              <div className="k-pad"><Button variant="danger" block onClick={() => setConfirm(true)}>Delete all location history</Button></div>
+            </>
+          )}
+
+          <SectionTitle>iPhone setup (once per place)</SectionTitle>
+          <div className="k-pad">
+            <ol className="k-steps">
+              <li>Open <b>Shortcuts</b> → <b>Automation</b> tab → <b>+</b> → <b>Arrive</b>.</li>
+              <li>Location: <b>Choose</b> → pick Home (search the address) → Done. Set <b>Run Immediately</b> (and turn off “Notify When Run”).</li>
+              <li><b>New Blank Automation</b> → add <b>Get Contents of URL</b>. URL: <span className="k-code" style={{ display: 'inline' }} onClick={() => copy(url, toast)}>{url}</span></li>
+              <li>Method <b>POST</b>. Headers → <b>Authorization</b> = <b>Bearer</b> + space + the key below.</li>
+              <li>Request Body <b>JSON</b>: <b>place</b> = <b>Home</b>, <b>event</b> = <b>arrive</b>. Done.</li>
+              <li>Same again with <b>Leave</b> and event = <b>leave</b>.</li>
+              <li>Repeat for <b>School</b>, <b>Work</b>, <b>Gym</b> (8 automations in total). Use exactly these names.</li>
+            </ol>
+            <p className="k-small" style={{ marginTop: 12 }}>Key (tap to copy):</p>
+            <div className="k-code" onClick={() => copy(d.token, toast)}>{d.token}</div>
+            <p className="k-muted k-small">Tip: tell Kairo “remind me at the gym to …” and it pops up when you arrive there.</p>
+          </div>
+        </>
+      )}
+      <Sheet open={confirm} onClose={() => setConfirm(false)} title="Delete all?">
+        <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>Every stored arrive/leave entry is deleted. This can't be undone.</p>
+        <Button variant="danger" block onClick={delAll}>Delete all</Button>
         <Button variant="secondary" block style={{ marginTop: 8 }} onClick={() => setConfirm(false)}>Cancel</Button>
       </Sheet>
     </Page>
@@ -312,6 +393,8 @@ function Root() {
               onClick={() => stack.push('Jobs', () => <JobsPage />)} />
             <ListRow icon={<IconInbox />} title="Capture" subtitle="Action button and share sheet setup" chevron
               onClick={() => stack.push('Capture', () => <CapturePage />)} />
+            <ListRow icon={<IconPin />} title="Location" subtitle="Places, history, pause" chevron
+              onClick={() => stack.push('Location', () => <LocationPage />)} />
           </List>
 
           <SectionTitle>History</SectionTitle>

@@ -62,11 +62,15 @@ class TasksList(Strict):
 
 # ---------------------------------------------------------------- tier 1: internal
 
+_PLACE = r"^[\w][\w .'&-]{0,39}$"
+
+
 class TasksCreate(Strict):
     title: str = Field(min_length=1, max_length=300)
     due: datetime | None = None
     priority: int = Field(default=0, ge=0, le=3)
     project_id: int | None = None
+    place: str | None = Field(default=None, pattern=_PLACE)   # remind on arrival there (Home, School, Work, Gym)
 
 
 class TasksUpdate(Strict):
@@ -75,6 +79,7 @@ class TasksUpdate(Strict):
     due: datetime | None = None
     priority: int | None = Field(default=None, ge=0, le=3)
     status: Literal["open", "done", "dropped"] | None = None
+    place: str | None = Field(default=None, pattern=_PLACE)
 
 
 class NotesWrite(Strict):
