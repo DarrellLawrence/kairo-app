@@ -584,6 +584,81 @@ function SoundCheckPage() {
   )
 }
 
+/* Acceptance (KICKOFF v8): done = proven on this PC and this iPhone. The PC runs the automated tests
+   itself after every update; the manual ones are yours to tap through (max 5 minutes). */
+const KIND_LABEL = { auto: 'Automated on the PC', manual: 'You, on the iPhone', ci: 'Proven in CI', later: 'Comes with a later block' }
+
+function AcceptancePage() {
+  const toast = useToast()
+  const [rep, setRep] = useState(null)
+  const load = useCallback(() => api('/api/acceptance').then(setRep).catch(() => setRep({ tests: [] })), [])
+  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    if (!rep?.running) return undefined
+    const t = setInterval(load, 3000)
+    return () => clearInterval(t)
+  }, [rep?.running, load])
+  const runAll = async () => {
+    const r = await api('/api/acceptance/run', { method: 'POST', body: {} })
+    toast.show({ text: r.started ? 'Running on the PC with the real Claude. A few minutes.' : 'Already running.' })
+    load()
+  }
+  const mark = async (id, ok) => { setRep(await api(`/api/acceptance/${id}/manual`, { method: 'POST', body: { ok } })) }
+  const badge = (t) => {
+    const r = t.result
+    if (t.kind === 'later') return <Badge tone="neutral" pop={false}>{t.block}</Badge>
+    if (t.kind === 'ci') return <Badge tone="neutral" pop={false}>CI</Badge>
+    if (!r) return <Badge tone="neutral" pop={false}>Not run</Badge>
+    return <Badge tone={r.ok ? (t.stale ? 'warn' : 'ok') : 'danger'} pop={false}>{r.ok ? (t.stale ? 'Old pass' : 'Pass') : 'Fail'}</Badge>
+  }
+  const sub = (t) => {
+    const r = t.result
+    if (!r || t.kind === 'later') return t.how
+    const failed = Object.entries(r.checks || {}).filter(([, v]) => !v).map(([k]) => k)
+    return [failed.length ? `Failed: ${failed.join(', ')}` : null, r.detail, r.at && new Date(r.at).toLocaleString()].filter(Boolean).join(' · ')
+  }
+  const s = rep?.summary
+  return (
+    <Page title="Acceptance" onRefresh={load}>
+      {!rep && <SkeletonCard lines={4} />}
+      {rep && (
+        <>
+          <p className="k-hello">
+            {s ? `Automated: ${s.auto_passed}/${s.auto} pass. Yours: ${s.manual_passed}/${s.manual}.` : ''} Done means it passes here, on this PC and this iPhone.
+          </p>
+          <div className="k-pad">
+            <Button variant="primary" block loading={rep.running} disabled={rep.running} onClick={runAll}>
+              {rep.running ? 'Running on the PC…' : 'Run the automated tests'}
+            </Button>
+          </div>
+          {['auto', 'manual', 'ci', 'later'].map((kind) => {
+            const tests = rep.tests.filter((t) => t.kind === kind)
+            if (!tests.length) return null
+            return (
+              <div key={kind}>
+                <SectionTitle>{KIND_LABEL[kind]}</SectionTitle>
+                <List>
+                  {tests.map((t) => (
+                    <div key={t.id}>
+                      <ListRow title={`${t.id}. ${t.name}`} subtitle={sub(t)} wrap value={badge(t)} />
+                      {kind === 'manual' && (
+                        <div className="k-pad" style={{ display: 'flex', gap: 8, paddingTop: 0 }}>
+                          <Button size="sm" block onClick={() => mark(t.id, true)}>Pass</Button>
+                          <Button size="sm" block variant="danger" onClick={() => mark(t.id, false)}>Fail</Button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </List>
+              </div>
+            )
+          })}
+        </>
+      )}
+    </Page>
+  )
+}
+
 function SystemPage() {
   const stack = useStack()
   const toast = useToast()
@@ -649,6 +724,8 @@ function SystemPage() {
               onClick={() => stack.push('Backups', () => <BackupsPage />)} />
             <ListRow icon={<IconChart />} title="Run diagnosis" subtitle="Read-only report to copy or share" chevron
               onClick={() => stack.push('Diagnosis', () => <DiagnosisPage />)} />
+            <ListRow icon={<IconCheck />} title="Acceptance" subtitle="Proven on this PC and this iPhone" chevron
+              onClick={() => stack.push('Acceptance', () => <AcceptancePage />)} />
             <ListRow icon={<IconSpeaker />} title="Sound check" subtitle="Is Kairo's voice audible on this iPhone?" chevron
               onClick={() => stack.push('Sound check', () => <SoundCheckPage />)} />
           </List>
