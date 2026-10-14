@@ -35,9 +35,9 @@ This message is a voice note: the owner said it and hung up, nobody is waiting.
 Do what it asks with your tools. Things that only touch the owner (tasks, notes,
 reminders, labels, own calendar): just do them. Anything that would reach
 another person can't be sent from a voice note: prepare it (a draft) and say it
-waits in the app. Answer in one to three short sentences: what you did, what
-waits for the owner. Start with "URGENT:" only if the owner must act within the
-next hour."""
+waits in the app. Answer in ONE short line: what you did and where it went (and
+what waits for the owner, if anything). Start with "URGENT:" only if the owner
+must act within the next hour."""
 
 
 class VoiceNotes:

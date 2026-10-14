@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { OnboardingCard } from './Onboarding.jsx'
+import { CaptureSheet } from './CaptureSheet.jsx'
 import { api, parseTs } from '../api.js'
 import { spring } from '../design/motion.js'
 import {
@@ -182,7 +183,6 @@ export default function Today({ go, onboarding }) {
   const [due, setDue] = useState([])
   const [ticked, setTicked] = useState({})
   const [captureOpen, setCaptureOpen] = useState(false)
-  const [draft, setDraft] = useState('')
   const [answering, setAnswering] = useState(null)
   const [answer, setAnswer] = useState('')
 
@@ -230,18 +230,6 @@ export default function Today({ go, onboarding }) {
     setTri((t) => ({ ...t, needs_reply: t.needs_reply.filter((m) => m.id !== id) }))
     setBrief((b) => b && { ...b, needs_reply: (b.needs_reply || []).filter((m) => m.id !== id) })
     toast.show({ text: 'Marked as done.' })
-  }
-
-  const sendCapture = async () => {
-    const text = draft.trim()
-    if (!text) return
-    try {
-      const isUrl = /^https?:\/\/\S+$/.test(text)
-      await api('/api/captures', { method: 'POST', body: isUrl ? { url: text } : { text } })
-      setDraft('')
-      setCaptureOpen(false)
-      toast.show({ text: 'Captured. Kairo files it within 15 minutes.' })
-    } catch (e) { toast.show({ text: e.message }) }
   }
 
   const sendAnswer = async () => {
@@ -503,14 +491,7 @@ export default function Today({ go, onboarding }) {
 
       {home?.error && <EmptyState icon={<IconSparkle />} title="Kairo is not answering" text="Pull down to try again." />}
 
-      <Sheet open={captureOpen} onClose={() => setCaptureOpen(false)} title="Capture">
-        <div className="k-field">
-          <textarea rows={4} autoFocus value={draft} onChange={(e) => setDraft(e.target.value)}
-            placeholder="A task, a test date, an idea, a link…" />
-        </div>
-        <Button variant="primary" block disabled={!draft.trim()} onClick={sendCapture}>Capture</Button>
-        <p className="k-muted k-small" style={{ textAlign: 'center', marginTop: 12 }}>Faster: Back Tap or the lock screen, see More → Capture.</p>
-      </Sheet>
+      <CaptureSheet open={captureOpen} onClose={() => setCaptureOpen(false)} />
 
       <Sheet open={!!answering} onClose={() => setAnswering(null)} title="Answer Kairo">
         {answering && <p className="k-small" style={{ margin: '0 0 12px' }}>{answering.question}</p>}

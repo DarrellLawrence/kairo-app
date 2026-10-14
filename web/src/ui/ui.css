@@ -426,3 +426,20 @@
 .k-ideas { list-style: none; margin: 0 0 var(--s-3); padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
 .k-ideas li { padding: var(--s-3) var(--s-4); border-radius: var(--r-md); background: rgba(0, 0, 0, 0.25); box-shadow: inset 0 0 0 0.5px var(--hairline); font: var(--t-sub); }
 .k-ideas li span { display: block; color: var(--text-2); font: var(--t-caption); margin-top: 2px; }
+
+/* Capture sheet (+): voice first */
+.k-capture { display: flex; flex-direction: column; align-items: center; gap: 14px; padding-bottom: 4px; }
+.k-capture-mic { --level: 0; width: 132px; height: 132px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #fff;
+  background: radial-gradient(circle at 35% 30%, #ff9a5a, var(--accent, #ff6a2b) 55%, #c2410c);
+  box-shadow: 0 0 calc(24px + var(--level) * 60px) rgba(255, 106, 43, calc(0.35 + var(--level) * 0.5));
+  transform: scale(calc(1 + var(--level) * 0.08)); transition: transform 80ms linear, box-shadow 80ms linear;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.k-capture-mic svg { width: 48px; height: 48px; }
+.k-capture-mic.recording { background: radial-gradient(circle at 35% 30%, #ffb08a, #ff4d2e 55%, #b91c1c); }
+.k-capture-mic:disabled { opacity: 0.7; }
+.k-capture-hint { margin: 0; font-size: 14px; color: var(--text-2); text-align: center; min-height: 20px; }
+.k-capture-attach { display: flex; gap: 8px; width: 100%; }
+.k-capture-attach .k-btn { flex: 1; min-width: 0; padding-left: 8px; padding-right: 8px; }
+.k-capture-text { display: flex; gap: 8px; width: 100%; align-items: center; }
+.k-capture-text input { flex: 1; min-width: 0; height: 40px; border-radius: 20px; border: 0; padding: 0 14px; font: inherit; font-size: 16px;
+  color: var(--text); background: rgba(255, 255, 255, 0.07); }
