@@ -1,4 +1,11 @@
-# Kairo — Kickoff & Build Spec (v5)
+# Kairo — Kickoff & Build Spec (v6)
+
+### Changelog v5 → v6 (owner's queue and location; owner's request 2026-10-14)
+- **Order after C:** location → design check + recordings → Milestone D → check all six reviews → phase 3 voice → phase 3 rest → later (phase 4 local LLM, backlog WhatsApp). The owner moved phase 3 forward; the phase-2 gate (section 3) still applies before relying on it daily.
+- **Location (new, section 13b).** iPhone Shortcut automations send arrive/leave for named places to `POST /api/location/event` (own token). Only place name + time, only on kairo-home, 365 days, pause and delete in the app. Used for place reminders, the brief, reviews and patterns. "Use my current location" (weather, SBB) only on tap: coordinates rounded, sent only to the weather and timetable services, never stored.
+- **App tabs (section 11):** Today, Chat, Board, Approvals, More. Reviews, School, Lerndokumentation, Location, Capture, Jobs, Backups open from More (pushes link straight to them).
+- **More → Your to-dos:** Google app publish (stops the 7-day sign-out), BIOS power-on after power loss, GitHub two-factor login.
+- **Phase 3 voice:** local speech on the RTX 3060 (Whisper/Moonshine + Kokoro/Piper, Pipecat), a talk button, "calls" by push. A native iOS app with CallKit stays a later option; it needs an Apple Developer account (ask first).
 
 ### Changelog v4 → v5 (memory first; owner's request 2026-10-14)
 - **Build order.** New **Milestone M (memory first)** runs between B and C: vault + sync, an onboarding interview, and all scheduled reviews. Everything later depends on what Kairo knows.
@@ -463,7 +470,7 @@ push_devices: [owner-phone]
 
 ## 11. App screens (PWA)
 
-Served at `https://kairo-home.<tailnet>.ts.net` via `tailscale serve`. App name **Kairo**. Bottom bar, six tabs:
+Served at `https://kairo-home.<tailnet>.ts.net` via `tailscale serve`. App name **Kairo**. Bottom bar, five tabs (v6): Today, Chat, Board, Approvals, More. Reviews and the rest open from More:
 
 | Screen | Shows | Actions |
 |---|---|---|
@@ -509,6 +516,16 @@ One at a time from a queue; times in `config/schedule.yaml`; all runnable on dem
 5. **File** + link back + line in next brief. **Unclear → ask, never guess.**
 
 Target: capture in < 5 s from locked phone.
+
+### 13b. Location (v6, privacy first)
+
+| What | How |
+|---|---|
+| In | iPhone Shortcuts automations (Arrive/Leave Home, School, Work, Gym) → `POST /api/location/event` `{place, event, time?}` with the location token |
+| Stored | Place name, arrive/leave, time. No coordinates. Only on kairo-home; deleted after 365 days |
+| Owner controls | More → Location: pause (nothing stored), history, delete one or all, new token |
+| Used for | Tasks with a place pop up on arrival; brief and reviews get patterns ("you skip training on long school days") |
+| On tap only | "Weather and trains here": the phone's position, rounded (~10 km weather, ~1 km stations), sent only to Open-Meteo and transport.opendata.ch, not stored or logged |
 
 ---
 

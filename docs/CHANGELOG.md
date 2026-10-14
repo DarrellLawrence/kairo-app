@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-14 — build: Milestone C, location, Milestone D
+- **Jobs.** One at a time, quiet window, kill switch, daily model budget, pause on usage limit, run now from More → Jobs.
+- **Email triage** (hourly 07–21). Claude sorts, the backend labels through the gate; suspicious mail is flagged and nothing else. Real-model test on the owner's three mails passed.
+- **Morning brief** (06:20 weekdays, 08:20 weekends), with a plain fallback when Claude is not available.
+- **Capture** by Shortcut (token) or in the app; filed every 15 minutes; Kairo asks when unclear.
+- **Location** (privacy first), see KICKOFF 13b.
+- **Board** tab (Kanban, timeline, goals), **School** (dates, grades, flashcards, study guides), **Lerndokumentation** (Friday push, German draft, approve).
+- **Backups** every night, restore test every Sunday, restore command.
+- **Reviews**: a simulated year confirms all six kinds fire on the right days.
+
+## 2026-10-14 — docs: kickoff v6 (owner's queue, location)
+- Order after C set by the owner; phase 3 moved forward. Location added (13b). Five tabs. Owner to-dos in More.
+
 ## 2026-10-14 — build: Milestone M (memory first)
 - **Vault.** Fixed folders. Profile and Goals go into every chat as notes, never as instructions. The backend writes only Kairo-owned sections between markers, so the owner's text stays.
 - **Onboarding.** A 25-question interview in the app, saved to the database and rendered into the vault. It can be edited or redone anytime.
