@@ -2,30 +2,49 @@ import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { spring, tabVariants } from './design/motion.js'
-import { Badge, IconChat, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
+import { Badge, IconBoard, IconChat, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
 import Today from './screens/Today.jsx'
 import Chat from './screens/Chat.jsx'
 import Approvals from './screens/Approvals.jsx'
 import More from './screens/More.jsx'
+import Reviews from './screens/Reviews.jsx'
+import Board from './screens/Board.jsx'
+import School from './screens/School.jsx'
+import Lerndoku from './screens/Lerndoku.jsx'
+import Call from './screens/Call.jsx'
+import Life from './screens/Life.jsx'
+import Onboarding from './screens/Onboarding.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
 
-// Board and Reviews join the tab bar when they are built (Milestone D).
 const TABS = [
   { id: 'today', label: 'Today', Icon: IconToday },
   { id: 'chat', label: 'Chat', Icon: IconChat },
+  { id: 'board', label: 'Board', Icon: IconBoard },
   { id: 'approvals', label: 'Approvals', Icon: IconShield },
   { id: 'more', label: 'More', Icon: IconMore },
 ]
+// Screens without their own tab, and the tab that stays lit while they are open.
+const HIDDEN = { reviews: 'more', school: 'more', lerndoku: 'more', life: 'more' }
 
+// Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
 function readRoute() {
   const hash = window.location.hash.replace(/^#\/?/, '')
   if (hash === 'dev/components' || window.location.pathname === '/dev/components') return 'dev'
-  return TABS.some((t) => t.id === hash) ? hash : 'today'
+  if (hash === 'onboarding') return 'onboarding'
+  if (/^call\/\d+$/.test(hash)) return 'call'
+  const base = hash.split('/')[0]
+  return TABS.some((t) => t.id === base) || base in HIDDEN ? base : 'today'
+}
+
+function readParam() {
+  const m = window.location.hash.match(/^#\/?(?:reviews|call)\/(\d+)$/)
+  return m ? Number(m[1]) : null
 }
 
 export default function App() {
   const [route, setRoute] = useState(readRoute)
+  const [param, setParam] = useState(readParam)
   const [dir, setDir] = useState(1)
   const [openCards, setOpenCards] = useState(0)
 
@@ -37,13 +56,13 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const onHash = () => setRoute(readRoute())
+    const onHash = () => { setRoute(readRoute()); setParam(readParam()) }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
 
   const go = useCallback((id) => {
-    const from = TABS.findIndex((t) => t.id === route)
+    const from = TABS.findIndex((t) => t.id === (HIDDEN[route] || route))
     const to = TABS.findIndex((t) => t.id === id)
     setDir(to >= from ? 1 : -1)
     window.history.replaceState(null, '', `#${id}`)
@@ -56,7 +75,14 @@ export default function App() {
   }))
 
   const screen = {
-    today: <Today openCards={openCards} go={go} />,
+    today: <Today openCards={openCards} go={go} onboarding={() => { window.location.hash = '#onboarding' }} />,
+    reviews: <Reviews key={param ?? 'list'} openId={param} />,
+    board: <Board />,
+    school: <School />,
+    lerndoku: <Lerndoku />,
+    life: <Life />,
+    call: <Call key={param} callId={param} onClose={() => { window.location.hash = '#chat' }} />,
+    onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,
     approvals: <Approvals onCount={setOpenCards} />,
     more: <More />,
@@ -83,7 +109,7 @@ export default function App() {
               </motion.div>
             </AnimatePresence>
           </main>
-          {route !== 'dev' && <TabBar tabs={tabs} active={route} onSelect={go} />}
+          {route !== 'dev' && route !== 'onboarding' && route !== 'call' && <TabBar tabs={tabs} active={HIDDEN[route] || route} onSelect={go} />}
         </div>
       </ToastProvider>
     </MotionConfig>

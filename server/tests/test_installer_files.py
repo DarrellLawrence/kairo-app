@@ -47,3 +47,13 @@ def test_bat_is_robust(path):
             for i in range(len(line)):
                 if line.startswith(var, i):
                     assert line[:i].count('"') % 2 == 1, f"unquoted {var}: {line}"
+
+
+@pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)
+def test_paths_variable_never_shadowed(path):
+    # PowerShell names are case-insensitive: `$p = ...` silently replaces the
+    # Kairo paths object `$P` (this broke vault sync once).
+    import re
+    for n, line in enumerate(path.read_text("ascii").splitlines(), 1):
+        if re.search(r"\$p\s*=[^=]", line, re.IGNORECASE) and "Get-KairoPaths" not in line:
+            pytest.fail(f"{path.name}:{n} assigns $P/$p: {line.strip()}")

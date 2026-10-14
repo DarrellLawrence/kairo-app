@@ -22,6 +22,8 @@ api_error_status, session_id).
 
 from __future__ import annotations
 
+import base64
+
 import json
 import os
 import shutil
@@ -121,7 +123,7 @@ class ClaudeCLIBrain:
 
     # -- command ---------------------------------------------------------
 
-    def build_command(self, *, session_id: str | None, system: str, tools: list[str]) -> list[str]:
+    def build_command(self, *, session_id: str | None, system: str, tools: list[str], images: bool = False) -> list[str]:
         cmd = [
             *self._launcher(),
             "-p",
@@ -142,6 +144,9 @@ class ClaudeCLIBrain:
             cmd += ["--model", self.model]
         if session_id:
             cmd += ["--resume", session_id]
+        if images:
+            # One JSON user message on stdin (text + base64 images), verified with CLI 2.1.299.
+            cmd += ["--input-format", "stream-json"]
         return cmd
 
     def _launcher(self) -> list[str]:
@@ -180,8 +185,14 @@ class ClaudeCLIBrain:
         system: str,
         tools: list[str],
         origin: str = "owner_chat",
+        images: list[tuple[bytes, str]] | None = None,
     ) -> Iterator[BrainEvent]:
-        cmd = self.build_command(session_id=session_id, system=system, tools=tools)
+        cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images))
+        if images:
+            content = [{"type": "document" if mt == "application/pdf" else "image",
+                        "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}
+                       for data, mt in images]
+            prompt = json.dumps({"type": "user", "message": {"role": "user", "content": content + [{"type": "text", "text": prompt}]}}) + "\n"
         run_env = {**self._env, "KAIRO_HOOK_ORIGIN": origin}
         self._run_limited = False
         self._cancelled.clear()

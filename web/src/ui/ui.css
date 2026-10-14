@@ -104,7 +104,7 @@
 .k-chevron { width: 14px; height: 14px; color: var(--text-3); flex: none; }
 
 /* ---------------------------------------------------------------- badge */
-.k-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--r-pill); font: var(--t-caption); font-weight: 700; }
+.k-badge { white-space: nowrap; flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--r-pill); font: var(--t-caption); font-weight: 700; }
 .k-badge.accent { background: var(--accent); color: var(--on-accent); }
 .k-badge.ok { background: var(--ok-soft); color: var(--ok); }
 .k-badge.warn { background: var(--warn-soft); color: var(--warn); }
@@ -232,3 +232,61 @@
 .k-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-3); margin: 0 var(--s-4) var(--s-3); }
 .k-grid2 .k-card { margin: 0; }
 .k-demo-row { display: flex; flex-wrap: wrap; gap: var(--s-2); padding: 0 var(--s-4) var(--s-3); }
+
+/* onboarding */
+.k-onboarding { padding-top: calc(var(--topbar-h) + var(--safe-top)); }
+.k-progress { height: 4px; margin: var(--s-2) var(--s-4) 0; border-radius: 4px; background: var(--surface-strong); overflow: hidden; }
+.k-progress-bar { height: 100%; background: var(--accent-gradient); transform-origin: left; }
+.k-ob-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-5) var(--s-4); }
+.k-ob-input { width: 100%; margin-top: var(--s-4); padding: 12px 14px; border-radius: var(--r-md); border: 0; background: var(--surface-strong); box-shadow: inset 0 0 0 0.5px var(--hairline-strong); resize: none; line-height: 1.4; }
+.k-ob-actions { display: flex; gap: var(--s-2); padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--kb-safe, var(--safe-bottom))); background: var(--glass); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); border-top: 0.5px solid var(--hairline); }
+.k-ob-actions .k-btn:last-child { flex: 1; }
+
+/* Morning brief top 3 */
+.k-top3 { list-style: none; margin: var(--s-3) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.k-top3 li { display: flex; gap: var(--s-3); align-items: flex-start; font: var(--t-sub); color: var(--text); }
+.k-top3 b { font-weight: 600; }
+.k-top3-n { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font: var(--t-caption); font-weight: 700; color: var(--on-accent, #fff); background: var(--accent); }
+.k-code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-strong); padding: 10px 12px; border-radius: var(--r-md); word-break: break-all; user-select: all; -webkit-user-select: all; }
+.k-steps { margin: 0; padding: 0 0 0 20px; font: var(--t-sub); color: var(--text); display: flex; flex-direction: column; gap: var(--s-2); }
+
+/* Board: stacked sections on a phone, three columns on a wide screen */
+.k-kanban { display: flex; flex-direction: column; gap: var(--s-4); padding: 0 var(--s-4); }
+.k-kanban-col .k-card { margin: 0 0 var(--s-2); }
+@media (min-width: 720px) {
+  .k-kanban { flex-direction: row; align-items: flex-start; }
+  .k-kanban-col { flex: 1; min-width: 0; }
+}
+
+/* School: flashcards and study guides */
+.k-flash { position: relative; min-height: 280px; display: flex; flex-direction: column; padding: var(--s-5); border-radius: var(--r-xl, 24px); background: var(--surface-strong); box-shadow: inset 0 0 0 0.5px var(--hairline-strong), 0 12px 30px rgba(0,0,0,.25); touch-action: pan-y; cursor: pointer; }
+.k-flash-front { font: var(--t-title, 600 22px/1.3 system-ui); margin: var(--s-3) 0; }
+.k-flash-back { font: var(--t-body); color: var(--accent-2); margin: 0 0 var(--s-3); white-space: pre-wrap; }
+.k-flash-tag { position: absolute; top: 16px; padding: 4px 10px; border-radius: var(--r-pill); font: var(--t-caption); font-weight: 700; }
+.k-flash-tag.ok { right: 16px; background: var(--ok-soft); color: var(--ok); }
+.k-flash-tag.no { left: 16px; background: var(--danger-soft); color: var(--danger); }
+.k-guide { white-space: pre-wrap; font: var(--t-sub); color: var(--text); max-height: 60vh; overflow-y: auto; margin-bottom: var(--s-3); }
+
+/* Voice: mic in the input bar, call screen */
+.k-mic { background: var(--surface-strong); color: var(--accent-2); }
+.k-mic.recording { background: var(--danger); color: #fff; animation: k-pulse 1.2s ease-in-out infinite; }
+.k-mic-stop { width: 12px; height: 12px; border-radius: 3px; background: #fff; display: block; }
+.k-spin-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; display: block; animation: k-spin 0.8s linear infinite; }
+@keyframes k-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); } 50% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); } }
+.k-call { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+  padding: calc(var(--safe-top) + 48px) var(--s-5) calc(var(--safe-bottom) + 40px);
+  background: radial-gradient(120% 80% at 50% 0%, var(--accent-soft, rgba(139,92,246,.35)), var(--bg) 70%); color: var(--text); }
+.k-call-orb { width: 140px; height: 140px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #c4b5fd, var(--accent) 55%, #4c1d95);
+  box-shadow: 0 0 60px rgba(139, 92, 246, 0.55); }
+.k-call-name { font: var(--t-large); margin: var(--s-4) 0 var(--s-1); text-align: center; }
+.k-call-sub { font: var(--t-sub); color: var(--text-2); text-align: center; min-height: 1.4em; }
+.k-call-log { width: 100%; max-height: 32vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; font: var(--t-sub); }
+.k-call-log p { margin: 0; padding: 8px 12px; border-radius: 14px; background: var(--surface-strong); }
+.k-call-log p.me { align-self: flex-end; background: var(--accent); color: var(--on-accent); }
+.k-call-buttons { display: flex; gap: 56px; }
+.k-call-btn { width: 72px; height: 72px; border-radius: 50%; border: 0; display: grid; place-items: center; color: #fff; }
+.k-call-btn svg { width: 30px; height: 30px; }
+.k-call-btn.answer { background: #22c55e; }
+.k-call-btn.hangup { background: #ef4444; }
+.k-call-btn.hangup svg { transform: rotate(135deg); }
+.k-call-btn.mute { background: var(--surface-strong); color: var(--text); }

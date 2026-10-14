@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("KAIRO_SCHEDULER", "0")   # no background jobs in tests; test_reviews drives them directly
 from pathlib import Path
 
 import pytest

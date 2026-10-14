@@ -65,6 +65,42 @@ class BrainRunner:
             yield event
 
 
+class AskResult:
+    """What a background job got back from one brain run."""
+
+    def __init__(self, text: str, status: str = "ok", error: str = "") -> None:
+        self.text, self.status, self.error = text, status, error
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok" and not self.error
+
+
+def ask_sync(runner: BrainRunner, prompt: str, *, system: str, origin: str = "job",
+             images: list[tuple[bytes, str]] | None = None) -> AskResult:
+    """One brain run for a job, blocking (jobs run in scheduler threads). No
+    tools: jobs give the model the data and get JSON back; the backend acts."""
+    with runner._lock:
+        runner.current_origin, runner.current_thread_id = origin, None
+        parts: list[str] = []
+        final, status, error = None, "ok", ""
+        try:
+            kwargs = {"images": images} if images else {}
+            for ev in runner.brain.run(prompt, session_id=None, system=system, tools=[], origin=origin, **kwargs):
+                if ev.kind == EventKind.text:
+                    parts.append(ev.text)
+                elif ev.kind == EventKind.result:
+                    final = ev.text
+                elif ev.kind == EventKind.error:
+                    error = ev.text or "brain error"
+                    status = (ev.status.value if ev.status else "unavailable")
+        except Exception as exc:  # adapter bug: the job fails, Kairo keeps running
+            error, status = f"Brain error: {exc}", "unavailable"
+        finally:
+            runner.current_origin = None
+    return AskResult(final if final is not None else "".join(parts), status, error)
+
+
 def local_day(ts: datetime, profile: Profile):
     return ts.astimezone(profile.tz).date()
 

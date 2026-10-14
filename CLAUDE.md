@@ -33,7 +33,9 @@ start the next until its checks pass and the owner says go.
 - The model's only MCP server is mcp_kairo, which forwards every call to the
   backend. Both Google tokens live only in the backend (read-only token for
   reads, write token only in executor.py), never in the CLI's environment or
-  workspace. No third-party MCP servers.
+  workspace. No third-party MCP servers for the model. Only exception (owner's
+  decision 2026-10-14): the backend may read bank data read-only from Finch once
+  its MCP is public; it reaches the model only as the tier-0 finance.list tool.
 - The gate fails closed: any hook error, crash, timeout or failure to start
   blocks the call (catch-all + exit 2, onFailure: block). Never weaken this.
 - A tier-2 action that would notify another person (attendees, invites,

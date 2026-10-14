@@ -2,7 +2,7 @@
 // refresh), Page (large title + nav bar), Stack (iOS push / pop) and
 // Expandable (a card that grows into its detail view, shared element).
 import { AnimatePresence, animate, motion, useDragControls, useMotionValue, useTransform } from 'motion/react'
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { pageVariants, rubber, spring } from '../design/motion.js'
 import { IconArrowDown, IconBack, IconRefresh } from './icons.jsx'
@@ -205,8 +205,9 @@ export function Stack({ root, rootTitle }) {
   const top = depth ? pages[depth - 1] : null
   const backLabel = depth > 1 ? pages[depth - 2].title : rootTitle
 
+  const value = useMemo(() => ({ push, pop, depth, backLabel }), [push, pop, depth, backLabel])
   return (
-    <StackCtx.Provider value={{ push, pop, depth, backLabel }}>
+    <StackCtx.Provider value={value}>
       <AnimatePresence initial={false} custom={dir} mode="popLayout">
         <EdgeSwipe key={top ? top.key : 'root'} dir={dir} canGoBack={depth > 0} onBack={pop}>
           {top ? top.render() : root}

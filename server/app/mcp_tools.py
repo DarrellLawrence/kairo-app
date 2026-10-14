@@ -12,9 +12,15 @@ DESCRIPTIONS = {
     "calendar_list": "List upcoming events on the owner's primary calendar.",
     "vault_read": "Read a file or list a folder in the owner's Obsidian vault (path relative to the vault).",
     "tasks_list": "List Kairo tasks.",
-    "tasks_create": "Create a task.",
+    "tasks_create": "Create a task. Set place (e.g. Gym, School) to remind the owner when they arrive there.",
     "tasks_update": "Change a task (title, due, priority, status).",
     "notes_write": "Write a Markdown note in the vault's Kairo/ folder (Kairo-owned files only).",
+    "shopping_list": "The owner's shopping list (open items).",
+    "shopping_add": "Add items to the owner's shopping list.",
+    "people_list": "People the owner knows: relation, birthday, notes, last contact. Filter by name.",
+    "people_note": "Remember something about a person (and/or that the owner was in touch today).",
+    "finance_list": "The owner's spending: totals by category and recent payments (read only; Kairo can't pay).",
+    "health_list": "Daily health numbers from Apple Health: steps, sleep, resting heart rate, workouts.",
 }
 
 PROPOSE_HELP = (

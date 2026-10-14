@@ -47,11 +47,11 @@ function Assert-Admin([string]$ScriptPath, [string[]]$ScriptArgs) {
     Write-Host 'Kairo needs administrator rights. Windows will ask: click Yes.' -ForegroundColor Cyan
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ScriptPath`"") + $ScriptArgs
     try {
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -PassThru
-        $null = $p.Handle   # without the cached handle, ExitCode can come back empty (= success)
-        $p.WaitForExit()
-        if ($null -eq $p.ExitCode) { exit 1 }
-        exit $p.ExitCode
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -PassThru
+        $null = $proc.Handle   # without the cached handle, ExitCode can come back empty (= success)
+        $proc.WaitForExit()
+        if ($null -eq $proc.ExitCode) { exit 1 }
+        exit $proc.ExitCode
     } catch {
         Write-Bad 'Administrator rights were not granted. Nothing was changed.'
         exit 1
@@ -71,6 +71,7 @@ function Get-KairoPaths([string]$Root) {
         State        = Join-Path $app 'state.json'
         Installer    = Join-Path $Root 'installer'
         Updater      = Join-Path $Root 'updater'
+        Vault        = Join-Path $data 'vault'
         Tools        = Join-Path $Root 'tools'
         Downloads    = Join-Path $Root 'downloads'
         Data         = $data
@@ -105,7 +106,7 @@ function Read-ReleaseInfo([string]$AppDir) {
 # ---------------------------------------------------------------- folders & permissions
 
 function Initialize-Folders($P) {
-    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Data, $P.Config, $P.Secrets,
+    foreach ($d in @($P.Root, $P.App, $P.Releases, $P.Installer, $P.Tools, $P.Downloads, $P.Data, $P.Vault, $P.Config, $P.Secrets,
                      $P.Logs, $P.Backups, $P.Workspace, $P.ClaudeConfig, (Split-Path $P.Db))) {
         if (-not (Test-Path $d)) { [void](New-Item -ItemType Directory -Path $d) }
     }
@@ -322,6 +323,39 @@ function Install-ReleaseFiles($P, [string]$SourceApp, [string]$Version, [string]
     return $dest
 }
 
+# Phase 3 voice: the big speech packages (about 2 GB with the NVIDIA runtime)
+# go once into tools\voice, shared by all releases, and are only reinstalled
+# when requirements-voice.txt changes. Models go to data\models. Never a reason
+# for an install or update to fail.
+function Install-Voice($P, [string]$ReleaseDir) {
+    if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return }
+    $req = Join-Path $ReleaseDir 'server\requirements-voice.txt'
+    if (-not (Test-Path $req)) { return }
+    $site = Join-Path $P.Tools 'voice'
+    $stamp = Join-Path $site '.requirements-sha256'
+    $hash = (Get-FileHash -Algorithm SHA256 $req).Hash
+    $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+    try {
+        if (-not ((Test-Path $stamp) -and ((Get-Content -Raw $stamp).Trim() -eq $hash))) {
+            Write-Note 'Installing voice (speech recognition and voices, about 2 GB, once)...'
+            $new = "$site.new"
+            if (Test-Path $new) { Remove-Item -Recurse -Force $new }
+            Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
+                                 '--target', $new, '-r', $req) 'Installing voice packages'
+            Set-Content -Path (Join-Path $new '.requirements-sha256') -Value $hash -Encoding ASCII
+            if (Test-Path $site) { Remove-Item -Recurse -Force $site }
+            Move-Item $new $site
+        }
+        Use-KairoEnv $P
+        $env:KAIRO_VOICE_SITE = $site
+        Push-Location (Join-Path $ReleaseDir 'server')
+        try { Invoke-Checked $py @('-m', 'app.voice', 'download') 'Downloading voice models' } finally { Pop-Location }
+        Write-Ok 'Voice ready (speech recognition on the graphics card, English and German voices)'
+    } catch {
+        Write-Warn "Voice not set up: $($_.Exception.Message.Trim()). Kairo works without it; the next update tries again."
+    }
+}
+
 # Highest migration revision in a release (files are named NNNN_slug.py; linear history).
 function Get-HeadRevision([string]$ReleaseDir) {
     $dir = Join-Path $ReleaseDir 'server\migrations\versions'
@@ -526,6 +560,7 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     }
 
     $newDir = Install-ReleaseFiles $P $SourceApp $version $Python
+    Install-Voice $P $newDir
     Initialize-Config $P $SourceApp
     $backup = Backup-Database $P "before-$version" $Python
 

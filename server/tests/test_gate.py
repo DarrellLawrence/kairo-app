@@ -221,3 +221,46 @@ def test_missing_or_broken_config_refuses_to_load(tmp_path):
 def test_every_configured_action_has_an_argument_schema(gate):
     """'Never add an action without a test': an action without a schema can't be decided."""
     assert gate.actions_without_schema() == []
+
+
+# ---------------------------------------------------------------- phase 3: life data (written before the code)
+
+@pytest.mark.parametrize("tool,args,tier", [
+    ("shopping_list", {}, 0),
+    ("shopping_add", {"items": ["Milch", "Brot"]}, 1),
+    ("people_list", {"name": "Anna"}, 0),
+    ("people_note", {"name": "Anna", "note": "Starts a new job in November", "contacted": True}, 1),
+    ("finance_list", {"days": 30}, 0),
+    ("health_list", {"days": 14}, 0),
+])
+def test_life_tools_are_direct_at_their_tier(gate, tool, args, tier):
+    d = gate.decide(P + tool, args, ctx(origin="job"))
+    assert (d.verdict, d.tier) == ("allow", tier)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("shopping_add", {"items": []}),
+    ("shopping_add", {"items": ["x" * 201]}),
+    ("shopping_add", {"items": ["ok"], "buy": True}),
+    ("people_note", {"name": "", "note": "x"}),
+    ("finance_list", {"days": 0}),
+    ("finance_list", {"days": 30, "pay": "CH93 0076"}),
+    ("health_list", {"days": 400}),
+])
+def test_life_tools_reject_bad_arguments(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+@pytest.mark.parametrize("action", ["shopping.add", "people.note", "finance.list"])
+def test_life_actions_cannot_be_proposed(gate, action):
+    """Tier 0-1 are direct tools; proposing them is refused (and nothing about money exists)."""
+    tool, args = propose(action, {})
+    assert gate.decide(tool, args, ctx()).verdict == "deny"
+
+
+def test_finance_is_read_only_and_money_still_impossible(gate):
+    finance = {a: t for a, t in gate.actions.items() if a.startswith("finance.")}
+    assert finance == {"finance.list": 0}
+    for action in ("finance.pay", "finance.transfer", "twint.send"):
+        tool, args = propose(action, {"amount": 10})
+        assert gate.decide(tool, args, ctx()).verdict == "deny"

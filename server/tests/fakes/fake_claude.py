@@ -66,6 +66,11 @@ def main():
         print("2.1.296 (Claude Code)")
         return 0
     prompt = sys.stdin.read()
+    if "--input-format" in args and args[args.index("--input-format") + 1] == "stream-json":
+        msg = json.loads(prompt.splitlines()[0])   # like the real CLI: one user message per line
+        parts = msg["message"]["content"]
+        images = sum(1 for p in parts if p.get("type") == "image")
+        prompt = f"[{images} image(s)] " + " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
     record = env("FAKE_CLAUDE_RECORD")
     if record:
         with open(record, "w", encoding="utf-8") as fh:

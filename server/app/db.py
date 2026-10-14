@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Text
+from sqlalchemy import Column, Text, UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine
 
 
@@ -49,6 +49,19 @@ class Task(SQLModel, table=True):
     source: str = "chat"  # capture / review / chat / email
     created_at: datetime = Field(default_factory=utcnow)
     done_at: datetime | None = None
+    place: str | None = Field(default=None, index=True)  # remind on arrival there (Home, School, Work, Gym)
+
+
+class LocationEvent(SQLModel, table=True):
+    """Arrive/leave at one of the owner's named places (iPhone Shortcut
+    automations). Stored only on kairo-home; the owner sees and deletes it."""
+
+    __tablename__ = "location_events"
+    id: int | None = Field(default=None, primary_key=True)
+    place: str = Field(index=True)
+    event: str  # arrive / leave
+    ts: datetime = Field(index=True)
+    received_at: datetime = Field(default_factory=utcnow)
 
 
 class Capture(SQLModel, table=True):
@@ -59,6 +72,42 @@ class Capture(SQLModel, table=True):
     text: str | None = Field(default=None, sa_column=Column(Text))
     processed: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=utcnow)
+    source: str = "shortcut"  # shortcut / share / app / email
+    status: str = Field(default="new", index=True)  # new / filed / asking / later / failed
+    filed_as: str | None = None  # task / school_event / note / person / idea / question
+    title: str | None = None
+    question: str | None = Field(default=None, sa_column=Column(Text))  # Kairo's question when unclear
+    result_json: str | None = Field(default=None, sa_column=Column(Text))
+    filed_at: datetime | None = None
+
+
+class TriagedEmail(SQLModel, table=True):
+    """Result of the hourly email triage (C2). Mail content is untrusted: these
+    rows feed the brief and the Today screen, never an approval card."""
+
+    __tablename__ = "email_triage"
+    message_id: str = Field(primary_key=True)
+    thread_id: str | None = None
+    sender: str | None = None
+    subject: str | None = None
+    received_at: datetime | None = Field(default=None, index=True)
+    category: str = Field(index=True)  # reply / fyi / ignore
+    summary: str | None = Field(default=None, sa_column=Column(Text))
+    deadline: dt.date | None = None
+    suspicious: bool = False
+    suspicious_reason: str | None = Field(default=None, sa_column=Column(Text))
+    task_id: int | None = None
+    done: bool = Field(default=False, index=True)  # the owner dealt with it
+    triaged_at: datetime = Field(default_factory=utcnow)
+
+
+class Brief(SQLModel, table=True):
+    __tablename__ = "briefs"
+    id: int | None = Field(default=None, primary_key=True)
+    date: dt.date = Field(unique=True, index=True)
+    content_json: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(default_factory=utcnow)
+    vault_path: str | None = None
 
 
 class Approval(SQLModel, table=True):
@@ -109,11 +158,27 @@ class Checkin(SQLModel, table=True):
 
 class Review(SQLModel, table=True):
     __tablename__ = "reviews"
+    __table_args__ = (UniqueConstraint("kind", "period_start", name="uq_reviews_kind_period"),)
     id: int | None = Field(default=None, primary_key=True)
-    kind: str = Field(index=True)  # daily/weekly/monthly/quarterly/yearly
+    kind: str = Field(index=True)  # daily/weekly/monthly/quarterly/half_year/yearly
     period_start: dt.date
+    period_end: dt.date | None = None
     vault_path: str | None = None
     commitments_json: str | None = None
+    status: str = Field(default="open", index=True)  # open / done / skipped
+    prefill_json: str | None = Field(default=None, sa_column=Column(Text))   # what Kairo gathered
+    answers_json: str | None = Field(default=None, sa_column=Column(Text))   # the owner's answers
+    created_at: datetime | None = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+
+class OnboardingAnswer(SQLModel, table=True):
+    """The owner's onboarding answers (source of truth; the vault files are rendered from them)."""
+
+    __tablename__ = "onboarding_answers"
+    question_id: str = Field(primary_key=True)
+    value: str = Field(sa_column=Column(Text, nullable=False))
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class SchoolEvent(SQLModel, table=True):
@@ -132,6 +197,21 @@ class Grade(SQLModel, table=True):
     date: dt.date
     grade: float
     weight: float = 1.0
+    title: str | None = None
+
+
+class Flashcard(SQLModel, table=True):
+    """Spaced repetition (Leitner boxes 1-5)."""
+
+    __tablename__ = "flashcards"
+    id: int | None = Field(default=None, primary_key=True)
+    subject: str = Field(index=True)
+    topic: str | None = None
+    front: str = Field(sa_column=Column(Text, nullable=False))
+    back: str = Field(sa_column=Column(Text, nullable=False))
+    box: int = 1
+    due: dt.date = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Lerndoku(SQLModel, table=True):
@@ -140,6 +220,76 @@ class Lerndoku(SQLModel, table=True):
     raw_notes: str | None = Field(default=None, sa_column=Column(Text))
     draft_path: str | None = None
     status: str = "draft"  # draft / approved
+
+
+class Call(SQLModel, table=True):
+    """Kairo "calls" the owner: a push opens a voice session that starts with `opening`."""
+
+    __tablename__ = "calls"
+    id: int | None = Field(default=None, primary_key=True)
+    reason: str
+    opening: str = Field(sa_column=Column(Text, nullable=False))
+    status: str = Field(default="ringing", index=True)  # ringing / answered / ended / missed
+    created_at: datetime = Field(default_factory=utcnow)
+    answered_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class Transaction(SQLModel, table=True):
+    """Spending (phase 3): Apple Pay Wallet trigger, UBS camt.053 import, later Finch. Read only."""
+
+    __tablename__ = "transactions"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(index=True)
+    amount: float                       # negative = money out
+    currency: str = "CHF"
+    merchant: str | None = None
+    category: str = Field(default="other", index=True)
+    source: str = "wallet"              # wallet / camt / manual / finch
+    card: str | None = None
+    note: str | None = None
+    dedupe: str = Field(unique=True)
+
+
+class HealthDay(SQLModel, table=True):
+    __tablename__ = "health_days"
+    date: dt.date = Field(primary_key=True)
+    steps: int | None = None
+    sleep_h: float | None = None
+    resting_hr: int | None = None
+    active_kcal: int | None = None
+    workout_min: int | None = None
+    weight_kg: float | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Person(SQLModel, table=True):
+    __tablename__ = "people"
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    relation: str | None = None
+    birthday: dt.date | None = None
+    notes: str | None = Field(default=None, sa_column=Column(Text))
+    last_contact: dt.date | None = None
+    contact_every_days: int | None = None
+
+
+class Chore(SQLModel, table=True):
+    __tablename__ = "chores"
+    id: int | None = Field(default=None, primary_key=True)
+    title: str
+    every_days: int = 7
+    last_done: dt.date | None = None
+
+
+class ShoppingItem(SQLModel, table=True):
+    __tablename__ = "shopping_items"
+    id: int | None = Field(default=None, primary_key=True)
+    text: str
+    done: bool = Field(default=False, index=True)
+    added_at: datetime = Field(default_factory=utcnow)
+    done_at: datetime | None = None
+    source: str = "app"
 
 
 class ChatThread(SQLModel, table=True):
