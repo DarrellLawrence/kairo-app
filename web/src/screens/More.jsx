@@ -393,11 +393,42 @@ function BootCheckPage({ check }) {
           <List>
             {check.checks.map((c) => (
               <ListRow key={c.name} title={c.name} subtitle={c.detail} wrap
-                value={<Badge tone={c.ok ? 'ok' : 'danger'} pop={false}>{c.ok ? 'OK' : 'Failed'}</Badge>} />
+                value={c.ok && c.level === 'warn' ? <Badge tone="warn" pop={false}>To do</Badge>
+                  : <Badge tone={c.ok ? 'ok' : 'danger'} pop={false}>{c.ok ? 'OK' : 'Failed'}</Badge>} />
             ))}
           </List>
         </>
       )}
+    </Page>
+  )
+}
+
+/* The self-test (fix P0): the owner-chat path adding a real task, context, voice and browser, with proof. */
+function SelfTestPage({ st }) {
+  if (!st) return <Page title="Self-test" tabbar><EmptyState icon={<IconShield />} title="No self-test yet" text="It runs after every update and at every boot." /></Page>
+  const c = st.checks || {}
+  const rows = [
+    ['Safety hook', c.hook_deny && c.hook_allow, c.hook_deny ? 'blocks what it must, lets Kairo tools through' : 'broken'],
+    ['Tool server', c.mcp === 'connected', c.mcp],
+    ['All tools reach the model', (c.tools_missing || []).length === 0, (c.tools_missing || []).length ? `missing: ${c.tools_missing.join(', ')}` : 'all listed'],
+    ['Adds a task like a chat message', c.task_added, st.proof?.task ? `"${st.proof.task.title}", due ${new Date(st.proof.task.due).toLocaleString()} (removed again)` : 'no task'],
+    ['Profile and Goals in the prompt', c.context === 'empty' ? 'warn' : (c.profile && c.goals),
+      c.context === 'empty' ? 'No context yet: do the onboarding (Today → Get to know you)' : (c.profile && c.goals ? 'yes' : 'notes exist but do not reach the model')],
+    ['Personality is current', c.personality !== 'older', c.personality],
+    ['Claude', c.claude === 'ok', c.claude],
+    ...(c.voice === null || c.voice === undefined ? [] : [['Voice: real transcription', c.voice, st.proof?.transcription ? `heard "${st.proof.transcription}"` : (st.details?.voice?.reason || '')]]),
+    ...(c.browser === null || c.browser === undefined ? [] : [['Browser', c.browser, st.details?.browser?.reason || 'renders a page']]),
+  ]
+  return (
+    <Page title="Self-test" tabbar>
+      <p className="k-hello">{st.ok ? 'Everything works the way your messages use it.' : `Failed: ${st.reason}`} {new Date(st.at).toLocaleString()} ({st.seconds}s)</p>
+      <List>
+        {rows.map(([name, ok, detail]) => (
+          <ListRow key={name} title={name} subtitle={String(detail ?? '')} wrap
+            value={ok === 'warn' ? <Badge tone="warn" pop={false}>To do</Badge>
+              : <Badge tone={ok ? 'ok' : 'danger'} pop={false}>{ok ? 'OK' : 'Failed'}</Badge>} />
+        ))}
+      </List>
     </Page>
   )
 }
@@ -497,6 +528,10 @@ function SystemPage() {
               subtitle={!google ? 'Unknown' : google.signed_out ? 'Signed out: sign in again' : google.read ? `Connected${googleEnd ? ` · ends ${new Date(googleEnd * 1000).toLocaleDateString()}` : ''}` : 'Not connected yet'}
               value={<Badge tone={googleOk ? 'ok' : 'warn'} pop={false}>{googleOk ? 'OK' : 'Fix'}</Badge>}
               onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
+            <ListRow icon={<IconShield />} title="Self-test" chevron
+              subtitle={status?.selftest ? `${new Date(status.selftest.at).toLocaleString()}${status.selftest.ok ? '' : ` · ${status.selftest.reason}`}` : 'Not run yet'}
+              value={status?.selftest ? <Badge tone={status.selftest.ok ? 'ok' : 'danger'} pop={false}>{status.selftest.ok ? 'OK' : 'Failed'}</Badge> : undefined}
+              onClick={() => stack.push('Self-test', () => <SelfTestPage st={status?.selftest} />)} />
             <ListRow icon={<IconShield />} title="Last boot check" chevron
               subtitle={boot ? new Date(boot.time).toLocaleString() : 'Not run yet'}
               value={boot ? <Badge tone={boot.all_ok ? 'ok' : 'danger'} pop={false}>{boot.all_ok ? 'OK' : 'Failed'}</Badge> : undefined}

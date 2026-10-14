@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_selftest_tools import FAKE_CLAUDE, free_port, post
+from tests.test_selftest_tools import FAKE_CLAUDE, free_port, post, vault
 
 APP = os.environ.get("KAIRO_RELEASE_APP", "")
 pytestmark = pytest.mark.skipif(not APP, reason="CI release-tools job only (KAIRO_RELEASE_APP)")
@@ -39,6 +39,7 @@ def release(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("release")
     data = tmp / "data"
     (data / "db").mkdir(parents=True)
+    vault(data)                                                # Profile + Goals: the self-test checks they reach the model
     port = free_port()
     # Like kairo.env from the installer: the release's config + the owner's changes (none yet).
     values = {"KAIRO_DATA_DIR": str(data), "KAIRO_CONFIG_OVERRIDES": str(data / "config"),
@@ -89,7 +90,8 @@ def test_the_release_builds_its_config(release):
 def test_selftest_passes_on_the_release(release):
     r = post(release[0], "/api/selftest/tools?notify=0")
     assert r["ok"] is True, r
-    assert r["checks"]["mcp"] == "connected" and r["checks"]["tool_call"] is True and r["checks"]["hook_deny"] is True
+    c = r["checks"]
+    assert c["mcp"] == "connected" and c["tools_missing"] == [] and c["task_added"] is True and c["hook_deny"] is True
 
 
 def test_propose_action_creates_a_card(release):

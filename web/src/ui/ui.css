@@ -301,6 +301,7 @@
 .k-hero p { font: var(--t-callout); color: var(--text-2); margin: 0; max-width: 34ch; }
 .k-warnchip { display: inline-flex; align-items: center; gap: 6px; margin: var(--s-3) 0 0; padding: 6px 12px; border-radius: var(--r-pill); border: 0; font: var(--t-caption); color: var(--warn); background: var(--warn-soft); box-shadow: inset 0 0 0 0.5px rgba(251, 191, 36, 0.3); }
 .k-warnchip svg { width: 14px; height: 14px; }
+.k-warnchip.danger { color: var(--danger); background: var(--danger-soft); box-shadow: inset 0 0 0 0.5px rgba(255, 90, 82, 0.35); }
 
 .k-streak { display: flex; flex-direction: column; align-items: center; text-align: center; padding: var(--s-5) var(--s-4) var(--s-4); }
 .k-flame { position: relative; width: 112px; height: 112px; display: grid; place-items: center; margin-bottom: var(--s-1); }

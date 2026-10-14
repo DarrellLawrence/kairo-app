@@ -282,3 +282,68 @@ def test_app_start_builds_config_and_notes_new_actions_once(settings, tmp_path):
         hk.run_once()
         hk.run_once()
         assert len(pushed) == 1 and "23 new actions" in pushed[0]
+
+
+# ---------------------------------------------------------------- the owner's edits in .md files ride along (owner 2026-10-14)
+
+BASE = "<!-- kairo-personality v1 -->\n# Who you are\nYou are Kairo.\n\n# Style\n- Ask before acting.\n- Short answers.\n"
+NEW = "<!-- kairo-personality v2 -->\n# Who you are\nYou are Kairo, chief of staff.\n\n# Style\n- Act, then say it in one line.\n- Short answers.\n"
+
+
+def release_with(tmp: Path, *texts: str) -> Path:
+    """A release whose personality.md history holds `texts` (oldest first; the last is current)."""
+    rel = defaults_copy(tmp)
+    h = history()
+    h["text"]["personality.md"] = []
+    h.setdefault("texts", {})["personality.md"] = {}
+    for t in texts:
+        cl.add_to_history(h, "personality.md", t.encode())
+    (rel / cl.HISTORY).write_text(json.dumps(h), encoding="utf-8")
+    (rel / "personality.md").write_text(texts[-1], encoding="utf-8")
+    return rel
+
+
+def test_owner_edits_are_carried_into_the_new_personality(tmp_path):
+    o = fresh_overrides(tmp_path)
+    mine = BASE.replace("- Short answers.\n", "- Short answers.\n- Call me D.\n")       # the owner's own line
+    (o / "personality.md").write_text(mine.replace("\n", "\r\n"), encoding="utf-8", newline="")   # Notepad
+    rel = release_with(tmp_path, BASE, NEW)
+    out, report = build(tmp_path, o, rel)
+    eff = (out / "personality.md").read_text(encoding="utf-8")
+    assert "chief of staff" in eff and "Act, then say it" in eff and "Ask before acting" not in eff   # the release's changes
+    assert "- Call me D." in eff                                                                     # the owner's edit
+    assert eff.startswith("<!-- kairo-personality v2 -->")                                         # so: current
+    assert report["merged"] == [{"file": "personality.md", "conflicts": 0}]
+    assert (o / "personality.md").read_text(encoding="utf-8") == eff                                # the override is rebased
+    assert (o / "personality.md.base").read_text(encoding="utf-8").strip() == cl.text_digest(NEW.encode())
+    backups = list((tmp_path / "data" / "backups").glob("config-before-merge-*/personality.md"))
+    assert len(backups) == 1 and "Call me D" in backups[0].read_text(encoding="utf-8")
+    out, report = build(tmp_path, o, rel)                                                            # nothing new: untouched
+    assert report["merged"] == [] and (out / "personality.md").read_text(encoding="utf-8") == eff
+    assert not (out / "personality.md.base").exists()
+
+
+def test_where_both_changed_the_same_line_the_owner_wins(tmp_path):
+    o = fresh_overrides(tmp_path)
+    (o / "personality.md").write_text(BASE.replace("- Ask before acting.", "- Never ask, just do it."), encoding="utf-8")
+    (o / "personality.md.base").write_text(cl.text_digest(BASE.encode()), encoding="utf-8")
+    out, report = build(tmp_path, o, release_with(tmp_path, BASE, NEW))
+    eff = (out / "personality.md").read_text(encoding="utf-8")
+    assert "- Never ask, just do it." in eff and "Act, then say it" not in eff and "chief of staff" in eff
+    assert report["merged"] == [{"file": "personality.md", "conflicts": 1}]
+
+
+def test_an_edit_next_to_a_release_change_keeps_both():
+    """The owner added a line right below one the release reworded: no conflict, both apply."""
+    base = "# Who\nYou are Kairo.\n- Ask first.\n"
+    mine = "# Who\nYou are Kairo.\n- Ask first.\n- Call me D.\n"
+    new = "<!-- kairo-personality v7 -->\n# Who\nYou are Kairo, chief.\n- Act.\n"
+    merged, conflicts = cl.merge3(base, mine, new)
+    assert merged == "<!-- kairo-personality v7 -->\n# Who\nYou are Kairo, chief.\n- Act.\n- Call me D.\n" and conflicts == 0
+
+
+def test_merge3_basics():
+    merged, conflicts = cl.merge3("a\nb\nc\n", "a\nB\nc\n", "a\nb\nc\nd\n")
+    assert merged == "a\nB\nc\nd\n" and conflicts == 0
+    merged, conflicts = cl.merge3("a\nb\nc\n", "a\nX\nc\n", "a\nY\nc\n")
+    assert merged == "a\nX\nc\n" and conflicts == 1
