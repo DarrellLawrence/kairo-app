@@ -18,9 +18,10 @@ if ($Interactive) {
 $P = Get-KairoPaths $Root
 $checks = New-Object System.Collections.Generic.List[object]
 
-function Add-Check([string]$Name, [bool]$Ok, [string]$Detail) {
-    $checks.Add([pscustomobject]@{ name = $Name; ok = $Ok; detail = $Detail })
-    if ($Ok) { Write-Ok "$Name - $Detail" } else { Write-Bad "$Name - $Detail" }
+# Level 'warn': nothing is broken, but there is something to do (yellow on the More screen).
+function Add-Check([string]$Name, [bool]$Ok, [string]$Detail, [string]$Level = '') {
+    $checks.Add([pscustomobject]@{ name = $Name; ok = $Ok; detail = $Detail; level = $Level })
+    if (-not $Ok) { Write-Bad "$Name - $Detail" } elseif ($Level -eq 'warn') { Write-Warn "$Name - $Detail" } else { Write-Ok "$Name - $Detail" }
 }
 
 if ($Interactive) { Write-Step 'Kairo check' }
@@ -43,9 +44,13 @@ if ($t -and $t.PSObject.Properties['checks'] -and $t.checks) {
     $toolsOk = [bool]$c.hook_deny -and [bool]$c.hook_allow -and [string]$c.mcp -eq 'connected' -and $missing.Count -eq 0 -and
         ($(if ($c.PSObject.Properties['task_added']) { [bool]$c.task_added } else { [bool]$c.tool_call }))
     Add-Check 'Kairo tools' $toolsOk $(if ($toolsOk) { 'safety hook, tool server, all tools, and a real task added like a chat message' } else { [string]$t.reason })
-    if ($c.PSObject.Properties['profile']) {
-        $ctxOk = [bool]$c.profile -and [bool]$c.goals -and [string]$c.personality -ne 'older'
-        Add-Check 'Context' $ctxOk $(if ($ctxOk) { 'Profile, Goals and the current personality reach the model' } else { [string]$t.reason })
+    if ($c.PSObject.Properties['context']) {
+        # An empty vault (new install) is a to-do, not a failure; notes that don't reach the model are.
+        $state = [string]$c.context
+        $ctxOk = $state -ne 'missing' -and [string]$c.personality -ne 'older'
+        $warn = @(if ($t.PSObject.Properties['warnings']) { $t.warnings } else { @() }) | Select-Object -First 1
+        $detail = if (-not $ctxOk) { [string]$t.reason } elseif ($state -eq 'empty') { [string]$warn } else { 'Profile, Goals and the current personality reach the model' }
+        Add-Check 'Context' $ctxOk $detail $(if ($ctxOk -and $state -eq 'empty') { 'warn' } else { '' })
     }
     $claudeOk = [string]$c.claude -eq 'ok'
     Add-Check 'Claude login' $claudeOk $(if ($claudeOk) { "answers ($($t.seconds)s for the whole self-test)" } else { [string]$t.reason })

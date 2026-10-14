@@ -393,7 +393,8 @@ function BootCheckPage({ check }) {
           <List>
             {check.checks.map((c) => (
               <ListRow key={c.name} title={c.name} subtitle={c.detail} wrap
-                value={<Badge tone={c.ok ? 'ok' : 'danger'} pop={false}>{c.ok ? 'OK' : 'Failed'}</Badge>} />
+                value={c.ok && c.level === 'warn' ? <Badge tone="warn" pop={false}>To do</Badge>
+                  : <Badge tone={c.ok ? 'ok' : 'danger'} pop={false}>{c.ok ? 'OK' : 'Failed'}</Badge>} />
             ))}
           </List>
         </>
@@ -411,7 +412,8 @@ function SelfTestPage({ st }) {
     ['Tool server', c.mcp === 'connected', c.mcp],
     ['All tools reach the model', (c.tools_missing || []).length === 0, (c.tools_missing || []).length ? `missing: ${c.tools_missing.join(', ')}` : 'all listed'],
     ['Adds a task like a chat message', c.task_added, st.proof?.task ? `"${st.proof.task.title}", due ${new Date(st.proof.task.due).toLocaleString()} (removed again)` : 'no task'],
-    ['Profile and Goals in the prompt', c.profile && c.goals, c.profile && c.goals ? 'yes' : 'missing'],
+    ['Profile and Goals in the prompt', c.context === 'empty' ? 'warn' : (c.profile && c.goals),
+      c.context === 'empty' ? 'No context yet: do the onboarding (Today → Get to know you)' : (c.profile && c.goals ? 'yes' : 'notes exist but do not reach the model')],
     ['Personality is current', c.personality !== 'older', c.personality],
     ['Claude', c.claude === 'ok', c.claude],
     ...(c.voice === null || c.voice === undefined ? [] : [['Voice: real transcription', c.voice, st.proof?.transcription ? `heard "${st.proof.transcription}"` : (st.details?.voice?.reason || '')]]),
@@ -423,7 +425,8 @@ function SelfTestPage({ st }) {
       <List>
         {rows.map(([name, ok, detail]) => (
           <ListRow key={name} title={name} subtitle={String(detail ?? '')} wrap
-            value={<Badge tone={ok ? 'ok' : 'danger'} pop={false}>{ok ? 'OK' : 'Failed'}</Badge>} />
+            value={ok === 'warn' ? <Badge tone="warn" pop={false}>To do</Badge>
+              : <Badge tone={ok ? 'ok' : 'danger'} pop={false}>{ok ? 'OK' : 'Failed'}</Badge>} />
         ))}
       </List>
     </Page>

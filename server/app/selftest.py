@@ -16,7 +16,8 @@ Failure categories decide what the installer does:
   toolchain  hook, MCP server or tools broken            -> roll back the update, push, red chip
   claude     logged out / usage limit / CLI down         -> push, red chip (an older version can't fix it)
   model      wired, but the model didn't add the task    -> push, red chip
-  context    no Profile/Goals in the prompt              -> push, red chip
+  context    Profile/Goals notes exist but don't reach the model -> push, red chip
+             (an empty vault on a new install is not broken: a yellow "no context yet" only)
   config     personality.md older than the release       -> push, red chip
 """
 
@@ -58,26 +59,40 @@ def personality_version_line(text: str) -> str:
     return m.group(0) if m else ""
 
 
-def context_checks(system_prompt: str, effective_config: Path, release_config: Path) -> dict:
-    """{profile, goals, personality: current|older|unknown, detail}"""
-    profile = f"## {CONTEXT_FOLDERS[0]}/" in system_prompt
-    goals = f"## {CONTEXT_FOLDERS[1]}/" in system_prompt
-    detail = []
-    if not (profile and goals):
-        missing = " and ".join(n for n, ok in (("Profile", profile), ("Goals", goals)) if not ok)
-        detail.append(f"the model gets no {missing} from the vault (vault/{CONTEXT_FOLDERS[0]}, vault/{CONTEXT_FOLDERS[1]} empty "
-                      "or not synced: do the onboarding interview or check Syncthing)")
+def _has_notes(folder: Path) -> bool:
+    if not folder.is_dir():
+        return False
+    return any(p.is_file() and "chats" not in p.relative_to(folder).parts
+               and p.read_text(encoding="utf-8", errors="replace").strip() for p in folder.rglob("*.md"))
+
+
+def context_checks(system_prompt: str, effective_config: Path, release_config: Path, vault_dir: Path) -> dict:
+    """{profile, goals, state: ok|empty|missing, personality: current|older|unknown, detail, warning}.
+    empty = the vault has no Profile/Goals notes yet (a new install, not broken: yellow);
+    missing = it has them but they don't reach the model (broken: red)."""
+    found = {name: f"## {folder}/" in system_prompt for name, folder in zip(("Profile", "Goals"), CONTEXT_FOLDERS)}
+    has = {name: _has_notes(Path(vault_dir) / folder) for name, folder in zip(("Profile", "Goals"), CONTEXT_FOLDERS)}
+    lost = [n for n in found if not found[n] and has[n]]
+    empty = [n for n in found if not found[n] and not has[n]]
+    detail, warning = [], ""
+    if lost:
+        detail.append(f"the vault has {' and '.join(lost)} notes, but they don't reach the model")
+    state = "missing" if lost else ("empty" if empty else "ok")
+    if empty and not lost:
+        warning = (f"No context yet ({' and '.join(empty)} empty): do the onboarding (Today -> Get to know you) "
+                   "so Kairo knows you")
     try:
         mine = personality_version((Path(effective_config) / "personality.md").read_text(encoding="utf-8"))
         release = personality_version((Path(release_config) / "personality.md").read_text(encoding="utf-8"))
     except OSError as exc:
         mine, release = 0, 0
         detail.append(f"personality.md: {exc}")
-    state = "unknown" if not release else ("older" if mine < release else "current")
-    if state == "older":
-        detail.append(f"personality.md is v{mine}, this release has v{release}: data/config/personality.md is an old copy "
-                      "(delete it to use the release's, or merge your changes into the new one)")
-    return {"profile": profile, "goals": goals, "personality": state, "detail": "; ".join(detail)}
+    personality = "unknown" if not release else ("older" if mine < release else "current")
+    if personality == "older":
+        detail.append(f"personality.md is v{mine}, this release has v{release}: carrying your edits into the new "
+                      "version didn't work (see kairo.log)")
+    return {"profile": found["Profile"], "goals": found["Goals"], "state": state, "personality": personality,
+            "detail": "; ".join(detail), "warning": warning}
 
 
 def hook_checks(workspace_dir: Path, env: dict[str, str]) -> dict:
@@ -119,10 +134,12 @@ def verdict(*, hooks: dict, mcp: str, listed: list[str], expected: list[str], to
     missing = sorted(set(expected) - set(listed))
     checks = {"hook_deny": hooks["deny"], "hook_allow": hooks["allow"], "mcp": mcp, "tools_missing": missing,
               "tool_call": tool_arrived, "task_added": task_found, "claude": claude_status,
-              "profile": context["profile"], "goals": context["goals"], "personality": context["personality"]}
+              "profile": context["profile"], "goals": context["goals"], "context": context["state"],
+              "personality": context["personality"]}
+    warnings = [context["warning"]] if context.get("warning") else []
 
     def fail(category: str, reason: str) -> dict:
-        return {"ok": False, "category": category, "reason": reason, "checks": checks}
+        return {"ok": False, "category": category, "reason": reason, "checks": checks, "warnings": warnings}
 
     if not hooks["deny"] or not hooks["allow"]:
         return fail("toolchain", "the safety hook doesn't work: " + hooks["detail"])
@@ -140,8 +157,8 @@ def verdict(*, hooks: dict, mcp: str, listed: list[str], expected: list[str], to
         return fail("toolchain", "the task tool ran but no task was saved")
     if not tool_arrived:
         return fail("model", "the model didn't add the test task although its tools work (it asked or refused instead of acting)")
-    if not (context["profile"] and context["goals"]):
+    if context["state"] == "missing":
         return fail("context", context["detail"])
     if context["personality"] == "older":
         return fail("config", context["detail"])
-    return {"ok": True, "category": None, "reason": "", "checks": checks}
+    return {"ok": True, "category": None, "reason": "", "checks": checks, "warnings": warnings}
