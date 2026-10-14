@@ -346,7 +346,7 @@ def close(s: Session, loop_id: int, reason: str, *, now: dt.datetime | None = No
 
 
 def _close(loop: OpenLoop, reason: str, now: dt.datetime) -> None:
-    loop.status = {"done": "done", "sent": "done", "answered": "done", "dropped": "dropped"}.get(reason, "stale")
+    loop.status = {"done": "done", "sent": "done", "answered": "done", "dropped": "dropped"}.get(reason, "stale")   # automated -> stale
     loop.close_reason = reason
     loop.closed_at = now
     loop.next_at = None
@@ -376,6 +376,28 @@ def _email(sender: str | None) -> str | None:
     return (m.group(1) if m else (sender or "")).strip().lower() or None
 
 
+AUTOMATED_LOCAL = re.compile(r"^(no-?reply|do-?not-?reply|donotreply|noreply|notifications?|newsletters?|news|marketing|"
+                             r"promo(tions)?|mailer(-daemon)?|bounces?|updates?|alerts?|digest)([+.-].*)?$", re.I)   # info@, hello@, team@: by headers
+AUTOMATED_DOMAIN = re.compile(r"(mailchimp|sendgrid|mailgun|mcsv\.net|amazonses|sparkpost|hubspot|klaviyo|brevo|sendinblue|"
+                              r"constantcontact|mail\.instagram|facebookmail|linkedin\.com|accounts\.google)", re.I)
+BULK_HEADERS = ("list-unsubscribe", "list-id")
+
+
+def automated_sender(sender: str | None) -> bool:
+    """Newsletters, notifications, promos: never a ping, never a loop. Real people, school, work are."""
+    email = _email(sender) or ""
+    local, _, domain = email.partition("@")
+    return bool(AUTOMATED_LOCAL.match(local) or AUTOMATED_DOMAIN.search(domain))
+
+
+def automated_headers(headers: dict[str, str]) -> bool:
+    if any(h in headers for h in BULK_HEADERS):
+        return True
+    if (headers.get("precedence") or "").lower() in ("bulk", "list", "junk"):
+        return True
+    return (headers.get("auto-submitted") or "no").lower() != "no"
+
+
 def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dict:
     """Bring the table in line with mail triage, tasks and school dates.
     `answered(thread_id, since) -> bool | None`: has the owner already replied in Gmail?"""
@@ -383,7 +405,7 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dic
     since_cut = utcnow() - dt.timedelta(days=30)
     for m in s.exec(select(TriagedEmail).where(TriagedEmail.category == "reply")
                     .where(TriagedEmail.triaged_at >= since_cut)).all():
-        if m.suspicious:
+        if m.suspicious or automated_sender(m.sender):
             continue
         due = dt.datetime.combine(m.deadline, dt.time(18), tzinfo=tz) if m.deadline else None
         if m.done:
@@ -544,6 +566,11 @@ class LoopEngine:
         pick = next((l for l in due if l.urgency == "urgent" or l in fresh_replies or not busy), None)
         if pick is None:
             return json.dumps({**counts, "raised": None, "why": "in a calendar event"})
+        if pick.kind == "reply" and pick.source == "email" and self._is_bulk(pick):
+            _close(pick, "automated", now)          # a newsletter or notification after all: never a ping
+            s.add(pick)
+            s.commit()
+            return json.dumps({**counts, "raised": None, "why": "automated mail"})
         if pick.kind in ("reply", "waiting", "promise") and draft_of(pick) is None:
             try:
                 self.draft(ctx, pick)
@@ -559,6 +586,18 @@ class LoopEngine:
         audit(s, actor="backend", action="proactive.ping", outcome=f"loop #{pick.id}: {clip(body, 160)}")
         mark_raised(s, pick, now, tz, self.times)
         return json.dumps({**counts, "raised": pick.id})
+
+    def _is_bulk(self, loop: OpenLoop) -> bool:
+        try:
+            g = self.google_read()
+            try:
+                msg = g.get(f"/gmail/v1/users/me/messages/{loop.source_ref}", format="metadata",
+                            metadataHeaders=["List-Unsubscribe", "List-Id", "Precedence", "Auto-Submitted"])
+            finally:
+                g.close()
+        except Exception:
+            return False
+        return automated_headers({k.lower(): v for k, v in _headers(msg).items()})
 
     def _busy(self, now: dt.datetime) -> bool:
         try:
