@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -148,6 +149,7 @@ class Jobs:
         self.bodies: dict[str, Callable] = dict(bodies or {})   # job name -> fn(JobContext)
         self.scheduler: BackgroundScheduler | None = None
         self._queue = threading.Lock()
+        self.hold_until = 0.0               # epoch seconds: an update is being installed, no new job starts
         self.bodies.setdefault("review.daily", self._daily_review_body)
         self.bodies.setdefault("review.big", self._big_review_body)
 
@@ -206,6 +208,10 @@ class Jobs:
 
     # ---------------------------------------------------------------- running
 
+    def busy(self) -> bool:
+        """A job is running right now (the auto-updater waits for it, fix P2.14)."""
+        return self._queue.locked()
+
     def run_job(self, name: str, *, forced: bool = False, **kwargs) -> JobRun:
         """Run one job now (scheduled or on demand). Returns its job_runs row."""
         body = self.bodies.get(name)
@@ -215,6 +221,8 @@ class Jobs:
             log.warning("job %s gave up waiting for the previous job", name)
             return self._log(name, "skipped", "previous job still running after 30 minutes")
         try:
+            if time.time() < self.hold_until:
+                return self._log(name, "skipped", "an update is being installed")
             with Session(self.engine) as s:
                 if killswitch.is_paused(s):
                     return self._log(name, "skipped", "kill switch is on")

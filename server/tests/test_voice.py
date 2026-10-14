@@ -149,22 +149,43 @@ def test_voice_memos_are_transcribed_then_sorted(migrated, tmp_path):
         assert failing.transcribe_memos(s) == 0 and s.get(Capture, cap2.id).status == "later"
 
 
+def heard(expected: str, text: str, share: float = 0.75) -> bool:
+    """Most words came through, allowing near misses: CI's small CPU Whisper hears Piper's "Mathe"
+    as "Matte" now and then (diagnosis D1.13). One misheard word must not fail the round trip;
+    a wrong language or garbage still does."""
+    import difflib
+    import re
+    want = re.findall(r"\w+", expected.lower())
+    got = re.findall(r"\w+", text.lower())
+    close = sum(1 for w in want if difflib.get_close_matches(w, got, n=1, cutoff=0.75))
+    return close >= share * len(want)
+
+
+def test_near_misses_count_and_garbage_does_not():
+    assert heard("Heute hast du eine Prüfung in Mathe.", "Heute hast du eine Prüfung in Matte.")
+    assert heard("Please call the dentist tomorrow.", "please call the dentist tomorrow")
+    assert not heard("Heute hast du eine Prüfung in Mathe.", "Today you have an exam in math.")
+    assert not heard("Please call the dentist tomorrow.", "")
+
+
 @pytest.mark.skipif(os.environ.get("KAIRO_VOICE_TEST") != "1", reason="real voice models: set KAIRO_VOICE_TEST=1 (CI voice job)")
 def test_real_voice_round_trip(tmp_path):
     """Kokoro says a sentence, Whisper (CPU) writes it down again; Piper speaks German."""
     models = os.environ.get("KAIRO_VOICE_MODELS") or str(tmp_path / "models")
     v = Voice(models)
     v.download()
-    wav, lang = v.speak("Kairo voice test. Please call the dentist tomorrow.")
+    en_text = "Kairo voice test. Please call the dentist tomorrow."
+    wav, lang = v.speak(en_text)
     assert lang == "en" and wav[:4] == b"RIFF"
     t = v.transcribe(wav, language="en")
     print("\nWHISPER HEARD:", t.text, t.took, v.status()["stt_device"])
-    assert "dentist" in t.text.lower()
-    de, lang = v.speak("Guten Morgen. Heute hast du eine Prüfung in Mathe.")
+    assert heard(en_text, t.text) and "dentist" in t.text.lower()
+    de_text = "Guten Morgen. Heute hast du eine Prüfung in Mathe."
+    de, lang = v.speak(de_text)
     assert lang == "de" and de[:4] == b"RIFF"
     t = v.transcribe(de, language="de")
     print("WHISPER HEARD (de):", t.text)
-    assert "mathe" in t.text.lower()
+    assert heard(de_text, t.text), t.text
 
 
 def test_owner_calls_kairo(client):

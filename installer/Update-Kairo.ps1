@@ -91,6 +91,7 @@ try {
     if ($CI) { $installArgs['CI'] = $true; $installArgs['ClaudeBin'] = (Read-EnvFile $P)['KAIRO_CLAUDE_BIN'] }
     & (Join-Path $setupDir 'installer\Install-Kairo.ps1') @installArgs
     $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0 -and -not $Auto) { Clear-UpdateHold $P }   # updated by hand: automatic updates resume
 } catch [System.OperationCanceledException] {
     $exitCode = 0
 } catch {

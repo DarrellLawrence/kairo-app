@@ -1,13 +1,16 @@
-# Kairo auto-update. Runs every minute as SYSTEM (task "\Kairo\Kairo Auto-Update").
+# Kairo auto-update. Runs every 5 minutes as SYSTEM (task "\Kairo\Kairo Auto-Update").
 #
 # 1. Asks GitHub for the newest tested release (cheap: an unchanged answer
 #    does not count against GitHub's limits).
-# 2. Newer than the running version, and not a version that already failed?
-#    Asks Kairo whether now is a good moment: no chat or job running, and not
-#    in the quiet hours unless the release notes say [urgent]. If not: try
-#    again next minute.
-# 3. Installs it with "Update Kairo" (backup, health check, automatic
-#    rollback) and leaves a one-line note that Kairo pushes to the iPhone.
+# 2. Newer than the running version (never older), not a version that ran and
+#    had to be undone, not one a manual rollback left (fix P2.13)? Asks Kairo
+#    whether now is a good moment: no chat, job, call or browser running, and
+#    not in the quiet hours unless the release notes say [urgent]. If not: try
+#    again in 5 minutes.
+# 3. Installs it with "Update Kairo" (backup, health check, self-test, automatic
+#    rollback) and leaves a one-line note that Kairo pushes to the iPhone. A
+#    hiccup before the switch (download, network) is retried later (10 min,
+#    30 min, 2 h, then every 6 h), never blacklisted.
 #
 #   -TestRelease <json>  CI only: {"tag_name": "...", "body": "...", "zip": "<path>"}
 #   -CI                  CI only: passed on to Update Kairo (no downloads, fake Claude)
@@ -19,7 +22,6 @@ Import-Module (Join-Path $PSScriptRoot 'Kairo.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'KairoSetup.psm1') -Force -DisableNameChecking
 
 $P = Get-KairoPaths $Root
-$statePath = Join-Path $P.Updater 'state.json'
 $logPath = Join-Path $P.Updater 'auto-update.log'
 
 function Write-Log([string]$Text) {
@@ -27,17 +29,6 @@ function Write-Log([string]$Text) {
     Add-Content -Path $logPath -Value "$(Get-Date -Format 's') $Text" -Encoding ASCII
 }
 
-function Read-UpdaterState {
-    $s = @{ etag = ''; release = $null; failed = @(); waiting = ''; down_since = '' }
-    if (Test-Path $statePath) {
-        $j = Get-Content -Raw $statePath | ConvertFrom-Json
-        foreach ($k in @('etag', 'release', 'waiting', 'down_since')) { if ($j.PSObject.Properties[$k]) { $s[$k] = $j.$k } }
-        if ($j.PSObject.Properties['failed']) { $s.failed = @($j.failed | Where-Object { $_ }) }
-    }
-    return $s
-}
-
-function Save-UpdaterState($S) { $S | ConvertTo-Json -Depth 5 | Set-Content -Path $statePath -Encoding ASCII }
 
 # GET releases/latest with If-None-Match. Returns @{ changed; release; etag }.
 function Get-LatestRelease([string]$Repo, [string]$Token, [string]$ETag) {
@@ -95,7 +86,7 @@ try {
     Protect-UpdaterFolder $P
     $installed = (Read-State $P).current
     if (-not $installed) { exit 0 }
-    $s = Read-UpdaterState
+    $s = Read-UpdaterState $P
 
     $zip = ''
     if ($TestRelease) {
@@ -106,33 +97,41 @@ try {
         $repo = [string](Read-ReleaseInfo $P.Current).update_repo
         $token = Get-GitHubToken $P
         if (-not $token) {
-            if ($s.waiting -ne 'no-token') { Write-Log 'No GitHub token: run Kairo Logins once. Auto-update is off until then.'; $s.waiting = 'no-token'; Save-UpdaterState $s }
+            if ($s.waiting -ne 'no-token') { Write-Log 'No GitHub token: run Kairo Logins once. Auto-update is off until then.'; $s.waiting = 'no-token'; Save-UpdaterState $P $s }
             exit 0
         }
         $r = Get-LatestRelease $repo $token ([string]$s.etag)
-        if ($r.changed) { $s.etag = $r.etag; $s.release = $r.release; Save-UpdaterState $s }
+        if ($r.changed) { $s.etag = $r.etag; $s.release = $r.release; Save-UpdaterState $P $s }
         if (-not $s.release) { exit 0 }
         $rel = @{ tag_name = [string]$s.release.tag_name; body = [string]$s.release.body }
     }
 
     $latest = $rel.tag_name -replace '^v', ''
-    if (-not $latest -or $latest -eq $installed) { exit 0 }
-    if (@($s.failed) -contains $latest) { exit 0 }   # failed before: only "Update Kairo" by hand retries it
+    if (-not $latest -or (Compare-KairoVersion $latest $installed) -le 0) { exit 0 }   # only newer versions
+    if (@($s.failed) -contains $latest) { exit 0 }   # ran and was undone: only "Update Kairo" by hand retries it
+    if ($s.hold -and (Compare-KairoVersion $latest ([string]$s.hold)) -le 0) { exit 0 }   # a manual rollback left it
+    if ($s.retry -and [string]$s.retry.version -eq $latest -and (Get-Date) -lt [datetime]$s.retry.next) { exit 0 }
     $urgent = $rel.body -match '\[urgent\]'
 
-    $ready = $null
-    try { $ready = Request-Kairo '/api/update/ready' @{ urgent = [bool]$urgent } } catch { $ready = $null }
+    # CI: a background job may be running for a few seconds; the real task just comes back in 5 minutes.
+    $tries = if ($CI) { 30 } else { 1 }
+    for ($i = 1; $i -le $tries; $i++) {
+        $ready = $null
+        try { $ready = Request-Kairo '/api/update/ready' @{ urgent = [bool]$urgent } } catch { $ready = $null }
+        if (-not ($ready -and -not $ready.ready -and $ready.reason -ne 'quiet') -or $i -eq $tries) { break }
+        Start-Sleep -Seconds 2
+    }
     if (-not $ready) {
         # Kairo is not answering. Usually it is just starting (after a reboot): wait.
         # Down for 30 minutes: install anyway, the new version may be the fix.
-        if (-not $s.down_since) { $s.down_since = (Get-Date).ToString('o'); Save-UpdaterState $s }
+        if (-not $s.down_since) { $s.down_since = (Get-Date).ToString('o'); Save-UpdaterState $P $s }
         if (((Get-Date) - [datetime]$s.down_since).TotalMinutes -lt 30 -and -not $urgent) { exit 0 }
         Write-Log 'Kairo has not answered for 30 minutes; installing without asking.'
     } else { $s.down_since = '' }
     if ($ready -and -not $ready.ready) {
         if ($s.waiting -ne $ready.reason) {
             Write-Log "Kairo $latest is ready; waiting ($($ready.reason))."
-            $s.waiting = [string]$ready.reason; Save-UpdaterState $s
+            $s.waiting = [string]$ready.reason; Save-UpdaterState $P $s
         }
         exit 0
     }
@@ -155,20 +154,35 @@ try {
     $now = (Read-State $P).current
     $s.waiting = ''
     $st = Read-SelfTest $latest $startedAt
+    $dr = Read-DeployResult $P $latest $startedAt
     if ($code -eq 0 -and $now -eq $latest) {
         $msg = "Kairo updated to $latest."
         if ($st -and -not $st.ok) { $msg += " Self-test: $(Format-Reason $st.reason)" }
         Write-UpdateNote $msg $true $installed $latest
         Write-Log "Done: running $latest. $(if ($st) { "Self-test: ok=$($st.ok) $($st.reason)" })"
+        $s.retry = $null
         $held = $false
-    } else {
+    } elseif ($dr -and $dr.stage -eq 'switched' -and -not (@($dr.warnings) -contains [string]$dr.category)) {
+        # It ran and failed its checks: a broken release. (Voice or browser failing because their
+        # install hit a hiccup is retried instead.)
         $s.failed = @(@($s.failed) + $latest | Select-Object -Unique)
-        $why = if ($st -and -not $st.ok) { " (self-test: $(Format-Reason $st.reason))" } else { '' }
+        $s.retry = $null
+        $why = if ($st -and -not $st.ok) { " (self-test: $(Format-Reason $st.reason))" } elseif ($dr.reason) { " ($(Format-Reason $dr.reason))" } else { '' }
         Write-UpdateNote "Kairo update to $latest failed and was undone$why. Still on $now." $false $installed $latest
         Write-Log "Failed: still on $now. $latest will not be tried again automatically."
         $exitCode = 1
+    } else {
+        $attempts = if ($s.retry -and [string]$s.retry.version -eq $latest) { [int]$s.retry.attempts + 1 } else { 1 }
+        $wait = @(10, 30, 120, 360)[[Math]::Min($attempts, 4) - 1]
+        $s.retry = @{ version = $latest; attempts = $attempts; next = (Get-Date).AddMinutes($wait).ToString('o') }
+        $why = if ($dr -and $dr.reason) { $dr.reason } elseif (Test-Path $err) { ((Get-Content $err | Select-Object -Last 3) -join ' ') } else { "exit code $code" }
+        Write-Log "Not installed (attempt $attempts, nothing changed, still on $now): $(Format-Reason $why). Next try in $wait minutes."
+        if ($attempts -eq 3) {
+            Write-UpdateNote "Kairo $latest could not be installed yet ($(Format-Reason $why)). Still on $now; it keeps trying." $false $installed $latest
+        }
+        $exitCode = 1
     }
-    Save-UpdaterState $s
+    Save-UpdaterState $P $s
 } catch {
     try { Write-Log "Error: $($_.Exception.Message)" } catch { }
     $exitCode = 1

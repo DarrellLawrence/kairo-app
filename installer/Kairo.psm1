@@ -100,6 +100,57 @@ function Save-State($P, $State) {
     $State | ConvertTo-Json -Depth 4 | Set-Content -Path $P.State -Encoding UTF8
 }
 
+# ---------------------------------------------------------------- the auto-updater's memory (updater\state.json)
+
+# failed: versions that were installed and had to be undone (never tried again automatically).
+# hold:   a manual rollback left this version; it and older ones are not installed again (fix P2.13).
+# retry:  {version, attempts, next}: a hiccup (download, network) is retried later, never blacklisted.
+function Read-UpdaterState($P) {
+    $s = @{ etag = ''; release = $null; failed = @(); waiting = ''; down_since = ''; hold = ''; retry = $null }
+    $path = Join-Path $P.Updater 'state.json'
+    if (Test-Path $path) {
+        $j = Get-Content -Raw $path | ConvertFrom-Json
+        foreach ($k in @('etag', 'release', 'waiting', 'down_since', 'hold', 'retry')) { if ($j.PSObject.Properties[$k]) { $s[$k] = $j.$k } }
+        if ($j.PSObject.Properties['failed']) { $s.failed = @($j.failed | Where-Object { $_ }) }
+    }
+    return $s
+}
+
+function Save-UpdaterState($P, $S) {
+    if (-not (Test-Path $P.Updater)) { Protect-UpdaterFolder $P }
+    $S | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $P.Updater 'state.json') -Encoding ASCII
+}
+
+function Set-UpdateHold($P, [string]$Version) { $s = Read-UpdaterState $P; $s.hold = $Version; Save-UpdaterState $P $s }
+function Clear-UpdateHold($P) { $s = Read-UpdaterState $P; if ($s.hold) { $s.hold = ''; Save-UpdaterState $P $s } }
+
+# Versions are yyyy.MM.dd.HHmm-<sha>[-suffix]. 1: A is newer, -1: older, 0: the same.
+function Compare-KairoVersion([string]$A, [string]$B) {
+    $pa = ($A -split '-', 2)[0]
+    $pb = ($B -split '-', 2)[0]
+    $c = 0
+    try { $c = ([version]$pa).CompareTo([version]$pb) } catch { $c = [string]::CompareOrdinal($pa, $pb) }
+    if ($c -eq 0) { $c = [string]::CompareOrdinal($A, $B) }
+    return [Math]::Sign($c)
+}
+
+# How far an install got: "prepare" (nothing switched yet) or "switched" (the new version ran and
+# was checked). The auto-updater blacklists only a version that ran and failed (fix P2.13).
+function Write-DeployResult($P, [string]$Version, [string]$Stage, $Ok, [string]$Category = '', [string]$Reason = '', [string[]]$Warnings = @()) {
+    if (-not (Test-Path $P.Updater)) { Protect-UpdaterFolder $P }
+    [pscustomobject]@{ version = $Version; stage = $Stage; ok = $Ok; category = $Category; reason = $Reason; warnings = @($Warnings)
+                       at = (Get-Date).ToString('o') } |
+        ConvertTo-Json | Set-Content -Path (Join-Path $P.Updater 'deploy-result.json') -Encoding ASCII
+}
+
+function Read-DeployResult($P, [string]$Version, [datetime]$Since) {
+    $f = Join-Path $P.Updater 'deploy-result.json'
+    if (-not (Test-Path $f)) { return $null }
+    try { $j = Get-Content -Raw $f | ConvertFrom-Json } catch { return $null }
+    if ([string]$j.version -ne $Version -or [datetime]$j.at -lt $Since) { return $null }
+    return $j
+}
+
 function Read-ReleaseInfo([string]$AppDir) {
     return Get-Content -Raw -Path (Join-Path $AppDir 'release.json') | ConvertFrom-Json
 }
@@ -472,8 +523,8 @@ function Remove-UnusedToolSites($P) {
 # tools\voice-<hash>; models in data\models. An install problem never stops the install
 # itself: the self-test after the switch finds it and rolls back.
 function Install-Voice($P, [string]$ReleaseDir) {
-    if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return }
-    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-voice.txt'))) { return }
+    if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return $true }
+    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-voice.txt'))) { return $true }
     try {
         $site = Install-ToolSite $P $ReleaseDir 'voice' 'voice (speech recognition and voices, about 2 GB)' $null
         Use-KairoEnv $P
@@ -483,16 +534,18 @@ function Install-Voice($P, [string]$ReleaseDir) {
         try { Invoke-Checked $py @('-m', 'app.voice', 'download') 'Downloading voice models' }
         finally { Pop-Location; Remove-Item Env:KAIRO_VOICE_SITE -ErrorAction SilentlyContinue }
         Write-Ok "Voice ready ($site)"
+        return $true
     } catch {
         Write-Warn "Voice not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
+        return $false
     }
 }
 
 # Kairo's own headless browser (Playwright + Chromium, about 300 MB) for reading the school
 # portal read-only, in tools\browser-<hash> (Chromium inside it, in ms-playwright).
 function Install-Browser($P, [string]$ReleaseDir) {
-    if ($env:KAIRO_SKIP_BROWSER -eq '1') { Write-Note 'Browser skipped (KAIRO_SKIP_BROWSER=1).'; return }
-    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-browser.txt'))) { return }
+    if ($env:KAIRO_SKIP_BROWSER -eq '1') { Write-Note 'Browser skipped (KAIRO_SKIP_BROWSER=1).'; return $true }
+    if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-browser.txt'))) { return $true }
     $chromium = {
         param($new, $py)
         $old = $env:PYTHONPATH
@@ -504,8 +557,10 @@ function Install-Browser($P, [string]$ReleaseDir) {
     try {
         $site = Install-ToolSite $P $ReleaseDir 'browser' 'Kairo''s browser (school portal, read-only)' $chromium
         Write-Ok "Browser ready ($site)"
+        return $true
     } catch {
         Write-Warn "Browser not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
+        return $false
     }
 }
 
@@ -535,6 +590,13 @@ function Backup-Database($P, [string]$Label, [string]$Python) {
         Select-Object -Skip 20 | Remove-Item -Force
     Write-Ok "database backed up to $dest"
     return $dest
+}
+
+# The copy taken by Backup-Database replaces the database. A journal left next to it would be
+# replayed into the restored file, so it goes too.
+function Restore-DatabaseBackup($P, [string]$Backup) {
+    foreach ($ext in @('-journal', '-wal', '-shm')) { Remove-Item -Force "$($P.Db)$ext" -ErrorAction SilentlyContinue }
+    Copy-Item -Force $Backup $P.Db
 }
 
 function Set-CurrentRelease($P, [string]$Version) {
@@ -634,14 +696,14 @@ function Register-BootCheckTask($P) {
         -Description 'Checks after every boot that Kairo, Claude, Tailscale and HTTPS came back.')
 }
 
-# Auto-update: every minute, as SYSTEM (it installs programs and restarts
+# Auto-update: every 5 minutes (fix P2.16), as SYSTEM (it installs programs and restarts
 # Kairo). Asks Kairo first; only installs when nothing is running and, unless
 # the release is marked [urgent], not in the quiet hours.
 function Register-AutoUpdateTask($P) {
     $script = Join-Path $P.Installer 'Kairo-AutoUpdate.ps1'
     $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Root `"$($P.Root)`""
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $taskArgs
-    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
     $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 45) -MultipleInstances IgnoreNew
@@ -712,13 +774,16 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
         return $false
     }
 
+    Write-DeployResult $P $version 'prepare' $null
     $newDir = Install-ReleaseFiles $P $SourceApp $version $Python
     Repair-LegacyToolSites $P
-    Install-Voice $P $newDir
-    Install-Browser $P $newDir
+    $warnings = @()
+    if (-not (Install-Voice $P $newDir)) { $warnings += 'voice' }
+    if (-not (Install-Browser $P $newDir)) { $warnings += 'browser' }
     $backup = Backup-Database $P "before-$version" $Python
 
     Write-Step 'Switching to the new version'
+    Write-DeployResult $P $version 'switched' $null '' '' $warnings
     Stop-Kairo $P
     Set-CurrentRelease $P $version
     Register-KairoTask $P $Svc
@@ -748,6 +813,8 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
         Save-State $P $state
         Remove-OldReleases $P $state
         Remove-UnusedToolSites $P
+        Write-DeployResult $P $version 'switched' $selftestOk $(if ($selftest) { [string]$selftest.category } else { '' }) `
+            $(if ($selftest) { [string]$selftest.reason } else { '' }) $warnings
         if ($selftestOk) { Write-Ok "Kairo $version is running"; return $true }
         Write-Bad 'There is no earlier version to go back to: Kairo keeps running, but what failed above does not work.'
         return $false
@@ -755,13 +822,17 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
 
     if ($healthy) { Write-Bad "Kairo $version started, but its self-test failed." }
     else { Write-Bad "Kairo $version did not start correctly."; Show-StartProblem $P }
+    Write-DeployResult $P $version 'switched' $false $(if ($selftest) { [string]$selftest.category } else { 'start' }) `
+        $(if ($selftest) { [string]$selftest.reason } elseif ($migrated) { 'did not start' } else { 'database update failed' }) $warnings
     if (-not $prev) {
         Stop-Kairo $P
         Write-Bad 'There is no earlier version to go back to. See C:\Kairo\data\logs\kairo.log'
         return $false
     }
     Write-Step "Going back to $prev"
-    Restore-Release $P $newDir $prev $backup
+    # A migration that failed half way can't be trusted to downgrade (SQLite keeps what it did):
+    # the backup taken before the update comes back instead (fix P2.15).
+    Restore-Release $P $newDir $prev $backup -UseBackup:(-not $migrated)
     # The version we went back to checks itself too (and clears the new version's red chip if it works).
     [void](Invoke-ToolSelfTest $P $prev -Quiet)
     return $false
@@ -810,14 +881,20 @@ function Get-SelfTestReason($R) {
     return [string]$R.reason
 }
 
-function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [string]$Backup) {
+function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [string]$Backup, [switch]$UseBackup) {
     Stop-Kairo $P
-    $rev = Get-HeadRevision (Get-ReleaseDir $P $Version)
-    $ok = $true
-    if ($rev) { $ok = Invoke-Alembic $P $CodeDirForDowngrade @('downgrade', $rev) }
-    if (-not $ok -and $Backup -and (Test-Path $Backup)) {
-        Write-Warn 'Schema downgrade failed; restoring the database backup taken before the update.'
-        Copy-Item -Force $Backup $P.Db
+    $ok = $false
+    if (-not $UseBackup) {
+        $rev = Get-HeadRevision (Get-ReleaseDir $P $Version)
+        $ok = $true
+        if ($rev) { $ok = Invoke-Alembic $P $CodeDirForDowngrade @('downgrade', $rev) }
+        if (-not $ok) { Write-Warn 'Schema downgrade failed.' }
+    }
+    if (-not $ok) {
+        if ($Backup -and (Test-Path $Backup)) {
+            Write-Warn "Restoring the database backup taken before the update ($Backup)."
+            Restore-DatabaseBackup $P $Backup
+        } else { Write-Bad 'There is no database backup from before the update to restore.' }
     }
     Set-CurrentRelease $P $Version
     Start-Kairo
