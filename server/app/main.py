@@ -666,6 +666,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          name=f"job-{name}", daemon=True).start()
         return {"started": name}
 
+    @app.get("/api/today")
+    def today_get():
+        """Everything the Today screen shows, in one call (v7 redesign)."""
+        from . import today as today_mod
+        day = dt.datetime.now(profile.tz).date()
+        events, cal_error = app.state.brief.calendar(day)
+        issues = []
+        if runner.brain.health().value != "ok":
+            issues.append(f"Claude: {runner.brain.health().value.replace('_', ' ')}")
+        boot = (status() or {}).get("boot_check") or {}
+        if boot and boot.get("all_ok") is False:
+            issues.append("Last boot check found a problem")
+        with session_for(engine) as s:
+            issues += brief._warnings(s)
+            return today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
+
     @app.get("/api/brief")
     def brief_get(date: str | None = None):
         try:
