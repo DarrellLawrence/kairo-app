@@ -214,7 +214,10 @@ class PA:
             log.info("message for %s: %s", p.name, exc)
             return
         if isinstance(out, dict) and str(out.get("text") or "").strip():
-            loop.draft_json = json.dumps({"text": str(out["text"]).strip()[:2000], "note": clip(out.get("reason"), 200),
+            from . import writer
+            checked = writer.polish(ctx.ask, str(out["text"]).strip()[:2000], level=level, language=self.profile.default_language,
+                                    voice=self._voice(), samples=writer.chat_samples(self.vault_dir, self.profile.name))
+            loop.draft_json = json.dumps({"text": checked["text"], "note": clip(out.get("reason"), 200),
                                           "subject": "Hi" if purpose != "happy birthday" else "Happy birthday!", "level": level})
             ctx.session.add(loop)
             ctx.session.commit()
@@ -546,9 +549,47 @@ def late_night_hint(s: Session, *, now: dt.datetime, first_tomorrow: dt.datetime
 
 # ---------------------------------------------------------------- 6. leaving the house
 
-def leaving_notice(*, weather: dict | None, stations: list[dict] | None, now: dt.datetime) -> str | None:
-    """Only when something is abnormal: delays, weather that matters. None on a normal day."""
+def destination(places: list, events: list[dict], now: dt.datetime):
+    """Where the owner is probably heading: the place named in the next calendar event today,
+    else the school/work place that applies today. Matching uses the private address too, on this PC."""
+    day = now.date()
+    active = [p for p in places if p.kind != "home" and p.active(day)]
+    for e in events:
+        try:
+            st = dt.datetime.fromisoformat(e["start"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if e.get("all_day") or st < now or st.date() != day:
+            continue
+        hay = f"{e.get('summary', '')} {e.get('location') or ''}".lower()
+        for p in active:
+            keys = [p.name.lower()] + [w for w in (p.address or "").lower().replace(",", " ").split() if len(w) > 4]
+            if any(k and k in hay for k in keys):
+                return p, st
+    for kind in ("school", "work"):
+        for p in active:
+            if p.kind == kind:
+                return p, None
+    return None, None
+
+
+def leaving_notice(*, weather: dict | None, stations: list[dict] | None, now: dt.datetime,
+                   connections: list[dict] | None = None, to: str | None = None) -> str | None:
+    """Only when something is abnormal: delays, cancellations, a better connection, weather that
+    matters. None on a normal day."""
     bits = []
+    cons = [c for c in connections or [] if c.get("departure")]
+    if cons:
+        first = cons[0]
+        dep = dt.datetime.fromisoformat(str(first["departure"]).replace("Z", "+00:00"))
+        arr = lambda c: dt.datetime.fromisoformat(str(c["arrival"]).replace("Z", "+00:00")) + dt.timedelta(minutes=c.get("delay") or 0)  # noqa: E731
+        if first.get("cancelled"):
+            bits.append(f"Your {dep.astimezone(now.tzinfo):%H:%M} {first.get('line') or 'connection'} to {to} is cancelled.")
+        elif (first.get("delay") or 0) >= 5:
+            bits.append(f"{first.get('line') or 'Your connection'} {dep.astimezone(now.tzinfo):%H:%M} to {to} is {first['delay']} min late.")
+        if bits and len(cons) > 1 and not cons[1].get("cancelled") and arr(cons[1]) < arr(first):
+            alt = dt.datetime.fromisoformat(str(cons[1]["departure"]).replace("Z", "+00:00"))
+            bits.append(f"Take the {alt.astimezone(now.tzinfo):%H:%M} instead, it gets there first.")
     for st in stations or []:
         for dep in st.get("departures") or []:
             try:

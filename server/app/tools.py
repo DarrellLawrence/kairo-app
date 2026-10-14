@@ -43,6 +43,7 @@ class ToolRunner:
         self.google_read = google_read
         self.profile = profile          # time zone for open loops
         self.schedule = schedule or {}
+        self.on_settings_change = None  # main re-applies settings when the owner changes one
 
     def run(self, decision: Decision) -> str:
         """Run an allowed tier 0-1 decision. Returns text for the model; errors are text too."""
@@ -240,6 +241,44 @@ class ToolRunner:
         from . import loops
         tz = self.profile.tz if self.profile else ZoneInfo("UTC")
         return loops, tz, datetime.now(tz), loops.good_times(self.schedule)
+
+    # ---------------------------------------------------------------- settings
+
+    def _settings_list(self, a: dict) -> str:
+        from . import prefs
+        with Session(self.engine) as s:
+            return json.dumps(prefs.public_view(s), default=str, ensure_ascii=False)
+
+    def _changed(self) -> None:
+        if self.on_settings_change:
+            self.on_settings_change()
+
+    def _settings_set(self, a: dict) -> str:
+        from . import prefs
+        with Session(self.engine) as s:
+            try:
+                prefs.set_key(s, a["key"], a["value"])
+            except prefs.PrefsError as exc:
+                raise ToolError(str(exc))
+        self._changed()
+        return f"Saved {a['key']}."
+
+    def _place_set(self, a: dict) -> str:
+        from . import prefs
+        with Session(self.engine) as s:
+            try:
+                p = prefs.place_set(s, {k: v for k, v in a.items() if v is not None})
+            except prefs.PrefsError as exc:
+                raise ToolError(str(exc))
+        self._changed()
+        return f"Saved {p.name} ({p.kind}{', station ' + p.station if p.station else ''})."
+
+    def _place_remove(self, a: dict) -> str:
+        from . import prefs
+        with Session(self.engine) as s:
+            gone = prefs.place_remove(s, a["name"])
+        self._changed()
+        return "Removed." if gone else f"No place called {a['name']}."
 
     def _debrief(self, a: dict) -> str:
         from . import debrief

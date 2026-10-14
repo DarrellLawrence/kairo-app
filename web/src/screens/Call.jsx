@@ -8,7 +8,7 @@ import { api } from '../api.js'
 import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
-import { speak, speakingLevel, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
+import { holdMic, listenLevel, releaseMic, speak, speakingLevel, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
 
 const BYE = /^(bye|goodbye|that'?s all|thanks,? bye|tsch(ü|ue)ss|ciao|adieu|auf wiederh|das war'?s|danke,? das war'?s)\b/i
 const LABEL = {
@@ -86,7 +86,7 @@ export default function Call({ callId: initialId, onClose }) {
   // While Kairo speaks, a second ear listens: talking over it stops the speech.
   const watchForBargeIn = async (abort) => {
     try {
-      const mon = await startRecording()
+      const mon = await listenLevel()
       if (live.current.phase !== 'speaking') { mon.cancel(); return }
       live.current.monitor = mon
       let ticks = 0
@@ -163,8 +163,11 @@ export default function Call({ callId: initialId, onClose }) {
     live.current.started = Date.now()
     const ws = new WebSocket(wsUrl())
     live.current.ws = ws
+    // Everything at once: the mic (asked once for the whole call), the chat line and the answer.
+    const micReady = holdMic().catch(() => {})
+    const wsReady = new Promise((r) => { ws.onopen = r; ws.onerror = r; setTimeout(r, 4000) })
     if (greet) await api(`/api/voice/calls/${idRef.current}/answer`, { method: 'POST', body: {} }).catch(() => {})
-    await new Promise((r) => { ws.onopen = r; setTimeout(r, 4000) })
+    await Promise.all([micReady, wsReady])
     if (greet) await say(call?.opening || 'Hi, it’s Kairo.')
     listen()
   }
@@ -180,8 +183,8 @@ export default function Call({ callId: initialId, onClose }) {
     const wasLive = l.on || l.ringing
     l.on = false
     l.ringing = false
-    if (l.rec?.heard?.()) l.rec.stop().then(sendAsVoiceNote)   // still talking: keep what was said
-    else l.rec?.cancel()
+    if (l.rec?.heard?.()) l.rec.stop().then((b) => { releaseMic(); sendAsVoiceNote(b) })   // still talking: keep what was said
+    else { l.rec?.cancel(); releaseMic() }
     l.monitor?.cancel()
     l.abort?.abort()
     stopSpeaking()

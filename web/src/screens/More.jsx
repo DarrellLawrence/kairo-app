@@ -522,6 +522,72 @@ function SystemPage() {
   )
 }
 
+const KINDS = ['home', 'school', 'work', 'training', 'other']
+
+/* Places and the settings you'd otherwise edit in config files. Same as saying it to Kairo. */
+function PrefsBlock() {
+  const toast = useToast()
+  const [d, setD] = useState(null)
+  const [edit, setEdit] = useState(null)
+  const load = useCallback(() => api('/api/settings').then(setD).catch(() => setD({ settings: {}, places: [] })), [])
+  useEffect(() => { load() }, [load])
+  const save = async (key, value) => {
+    try { setD(await api(`/api/settings/${key}`, { method: 'PUT', body: { value } })); toast.show({ text: 'Saved.' }) } catch (e) { toast.show({ text: e.message }) }
+  }
+  const savePlace = async () => {
+    try { setD(await api('/api/places', { method: 'POST', body: edit })); setEdit(null); toast.show({ text: 'Place saved.' }) } catch (e) { toast.show({ text: e.message }) }
+  }
+  const removePlace = async (name) => { setD(await api(`/api/places/${encodeURIComponent(name)}`, { method: 'DELETE' })); setEdit(null) }
+  if (!d) return <SkeletonCard lines={3} />
+  const st = d.settings || {}
+  const time = (label, value, onSave) => (
+    <label className="k-field">{label}<input type="time" defaultValue={value || ''} onBlur={(e) => e.target.value && e.target.value !== value && onSave(e.target.value)} /></label>
+  )
+  return (
+    <>
+      <SectionTitle>Places</SectionTitle>
+      <List>
+        {(d.places || []).map((p) => (
+          <ListRow key={p.name} icon={<IconPin />} title={p.name} chevron
+            subtitle={[p.kind, p.station && `station ${p.station}`, p.valid_from && `from ${p.valid_from}`, p.valid_until && `until ${p.valid_until}`].filter(Boolean).join(' · ')}
+            onClick={() => setEdit({ ...p })} />
+        ))}
+        <ListRow icon={<IconPin />} title="Add a place" subtitle="Home, school, work, training" onClick={() => setEdit({ name: '', kind: 'home' })} />
+      </List>
+      <p className="k-muted k-small k-pad">Or just tell Kairo: “my home station is …”. Only the station name is sent anywhere; an address stays on the PC.</p>
+      <SectionTitle>Times</SectionTitle>
+      <div className="k-pad">
+        {time('Quiet from', st.quiet_hours?.start, (v) => save('quiet_hours', { start: v, end: st.quiet_hours?.end || '06:30' }))}
+        {time('Quiet until', st.quiet_hours?.end, (v) => save('quiet_hours', { start: st.quiet_hours?.start || '22:30', end: v }))}
+        {time('Brief on weekdays', st.brief_times?.weekdays || '06:20', (v) => save('brief_times', { weekdays: v, weekends: st.brief_times?.weekends || '08:20' }))}
+        {time('Brief on weekends', st.brief_times?.weekends || '08:20', (v) => save('brief_times', { weekdays: st.brief_times?.weekdays || '06:20', weekends: v }))}
+        <label className="k-field">Most pings a day
+          <input type="number" min={1} max={20} defaultValue={st.max_pings || 6} onBlur={(e) => save('max_pings', Number(e.target.value))} />
+        </label>
+        <label className="k-field">Language
+          <select defaultValue={st.language || 'English'} onChange={(e) => save('language', e.target.value)}><option value="English">English</option><option value="German">Deutsch</option></select>
+        </label>
+      </div>
+      <Sheet open={!!edit} onClose={() => setEdit(null)} title={edit?.name ? edit.name : 'New place'}>
+        {edit && (
+          <>
+            <label className="k-field">Name<input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="Home, School, Boxing" /></label>
+            <label className="k-field">Kind<select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value })}>{KINDS.map((k) => <option key={k}>{k}</option>)}</select></label>
+            <label className="k-field">Nearest station<input value={edit.station || ''} onChange={(e) => setEdit({ ...edit, station: e.target.value })} placeholder="e.g. Schooltown" /></label>
+            <label className="k-field">Address (private, stays on the PC)<input value={edit.address || ''} onChange={(e) => setEdit({ ...edit, address: e.target.value })} /></label>
+            <label className="k-field">From (optional)<input type="date" value={edit.valid_from || ''} onChange={(e) => setEdit({ ...edit, valid_from: e.target.value })} /></label>
+            <label className="k-field">Until (optional)<input type="date" value={edit.valid_until || ''} onChange={(e) => setEdit({ ...edit, valid_until: e.target.value })} /></label>
+            <Button variant="primary" block disabled={!edit.name?.trim()} onClick={savePlace}>Save</Button>
+            {(d.places || []).some((p) => p.name === edit.name) && (
+              <Button variant="danger" block style={{ marginTop: 8 }} onClick={() => removePlace(edit.name)}>Remove</Button>
+            )}
+          </>
+        )}
+      </Sheet>
+    </>
+  )
+}
+
 function SettingsPage() {
   const toast = useToast()
   const stack = useStack()
@@ -544,6 +610,8 @@ function SettingsPage() {
   }
   return (
     <Page title="Settings">
+      <PrefsBlock />
+      <SectionTitle>Phone and account</SectionTitle>
       <List>
         <ListRow icon={<IconBell />} title="Notifications"
           subtitle={perm === 'unsupported' ? 'Open Kairo from the Home Screen first' : perm === 'granted' ? 'On · tap to reconnect' : 'Tap to turn on'}

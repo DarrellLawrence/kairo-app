@@ -25,6 +25,10 @@ actions:
   health.list:           0_read
   shopping.add:          1_internal
   people.note:           1_internal
+  settings.list:         0_read       # owner settings (not the gate, not permissions)
+  settings.set:          1_internal
+  place.set:             1_internal   # home / school / work / training; only station names leave the PC
+  place.remove:          1_internal
   debrief:               0_read       # PA rule 1: what's going on, by time of day
   loops.list:            0_read       # open loops: what is still waiting
   loops.add:             1_internal

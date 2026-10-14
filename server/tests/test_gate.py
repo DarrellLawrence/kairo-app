@@ -360,3 +360,28 @@ def test_people_note_can_store_an_email_but_only_a_valid_one(gate):
     ok = gate.decide(P + "people_note", {"name": "Marc", "email": "marc@example.com"}, ctx())
     assert (ok.verdict, ok.tier) == ("allow", 1)
     assert gate.decide(P + "people_note", {"name": "Marc", "email": "not an address"}, ctx()).verdict == "deny"
+
+
+# ---------------------------------------------------------------- settings by voice (written before the code)
+
+@pytest.mark.parametrize("tool,args,tier", [
+    ("settings_list", {}, 0),
+    ("settings_set", {"key": "quiet_hours", "value": {"start": "23:00", "end": "06:30"}}, 1),
+    ("settings_set", {"key": "max_pings", "value": 8}, 1),
+    ("place_set", {"name": "Home", "kind": "home", "station": "Hometown"}, 1),
+    ("place_set", {"name": "Work 2", "kind": "work", "station": "Worktown", "valid_from": "2027-08-01"}, 1),
+    ("place_remove", {"name": "Home"}, 1),
+])
+def test_settings_tools_are_internal(gate, tool, args, tier):
+    d = gate.decide(P + tool, args, ctx(origin="voice_note"))
+    assert (d.verdict, d.tier) == ("allow", tier)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("settings_set", {"key": "gate", "value": "off"}),                    # only listed settings exist
+    ("settings_set", {"key": "permissions", "value": {}}),
+    ("place_set", {"name": "Home", "kind": "castle"}),
+    ("place_set", {"name": "", "kind": "home"}),
+])
+def test_unknown_settings_are_denied(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"

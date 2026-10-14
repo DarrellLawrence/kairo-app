@@ -79,3 +79,32 @@ class Lookup:
                                  "time": stop.get("departure"), "platform": stop.get("platform"), "delay": stop.get("delay")})
                 out.append({"name": st.get("name"), "distance_m": st.get("distance"), "departures": deps})
         return out
+
+    # ---------------------------------------------------------------- by station name (saved places)
+
+    def station(self, name: str) -> dict | None:
+        """A station by name -> {name, lat, lon}. Only the station name is sent."""
+        with self._client() as c:
+            r = c.get(f"{TRANSPORT}/locations", params={"query": name, "type": "station"})
+            r.raise_for_status()
+            for st in r.json().get("stations") or []:
+                coord = st.get("coordinate") or {}
+                if st.get("id") and coord.get("x") is not None:
+                    return {"name": st.get("name"), "lat": coord["x"], "lon": coord["y"]}
+        return None
+
+    def connections(self, frm: str, to: str, *, limit: int = 3) -> list[dict]:
+        """Next connections between two stations: departure, arrival, delay (min), cancelled."""
+        with self._client() as c:
+            r = c.get(f"{TRANSPORT}/connections", params={"from": frm, "to": to, "limit": limit})
+            r.raise_for_status()
+            out = []
+            for cn in r.json().get("connections") or []:
+                dep, arr = cn.get("from") or {}, cn.get("to") or {}
+                sections = cn.get("sections") or []
+                first = next(((s.get("journey") or {}) for s in sections if s.get("journey")), {})
+                out.append({"departure": dep.get("departure"), "arrival": arr.get("arrival"),
+                            "delay": dep.get("delay") or 0, "line": f"{first.get('category') or ''}{first.get('number') or ''}".strip(),
+                            "platform": dep.get("platform"),
+                            "cancelled": any((s.get("journey") or {}).get("cancelled") for s in sections)})
+            return out

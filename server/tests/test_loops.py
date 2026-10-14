@@ -340,3 +340,24 @@ def test_promises_come_back_the_next_morning(env):
     with Session(env["engine"]) as s:
         loop = loops.add(s, kind="promise", what="send Lea the notes", who="Lea", due=None, now=WED, tz=TZ, times=TIMES)
         assert loops.aware(loop.next_at).astimezone(TZ).strftime("%a %H:%M") == "Thu 07:15"
+
+
+def test_automated_mail_never_becomes_a_ping(env):
+    assert loops.automated_sender("Galaxus <newsletter@galaxus.ch>")
+    assert loops.automated_sender("no-reply@accounts.google.com")
+    assert loops.automated_sender("Instagram <notification@mail.instagram.com>")
+    assert not loops.automated_sender("Mr. Keller <keller@school.example>")
+    assert not loops.automated_sender("Anna Meier <anna@example.com>")
+    pushes = Pushes()
+    env["fake"].add_message("promo", sender="Lisa from Shop <lisa@shop.example>", subject="Your cart", body="Come back!")
+    env["fake"].messages["promo"]["payload"]["headers"].append({"name": "List-Unsubscribe", "value": "<mailto:u@shop.example>"})
+    with Session(env["engine"]) as s:
+        s.add(TriagedEmail(message_id="nl", thread_id="t9", sender="Galaxus <newsletter@galaxus.ch>", subject="Deals",
+                           category="reply", triaged_at=dt.datetime.now(dt.timezone.utc), received_at=WED.astimezone(dt.timezone.utc)))
+        s.add(TriagedEmail(message_id="promo", thread_id="t-promo", sender="Lisa from Shop <lisa@shop.example>", subject="Your cart",
+                           category="reply", triaged_at=dt.datetime.now(dt.timezone.utc), received_at=WED.astimezone(dt.timezone.utc)))
+        s.commit()
+        out = json.loads(engine_for(env, pushes).run(Ctx(s, DRAFT), now=WED))
+        assert pushes.sent == [] and out["raised"] is None
+        assert [l.source_ref for l in s.exec(select(OpenLoop)).all()] == ["promo"]        # newsletter never tracked
+        assert s.exec(select(OpenLoop)).one().close_reason == "automated"                  # bulk header found when drafting

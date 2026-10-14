@@ -24,6 +24,7 @@ class Profile(BaseModel):
     gmail: str | None = None
     quiet_hours: QuietHours
     push_devices: list[str] = []
+    places: list[dict] = []   # seeds Settings -> Places on first start
 
     @property
     def tz(self) -> ZoneInfo:

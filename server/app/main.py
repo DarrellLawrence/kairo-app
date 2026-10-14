@@ -140,6 +140,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = asyncio.create_task(run_forever(Housekeeping(app)))
         if os.environ.get("KAIRO_SCHEDULER", "1") != "0":   # tests switch it off
             app.state.jobs.start()
+            if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
+                asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
         yield
         app.state.jobs.stop()
         task.cancel()
@@ -251,6 +253,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                                        calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
                                        vault_dir=settings.vault_dir, config_dir=settings.config_dir)
+    from . import prefs as prefs_mod
+
+    def _apply_prefs() -> None:
+        with session_for(engine) as s_:
+            prefs_mod.apply(prefs_mod.load(s_), schedule=app.state.jobs.schedule, profile=profile)
+        app.state.jobs.reload()
+
+    try:
+        with session_for(engine) as _s:
+            if not prefs_mod.places(_s) and profile.places:
+                for _p in profile.places:   # first start: places from profile.yaml become settings
+                    try:
+                        prefs_mod.place_set(_s, _p)
+                    except prefs_mod.PrefsError as exc:
+                        log.warning("place in profile.yaml skipped: %s", exc)
+            prefs_mod.apply(prefs_mod.load(_s), schedule=app.state.jobs.schedule, profile=profile)
+    except Exception as exc:   # database not migrated yet: /health says so, settings come later
+        log.warning("settings not loaded: %s", exc)
+    app.state.jobs.reload()   # not started yet: only recomputes times
+    tools.on_settings_change = _apply_prefs
+    tools.schedule = app.state.jobs.schedule
+
     app.state.pa = pa_mod.PA(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                              executor=lambda: app.state.executor, gate=gate, vault_dir=settings.vault_dir, config_dir=settings.config_dir)
     app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
@@ -735,6 +759,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          name=f"job-{name}", daemon=True).start()
         return {"started": name}
 
+    # ---------------------------------------------------------------- settings (More -> Settings, or by voice)
+
+    @app.get("/api/settings")
+    def settings_get():
+        with session_for(engine) as s:
+            return prefs_mod.public_view(s)
+
+    @app.put("/api/settings/{key}")
+    def settings_put(key: str, body: dict):
+        with session_for(engine) as s:
+            try:
+                prefs_mod.set_key(s, key, body.get("value"))
+            except prefs_mod.PrefsError as exc:
+                raise HTTPException(400, str(exc))
+            audit(s, actor="owner", action="settings.set", outcome=key)
+        _apply_prefs()
+        return settings_get()
+
+    @app.post("/api/places")
+    def places_put(body: dict):
+        with session_for(engine) as s:
+            try:
+                prefs_mod.place_set(s, {k: v for k, v in body.items() if v not in (None, "")})
+            except prefs_mod.PrefsError as exc:
+                raise HTTPException(400, str(exc))
+        return settings_get()
+
+    @app.delete("/api/places/{name}")
+    def places_delete(name: str):
+        with session_for(engine) as s:
+            prefs_mod.place_remove(s, name)
+        return settings_get()
+
     # ---------------------------------------------------------------- open loops
 
     from .db import OpenLoop
@@ -1035,22 +1092,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"ok": True, "stored": True, "id": row.id}
 
     def _leaving_check() -> None:
-        """PA rule 6: only abnormal things (delays, weather that matters), never a normal-day notice."""
-        commute = (app.state.jobs.schedule.get("commute") or {})
-        try:
-            lat, lon = float(commute["lat"]), float(commute["lon"])
-        except (KeyError, TypeError, ValueError):
-            return   # no commute place set in schedule.yaml
+        """PA rule 6: only abnormal things (delays, cancellations, a better connection, weather that
+        matters), never a normal-day notice. Only station names leave the PC."""
         now = dt.datetime.now(profile.tz)
+        with session_for(engine) as s:
+            places = prefs_mod.places(s)
+        home = next((p for p in places if p.kind == "home" and p.active(now.date()) and p.station), None)
+        if home is None:
+            return   # no home station saved yet (say "my home station is ...")
         try:
-            weather = app.state.lookup.weather(lat, lon)
+            events, _ = app.state.brief.calendar(now.date())
         except Exception:
-            weather = None
+            events = []
+        dest, _ = pa_mod.destination(places, events, now)
+        weather = stations = connections = None
         try:
-            stations = app.state.lookup.stations(lat, lon)
+            st = app.state.lookup.station(home.station)
+            if st:
+                weather = app.state.lookup.weather(st["lat"], st["lon"])
         except Exception:
-            stations = None
-        text_ = pa_mod.leaving_notice(weather=weather, stations=stations, now=now)
+            pass
+        try:
+            if dest and dest.station:
+                connections = app.state.lookup.connections(home.station, dest.station)
+            else:
+                st = st or app.state.lookup.station(home.station)
+                stations = app.state.lookup.stations(st["lat"], st["lon"]) if st else None
+        except Exception:
+            pass
+        text_ = pa_mod.leaving_notice(weather=weather, stations=stations, now=now, connections=connections,
+                                      to=dest.name if dest else None)
         if not text_:
             return
         with session_for(engine) as s:
@@ -1354,6 +1425,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(503, str(exc))
         except VoiceError as exc:
             raise HTTPException(400, str(exc))
+        except Exception as exc:   # never a bare 500: the app shows this text
+            log.exception("voice transcribe")
+            raise HTTPException(503, f"Speech recognition failed on the PC: {type(exc).__name__}: {exc}")
         return {"text": t.text, "language": t.language, "seconds": t.seconds, "took": t.took}
 
     @app.post("/api/voice/speak")
@@ -1366,6 +1440,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(503, str(exc))
         except VoiceError as exc:
             raise HTTPException(400, str(exc))
+        except Exception as exc:
+            log.exception("voice speak")
+            raise HTTPException(503, f"Kairo's voice failed on the PC: {type(exc).__name__}: {exc}")
         return Response(content=wav, media_type="audio/wav", headers={"X-Kairo-Language": used, "Cache-Control": "no-store"})
 
     @app.post("/api/voice/calls")
