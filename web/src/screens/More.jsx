@@ -1,9 +1,139 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, parseTs } from '../api.js'
 import {
-  Badge, Button, EmptyState, IconBell, IconKey, IconList, IconMail, IconPower, IconPulse, IconShield, IconSparkle,
-  List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
+  Badge, Button, EmptyState, IconBell, IconCheck, IconInbox, IconKey, IconList, IconMail, IconPower, IconPulse, IconRefresh,
+  IconShield, IconSparkle, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
 } from '../ui/index.js'
+
+const STATUS_TONE = { ok: 'ok', skipped: 'neutral', error: 'danger', running: 'warn' }
+
+function JobsPage() {
+  const toast = useToast()
+  const [data, setData] = useState(null)
+  const load = useCallback(() => api('/api/jobs').then(setData).catch(() => setData({ jobs: [], brain: null })), [])
+  useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t) }, [load])
+  const run = async (j) => {
+    await api(`/api/jobs/${j.name}/run`, { method: 'POST', body: {} })
+    toast.show({ text: `${j.title} started.` })
+    setTimeout(load, 800)
+  }
+  const b = data?.brain
+  return (
+    <Page title="Jobs" onRefresh={load}>
+      {!data && <SkeletonCard lines={4} />}
+      {b && (
+        <p className="k-hello">
+          Claude runs today: {b.runs_today} of {b.budget}.{b.paused_until ? ` Paused (usage limit) until ${parseTs(b.paused_until)?.toLocaleTimeString()}.` : ''}
+        </p>
+      )}
+      {data && (
+        <List>
+          {data.jobs.map((j) => (
+            <ListRow key={j.name} title={j.title} wrap
+              subtitle={j.last ? `${parseTs(j.last.started_at)?.toLocaleString()} · ${j.last.status}${j.last.error ? ` · ${j.last.error}` : ''}` : 'Not run yet'}
+              value={<Badge tone={STATUS_TONE[j.last?.status] || 'neutral'} pop={false}>{j.last?.status ?? '–'}</Badge>}
+              onClick={() => run(j)} />
+          ))}
+        </List>
+      )}
+      <p className="k-muted k-small k-pad" style={{ marginTop: 12 }}>
+        Tap a job to run it now. Jobs run one at a time, never between 23:00 and 06:00, and not while Kairo is paused.
+      </p>
+    </Page>
+  )
+}
+
+function copy(text, toast) {
+  navigator.clipboard?.writeText(text).then(() => toast.show({ text: 'Copied.' }), () => toast.show({ text: 'Long-press to copy.' }))
+}
+
+function CapturePage() {
+  const toast = useToast()
+  const [setup, setSetup] = useState(null)
+  const [confirm, setConfirm] = useState(false)
+  useEffect(() => { api('/api/capture/setup').then(setSetup).catch(() => setSetup({})) }, [])
+  const url = setup?.url || `${window.location.origin}/api/capture`
+  const rotate = async () => {
+    const r = await api('/api/capture/token/rotate', { method: 'POST', body: {} })
+    setSetup((s) => ({ ...s, token: r.token }))
+    setConfirm(false)
+    toast.show({ text: 'New key. Put it into both Shortcuts.' })
+  }
+  return (
+    <Page title="Capture">
+      <p className="k-hello">Send anything to Kairo in a second: a task, a test date, an idea, a photo of a letter.</p>
+      <SectionTitle>Address</SectionTitle>
+      <div className="k-pad"><div className="k-code" onClick={() => copy(url, toast)}>{url}</div></div>
+      <SectionTitle>Key</SectionTitle>
+      <div className="k-pad">
+        <div className="k-code" onClick={() => setup?.token && copy(setup.token, toast)}>{setup?.token ?? '…'}</div>
+        <p className="k-muted k-small">Tap to copy. Only for your Shortcuts. If it ever leaks: </p>
+        <Button variant="secondary" size="sm" onClick={() => setConfirm(true)}>Make a new key</Button>
+      </div>
+
+      <SectionTitle>Shortcut 1: Action button (text)</SectionTitle>
+      <div className="k-pad">
+        <ol className="k-steps">
+          <li>Open the <b>Shortcuts</b> app → <b>+</b> → name it <b>Kairo Capture</b>.</li>
+          <li>Add <b>Ask for Input</b> (type: Text, prompt: “Capture”).</li>
+          <li>Add <b>Get Contents of URL</b>. URL: the address above. Tap the arrow: Method <b>POST</b>.</li>
+          <li>Headers → Add: key <b>Authorization</b>, value <b>Bearer</b> + space + the key above.</li>
+          <li>Request Body: <b>JSON</b> → Add field: key <b>text</b>, type Text, value: <b>Provided Input</b>.</li>
+          <li>Add <b>Show Notification</b>: “Captured”.</li>
+          <li>iPhone Settings → <b>Action Button</b> → Shortcut → <b>Kairo Capture</b>.</li>
+        </ol>
+      </div>
+
+      <SectionTitle>Shortcut 2: Share sheet (photos, PDFs)</SectionTitle>
+      <div className="k-pad">
+        <ol className="k-steps">
+          <li>New shortcut <b>Send to Kairo</b>. Tap the <b>(i)</b> → turn on <b>Show in Share Sheet</b>, types: <b>Images</b> and <b>PDFs</b>.</li>
+          <li>Add <b>Get Contents of URL</b>. URL: the address above + <b>?source=share</b>. Method <b>POST</b>.</li>
+          <li>Same <b>Authorization</b> header as above.</li>
+          <li>Request Body: <b>File</b> → <b>Shortcut Input</b>.</li>
+          <li>Add <b>Show Notification</b>: “Sent to Kairo”.</li>
+        </ol>
+        <p className="k-muted k-small">Links and text from other apps: copy, then press the Action button and paste.</p>
+      </div>
+
+      <SectionTitle>What happens</SectionTitle>
+      <div className="k-pad">
+        <p className="k-small">Within 15 minutes Kairo files it: task, school date, note, person, idea. If it is unclear, Kairo asks you on Today. It never sends or deletes anything because of a capture.</p>
+      </div>
+
+      <Sheet open={confirm} onClose={() => setConfirm(false)} title="New key?">
+        <p className="k-small" style={{ textAlign: 'center', margin: '0 0 20px' }}>The old key stops working. You have to paste the new one into both Shortcuts.</p>
+        <Button variant="danger" block onClick={rotate}>Make a new key</Button>
+        <Button variant="secondary" block style={{ marginTop: 8 }} onClick={() => setConfirm(false)}>Cancel</Button>
+      </Sheet>
+    </Page>
+  )
+}
+
+const TODOS = [
+  { id: 'google_publish', title: 'Publish the Google app', why: 'Stops Google from signing Kairo out every 7 days.',
+    steps: ['On the PC open console.cloud.google.com and pick the Kairo project.', 'Menu → Google Auth Platform → Audience.',
+      'Under “Publishing status” click Publish app → Confirm.', 'Google shows “unverified app”: fine, it is only you.',
+      'Then in Kairo: More → Google → Sign in to Google again (once).'] },
+  { id: 'bios_power_on', title: 'BIOS: turn on after power loss', why: 'After a power cut the PC starts by itself, so Kairo comes back.',
+    steps: ['Restart the PC and press Del (or F2) right away to open the BIOS.', 'Look for “Restore on AC Power Loss”, “AC Back” or “Power On after Power Failure” (often under Advanced → APM / Power).',
+      'Set it to Power On (or “Last State”).', 'Save and exit (usually F10).', 'Test: pull the plug, plug it back in. It should start alone.'] },
+  { id: 'github_2fa', title: 'GitHub: two-factor login', why: 'Kairo updates come from your GitHub; protect that account.',
+    steps: ['github.com → your picture → Settings → Password and authentication.', 'Enable two-factor authentication → Authenticator app.',
+      'Scan the code with an authenticator app (e.g. the iPhone Passwords app).', 'Save the recovery codes in a safe place (not in OneDrive Kairo).'] },
+]
+
+function TodoPage({ todo, done, onToggle }) {
+  return (
+    <Page title={todo.title}>
+      <p className="k-hello">{todo.why}</p>
+      <div className="k-pad"><ol className="k-steps">{todo.steps.map((s) => <li key={s}>{s}</li>)}</ol></div>
+      <div className="k-pad" style={{ marginTop: 20 }}>
+        <Button variant={done ? 'secondary' : 'primary'} block onClick={onToggle}>{done ? 'Mark as not done' : 'I did it'}</Button>
+      </div>
+    </Page>
+  )
+}
 
 function urlBase64ToUint8Array(base64) {
   const pad = '='.repeat((4 - (base64.length % 4)) % 4)
@@ -89,6 +219,7 @@ function Root() {
   const [paused, setPaused] = useState(null)
   const [askPause, setAskPause] = useState(false)
   const [perm, setPerm] = useState(() => (typeof Notification === 'undefined' ? 'unsupported' : Notification.permission))
+  const [todos, setTodos] = useState({})
 
   const load = useCallback(async () => {
     const [h, s, g, k] = await Promise.allSettled([
@@ -98,7 +229,16 @@ function Root() {
     setStatus(s.status === 'fulfilled' ? s.value : {})
     setGoogle(g.status === 'fulfilled' ? g.value : null)
     setPaused(k.status === 'fulfilled' ? k.value.paused : null)
+    api('/api/owner-todos').then(setTodos).catch(() => {})
   }, [])
+
+  const toggleTodo = async (id) => {
+    const next = await api(`/api/owner-todos/${id}`, { method: 'POST', body: { done: !todos[id] } })
+    setTodos(next)
+    stack.pop()
+    toast.show({ text: next[id] ? 'Nice. Ticked off.' : 'Back on the list.' })
+  }
+  const openTodos = TODOS.filter((t) => !todos[t.id])
   useEffect(() => { load() }, [load])
 
   const setKill = async (value) => {
@@ -128,6 +268,18 @@ function Root() {
     <Page title="More" onRefresh={load}>
       {health === null ? <SkeletonCard lines={3} /> : (
         <>
+          {openTodos.length > 0 && (
+            <>
+              <SectionTitle>Your to-dos ({openTodos.length})</SectionTitle>
+              <List>
+                {openTodos.map((t) => (
+                  <ListRow key={t.id} icon={<IconWarn />} title={t.title} subtitle={t.why} wrap chevron
+                    onClick={() => stack.push(t.title, () => <TodoPage todo={t} done={false} onToggle={() => toggleTodo(t.id)} />)} />
+                ))}
+              </List>
+            </>
+          )}
+
           <SectionTitle>Kairo</SectionTitle>
           <List>
             <ListRow icon={<IconPower />} title={paused ? 'Paused (kill switch)' : 'Running'}
@@ -154,10 +306,22 @@ function Root() {
               onClick={perm === 'unsupported' ? undefined : enablePush} />
           </List>
 
+          <SectionTitle>Work</SectionTitle>
+          <List>
+            <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron
+              onClick={() => stack.push('Jobs', () => <JobsPage />)} />
+            <ListRow icon={<IconInbox />} title="Capture" subtitle="Action button and share sheet setup" chevron
+              onClick={() => stack.push('Capture', () => <CapturePage />)} />
+          </List>
+
           <SectionTitle>History</SectionTitle>
           <List>
             <ListRow icon={<IconList />} title="Activity" subtitle="Everything Kairo did, newest first" chevron
               onClick={() => stack.push('Activity', () => <ActivityPage />)} />
+            {TODOS.filter((t) => todos[t.id]).map((t) => (
+              <ListRow key={t.id} icon={<IconCheck />} title={t.title} subtitle="Done" chevron
+                onClick={() => stack.push(t.title, () => <TodoPage todo={t} done onToggle={() => toggleTodo(t.id)} />)} />
+            ))}
           </List>
 
           <SectionTitle>Developer</SectionTitle>

@@ -35,7 +35,7 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, ChatMessage, ChatThread, Review, make_engine, session_for
+from .db import Approval, AuditLog, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import Settings, get_settings
 
@@ -677,6 +677,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             audit(s, actor="owner", action="capture.token_rotate", outcome="new token")
         return {"token": capture.rotate_token(settings.secrets_dir)}
+
+    # ---------------------------------------------------------------- owner's own to-dos (More tab)
+
+    OWNER_TODOS = ["google_publish", "bios_power_on", "github_2fa"]
+
+    @app.get("/api/owner-todos")
+    def owner_todos():
+        with session_for(engine) as s:
+            return {t: (s.get(SettingKV, f"owner_todo:{t}") or SettingKV(key="", value="0")).value == "1" for t in OWNER_TODOS}
+
+    @app.post("/api/owner-todos/{todo}")
+    def owner_todo_set(todo: str, body: dict):
+        if todo not in OWNER_TODOS:
+            raise HTTPException(404, "unknown reminder")
+        with session_for(engine) as s:
+            row = s.get(SettingKV, f"owner_todo:{todo}") or SettingKV(key=f"owner_todo:{todo}")
+            row.value = "1" if body.get("done") else "0"
+            s.add(row)
+            s.commit()
+        return owner_todos()
 
     @app.get("/api/status")
     def status():

@@ -337,3 +337,12 @@ def test_jobs_and_brief_api(migrated):
         assert client.post("/api/jobs/nope/run").status_code == 404
         assert client.get("/api/brief").json() == {"brief": None}
         assert client.get("/api/triage").json() == {"needs_reply": [], "flagged": []}
+
+
+def test_owner_todos_are_kept(migrated):
+    app = create_app(migrated)
+    with TestClient(app) as client:
+        assert client.get("/api/owner-todos").json() == {"google_publish": False, "bios_power_on": False, "github_2fa": False}
+        assert client.post("/api/owner-todos/github_2fa", json={"done": True}).json()["github_2fa"] is True
+        assert client.get("/api/owner-todos").json()["github_2fa"] is True
+        assert client.post("/api/owner-todos/nope", json={"done": True}).status_code == 404
