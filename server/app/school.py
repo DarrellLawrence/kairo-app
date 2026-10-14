@@ -129,6 +129,8 @@ def _notes(vault_dir: Path, subject: str, limit: int = 15_000) -> str:
         return ""
     parts, used = [], 0
     for p in sorted(folder.rglob("*.md")):
+        if vault.is_conflict(p):
+            continue   # a Syncthing conflict copy (fix plan 33)
         text = p.read_text(encoding="utf-8", errors="replace")
         if "<!-- kairo:study-guide -->" in text:
             continue   # don't feed Kairo's own guides back in

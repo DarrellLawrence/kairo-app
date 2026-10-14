@@ -23,8 +23,30 @@ parts between `<!-- kairo:... -->` markers; everything else is yours.
 """
 
 
+# Syncthing keeps both sides of an edit made on two devices at once: "note.sync-conflict-20261014-101530-ABCDEFG.md"
+# next to "note.md" (fix plan 33). Such a file is never read into a prompt; the owner picks a side or a merge.
+CONFLICT = re.compile(r"\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}(?=\.[^.]+$|$)")
+
+
 class VaultError(Exception):
     pass
+
+
+def is_conflict(path: Path | str) -> bool:
+    return bool(CONFLICT.search(PurePosixPath(str(path).replace("\\", "/")).name))
+
+
+def conflict_original(path: Path) -> Path:
+    """note.sync-conflict-20261014-101530-ABCDEFG.md -> note.md (same folder)."""
+    return path.with_name(CONFLICT.sub("", path.name, count=1))
+
+
+def conflicts(root: Path) -> list[Path]:
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.rglob("*.sync-conflict-*") if p.is_file() and is_conflict(p)
+                  and not any(part.startswith(".") for part in p.relative_to(root).parts))
 
 
 def ensure_structure(root: Path) -> None:
@@ -44,7 +66,8 @@ def context(root: Path, limit: int = CONTEXT_LIMIT) -> str:
         d = root / folder
         if d.is_dir():
             # chat exports hold other people's messages (untrusted): only the voice checker reads them
-            files += [p for p in d.rglob("*.md") if p.is_file() and "chats" not in p.relative_to(d).parts]
+            files += [p for p in d.rglob("*.md") if p.is_file() and "chats" not in p.relative_to(d).parts
+                      and not is_conflict(p)]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     parts, used = [], 0
     for p in files:

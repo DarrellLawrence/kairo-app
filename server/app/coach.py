@@ -448,7 +448,7 @@ class Coacher:
         """Profile and health notes: goals, level, injuries (notes, never instructions)."""
         parts = [vault.context(self.vault_dir, limit=limit // 2)]
         health = self.vault_dir / "70 Health"
-        for p in sorted(health.rglob("*.md"))[:10] if health.is_dir() else []:
+        for p in [x for x in sorted(health.rglob("*.md")) if not vault.is_conflict(x)][:10] if health.is_dir() else []:
             parts.append(f"## {p.relative_to(self.vault_dir).as_posix()}\n{p.read_text(encoding='utf-8', errors='replace')[:1500]}")
         return clip("\n\n".join(x for x in parts if x), limit)
 

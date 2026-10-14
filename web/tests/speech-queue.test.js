@@ -86,3 +86,14 @@ test('a sentence iOS would not play waits for the tap, then the rest follows', a
   assert.equal(taps, 1)
   assert.ok(events.includes('play After the tap.'))
 })
+
+test('onStart fires once, when the first sentence starts (the call turn is timed to it)', async () => {
+  let starts = 0
+  const q = speechQueue({ call: true, onStart: () => { starts += 1; events.push('start') } })
+  q.push('One.')
+  q.push('Two.')
+  q.end()
+  await q.done
+  assert.equal(starts, 1)
+  assert.ok(events.indexOf('start') < events.indexOf('play One.'))
+})

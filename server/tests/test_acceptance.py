@@ -183,7 +183,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 30))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 31))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable
@@ -249,3 +249,54 @@ def test_lag_fails_when_the_warm_process_is_not_used(migrated, tmp_path):
     ctx.runner.brain.warm_up = lambda **kw: False            # broken: nothing is started ahead
     r = run(acceptance.t_lag(ctx))
     assert not r["ok"] and r["checks"]["the call turn ran warm"] is False
+
+
+# ---------------------------------------------------------------- 30 Health
+
+def _health_ctx(migrated, monkeypatch, *, url_answers=True, free_gb=400):
+    from collections import namedtuple
+
+    from app import health
+    U = namedtuple("U", "total used free")
+    monkeypatch.setattr(health.shutil, "disk_usage", lambda p: U(500e9, 500e9 - free_gb * 1e9, free_gb * 1e9))
+    logs = migrated.data_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "boot-check.json").write_text(json.dumps({"kairo_url": "https://kairo-home.tail1234.ts.net"}), encoding="utf-8")
+
+    def get(url):
+        if not url_answers:
+            import httpx
+            raise httpx.ConnectError("down")
+
+    class Brain:
+        def health(self):
+            from app.brain import BrainStatus
+            return BrainStatus.ok
+
+    class Runner:
+        brain = Brain()
+    ctx = ctx_for(migrated)
+    migrated.vault_dir.mkdir(parents=True, exist_ok=True)
+    ctx.vault_dir, ctx.data_dir = migrated.vault_dir, migrated.data_dir
+    from tests.fakes.fake_google import FakeGoogle, connect
+    fake = FakeGoogle()
+    connect(migrated.secrets_dir, fake)
+    ctx.health = health.HealthWatch(settings=migrated, engine=ctx.engine, runner=Runner(), pusher=None, http_get=get,
+                                    transport=fake.transport)
+    return ctx
+
+
+def test_health_passes_and_cleans_up(migrated, monkeypatch):
+    ctx = _health_ctx(migrated, monkeypatch)
+    r = run(acceptance.t_health(ctx))
+    assert r["ok"], r
+    assert not list((migrated.vault_dir / "Kairo").glob(f"{MARK}*"))
+    assert not list((migrated.data_dir / "conflicts-resolved").rglob("*.md"))
+
+
+def test_health_fails_when_the_tailnet_is_down_or_the_disk_full(migrated, monkeypatch):
+    ctx = _health_ctx(migrated, monkeypatch, url_answers=False, free_gb=5)
+    r = run(acceptance.t_health(ctx))
+    assert not r["ok"]
+    assert r["checks"]["the tailnet address answers"] is False and r["checks"]["at least 10 GB free"] is False
+    assert "can't reach Kairo" in r["detail"]

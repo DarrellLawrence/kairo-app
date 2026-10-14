@@ -190,7 +190,7 @@ async function fetchSpeech(text, signal) {
    comes; the next one's audio is made on the PC while the current one plays. done resolves once
    everything pushed before end() was spoken, or at once on abort. onNeedTap(): iOS didn't play a
    sentence; return a promise that resolves after "Tap to play" replayed it, and the rest follows. */
-export function speechQueue({ signal, call = false, onNeedTap } = {}) {
+export function speechQueue({ signal, call = false, onNeedTap, onStart } = {}) {
   const items = []
   let ended = false
   let wake = null
@@ -217,6 +217,7 @@ export function speechQueue({ signal, call = false, onNeedTap } = {}) {
       const { buf, fetchMs } = await items[i++]
       if (signal?.aborted) return
       last = { buf: buf.slice(0), call }
+      if (i === 1) onStart?.()
       try {
         await play(buf, { signal, call, fetchMs })
       } catch (e) {
@@ -353,7 +354,8 @@ export async function startRecording({ autoStop = false, silenceMs = 1300, maxMs
     const now = performance.now()
     if (current > 0.12) { heard = true; quietSince = null } else if (heard && quietSince === null) quietSince = now
     if ((heard && quietSince !== null && now - quietSince > silenceMs) || now - started > maxMs) {
-      finish().then((b) => b && onAutoStop?.(b))
+      const speechEndedAt = quietSince ?? now   // fix plan 31: the wait starts when you stop talking
+      finish().then((b) => b && onAutoStop?.(b, { speechEndedAt }))
     }
   }, 80)
 

@@ -374,6 +374,16 @@ class ShoppingItem(SQLModel, table=True):
     source: str = "app"
 
 
+class Latency(SQLModel, table=True):
+    """Fix plan 31: how long the owner waited, in ms (speech to text, Kairo's voice, a call turn)."""
+
+    __tablename__ = "latency"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=utcnow, index=True)
+    kind: str = Field(index=True)          # stt / tts / call_turn
+    ms: int
+
+
 class ModelRun(SQLModel, table=True):
     """One model run: which model, for what, how long (More -> Usage)."""
 

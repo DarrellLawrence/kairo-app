@@ -15,6 +15,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -94,6 +95,8 @@ SPECS = [
     Spec(29, "Lag", "auto", "With the real Claude: the answer arrives in pieces while it is written; a job's call starts "
                             "no tool server; a call turn finds Claude already started (warm) and starts faster than a "
                             "cold one. The numbers are the cold start cost.", "F23"),
+    Spec(30, "Health", "auto", "Google answers a real call, Kairo's tailnet address answers, 10 GB free; a note changed on "
+                               "two devices is reported, kept out of the chat, and sorted out with one tap.", "F23"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -126,6 +129,8 @@ class Context:
     pa: object = None                                      # pa.PA
     share: Callable[[bytes, str, str], int] | None = None  # share a file like the + sheet does: (data, name, type) -> capture id
     runner: object = None                                  # chat.BrainRunner (fix plan 26-30: lag)
+    health: object = None                                  # health.HealthWatch (fix plan 32)
+    data_dir: Path | None = None
 
 
 class RecordingExecutor:
@@ -710,11 +715,48 @@ async def t_lag(ctx: Context) -> dict:
     return _result(err is None, checks, err or detail)
 
 
+async def t_health(ctx: Context) -> dict:
+    from . import conflicts, health, vault
+    if ctx.health is None or ctx.vault_dir is None or ctx.data_dir is None:
+        return _result(False, {"health watch": False}, "no health watch")
+    folder = ctx.vault_dir / "Kairo"
+    folder.mkdir(parents=True, exist_ok=True)
+    note = folder / f"{MARK} sync.md"
+    copy = folder / f"{MARK} sync.sync-conflict-20261014-101530-KAIROTS.md"
+    note.write_text(f"{MARK}: this PC's line", encoding="utf-8")
+    copy.write_text(f"{MARK}: the other device's line", encoding="utf-8")
+    stash = None
+    try:
+        seen = await asyncio.to_thread(ctx.health.cheap)
+        hourly = await asyncio.to_thread(ctx.health.hourly, {})
+        in_prompt = "other device's line" in vault.context(ctx.vault_dir, limit=10**7)
+        listed = any(c["path"].endswith(copy.name) for c in conflicts.listing(ctx.vault_dir))
+        r = conflicts.resolve(ctx.vault_dir, ctx.data_dir, copy.relative_to(ctx.vault_dir).as_posix(), "pc")
+        stash = Path(r["old_versions"])
+        url = health.kairo_url(ctx.data_dir)
+        from .google.client import load_token
+        connected = bool((load_token(ctx.health.settings.secrets_dir, "read") or {}).get("refresh_token"))
+        checks = {"Google answers a real call": connected and not ({"google_read", "google_write"} & hourly.keys()),
+                  "the tailnet address answers": bool(url) and "tailscale" not in hourly,
+                  "at least 10 GB free": "disk" not in seen,
+                  "a conflict copy is reported": "conflicts" in seen and listed,
+                  "never in the chat's prompt": not in_prompt,
+                  "sorted out with one tap": not copy.exists() and note.read_text(encoding="utf-8").endswith("this PC's line")}
+        detail = "; ".join([*hourly.values(), seen.get("disk", "")]).strip("; ") or (
+            f"{url} answers" if url else "no tailnet address recorded yet: run the boot check (Start menu -> Kairo Boot Check)")
+        return _result(True, checks, detail)
+    finally:
+        for f in (note, copy):
+            f.unlink(missing_ok=True)
+        if stash is not None:
+            shutil.rmtree(stash, ignore_errors=True)
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
     20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
-    29: t_lag,
+    29: t_lag, 30: t_health,
 }
 
 

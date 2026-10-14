@@ -31,6 +31,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import vault
+
 log = logging.getLogger("kairo.memory")
 
 MODEL_REPO = "onnx-community/Qwen3-Embedding-0.6B-ONNX"
@@ -318,8 +320,8 @@ class MemoryIndex:
         docs: dict[tuple[str, str], tuple[str, str]] = {}
         for p in sorted(self.vault_dir.rglob("*.md")) if self.vault_dir.is_dir() else []:
             rel = p.relative_to(self.vault_dir).as_posix()
-            if rel.startswith(".") or "/." in rel or p.stat().st_size > MAX_NOTE_BYTES:
-                continue
+            if rel.startswith(".") or "/." in rel or p.stat().st_size > MAX_NOTE_BYTES or vault.is_conflict(p):
+                continue    # a Syncthing conflict copy is never recalled into a prompt (fix plan 33)
             text = p.read_text(encoding="utf-8", errors="replace")
             text = re.sub(r"<!-- /?kairo:[a-z0-9_-]+ -->", "", text).strip()
             if text:

@@ -6,6 +6,8 @@
 - Google "Testing" mode ends sign-ins after 7 days: push a reminder a day
   before, and once if Google has signed Kairo out. Tokens that outlive 7 days
   belong to a published app; they get no more reminders.
+- Fix plan 32: the health watch (app/health.py), every 5 minutes, the network
+  checks every hour; fix plan 31: waiting times older than 30 days go.
 
 No pushes in the quiet hours: notices wait until the morning.
 """
@@ -20,6 +22,7 @@ from pathlib import Path
 
 import httpx
 
+from . import health as health_mod
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected, load_token, save_token
 from .push import in_quiet_hours
 
@@ -36,6 +39,8 @@ class Housekeeping:
         self.settings = app.state.settings
         self._last_unknown_check: dict[str, float] = {}
         self._signed_out_pushed = False
+        self._health_at = 0.0
+        self._health_full_at = 0.0
 
     @property
     def secrets(self) -> Path:
@@ -48,7 +53,7 @@ class Housekeeping:
         self.app.state.pusher.notify("Kairo", body, url, source="system")
 
     def run_once(self) -> None:
-        for duty in (self.update_notice, self.google_reminder, self.held_pushes):
+        for duty in (self.update_notice, self.google_reminder, self.held_pushes, self.health):
             try:
                 duty()
             except Exception:
@@ -59,6 +64,22 @@ class Housekeeping:
         flush = getattr(self.app.state.pusher, "flush", None)
         if flush is not None:
             flush()
+
+    def health(self) -> None:
+        watch = getattr(self.app.state, "health", None)
+        now = time.monotonic()
+        if watch is None or now - self._health_at < health_mod.CHEAP_EVERY_S and self._health_at:
+            return
+        full = not self._health_full_at or now - self._health_full_at >= health_mod.FULL_EVERY_S
+        self._health_at = now
+        if full:
+            self._health_full_at = now
+        watch.run(full=full)
+        if full:
+            from sqlmodel import Session
+            from . import latency
+            with Session(self.app.state.health.engine) as s:
+                latency.prune(s)
 
     # ---------------------------------------------------------------- updates
 

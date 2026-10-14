@@ -18,6 +18,7 @@ if ($Interactive) {
 $P = Get-KairoPaths $Root
 $checks = New-Object System.Collections.Generic.List[object]
 $tailnetLogin = ''
+$url = $null
 
 # Level 'warn': nothing is broken, but there is something to do (yellow on the More screen).
 function Add-Check([string]$Name, [bool]$Ok, [string]$Detail, [string]$Level = '') {
@@ -109,6 +110,8 @@ $report = [pscustomobject]@{
     checks = $checks
 }
 if ($tailnetLogin) { $report | Add-Member -NotePropertyName tailnet_login -NotePropertyValue $tailnetLogin }
+# Fix plan 32: Kairo checks this address itself every hour (is the tailnet path to the iPhone up?).
+if ($url) { $report | Add-Member -NotePropertyName kairo_url -NotePropertyValue $url }
 if (-not (Test-Path $P.Logs)) { [void](New-Item -ItemType Directory -Path $P.Logs) }
 $report | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $P.Logs 'boot-check.json') -Encoding UTF8
 

@@ -3,8 +3,9 @@ import { api, parseTs } from '../api.js'
 import { clientLog, device } from '../clientlog.js'
 import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
 import {
-  Badge, Button, EmptyState, IconBell, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower, IconPulse, IconRefresh,
-  IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack, useToast,
+  Badge, Button, Card, EmptyState, IconBell, IconBolt, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower,
+  IconPulse, IconRefresh, IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack,
+  useToast,
 } from '../ui/index.js'
 
 const STATUS_TONE = { ok: 'ok', skipped: 'neutral', error: 'danger', running: 'warn' }
@@ -648,6 +649,66 @@ function AcceptancePage() {
   )
 }
 
+/* Fix plan 33: a note changed on two devices at once. Pick this PC's version, the other one, or Kairo's
+   merge (shown first, editable, written only on "Use this"). The replaced version is kept on the PC. */
+function ConflictsPage() {
+  const toast = useToast()
+  const [list, setList] = useState(null)
+  const [merged, setMerged] = useState({})
+  const [busy, setBusy] = useState('')
+  const load = useCallback(() => api('/api/vault/conflicts').then((d) => setList(d.conflicts)).catch(() => setList([])), [])
+  useEffect(() => { load() }, [load])
+  const resolve = async (c, keep, text) => {
+    setBusy(c.path)
+    try {
+      await api('/api/vault/conflicts/resolve', { method: 'POST', body: { path: c.path, keep, text } })
+      toast.show({ text: 'Done. The other version is kept on the PC, just in case.' })
+      await load()
+    } catch (e) { toast.show({ text: e.message }) } finally { setBusy('') }
+  }
+  const merge = async (c) => {
+    setBusy(c.path)
+    try {
+      const r = await api('/api/vault/conflicts/merge', { method: 'POST', body: { path: c.path } })
+      setMerged((m) => ({ ...m, [c.path]: r.text }))
+    } catch (e) { toast.show({ text: e.message }) } finally { setBusy('') }
+  }
+  const when = (t) => (t ? new Date(t).toLocaleString() : 'missing')
+  return (
+    <Page title="Sync conflicts" onRefresh={load}>
+      <p className="k-hello">These notes were changed on two devices at the same time. Kairo doesn’t read either copy into a chat until you pick one.</p>
+      {list === null && <SkeletonCard lines={3} />}
+      {list?.length === 0 && <EmptyState title="Nothing to sort out" text="Every note has one version." />}
+      {list?.map((c) => (
+        <Card key={c.path}>
+          <p className="k-eyebrow">{c.original}</p>
+          <p className="k-small k-muted">This PC · {when(c.pc_at)}</p>
+          <pre className="k-approval-preview">{c.pc_text || '(empty)'}</pre>
+          <p className="k-small k-muted">Other device · {when(c.other_at)}</p>
+          <pre className="k-approval-preview">{c.other_text || '(empty)'}</pre>
+          {merged[c.path] !== undefined ? (
+            <>
+              <p className="k-eyebrow">Kairo’s merge (you can edit it)</p>
+              <div className="k-field">
+                <textarea rows={10} value={merged[c.path]} onChange={(e) => setMerged((m) => ({ ...m, [c.path]: e.target.value }))} />
+              </div>
+              <Button block disabled={busy === c.path || !merged[c.path].trim()} onClick={() => resolve(c, 'merged', merged[c.path])}>Use this</Button>
+            </>
+          ) : (
+            <Button variant="secondary" block disabled={busy === c.path} onClick={() => merge(c)}>{busy === c.path ? 'Merging…' : 'Merge both with Kairo'}</Button>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <Button variant="secondary" block disabled={busy === c.path} onClick={() => resolve(c, 'pc')}>Keep this PC’s</Button>
+            <Button variant="secondary" block disabled={busy === c.path} onClick={() => resolve(c, 'other')}>Keep the other</Button>
+          </div>
+        </Card>
+      ))}
+    </Page>
+  )
+}
+
+const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
+
 function SystemPage() {
   const stack = useStack()
   const toast = useToast()
@@ -656,15 +717,20 @@ function SystemPage() {
   const [google, setGoogle] = useState(null)
   const [paused, setPaused] = useState(null)
   const [askPause, setAskPause] = useState(false)
+  const [speed, setSpeed] = useState([])
+  const [conflicts, setConflicts] = useState(0)
 
   const load = useCallback(async () => {
-    const [h, s, g, k] = await Promise.allSettled([
+    const [h, s, g, k, l, c] = await Promise.allSettled([
       fetch('/health').then((r) => r.json()), api('/api/status'), api('/api/setup/google/status'), api('/api/kill-switch'),
+      api('/api/latency'), api('/api/vault/conflicts'),
     ])
     setHealth(h.status === 'fulfilled' ? (h.value.detail ?? h.value) : { status: 'unreachable' })
     setStatus(s.status === 'fulfilled' ? s.value : {})
     setGoogle(g.status === 'fulfilled' ? g.value : null)
     setPaused(k.status === 'fulfilled' ? k.value.paused : null)
+    setSpeed(l.status === 'fulfilled' ? l.value.rows : [])
+    setConflicts(c.status === 'fulfilled' ? c.value.conflicts.length : 0)
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -703,6 +769,21 @@ function SystemPage() {
               value={boot ? <Badge tone={boot.all_ok ? 'ok' : 'danger'} pop={false}>{boot.all_ok ? 'OK' : 'Failed'}</Badge> : undefined}
               onClick={() => stack.push('Boot check', () => <BootCheckPage check={boot} />)} />
           </List>
+          {conflicts > 0 && (
+            <List>
+              <ListRow icon={<IconWarn />} title="Sync conflicts" subtitle="Notes changed on two devices at once: pick a version" chevron
+                value={<Badge tone="warn" pop={false}>{conflicts}</Badge>}
+                onClick={() => stack.push('Sync conflicts', () => <ConflictsPage />)} />
+            </List>
+          )}
+          <SectionTitle>Speed (last 7 days)</SectionTitle>
+          {speed.length === 0 ? <p className="k-muted k-small k-pad">No numbers yet: they come with use.</p> : (
+            <List>
+              {speed.map((r) => (
+                <ListRow key={r.kind} icon={<IconBolt />} title={r.title} subtitle={`Typical ${secs(r.p50_ms)} · slow ones ${secs(r.p95_ms)} · ${r.n}×`} />
+              ))}
+            </List>
+          )}
           <SectionTitle>Behind the scenes</SectionTitle>
           <List>
             <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron

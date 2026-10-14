@@ -161,7 +161,14 @@ export default function Call({ callId: initialId, onClose }) {
   }
 
   // Fix plan 29: Kairo starts talking after its first sentence while the rest is still being written.
-  const reply = async (heard) => {
+  // Fix plan 31: you stop talking -> Kairo's voice starts, for the p50/p95 in More -> System.
+  const timeTurn = (since) => {
+    const ms = Math.round(performance.now() - since)
+    fetch('/api/latency', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'call_turn', ms }) })
+      .catch(() => {})
+  }
+
+  const reply = async (heard, speechEndedAt) => {
     const l = live.current
     const abort = new AbortController()
     l.abort = abort
@@ -177,6 +184,7 @@ export default function Call({ callId: initialId, onClose }) {
     const q = speechQueue({
       signal: abort.signal, call: true,
       onNeedTap: () => { stopMonitor(); setNeedTap(true); return new Promise((resolve) => { l.afterTap = resolve }) },
+      onStart: () => { if (speechEndedAt) timeTurn(speechEndedAt) },
     })
     const out = (sentence) => {
       if (!sentence || abort.signal.aborted || !l.on || l.phase === 'paused') return
@@ -222,7 +230,7 @@ export default function Call({ callId: initialId, onClose }) {
     try {
       l.rec = await startRecording({
         autoStop: true,
-        onAutoStop: async (blob) => {
+        onAutoStop: async (blob, { speechEndedAt } = {}) => {
           if (!live.current.on) { sendAsVoiceNote(blob); return }
           if (live.current.phase !== 'listening') return   // paused or muted meanwhile
           set('thinking')
@@ -238,7 +246,7 @@ export default function Call({ callId: initialId, onClose }) {
           live.current.empty = 0
           setLog((x) => [...x, { who: 'me', text: heard }])
           if (BYE.test(heard)) { await say('Bye!'); hangup(true); return }
-          await reply(heard)
+          await reply(heard, speechEndedAt)
           if (['speaking', 'thinking'].includes(live.current.phase) || live.current.interrupted) listen()
         },
       })

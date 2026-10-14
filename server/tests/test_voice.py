@@ -90,6 +90,8 @@ def test_voice_api(client):
     r = client.post("/api/voice/speak", json={"text": "Hallo, du hast heute einen Test."})
     assert r.headers["content-type"] == "audio/wav" and r.headers["x-kairo-language"] == "de" and r.content[:4] == b"RIFF"
     assert client.get("/api/voice/status").json()["call_options"] == {"checkin": False}   # v8 D: the brief is never a call
+    kinds = {r["kind"]: r["n"] for r in client.get("/api/latency").json()["rows"]}
+    assert kinds == {"stt": 1, "tts": 1}               # fix plan 31: what worked was timed, failures not
 
 
 def test_voice_without_the_libraries(client, monkeypatch):

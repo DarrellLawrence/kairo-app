@@ -86,7 +86,7 @@ def report(settings) -> str:
 def test_every_query_runs_on_the_real_schema(migrated):
     seed(migrated)
     text = report(migrated)
-    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "Last self-test", "G.6", "Logs"):
+    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "G.5d", "Health watch", "Last self-test", "G.6", "Logs"):
         assert f"== {section}" in text, section
     assert "ERROR" not in text and "no such" not in text, text
     assert "  done | 1 | 1" in text and "  open | 1 | 0" in text          # approvals, from loop Send

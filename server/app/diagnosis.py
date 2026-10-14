@@ -186,6 +186,13 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
     r.rows([(*k, max(len(a[0]), len(a[1])), _pct(a[0], .5), _pct(a[0], .95), _pct(a[1], .5), _pct(a[1], .95))
             for k, a in sorted(starts.items())])
 
+    r.h(f"G.5d waiting ({DAYS} d), ms: kind | n | p50 | p95")
+    rows = q("SELECT kind, ms FROM latency WHERE ts>=?", since)
+    waits: dict[str, list] = {}
+    for kind, ms in [] if failed(rows) else rows:
+        waits.setdefault(kind, []).append(ms)
+    r.rows([(k, len(v), _pct(v, .5), _pct(v, .95)) for k, v in sorted(waits.items())])
+
     r.h("G.5b reply wall time (owner message -> Kairo reply), s: n | p50 | p95")
     chat, call, last = [], [], {}
     rows = q("SELECT thread_id, role, substr(text,1,7)='(spoken', created_at FROM chat_messages "
@@ -210,6 +217,19 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
         if ta and tb:
             vn.append((tb - ta).total_seconds())
     r.add(f"  {len(vn)} | {_pct(vn, .5)} | {_pct(vn, .95)}")
+
+    r.h("Health watch (fix plan 32): problem | since | text")
+    value = one("SELECT value FROM settings WHERE key='health.state'")
+    try:
+        hs = json.loads(value) if value and not str(value).startswith("ERROR") else None
+    except (TypeError, ValueError):
+        hs = None
+    if not hs:
+        r.add("  not run yet")
+    else:
+        r.add(f"  checked {hs.get('checked_at')}, network checks {hs.get('full_at')}")
+        for k, v in sorted((hs.get("problems") or {}).items()):
+            r.add(f"  {k} | {v.get('since')} | {v.get('text')}")
 
     r.h("Last self-test")
     value = one("SELECT value FROM settings WHERE key='selftest.tools'")

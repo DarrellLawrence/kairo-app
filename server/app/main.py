@@ -38,7 +38,8 @@ from . import memory
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
-from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
+from . import conflicts as conflicts_mod, health as health_mod
+from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError, wav_problems
 from .voice import calls as voice_calls
@@ -256,6 +257,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = asyncio.create_task(run_forever(Housekeeping(app)))
         background = []
         if os.environ.get("KAIRO_SCHEDULER", "1") != "0":   # tests switch it off
+            starts = health_mod.record_start(settings.data_dir)
+            if starts > health_mod.CRASH_STARTS:   # a crash loop may never live long enough for the watch
+                app.state.pusher.notify("Kairo", health_mod.crash_loop_text(starts), "/#more", source="health")
             app.state.jobs.start()
             background.append(asyncio.create_task(acceptance_after_release(app)))
             background.append(asyncio.create_task(memory_loop(app)))
@@ -294,6 +298,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine, gate=gate, executor=lambda: app.state.executor, google_read=google_read,
         on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today",
                                   source="security"))
+    app.state.health = health_mod.HealthWatch(settings=settings, engine=engine, runner=runner, pusher=app.state.pusher,
+                                              transport=lambda: getattr(app.state, "google_transport", None))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
     app.state.voice = Voice(settings.data_dir / "models", site_dir=tool_sites.site("voice", settings.data_dir))
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
@@ -991,7 +997,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             selftest=lambda: run_tools_selftest(notify=False, voice=True, browser=False),
             broken_selftests=broken_selftests, schedule=app.state.jobs.schedule,
             memory=app.state.memory, vault_dir=settings.vault_dir, profile=profile, coach=app.state.coach, pa=app.state.pa,
-            share=acceptance_share, runner=runner,
+            share=acceptance_share, runner=runner, health=app.state.health, data_dir=settings.data_dir,
             ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
                 prompt, system, images=images, purpose=purpose))
 
@@ -1465,6 +1471,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             elif last:
                 notices += last.get("warnings") or []          # yellow: not broken, something to do
             issues += brief._warnings(s)
+            issues += health_mod.today_issues(s)       # fix plan 32: Google, Tailscale, disk, conflicts, crash loop
             out = today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
             out["notices"] = notices
             return out
@@ -1984,6 +1991,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, "send the recording as the request body (audio/*)")
         body = await request.body()
         lang = request.query_params.get("language") or None
+        started = time.monotonic()
         try:
             t = await asyncio.to_thread(app.state.voice.transcribe, body, lang)
         except NotInstalled as exc:
@@ -1993,12 +2001,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:   # never a bare 500: the app shows this text
             log.exception("voice transcribe")
             raise HTTPException(503, f"Speech recognition failed on the PC: {type(exc).__name__}: {exc}")
+        latency.record(engine, "stt", (time.monotonic() - started) * 1000)
         return {"text": t.text, "language": t.language, "seconds": t.seconds, "took": t.took}
 
     @app.post("/api/voice/speak")
     async def voice_speak(body: dict):
         text = str(body.get("text") or "")
         lang = body.get("language") if body.get("language") in ("de", "en") else None
+        started = time.monotonic()
         try:
             wav, used = await asyncio.to_thread(app.state.voice.speak, text, lang)
         except NotInstalled as exc:
@@ -2008,6 +2018,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             log.exception("voice speak")
             raise HTTPException(503, f"Kairo's voice failed on the PC: {type(exc).__name__}: {exc}")
+        latency.record(engine, "tts", (time.monotonic() - started) * 1000)
         return Response(content=wav, media_type="audio/wav", headers={"X-Kairo-Language": used, "Cache-Control": "no-store"})
 
     @app.post("/api/voice/calls")
@@ -2063,6 +2074,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             client_budget["n"] += 1
             kept += 1
         return {"kept": kept}
+
+    # ---------------------------------------------------------------- fix plan 33: Syncthing conflicts
+
+    @app.get("/api/vault/conflicts")
+    def vault_conflicts():
+        return {"conflicts": conflicts_mod.listing(settings.vault_dir)}
+
+    @app.post("/api/vault/conflicts/merge")
+    def vault_conflict_merge(body: dict):
+        """Kairo's merge of both versions, to look at first (nothing is written)."""
+        try:
+            return {"text": conflicts_mod.merge(lambda p, sy: _model_ask(p, sy, "merge"), settings.vault_dir, str(body.get("path") or ""))}
+        except conflicts_mod.ConflictError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/vault/conflicts/resolve")
+    def vault_conflict_resolve(body: dict):
+        keep = str(body.get("keep") or "")
+        try:
+            r = conflicts_mod.resolve(settings.vault_dir, settings.data_dir, str(body.get("path") or ""), keep, body.get("text"))
+        except conflicts_mod.ConflictError as exc:
+            raise HTTPException(400, str(exc))
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="vault.conflict", outcome=f"kept {keep}", args={"note": r["original"]})
+        return r
+
+    @app.post("/api/latency")
+    def latency_report(body: dict):
+        """Fix plan 31: what only the phone can time (a call turn: you stop talking -> Kairo's voice starts)."""
+        kind, ms = body.get("kind"), body.get("ms")
+        if kind not in latency.CLIENT_KINDS or not isinstance(ms, (int, float)) or not 0 <= ms <= latency.MAX_MS:
+            raise HTTPException(400, "kind must be call_turn and ms a number of milliseconds")
+        latency.record(engine, kind, ms)
+        return {"ok": True}
+
+    @app.get("/api/latency")
+    def latency_get(days: int = 7):
+        with session_for(engine) as s:
+            return {"days": days, "rows": latency.summary(s, days=min(max(days, 1), 30))}
 
     @app.get("/api/voice/calls")
     def voice_calls_list():

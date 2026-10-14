@@ -91,6 +91,8 @@ class FakeGoogle:
                                                  "scope": self.grant_scope})
             return httpx.Response(200, json={"access_token": "at-" + str(len(self.calls)), "expires_in": 3600})
 
+        if self.revoked:   # like Google: a revoked grant's access tokens stop working too
+            return httpx.Response(401, json={"error": {"message": "Invalid Credentials"}})
         g = "/gmail/v1/users/me"
         if path == f"{g}/profile":
             return httpx.Response(200, json={"emailAddress": self.owner})
