@@ -41,7 +41,11 @@ DEFAULT_CRON = {
     "email_triage": "0 7-21 * * *",
     "morning_brief.weekdays": "20 6 * * 1-5",
     "morning_brief.weekends": "20 8 * * 6,0",
+    "backup": "30 3 * * *",
+    "restore_test": "0 4 * * 0",
 }
+# Silent housekeeping: no model, no push unless it fails. Allowed in the quiet window.
+QUIET_EXEMPT = {"backup", "restore_test"}
 CAPTURE_EVERY_MIN = 15
 
 # Shown in the app (More -> Jobs) and runnable on demand.
@@ -51,6 +55,8 @@ JOB_TITLES = {
     "capture_process": "Process captures",
     "review.daily": "Evening check-in",
     "review.big": "Sunday review",
+    "backup": "Backup",
+    "restore_test": "Restore test",
 }
 
 
@@ -195,7 +201,7 @@ class Jobs:
             with Session(self.engine) as s:
                 if killswitch.is_paused(s):
                     return self._log(name, "skipped", "kill switch is on")
-                if not forced and self.in_quiet():
+                if not forced and name not in QUIET_EXEMPT and self.in_quiet():
                     return self._log(name, "skipped", "quiet window")
                 run = JobRun(job=name)
                 s.add(run)
@@ -300,6 +306,9 @@ class Jobs:
         if "morning_brief" in self.bodies:
             for k in ("morning_brief.weekdays", "morning_brief.weekends"):
                 sched.add_job(self.run_job, cron_trigger(self._cron(k), tz), args=["morning_brief"], id=k)
+        for name in ("backup", "restore_test"):
+            if name in self.bodies:
+                sched.add_job(self.run_job, cron_trigger(self._cron(name), tz), args=[name], id=name)
         if "capture_process" in self.bodies:
             every = ((self.schedule.get("jobs") or {}).get("capture_process") or {}).get("every_minutes") or CAPTURE_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["capture_process"],

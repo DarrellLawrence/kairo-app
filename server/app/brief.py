@@ -118,6 +118,7 @@ class BriefMaker:
             "place_now": location.current_place(s),
             "place_tasks": {p: [t.title for t in location.tasks_for(s, p)] for p in location.places(s) if location.tasks_for(s, p)},
             "patterns": location.patterns(s, tz, today=day),
+            "warnings": _warnings(s),
         }
 
     # ---------------------------------------------------------------- write
@@ -170,6 +171,23 @@ class BriefMaker:
         s.commit()
         ctx.jobs.pusher.notify("Morning brief", written["headline"], "/#today")
         return by
+
+
+def _warnings(s: Session) -> list[str]:
+    """Things the owner must know about Kairo itself (backups)."""
+    from .db import SettingKV
+    row = s.get(SettingKV, "backup_status")
+    st = json.loads(row.value) if row and row.value else {}
+    out = []
+    if st.get("last_error"):
+        out.append(f"Backup failed: {st['last_error']}")
+    elif st.get("last_backup_at"):
+        age = dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(st["last_backup_at"])
+        if age > dt.timedelta(hours=48):
+            out.append(f"No backup for {age.days} days.")
+    if st.get("test_ok") is False:
+        out.append(f"Restore test failed: {st.get('test_detail')}")
+    return out
 
 
 def _data_for_model(data: dict) -> str:

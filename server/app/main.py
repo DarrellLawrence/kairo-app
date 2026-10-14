@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, brief, capture, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
+from . import approvals, backup, brief, capture, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
 from .audit import audit
 from .executor import Executor
@@ -109,12 +109,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.captures = capture.Processor(
         engine=engine, vault_dir=settings.vault_dir, profile=profile,
         on_question=lambda c: pusher.notify("Kairo has a question", c.question or "About your capture", "/#today"))
+    backup_dir = settings.data_dir / "backups" / "nightly"
+
+    def _backup_status(s, **update):
+        row = s.get(SettingKV, "backup_status") or SettingKV(key="backup_status", value="{}")
+        st = json.loads(row.value or "{}")
+        st.update(update)
+        row.value = json.dumps(st, default=str)
+        s.add(row)
+        s.commit()
+        return st
+
+    def backup_job(ctx):
+        try:
+            path = backup.make(db_path=settings.db_path, data_dir=settings.data_dir, config_dir=settings.config_dir,
+                               dest_dir=backup_dir)
+        except Exception as exc:
+            _backup_status(ctx.session, last_error=f"{dt.datetime.now(profile.tz):%Y-%m-%d %H:%M}: {exc}")
+            pusher.notify("Backup failed", str(exc)[:200], "/#more")
+            raise
+        backup.rotate(backup_dir)
+        _backup_status(ctx.session, last_backup=path.name, last_backup_at=dt.datetime.now(profile.tz).isoformat(),
+                       last_size=path.stat().st_size, last_error=None)
+        return path.name
+
+    def restore_test_job(ctx):
+        z = backup.latest(backup_dir)
+        if z is None:
+            raise RuntimeError("no backup to test yet")
+        try:
+            result = backup.verify(z)
+        except Exception as exc:
+            _backup_status(ctx.session, test_ok=False, test_at=dt.datetime.now(profile.tz).isoformat(), test_detail=str(exc))
+            pusher.notify("Restore test failed", str(exc)[:200], "/#more")
+            raise
+        _backup_status(ctx.session, test_ok=True, test_at=dt.datetime.now(profile.tz).isoformat(), test_detail=result)
+        return json.dumps(result)
+
     app.state.jobs = Jobs(
         engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
         ask=lambda prompt, system: chat.ask_sync(runner, prompt, system=system),
         bodies={"email_triage": lambda ctx: app.state.triage.run(ctx),
                 "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
-                "capture_process": lambda ctx: app.state.captures.run(ctx)})
+                "capture_process": lambda ctx: app.state.captures.run(ctx),
+                "backup": backup_job, "restore_test": restore_test_job})
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
@@ -763,6 +801,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             out["transport_error"] = f"Timetable not available ({type(exc).__name__})"
         return out
+
+    @app.get("/api/backups")
+    def backups_list():
+        with session_for(engine) as s:
+            row = s.get(SettingKV, "backup_status")
+            st = json.loads(row.value) if row and row.value else {}
+        zips = sorted(backup_dir.glob("kairo-*.zip"), reverse=True) if backup_dir.is_dir() else []
+        return {"status": st, "folder": str(backup_dir),
+                "backups": [{"name": z.name, "size": z.stat().st_size} for z in zips]}
 
     # ---------------------------------------------------------------- owner's own to-dos (More tab)
 
