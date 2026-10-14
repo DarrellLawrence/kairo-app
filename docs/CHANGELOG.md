@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-14 — plan: KICKOFF v8 (real-use batch after P0; owner's request)
+- Done now means proven on kairo-home with the real Claude and the real iPhone: `docs/ACCEPTANCE.md` (20 tests), run on the PC after every release, results in More → System → Acceptance.
+- Every PR also removes what it replaces and says what it removed.
+- Order: voice reply sound → voice-first capture → P1/P2 proven → capture from anywhere → judgment → semantic memory → coaching → profile import → P3–P5 → Obsidian graph → no SYSTEM writes into data (then OLAT on).
+- Owner only, app-wide; no visual brain; no WhatsApp bots.
+
 ## 2026-10-14 — build: school portal (OLAT), read-only (owner's request)
 - More -> Settings -> Logins: OLAT username and password, typed in the app only, encrypted on the PC (Windows DPAPI, bound to kairo-svc). Never in the repo, chat, logs, database or an API answer. The model has no tool for it.
 - Daily at 06:05 Kairo's own browser (Playwright + Chromium, installed into tools\browser) logs in and reads: course folders, pages, announcements, calendar. New files go to vault `40 School/OLAT/<course>/`, new material and dates into the brief.

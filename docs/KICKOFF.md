@@ -1,4 +1,19 @@
-# Kairo — Kickoff & Build Spec (v7)
+# Kairo — Kickoff & Build Spec (v8)
+
+### Changelog v7 → v8 (real-use batch after P0; owner's request 2026-10-14)
+- **Done means proven.** Nothing is done until it passes on kairo-home with the real Claude, the real Google account and the owner's real iPhone. Green CI is not done. The tests are `docs/ACCEPTANCE.md` (section 16b). After every release with user-facing changes the automated ones run on the PC itself (`KAIRO-TEST` items, cleaned up after), pass/fail in More → System → Acceptance; manual ones are listed for the owner, max 5 min. Every new feature adds its test there before it is built. If something can't be proven, say so and why.
+- **Clean while you build.** Every PR that adds something removes what it replaces: dead code, unused config keys, duplicate paths (loops vs tasks vs promises; brief vs debrief vs recap), old thread/session code, stale docs and checklist items. No new feature on top of a broken or duplicate one. Each PR lists what it removed.
+- **Owner only, app-wide.** Every request must come from the PC itself or through Kairo's tailnet address as the PC's own Tailscale account (recorded by the boot check). Run diagnosis (More → System, read-only, redacted, copy/share) is in.
+- **A. Real-use bugs first.** (1) Voice reply plays no sound on the iPhone PWA: find the real cause, log audio events from the phone to the server, play reliably (silent switch on or off, AirPods), clear "no sound? tap to play" fallback; self-test checks TTS makes a valid, non-silent WAV. (2) + opens voice-first capture: big hold-to-talk mic (release = sent, handled as a voice note: no reply, one line saying what Kairo did), attach (Files, Photos, camera), text last.
+- **B. Capture from anywhere.** "Kairo Voice" Shortcut (one tap from the lock screen or Back Tap → records → sends → done) and "Share to Kairo" in the share sheet (text, links, images, files; no app opens), with plain-words setup. Kairo works out who it's from and what it is (gift idea, task, info, file); unsure → a short quick-questions list asked next time, with its best guess. Gift ideas go to that person's wishlist with price and link. No WhatsApp bots or unofficial APIs. Files live only on kairo-home in `vault/Files/<category>/` (School, Work, Personal, Money, Receipts, …), original name kept, a short summary note, deduped by hash, inbox cleaned after filing, one-line confirmation; `Files/` and anything over 20 MB are not synced to the iPhone.
+- **C. Memory.** Semantic memory, 100% local: a multilingual (English + German) embedding model on the GPU, a SQLite vector store over notes, file summaries, chat memory, people and loops, re-indexed on change; hybrid search (keyword + meaning) used automatically before answering anything about the owner; answers name the source note. Obsidian graph: every note Kairo writes links people, places, subjects, projects and goals with [[wikilinks]] (one note each, created if missing, aliases in frontmatter). **No visual brain**: no Brain tab, graph, neuron view or any visualisation of memory.
+- **D. Personality and judgment.** "Leave it / drop it / forget it" applies only to the item just discussed; Kairo confirms in one line what it dropped, or asks once with 2–3 options. Reply in the language of each message (English or German). Model routing: judgment calls (re-plan after a change, whether to push or call, how hard) on Sonnet or Opus by importance, never Haiku; money coaching, investing and the monthly money review on Opus; training and food plans on Sonnet; simple triage and reminders on Haiku. Calls only for important things or real questions, and only in the owner's call windows (morning commute, evening commute, evening at home). Morning brief: short push text + voice on the commute, unusual things first. Push hard on important things (school, gifts, health, money), firm but fair on the rest.
+- **E. Coaching modules** (generic features; the owner's details come from the vault): training (weekly split around fixed training days, short home sessions on other days, only the equipment listed in the profile, tracked, streaks, pushback on skipped sessions and leg day); food and water (evening-before check: food packed, cutlery; protein focus; snack spending tracked; water reminders during work/school); study (exam plan to the date in the profile, commute = flashcards/voice quiz, short summaries + videos); money on Opus (monthly review, investing plan, spending pushback, savings goals, gift budgets, Christmas planning from early November; read-only always, facts + options + a recommendation, the owner decides); people (wishlists, birthdays, date ideas, what people said, 1:1 family time); faith (a small daily habit next to an existing morning habit, gentle, in the weekly review); style (wardrobe plan + budget inside the money plan, second-hand first).
+- **F. Fix plan, still open.** P1/P2 proven on the PC (self-test + acceptance). P3–P5 (noise and duplicates, one notification boss, one call budget, lag, observability) ranked by the in-app diagnosis numbers; the updater history joins the diagnosis in P5. SYSTEM writes into `data\` (junction risk) fixed before OLAT or any browser job runs for real: OLAT stays off until then.
+- **G. Profile import.** The owner attaches a profile file in chat ("save this to my profile"): stored as-is in `10 Profile/`, then the loops, calendar tags, people notes and plans it describes are created, and Kairo says in a few lines what it set up; unclear points go to quick questions. Real personal data never goes into the repo, tests, fixtures, logs, issues or PR text; the acceptance test uses a fake profile.
+- **Already built, now in the plan:** school portal (OLAT, read-only, section 15c; off until F24). Knowledge calls (max 1/day, open PR #18) merge after the one call budget (F23).
+- **Order:** A1 → A2 → F22 → B → D → C6 (semantic memory) → E → G → F23 → C7 (Obsidian graph) → F24. Each block is its own PR, merged on green; after each block the acceptance tests that apply run on kairo-home and the result is reported. Updates to the owner: 3 short lines (done / next / what the owner must do).
+
 
 ### Changelog v6 → v7 (chief of staff; owner's request 2026-10-14)
 - **Auto-merge.** Claude merges its own PRs (plan changes included) as soon as every CI check is green; never with red CI. Two-line note to the owner after each merge.
@@ -197,7 +212,7 @@ Kairo may later be set up for a few paying clients (one box per client, their ow
 | **2 (this repo)** | 2–5 | kairo-home, CLI runtime, gate, approvals, app, jobs, capture, board, reviews, school, Lerndokumentation, vault sync, backups | All acceptance checks + daily use 2 weeks |
 | 3 | 6–9 | Local voice, push "calls", health feed, finance (Finch MCP + Wallet trigger + camt.053), people, life admin scans, chores, German coach, monthly review | Daily use 2 weeks |
 | 4 | 10+ | Outdoors, career, idea inbox + skeptic, **local LLM + routing**, focus, reading, quarterly/yearly reviews, relationship memory + meeting prep | — |
-| Backlog | — | WhatsApp (read-only, `wa.me` replies), native iOS + CallKit, nonstop tasks, JARVIS link, socials, **Kairo for clients** | — |
+| Backlog | — | WhatsApp (share sheet only, `wa.me` replies), native iOS + CallKit, nonstop tasks, JARVIS link, socials, **Kairo for clients** | — |
 
 **Don't build phase 3–4 features in phase 2.** Leave extension points (section 17).
 
@@ -676,6 +691,8 @@ start the next until its checks pass and the owner says go.
 - Gate, approvals, hooks: write the failing test first.
 - Ask before adding a dependency.
 - Explain any manual step the owner must do, in plain words.
+- Done = passes docs/ACCEPTANCE.md on kairo-home with the real Claude and the real iPhone. Green CI is not done.
+- Clean while you build: every PR removes what it replaces and lists what it removed.
 ```
 
 ---
@@ -727,6 +744,24 @@ start the next until its checks pass and the owner says go.
 - [ ] Backups + one restore tested
 - [ ] The owner turns off phase 1 scheduled tasks
 
+**Batch v8 (order of the v7 → v8 changelog; each box ticks only when its acceptance tests pass on kairo-home and the iPhone)**
+- [x] Run diagnosis in More → System
+- [ ] Owner check app-wide
+- [ ] A1 Voice reply audible (tests 3, 15)
+- [ ] A2 Voice-first capture on + (test 16)
+- [ ] F22 P1/P2 proven on the PC; Acceptance page runs the automated tests (tests 1, 6, 7, 11, 12)
+- [ ] B Shortcuts, share sheet, quick questions, wishlists, files (tests 5, 17)
+- [ ] D Leave it, language per message, model routing, call windows, brief, push style (tests 10, 13, 19)
+- [ ] C6 Semantic memory (tests 2, 18)
+- [ ] E Coaching modules: training, food and water, study, money, people, faith, style
+- [ ] G Profile import (test 20)
+- [ ] F23 P3–P5 from the diagnosis numbers (tests 4, 8, 9, 14)
+- [ ] C7 Obsidian graph
+- [ ] F24 No SYSTEM writes into `data\`; then OLAT on
+
+### 15c. School portal (OLAT, built 2026-10-14)
+Read-only: Kairo's own browser logs in daily and reads course folders, pages, announcements and the calendar; never tests, quizzes, assignments, surveys, forums or enrollment. Login typed in the app, encrypted on the PC. Off until F24.
+
 ---
 
 ## 16. Acceptance checks (all must pass)
@@ -757,6 +792,12 @@ start the next until its checks pass and the owner says go.
 
 ---
 
+## 16b. Owner acceptance tests (v8)
+
+`docs/ACCEPTANCE.md` is part of this spec: 20 tests run on kairo-home with the real Claude, Google and iPhone. The table in section 16 stays as the safety checks.
+
+---
+
 ## 17. Later — extension points only (don't build now)
 
 - **Voice (3):** Pipecat/WebRTC; faster-whisper or Moonshine on GPU; Silero VAD + smart-turn; Kokoro/Piper; "call me" push.
@@ -764,7 +805,8 @@ start the next until its checks pass and the owner says go.
 - **Health (3):** Apple Health daily via Shortcut → `POST /api/health`.
 - **Relationship memory + meeting prep (4):** people records (last contact, context, promises, intros owed), pre-meeting brief from past emails + notes. Key feature for busy networkers / client setups.
 - **Local LLM (4):** `brain/local.py` + router.
-- **WhatsApp (backlog):** read-only WhatsApp Web on kairo-home; replies via `wa.me` + owner's tap.
+- **WhatsApp (backlog):** no bots and no unofficial APIs (ban risk). Today: the share sheet. Replies via `wa.me` + owner's tap.
+- **Never in v8:** a visual brain (Brain tab, graph, neuron view or any visualisation of memory).
 - **Clients (backlog):** one box per client; own model subscription; config-only tailoring; remote maintenance via Tailscale with consent.
 
 ---
