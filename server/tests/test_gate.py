@@ -354,3 +354,9 @@ def test_debrief_is_a_read_tool(gate, args):
 
 def test_debrief_rejects_unknown_topics(gate):
     assert gate.decide(P + "debrief", {"topic": "bank_transfer"}, ctx()).verdict == "deny"
+
+
+def test_people_note_can_store_an_email_but_only_a_valid_one(gate):
+    ok = gate.decide(P + "people_note", {"name": "Marc", "email": "marc@example.com"}, ctx())
+    assert (ok.verdict, ok.tier) == ("allow", 1)
+    assert gate.decide(P + "people_note", {"name": "Marc", "email": "not an address"}, ctx()).verdict == "deny"

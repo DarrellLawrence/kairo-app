@@ -212,6 +212,7 @@ class Flashcard(SQLModel, table=True):
     box: int = 1
     due: dt.date = Field(index=True)
     created_at: datetime = Field(default_factory=utcnow)
+    reviewed_at: datetime | None = None       # tells Kairo a study block happened
 
 
 class Lerndoku(SQLModel, table=True):
@@ -272,6 +273,7 @@ class Person(SQLModel, table=True):
     notes: str | None = Field(default=None, sa_column=Column(Text))
     last_contact: dt.date | None = None
     contact_every_days: int | None = None
+    email: str | None = None                 # for ready-to-send drafts (birthday, catching up)
 
 
 class Chore(SQLModel, table=True):

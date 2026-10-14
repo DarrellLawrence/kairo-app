@@ -50,6 +50,7 @@ DEFAULT_CRON = {
 QUIET_EXEMPT = {"backup", "restore_test"}
 CAPTURE_EVERY_MIN = 15
 LOOPS_EVERY_MIN = 15
+PA_EVERY_MIN = 30
 
 # Shown in the app (More -> Jobs) and runnable on demand.
 JOB_TITLES = {
@@ -63,6 +64,7 @@ JOB_TITLES = {
     "lerndoku_prompt": "Lerndokumentation reminder",
     "open_loops": "Open loops",
     "promises": "Find promises in sent mail",
+    "pa": "PA: birthdays, people, money, tests, patterns",
 }
 
 
@@ -328,6 +330,10 @@ class Jobs:
             every = ((self.schedule.get("jobs") or {}).get("open_loops") or {}).get("every_minutes") or LOOPS_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["open_loops"],
                           id="open_loops", misfire_grace_time=600)
+        if "pa" in self.bodies:
+            every = ((self.schedule.get("jobs") or {}).get("pa") or {}).get("every_minutes") or PA_EVERY_MIN
+            sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["pa"], id="pa",
+                          misfire_grace_time=900)
         for name in ("backup", "restore_test", "lerndoku_prompt", "promises"):
             if name in self.bodies:
                 sched.add_job(self.run_job, cron_trigger(self._cron(name), tz), args=[name], id=name)

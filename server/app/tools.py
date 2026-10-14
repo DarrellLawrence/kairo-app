@@ -219,7 +219,7 @@ class ToolRunner:
         from . import life
         with Session(self.engine) as s:
             p = life.people_note(s, name=a["name"], note=a.get("note", ""), contacted=a.get("contacted", False),
-                                 relation=a.get("relation"), today=datetime.now().date())
+                                 relation=a.get("relation"), today=datetime.now().date(), email=a.get("email"))
             return json.dumps(life.person_dict(p, datetime.now().date()), default=str)
 
     def _finance_list(self, a: dict) -> str:

@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops
+from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError
 from .voice import calls as voice_calls
@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from .actions import LoopsAdd
 from .audit import audit
+from .jobkit import clip as clip_text
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
 from .gate_context import read_context
@@ -88,6 +89,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if dt.datetime.fromisoformat(e["start"]) <= now < dt.datetime.fromisoformat(e["end"]):
                     bits.append(f"Busy: in \"{e['summary']}\" until {dt.datetime.fromisoformat(e['end']).astimezone(profile.tz):%H:%M}. Keep it short.")
         except Exception:   # no calendar: the rule still works on the rest
+            pass
+        try:
+            nxt = None
+            for e in _cal_cache["events"]:
+                if e.get("all_day") or not e.get("start"):
+                    continue
+                st = dt.datetime.fromisoformat(e["start"]).astimezone(profile.tz)
+                if now < st <= now + dt.timedelta(hours=12):
+                    nxt = (st, e["summary"])
+                    break
+            with session_for(engine) as s_:
+                hint = pa_mod.late_night_hint(s_, now=now, first_tomorrow=nxt[0] if nxt else None, title=nxt[1] if nxt else None)
+            if hint:
+                bits.append(hint)
+        except Exception:
             pass
         try:
             from .db import SchoolEvent as _SE
@@ -230,10 +246,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "backup": backup_job, "restore_test": restore_test_job,
                 "lerndoku_prompt": lambda ctx: lerndoku_prompt_job(ctx),
                 "open_loops": lambda ctx: app.state.loops.run(ctx),
-                "promises": lambda ctx: app.state.promises.run(ctx)})
+                "promises": lambda ctx: app.state.promises.run(ctx),
+                "pa": lambda ctx: app.state.pa.run(ctx)})
     app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
                                        calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
                                        vault_dir=settings.vault_dir, config_dir=settings.config_dir)
+    app.state.pa = pa_mod.PA(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
+                             executor=lambda: app.state.executor, gate=gate, vault_dir=settings.vault_dir, config_dir=settings.config_dir)
     app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
@@ -1011,7 +1030,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 msg = location.arrival_reminder(s, row.place)
                 if msg:
                     app.state.pusher.notify(msg[0], msg[1], "/#today")
+            if row.event == "leave" and row.place.lower() == "home":
+                threading.Thread(target=_leaving_check, daemon=True).start()   # answer the Shortcut fast
             return {"ok": True, "stored": True, "id": row.id}
+
+    def _leaving_check() -> None:
+        """PA rule 6: only abnormal things (delays, weather that matters), never a normal-day notice."""
+        commute = (app.state.jobs.schedule.get("commute") or {})
+        try:
+            lat, lon = float(commute["lat"]), float(commute["lon"])
+        except (KeyError, TypeError, ValueError):
+            return   # no commute place set in schedule.yaml
+        now = dt.datetime.now(profile.tz)
+        try:
+            weather = app.state.lookup.weather(lat, lon)
+        except Exception:
+            weather = None
+        try:
+            stations = app.state.lookup.stations(lat, lon)
+        except Exception:
+            stations = None
+        text_ = pa_mod.leaving_notice(weather=weather, stations=stations, now=now)
+        if not text_:
+            return
+        with session_for(engine) as s:
+            if loops.pings_today(s, now, profile.tz) >= loops.max_pings(app.state.jobs.schedule):
+                return
+            audit(s, actor="backend", action="proactive.ping", outcome=f"leaving: {clip_text(text_)}")
+        app.state.pusher.notify("Heads up", text_, "/#today")
 
     @app.get("/api/location")
     def location_get(request: Request, limit: int = 200):

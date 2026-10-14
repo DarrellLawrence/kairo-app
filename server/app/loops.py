@@ -39,6 +39,7 @@ from .tools import _body_text, _headers, untrusted
 log = logging.getLogger("kairo.loops")
 
 URGENCY_RANK = {"urgent": 0, "normal": 1, "low": 2}
+PA_KINDS = ("birthday", "people", "money", "study", "pattern")   # raised by the PA engine (pa.py)
 URGENT_STEPS_MIN = (30, 60)
 DEFAULT_TIMES = {"after_work": "17:30", "weekend": "10:00", "morning": "07:15", "morning_weekend": "09:00"}
 DEFAULT_MAX_PINGS = 6
@@ -129,10 +130,14 @@ def urgency_of(loop: OpenLoop, now: dt.datetime, tz) -> str:
             return "urgent"
         if days <= 7:
             return "normal"
+        if days > 14 and loop.kind in PA_KINDS:
+            return "low"                        # e.g. planning a big birthday two months ahead
     if loop.kind in ("reply", "waiting", "promise"):
         waited = now - aware(loop.since)
         return "urgent" if waited > dt.timedelta(days=WAITING_URGENT_DAYS) else "normal"
-    return "low" if loop.kind == "task" and due is None else "normal"
+    if loop.kind in ("pattern", "money") and due is None:
+        return "normal"
+    return "low" if loop.kind in ("task", "people") and due is None else "normal"
 
 
 # ---------------------------------------------------------------- words
@@ -176,6 +181,8 @@ def phrase(loop: OpenLoop, now: dt.datetime, tz) -> str:
         if again:
             return f"You promised {loop.who or 'it'} {_ago(since, now, tz)}: {loop.what}. Still open{by}."
         return f"You told {loop.who or 'someone'} you'd {loop.what}{by}."
+    if loop.kind in PA_KINDS:   # the PA engine writes the whole sentence
+        return f"Still open: {loop.what}" if again else loop.what
     due = f", {_when(aware(loop.due), now, tz)}" if loop.due else ""
     return f"{loop.what}{due}. Still not done." if again else f"{loop.what}{due}."
 

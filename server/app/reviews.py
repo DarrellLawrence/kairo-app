@@ -161,6 +161,10 @@ def prefill(session: Session, kind: str, start: dt.date, end: dt.date, tz=None) 
         h = life.health_summary(session, (end - start).days + 1, end)["avg"]
         if h["sleep_h"] is not None:
             facts.append(f"Sleep {h['sleep_h']} h on average" + (f", {int(h['steps'])} steps a day" if h["steps"] else ""))
+        from .db import OpenLoop
+        pats = [l.what for l in session.exec(select(OpenLoop).where(OpenLoop.kind == "pattern")).all()]
+        if pats:
+            facts.append("Patterns Kairo noticed: " + " | ".join(pats[:4]))
         if kind != "weekly":
             m = life.money_summary(session, (end - start).days + 1,
                                    now=dt.datetime.combine(end + dt.timedelta(days=1), dt.time.min, tzinfo=dt.timezone.utc))

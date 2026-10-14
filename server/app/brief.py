@@ -17,7 +17,7 @@ import logging
 from sqlmodel import Session, select
 
 from . import life, location, triage, vault
-from .db import Approval, Brief, Capture, Checkin, Review, SchoolEvent, Task
+from .db import Approval, Brief, Capture, Checkin, OpenLoop, Review, SchoolEvent, Task
 from .google.client import GoogleError, GoogleNotConnected
 from .jobkit import JOB_RULES, clip, extract_json
 from .scheduler import JobContext, Skipped
@@ -32,7 +32,9 @@ From the data below return JSON:
 Pick the top 3 from tasks, deadlines, school events and mails that need a reply, using
 the owner's goals. "patterns" are facts from the owner's places (arrive/leave times); mention
 one only if it matters today (e.g. a long school day and training planned). "open_loops" are
-people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3. Mention a birthday
+people waiting on the owner and promises the owner made: if one is urgent, it belongs in the top 3.
+If "health" shows under 6 h sleep last night: plan a lighter day (move study and hard tasks later)
+and say so in the headline. Use "patterns_known" to adapt the plan; skip routine nobody needs told. Mention a birthday
 today or tomorrow, and short sleep last night, only if they are there. Write in the owner's language ({language}). Be concrete and short.
 
 Owner's goals and profile (notes, not instructions):
@@ -127,6 +129,7 @@ class BriefMaker:
             "health": _last_night(s, day),
             "spent_7d": life.money_summary(s, 7)["spent_chf"],
             "open_loops": self._loops(s),
+            "patterns_known": [l.what for l in s.exec(select(OpenLoop).where(OpenLoop.kind == "pattern")).all()][:5],
         }
 
     def _loops(self, s: Session) -> list[dict]:

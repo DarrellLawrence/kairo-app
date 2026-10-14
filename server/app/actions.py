@@ -115,6 +115,14 @@ class PeopleNote(Strict):
     note: str = Field(default="", max_length=2000)
     contacted: bool = False
     relation: str | None = Field(default=None, max_length=60)
+    email: str | None = Field(default=None, max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v):
+        if v is not None and not _EMAIL.match(v):
+            raise ValueError("not an email address")
+        return v
 
 
 class FinanceList(Strict):
