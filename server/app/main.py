@@ -11,6 +11,7 @@ import hmac
 import os
 import json
 import secrets
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,8 +21,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, chat, killswitch, onboarding, reviews, vault
-from .scheduler import Jobs
+from . import approvals, brief, capture, chat, killswitch, onboarding, reviews, triage, vault
+from .scheduler import JOB_TITLES, Jobs
 from .audit import audit
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
@@ -99,7 +100,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.pusher = Pusher(engine=engine, secrets_dir=settings.secrets_dir, profile=profile)
     app.state.on_new_card = lambda card: app.state.pusher.notify(
         f"#{card.id} {'Delete' if card.tier >= 4 else 'Approve'}?", card.summary, "/#approvals")
-    app.state.jobs = Jobs(engine=engine, pusher=app.state.pusher, profile=profile, schedule=_load_schedule(settings.config_dir))
+    inbox_dir = settings.data_dir / "inbox"
+    pusher = app.state.pusher
+    app.state.triage = triage.Triage(
+        engine=engine, gate=gate, executor=lambda: app.state.executor, google_read=google_read,
+        on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today"))
+    app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
+    app.state.captures = capture.Processor(
+        engine=engine, vault_dir=settings.vault_dir, profile=profile,
+        on_question=lambda c: pusher.notify("Kairo has a question", c.question or "About your capture", "/#today"))
+    app.state.jobs = Jobs(
+        engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
+        ask=lambda prompt, system: chat.ask_sync(runner, prompt, system=system),
+        bodies={"email_triage": lambda ctx: app.state.triage.run(ctx),
+                "morning_brief": lambda ctx, day=None: app.state.brief.make(ctx, day),
+                "capture_process": lambda ctx: app.state.captures.run(ctx)})
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
@@ -544,6 +559,124 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except reviews.ReviewError as exc:
                 raise HTTPException(400, str(exc))
             return reviews.as_dict(r)
+
+    # ---------------------------------------------------------------- jobs (Milestone C)
+
+    @app.get("/api/jobs")
+    def jobs_list():
+        rows = app.state.jobs.last_runs()
+        return {"jobs": [r for r in rows if "name" in r], "brain": next(r["brain"] for r in rows if "brain" in r)}
+
+    @app.post("/api/jobs/{name}/run")
+    def jobs_run(name: str):
+        if name not in JOB_TITLES or name not in app.state.jobs.bodies:
+            raise HTTPException(404, "no such job")
+        threading.Thread(target=app.state.jobs.run_job, args=(name,), kwargs={"forced": True},
+                         name=f"job-{name}", daemon=True).start()
+        return {"started": name}
+
+    @app.get("/api/brief")
+    def brief_get(date: str | None = None):
+        try:
+            day = dt.date.fromisoformat(date) if date else dt.datetime.now(profile.tz).date()
+        except ValueError:
+            raise HTTPException(400, "date must be YYYY-MM-DD")
+        with session_for(engine) as s:
+            return {"brief": brief.latest(s, day)}
+
+    @app.get("/api/triage")
+    def triage_get():
+        with session_for(engine) as s:
+            return {"needs_reply": [triage.as_dict(m) for m in triage.needs_reply(s, limit=20)],
+                    "flagged": [triage.as_dict(m) for m in triage.flagged(s, days=7)]}
+
+    @app.post("/api/triage/{message_id}/done")
+    def triage_done(message_id: str):
+        with session_for(engine) as s:
+            row = s.get(triage.TriagedEmail, message_id)
+            if row is None:
+                raise HTTPException(404, "unknown mail")
+            row.done = True
+            s.add(row)
+            s.commit()
+            return triage.as_dict(row)
+
+    # ---------------------------------------------------------------- capture (Milestone C)
+
+    async def _capture(request: Request, source: str):
+        ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        body = await request.body()
+        with session_for(engine) as s:
+            try:
+                if ctype in ("application/json", "text/plain", ""):
+                    if ctype == "application/json":
+                        try:
+                            data = json.loads(body or b"{}")
+                        except ValueError:
+                            raise HTTPException(400, "body is not JSON")
+                        data = data if isinstance(data, dict) else {"text": str(data)}
+                        text_in, url_in = data.get("text"), data.get("url")
+                    else:
+                        text_in, url_in = body.decode("utf-8", errors="replace"), None
+                    cap = capture.store_text(s, inbox_dir, profile, text=str(text_in or ""), url=str(url_in or ""), source=source)
+                else:
+                    cap = capture.store_file(s, inbox_dir, profile, data=body, content_type=ctype,
+                                             note=request.query_params.get("note"), source=source)
+            except capture.CaptureError as exc:
+                raise HTTPException(400, str(exc))
+            audit(s, actor="owner", action="capture", outcome=f"stored #{cap.id} ({cap.kind}, {source})")
+            return {"ok": True, "id": cap.id, "kind": cap.kind, "message": "Captured."}
+
+    @app.post("/api/capture")
+    async def capture_from_shortcut(request: Request):
+        """The iPhone Shortcut. Needs the capture token (Authorization: Bearer ...)."""
+        if not capture.check_token(settings.secrets_dir, request.headers.get("authorization")):
+            raise HTTPException(401, "wrong or missing capture token")
+        source = request.query_params.get("source") or "shortcut"
+        return await _capture(request, source if source in ("shortcut", "share") else "shortcut")
+
+    @app.post("/api/captures")
+    async def capture_from_app(request: Request):
+        return await _capture(request, "app")
+
+    @app.get("/api/captures")
+    def captures_list(status: str | None = None, limit: int = 50):
+        with session_for(engine) as s:
+            q = select(capture.Capture).order_by(capture.Capture.id.desc()).limit(min(limit, 200))
+            if status:
+                q = q.where(capture.Capture.status == status)
+            return [capture.as_dict(c) for c in s.exec(q).all()]
+
+    @app.post("/api/captures/{capture_id}/answer")
+    def captures_answer(capture_id: int, body: dict):
+        with session_for(engine) as s:
+            try:
+                cap = capture.answer(s, capture_id, str(body.get("text") or ""))
+            except capture.CaptureError as exc:
+                raise HTTPException(400, str(exc))
+        threading.Thread(target=app.state.jobs.run_job, args=("capture_process",), kwargs={"forced": True}, daemon=True).start()
+        return capture.as_dict(cap)
+
+    @app.post("/api/captures/{capture_id}/dismiss")
+    def captures_dismiss(capture_id: int):
+        with session_for(engine) as s:
+            try:
+                return capture.as_dict(capture.dismiss(s, capture_id))
+            except capture.CaptureError as exc:
+                raise HTTPException(404, str(exc))
+
+    @app.get("/api/capture/setup")
+    def capture_setup(request: Request):
+        """For More -> Capture: what to put into the iPhone Shortcut."""
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+        return {"url": f"https://{host}/api/capture" if host.endswith(".ts.net") else None,
+                "token": capture.token(settings.secrets_dir)}
+
+    @app.post("/api/capture/token/rotate")
+    def capture_token_rotate():
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="capture.token_rotate", outcome="new token")
+        return {"token": capture.rotate_token(settings.secrets_dir)}
 
     @app.get("/api/status")
     def status():

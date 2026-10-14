@@ -59,6 +59,42 @@ class Capture(SQLModel, table=True):
     text: str | None = Field(default=None, sa_column=Column(Text))
     processed: bool = Field(default=False, index=True)
     created_at: datetime = Field(default_factory=utcnow)
+    source: str = "shortcut"  # shortcut / share / app / email
+    status: str = Field(default="new", index=True)  # new / filed / asking / later / failed
+    filed_as: str | None = None  # task / school_event / note / person / idea / question
+    title: str | None = None
+    question: str | None = Field(default=None, sa_column=Column(Text))  # Kairo's question when unclear
+    result_json: str | None = Field(default=None, sa_column=Column(Text))
+    filed_at: datetime | None = None
+
+
+class TriagedEmail(SQLModel, table=True):
+    """Result of the hourly email triage (C2). Mail content is untrusted: these
+    rows feed the brief and the Today screen, never an approval card."""
+
+    __tablename__ = "email_triage"
+    message_id: str = Field(primary_key=True)
+    thread_id: str | None = None
+    sender: str | None = None
+    subject: str | None = None
+    received_at: datetime | None = Field(default=None, index=True)
+    category: str = Field(index=True)  # reply / fyi / ignore
+    summary: str | None = Field(default=None, sa_column=Column(Text))
+    deadline: dt.date | None = None
+    suspicious: bool = False
+    suspicious_reason: str | None = Field(default=None, sa_column=Column(Text))
+    task_id: int | None = None
+    done: bool = Field(default=False, index=True)  # the owner dealt with it
+    triaged_at: datetime = Field(default_factory=utcnow)
+
+
+class Brief(SQLModel, table=True):
+    __tablename__ = "briefs"
+    id: int | None = Field(default=None, primary_key=True)
+    date: dt.date = Field(unique=True, index=True)
+    content_json: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: datetime = Field(default_factory=utcnow)
+    vault_path: str | None = None
 
 
 class Approval(SQLModel, table=True):
