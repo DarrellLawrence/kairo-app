@@ -104,9 +104,15 @@ def test_brief_and_capture_use_life_data(migrated):
         assert app.state.jobs.run_job("morning_brief", forced=True).status == "ok"
         b = c.get("/api/brief").json()["brief"]
         assert b["chores_due"] == ["Müll raus"] and b["people"]["birthdays"] == [{"name": "Ben", "in_days": 0}]
-        # A captured shopping note lands on the list.
-        c.post("/api/captures", json={"text": "Einkaufen: Eier, Butter"})
-        cap_id = c.get("/api/captures").json()[0]["id"]
-        app.state.jobs._ask = lambda p, s, images=None: AskResult(json.dumps([{"id": cap_id, "type": "shopping", "title": "Einkauf", "items": ["Eier", "Butter"]}]))
-        assert app.state.jobs.run_job("capture_process", forced=True).status == "ok"
+        # A captured shopping note lands on the list, at once (v8 B: no 15-minute wait).
+        import re
+        import time
+        app.state.jobs._ask = lambda p, s, images=None: AskResult(json.dumps(
+            [{"id": int(re.search(r"capture \(id (\d+)", p).group(1)), "type": "shopping", "title": "Einkauf", "items": ["Eier", "Butter"]}]))
+        cap_id = c.post("/api/captures", json={"text": "Einkaufen: Eier, Butter"}).json()["id"]
+        for _ in range(50):
+            if c.get(f"/api/captures/{cap_id}").json()["status"] == "filed":
+                break
+            time.sleep(0.1)
+        assert c.get(f"/api/captures/{cap_id}").json()["line"] == "Shopping list: Eier, Butter."
         assert [i["text"] for i in c.get("/api/shopping").json()] == ["Eier", "Butter"]

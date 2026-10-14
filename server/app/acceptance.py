@@ -66,7 +66,9 @@ SPECS = [
     Spec(14, "Calendar", "later", "\"training is fixed, study blocks are flexible\", then \"I have a test Friday\".", "D"),
     Spec(15, "Sound", "manual", "More → System → Sound check: silent switch on and off, with and without AirPods.", "A1"),
     Spec(16, "Capture", "manual", "+ → hold the mic → \"buy protein powder\" → let go: filed, one line back, no reply needed.", "A2"),
-    Spec(17, "Share", "later", "Share a WhatsApp message, a photo and a PDF to Kairo.", "B"),
+    Spec(17, "Share", "manual", "Share a WhatsApp message, a photo and a PDF with \"Share to Kairo\": no app opens, each "
+         "notification says where it went (Files/<category>/ on the PC), a gift idea lands on the wishlist or comes back "
+         "as a quick question the next time you talk to Kairo.", "B"),
     Spec(18, "Semantic memory", "later", "A fact told days ago, asked in other words: right answer naming the note.", "C6"),
     Spec(19, "Leave it", "later", "Two topics, then \"leave it\": only the last one is dropped, and Kairo says which.", "D"),
     Spec(20, "Profile import", "later", "Attach a profile in chat: stored as-is, loops/tags/people created, summary.", "G"),

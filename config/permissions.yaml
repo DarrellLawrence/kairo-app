@@ -25,6 +25,8 @@ actions:
   health.list:           0_read
   shopping.add:          1_internal
   people.note:           1_internal
+  captures.answer:       1_internal   # v8 B: the owner answered a quick question in chat
+  wishlist.add:          1_internal   # v8 B: a gift idea on that person's wishlist (Kairo's own table)
   settings.list:         0_read       # owner settings (not the gate, not permissions)
   settings.set:          1_internal
   place.set:             1_internal   # home / school / work / training; only station names leave the PC

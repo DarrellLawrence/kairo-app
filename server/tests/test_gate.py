@@ -411,3 +411,34 @@ def test_settings_tools_are_internal(gate, tool, args, tier):
 ])
 def test_unknown_settings_are_denied(gate, tool, args):
     assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+# ---------------------------------------------------------------- v8 block B: quick questions + wishlists (written before the code)
+
+@pytest.mark.parametrize("tool,args", [
+    ("captures_answer", {"capture_id": 12, "answer": "Yes, from my girlfriend. Gift idea."}),
+    ("wishlist_add", {"person": "Anna", "title": "Leather bag", "price_chf": 25.0, "url": "https://www.vinted.ch/items/1"}),
+    ("wishlist_add", {"person": "Anna", "title": "Board game"}),
+])
+def test_quick_answers_and_wishlists_are_internal(gate, tool, args):
+    d = gate.decide(P + tool, args, ctx())
+    assert (d.verdict, d.tier) == ("allow", 1)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("captures_answer", {"capture_id": 0, "answer": "x"}),
+    ("captures_answer", {"capture_id": 3, "answer": ""}),
+    ("captures_answer", {"capture_id": 3, "answer": "x", "approve": True}),
+    ("wishlist_add", {"person": "", "title": "x"}),
+    ("wishlist_add", {"person": "Anna", "title": "x", "url": "javascript:alert(1)"}),
+    ("wishlist_add", {"person": "Anna", "title": "x", "price_chf": -5}),
+    ("wishlist_add", {"person": "Anna", "title": "x", "buy": True}),
+])
+def test_quick_answers_and_wishlists_reject_bad_arguments(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
+@pytest.mark.parametrize("action", ["captures.answer", "wishlist.add"])
+def test_quick_answers_and_wishlists_cannot_be_proposed(gate, action):
+    tool, args = propose(action, {})
+    assert gate.decide(tool, args, ctx()).verdict == "deny"

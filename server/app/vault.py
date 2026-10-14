@@ -12,7 +12,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 FOLDERS = ["00 Inbox", "10 Profile", "20 Goals", "30 Projects", "40 School", "50 Apprenticeship",
-           "60 People", "70 Health", "80 Admin", "90 Reviews", "Ideas", "Kairo"]
+           "60 People", "70 Health", "80 Admin", "90 Reviews", "Ideas", "Kairo", "Files"]
 CONTEXT_FOLDERS = ["10 Profile", "20 Goals"]
 CONTEXT_LIMIT = 12_000
 

@@ -48,6 +48,9 @@
    "[\"actions\", \"calendar.tag\"]": [
     "9fe4c6d61f516b4f83823780"
    ],
+   "[\"actions\", \"captures.answer\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
    "[\"actions\", \"debrief\"]": [
     "d5f7e60aa5c52aca74fa4e18"
    ],
@@ -132,6 +135,9 @@
    ],
    "[\"actions\", \"vault.read\"]": [
     "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"wishlist.add\"]": [
+    "9fe4c6d61f516b4f83823780"
    ],
    "[\"default\"]": [
     "d2a00b488ac374247aa72cf8"

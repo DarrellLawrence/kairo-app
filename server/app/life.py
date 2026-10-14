@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 
 from sqlmodel import Session, func, select
 
-from .db import Chore, HealthDay, Person, ShoppingItem, Transaction, utcnow
+from .db import Chore, HealthDay, Person, ShoppingItem, Transaction, WishItem, utcnow
 
 MAX_CAMT = 10 * 1024 * 1024
 
@@ -143,6 +143,41 @@ def people_note(s: Session, *, name: str, note: str = "", contacted: bool = Fals
     return p
 
 
+def wish_add(s: Session, *, person: str, title: str, price_chf: float | None = None, url: str | None = None,
+             note: str | None = None, source: str = "chat", capture_id: int | None = None) -> WishItem:
+    """A gift idea on that person's wishlist (v8 B). The same link or title for the same person is kept once."""
+    p = person_find(s, person)
+    if p is None:
+        p = Person(name=" ".join(person.split())[:80])
+        s.add(p)
+        s.commit()
+        s.refresh(p)
+    title = " ".join(title.split())[:200]
+    for w in s.exec(select(WishItem).where(WishItem.person_id == p.id).where(WishItem.status == "open")).all():
+        if (url and w.url == url) or w.title.lower() == title.lower():
+            w.price_chf = price_chf if price_chf is not None else w.price_chf
+            w.url = url or w.url
+            s.add(w)
+            s.commit()
+            s.refresh(w)
+            return w
+    w = WishItem(person_id=p.id, title=title, price_chf=price_chf, url=url, note=(note or "").strip()[:1000] or None,
+                 source=source, capture_id=capture_id)
+    s.add(w)
+    s.commit()
+    s.refresh(w)
+    return w
+
+
+def wishlist(s: Session, person_id: int) -> list[WishItem]:
+    return list(s.exec(select(WishItem).where(WishItem.person_id == person_id).where(WishItem.status == "open")
+                       .order_by(WishItem.id)).all())
+
+
+def wish_dict(w: WishItem) -> dict:
+    return {"id": w.id, "title": w.title, "price_chf": w.price_chf, "url": w.url, "note": w.note, "source": w.source}
+
+
 def next_birthday(b: dt.date, today: dt.date) -> dt.date:
     try:
         nb = b.replace(year=today.year)
@@ -156,13 +191,13 @@ def next_birthday(b: dt.date, today: dt.date) -> dt.date:
     return nb
 
 
-def person_dict(p: Person, today: dt.date) -> dict:
+def person_dict(p: Person, today: dt.date, s: Session | None = None) -> dict:
     nb = next_birthday(p.birthday, today) if p.birthday else None
     overdue = bool(p.contact_every_days and (p.last_contact is None or (today - p.last_contact).days > p.contact_every_days))
     return {"id": p.id, "name": p.name, "relation": p.relation, "birthday": p.birthday.isoformat() if p.birthday else None,
             "birthday_in_days": (nb - today).days if nb else None, "notes": p.notes, "contact_every_days": p.contact_every_days,
             "last_contact": p.last_contact.isoformat() if p.last_contact else None, "reach_out": overdue,
-            "email": p.email}
+            "email": p.email, "wishlist": [wish_dict(w) for w in wishlist(s, p.id)] if s is not None else []}
 
 
 def people_reminders(s: Session, today: dt.date, days: int = 7) -> dict:

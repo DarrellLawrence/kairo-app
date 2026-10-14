@@ -93,7 +93,8 @@ function People() {
       <List>
         {d.people.map((p) => (
           <ListRow key={p.id} title={p.name} wrap chevron
-            subtitle={[p.relation, p.birthday && `birthday ${dayLabel(p.birthday)}`, p.last_contact && `last talked ${dayLabel(p.last_contact)}`].filter(Boolean).join(' · ')}
+            subtitle={[p.relation, p.birthday && `birthday ${dayLabel(p.birthday)}`, p.last_contact && `last talked ${dayLabel(p.last_contact)}`,
+              p.wishlist?.length && `${p.wishlist.length} on the wishlist`].filter(Boolean).join(' · ')}
             value={p.reach_out ? <Badge tone="warn" pop={false}>Reach out</Badge> : undefined}
             onClick={() => setEdit({ ...p, birthday: p.birthday || '', contact_every_days: p.contact_every_days || '' })} />
         ))}
@@ -116,6 +117,16 @@ function People() {
           </Button>
         )}
         <label className="k-field">Remind me to get in touch every … days (optional)<input inputMode="numeric" value={edit?.contact_every_days || ''} onChange={(e) => setEdit((x) => ({ ...x, contact_every_days: e.target.value }))} /></label>
+        {edit?.wishlist?.length > 0 && (
+          <div className="k-field">Wishlist
+            {edit.wishlist.map((w) => (
+              <p key={w.id} className="k-small" style={{ margin: '6px 0 0' }}>
+                🎁 {w.url ? <a href={w.url} target="_blank" rel="noreferrer">{w.title}</a> : w.title}
+                {w.price_chf != null ? ` · CHF ${w.price_chf.toFixed(2)}` : ''}
+              </p>
+            ))}
+          </div>
+        )}
         <label className="k-field">Notes<textarea rows={5} value={edit?.notes || ''} onChange={(e) => setEdit((x) => ({ ...x, notes: e.target.value }))} /></label>
         <Button variant="primary" block disabled={!edit?.name?.trim()} onClick={save}>Save</Button>
         {edit?.id && <Button variant="ghost" block style={{ marginTop: 6 }} onClick={async () => { await api('/api/people', { method: 'POST', body: { name: edit.name, contacted: true } }); setEdit(null); load() }}>We talked today</Button>}

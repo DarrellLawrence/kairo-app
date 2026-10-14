@@ -72,7 +72,9 @@ def test_tool_list_has_no_write_tools(setup):
                      "calendar_tag",
                      # open loops: Kairo's own table
                      "loops_list", "loops_add", "loops_snooze", "loops_close",
-                     "debrief", "settings_list", "settings_set", "place_set", "place_remove"}
+                     "debrief", "settings_list", "settings_set", "place_set", "place_remove",
+                     # v8 B: quick answers and wishlists, Kairo's own tables
+                     "captures_answer", "wishlist_add"}
     propose = [t for t in tools if t["name"] == "propose_action"][0]
     assert "gmail.send" in propose["inputSchema"]["properties"]["action"]["enum"]
     assert not any("pay" in a or "money" in a for a in propose["inputSchema"]["properties"]["action"]["enum"])
@@ -205,3 +207,51 @@ def test_mcp_kairo_speaks_mcp_and_forwards(tmp_path, migrated):
     finally:
         server.terminate()
         server.wait(timeout=10)
+
+
+# ---------------------------------------------------------------- v8 block B: quick questions + wishlists
+
+def test_wishlist_add_through_the_tool(setup):
+    r = setup["call"]("wishlist_add", {"person": "Anna", "title": "Board game", "price_chf": 39.9,
+                                       "url": "https://shop.example/game"})
+    body = json.loads(r.json()["text"]) if "text" in r.json() else r.json()
+    out = json.dumps(body)
+    assert "Board game" in out and "Anna" in out
+    r = setup["call"]("people_list", {"name": "Anna"})
+    assert "Board game" in json.dumps(r.json())
+
+
+def test_a_quick_answer_files_the_capture_again(setup):
+    from app import capture
+    from app.db import Capture
+    with Session(setup["engine"]) as s:
+        cap = Capture(kind="text", text="https://www.vinted.ch/items/77", source="share", status="asking",
+                      question="Was the jacket from Anna? Gift idea?")
+        s.add(cap)
+        s.commit()
+        s.refresh(cap)
+        cap_id = cap.id
+    filed = []
+    setup["app"].state.jobs.run_job = lambda *a, **k: filed.append(a)   # filing itself is tested in test_jobs
+    r = setup["call"]("captures_answer", {"capture_id": cap_id, "answer": "Yes, from Anna. Gift idea."})
+    assert r.status_code == 200 and "filing it now" in json.dumps(r.json())
+    with Session(setup["engine"]) as s:
+        c = s.get(Capture, cap_id)
+        assert c.status == "new" and "Owner answered: Yes, from Anna" in c.text
+    time.sleep(0.2)
+    assert filed and filed[0][0] == "capture_process"
+    r = setup["call"]("captures_answer", {"capture_id": cap_id, "answer": "again"})
+    assert "no question open" in json.dumps(r.json())
+    with Session(setup["engine"]) as s:
+        assert capture.quick_questions(s) == []
+
+
+def test_quick_questions_reach_the_chat_prompt(setup):
+    from app.db import Capture
+    app = setup["app"]
+    assert "Quick questions waiting" not in app.state.system_prompt()
+    with Session(setup["engine"]) as s:
+        s.add(Capture(kind="text", text="x", source="share", status="asking", question="Was the bag from Anna? Gift idea?"))
+        s.commit()
+    prompt = app.state.system_prompt()
+    assert "Quick questions waiting" in prompt and "Was the bag from Anna? Gift idea?" in prompt and "captures_answer" in prompt

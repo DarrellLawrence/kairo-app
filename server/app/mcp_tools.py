@@ -19,6 +19,8 @@ DESCRIPTIONS = {
     "shopping_add": "Add items to the owner's shopping list.",
     "people_list": "People the owner knows: relation, birthday, notes, last contact. Filter by name.",
     "people_note": "Remember something about a person (and/or that the owner was in touch today).",
+    "captures_answer": "The owner answered one of your quick questions about something they captured: pass their answer; Kairo files it.",
+    "wishlist_add": "Put a gift idea on a person's wishlist (title, price in CHF, link). Only things that person wants or would like.",
     "finance_list": "The owner's spending: totals by category and recent payments (read only; Kairo can't pay).",
     "health_list": "Daily health numbers from Apple Health: steps, sleep, resting heart rate, workouts.",
     "settings_list": "The owner's settings (quiet hours, brief times, ping limit, ...) and places.",

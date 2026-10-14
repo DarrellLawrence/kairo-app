@@ -64,7 +64,7 @@ function CapturePage() {
   }
   return (
     <Page title="Capture">
-      <p className="k-hello">Send anything to Kairo in a second: a task, a test date, an idea, a photo of a letter.</p>
+      <p className="k-hello">Send anything to Kairo in a second, from anywhere: say it, share it, done.</p>
       <SectionTitle>Address</SectionTitle>
       <div className="k-pad"><div className="k-code" onClick={() => copy(url, toast)}>{url}</div></div>
       <SectionTitle>Key</SectionTitle>
@@ -107,35 +107,24 @@ function CapturePage() {
         <p className="k-muted k-small">You can say something and hang up straight away. Kairo handles it like a voice note.</p>
       </div>
 
-      <SectionTitle>Shortcut 3: Type it (text)</SectionTitle>
+      <SectionTitle>Shortcut 3: Share to Kairo (text, links, photos, any file)</SectionTitle>
       <div className="k-pad">
         <ol className="k-steps">
-          <li>Open the <b>Shortcuts</b> app → <b>+</b> → name it <b>Kairo Capture</b>.</li>
-          <li>Add <b>Ask for Input</b> (type: Text, prompt: “Capture”).</li>
-          <li>Add <b>Get Contents of URL</b>. URL: the address above. Tap the arrow: Method <b>POST</b>.</li>
-          <li>Headers → Add: key <b>Authorization</b>, value <b>Bearer</b> + space + the key above.</li>
-          <li>Request Body: <b>JSON</b> → Add field: key <b>text</b>, type Text, value: <b>Provided Input</b>.</li>
-          <li>Add <b>Show Notification</b>: “Captured”.</li>
-          <li>Put it on the lock screen or Back Tap like above, if you want.</li>
+          <li>Shortcuts app → <b>+</b> → name it <b>Share to Kairo</b>. Tap <b>(i)</b> → turn on <b>Show in Share Sheet</b>.</li>
+          <li>At the top it says “Receive <b>Any</b> input from Share Sheet”: leave <b>Any</b>. Under it, “If there's no input”: pick <b>Ask For Text</b> (then you can also just type).</li>
+          <li>Add <b>Get Type</b> (it uses Shortcut Input).</li>
+          <li>Add <b>If</b> → condition: <b>Type is Text</b>. Tap <b>Add Condition</b> → <b>Type is URL</b>. Switch the If from “All” to <b>Any</b>.</li>
+          <li>Inside the If: add <b>Get Contents of URL</b>. URL: <span className="k-code" style={{ display: 'inline' }} onClick={() => copy(`${url}?source=share&wait=1`, toast)}>{url}?source=share&amp;wait=1</span> Method <b>POST</b>. Header <b>Authorization</b>: <b>Bearer</b> + space + the key above. Request Body: <b>JSON</b> → key <b>text</b>, value <b>Shortcut Input</b>.</li>
+          <li>Under <b>Otherwise</b>: add <b>Get Contents of URL</b> with the same URL, <b>POST</b> and Authorization header, plus a second header: key <b>X-Kairo-Filename</b>, value <b>Shortcut Input</b> → tap it → <b>Name</b>. Request Body: <b>File</b> → <b>Shortcut Input</b>.</li>
+          <li>After <b>End If</b>: add <b>Get Dictionary Value</b> → key <b>message</b> from <b>If Result</b>, then <b>Show Notification</b> → <b>Dictionary Value</b>.</li>
+          <li>So Kairo can read your photos: iPhone Settings → <b>Camera</b> → <b>Formats</b> → <b>Most Compatible</b>.</li>
         </ol>
-      </div>
-
-      <SectionTitle>Shortcut 4: Share sheet (photos, PDFs)</SectionTitle>
-      <div className="k-pad">
-        <ol className="k-steps">
-          <li>New shortcut <b>Send to Kairo</b>. Tap the <b>(i)</b> → turn on <b>Show in Share Sheet</b>, types: <b>Images</b> and <b>PDFs</b>.</li>
-          <li>For photos: add <b>Convert Image</b> → <b>JPEG</b>, then <b>Resize Image</b> → width <b>2000</b> (Kairo can't read iPhone HEIC photos).</li>
-          <li>Add <b>Get Contents of URL</b>. URL: the address above + <b>?source=share</b>. Method <b>POST</b>.</li>
-          <li>Same <b>Authorization</b> header as above.</li>
-          <li>Request Body: <b>File</b> → <b>Shortcut Input</b>.</li>
-          <li>Add <b>Show Notification</b>: “Sent to Kairo”.</li>
-        </ol>
-        <p className="k-muted k-small">Links and text from other apps: copy, then run Kairo Capture and paste.</p>
+        <p className="k-muted k-small">WhatsApp, Safari, Photos, Vinted, Files: share → <b>Share to Kairo</b>. No app opens; the notification says where it went. Kairo never reads WhatsApp itself: only what you share.</p>
       </div>
 
       <SectionTitle>What happens</SectionTitle>
       <div className="k-pad">
-        <p className="k-small">Within 15 minutes Kairo files it: task, school date, note, person, idea. Letters and bills (photo or PDF): Claude reads them, a bill becomes a “Pay …” task with its due date, a note goes to 80 Admin/Letters. Voice memos are transcribed on the PC first. If it is unclear, Kairo asks you on Today. It never sends, deletes or pays anything because of a capture.</p>
+        <p className="k-small">Kairo files it at once and tells you in one line. Files stay only on the PC, in your vault under Files/School, Work, Personal, Money, Receipts… with their own name and a short summary next to them; the same file is kept once, and Files/ never syncs to the iPhone. Bills and appointments also become tasks. Something someone would like goes on that person's wishlist with the price and link. If Kairo isn't sure (who it's from, what it is), it asks you with its best guess the next time you talk to it. It never sends, deletes or pays anything because of a capture.</p>
       </div>
 
       <Sheet open={confirm} onClose={() => setConfirm(false)} title="New key?">

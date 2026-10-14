@@ -39,6 +39,7 @@ class ToolError(Exception):
 class ToolRunner:
     def __init__(self, *, engine, vault_dir: Path, google_read: Callable[[], GoogleAPI], profile=None, schedule=None):
         self.engine = engine
+        self.on_capture_answer: Callable[[], None] | None = None   # files the answered capture at once
         self.vault_dir = Path(vault_dir)
         self.google_read = google_read
         self.profile = profile          # time zone for open loops
@@ -214,14 +215,35 @@ class ToolRunner:
         from . import life
         today = datetime.now().date()
         with Session(self.engine) as s:
-            return json.dumps([life.person_dict(p, today) for p in life.people_list(s, a.get("name"))][:50], default=str)
+            return json.dumps([life.person_dict(p, today, s) for p in life.people_list(s, a.get("name"))][:50], default=str)
 
     def _people_note(self, a: dict) -> str:
         from . import life
         with Session(self.engine) as s:
             p = life.people_note(s, name=a["name"], note=a.get("note", ""), contacted=a.get("contacted", False),
                                  relation=a.get("relation"), today=datetime.now().date(), email=a.get("email"))
-            return json.dumps(life.person_dict(p, datetime.now().date()), default=str)
+            return json.dumps(life.person_dict(p, datetime.now().date(), s), default=str)
+
+    def _captures_answer(self, a: dict) -> str:
+        """The owner answered a quick question in chat: the capture is filed again with the answer."""
+        from . import capture
+        with Session(self.engine) as s:
+            try:
+                cap = capture.answer(s, a["capture_id"], a["answer"])
+            except capture.CaptureError as exc:
+                raise ToolError(str(exc)) from exc
+        if self.on_capture_answer:
+            self.on_capture_answer()
+        return json.dumps({"capture": cap.id, "status": "filing it now"})
+
+    def _wishlist_add(self, a: dict) -> str:
+        from . import life
+        with Session(self.engine) as s:
+            w = life.wish_add(s, person=a["person"], title=a["title"], price_chf=a.get("price_chf"), url=a.get("url"),
+                              note=a.get("note"), source="chat")
+            p = s.get(life.Person, w.person_id)
+            return json.dumps({"added": life.wish_dict(w), "person": p.name,
+                               "wishlist": [life.wish_dict(x) for x in life.wishlist(s, p.id)]})
 
     def _finance_list(self, a: dict) -> str:
         from . import life

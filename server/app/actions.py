@@ -108,6 +108,20 @@ class ShoppingAdd(Strict):
         return [i.strip() for i in v]
 
 
+class CapturesAnswer(Strict):
+    """The owner answered a quick question in chat (a capture Kairo wasn't sure about)."""
+    capture_id: int = Field(ge=1)
+    answer: str = Field(min_length=1, max_length=1000)
+
+
+class WishlistAdd(Strict):
+    person: str = Field(min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=200)
+    price_chf: float | None = Field(default=None, ge=0, le=100_000)
+    url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://\S+$")
+    note: str = Field(default="", max_length=1000)
+
+
 class PeopleList(Strict):
     name: str | None = Field(default=None, max_length=80)
 
@@ -359,6 +373,8 @@ SCHEMAS: dict[str, type[Strict]] = {
     "shopping.add": ShoppingAdd,
     "people.list": PeopleList,
     "people.note": PeopleNote,
+    "captures.answer": CapturesAnswer,
+    "wishlist.add": WishlistAdd,
     "finance.list": FinanceList,
     "health.list": HealthList,
     "calendar.tag": CalendarTag,
@@ -389,7 +405,7 @@ MIN_TIER: dict[str, int] = {
     "gmail.search": 0, "gmail.read": 0, "calendar.list": 0, "vault.read": 0, "tasks.list": 0,
     "tasks.create": 1, "tasks.update": 1, "notes.write": 1,
     "shopping.list": 0, "people.list": 0, "finance.list": 0, "health.list": 0,
-    "shopping.add": 1, "people.note": 1,
+    "shopping.add": 1, "people.note": 1, "captures.answer": 1, "wishlist.add": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
     "calendar.tag": 1, "loops.list": 0, "debrief": 0, "settings.list": 0, "settings.set": 1, "place.set": 1, "place.remove": 1, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
@@ -413,6 +429,8 @@ DIRECT_TOOLS: dict[str, str] = {
     "shopping_add": "shopping.add",
     "people_list": "people.list",
     "people_note": "people.note",
+    "captures_answer": "captures.answer",
+    "wishlist_add": "wishlist.add",
     "finance_list": "finance.list",
     "health_list": "health.list",
     "calendar_tag": "calendar.tag",

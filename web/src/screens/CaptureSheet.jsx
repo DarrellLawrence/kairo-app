@@ -9,21 +9,22 @@ import { startRecording, stopSpeaking, unlockAudio } from '../voice.js'
 
 const TAP_MS = 350   // shorter than this = a tap: keep recording until the next tap
 
-async function upload(body, type) {
-  const res = await fetch('/api/captures', { method: 'POST', headers: { 'Content-Type': type || 'application/octet-stream' }, body })
+async function upload(body, type, name) {
+  const headers = { 'Content-Type': type || 'application/octet-stream' }
+  if (name) headers['X-Kairo-Filename'] = encodeURIComponent(name)
+  const res = await fetch('/api/captures', { method: 'POST', headers, body })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
   return data
 }
 
-/* Waits (max ~45 s) for Kairo's one line about a voice note, while the sheet may already be closed. */
+/* Waits (max ~45 s) for Kairo's one line about a capture, while the sheet may already be closed. */
 async function oneLine(id) {
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 1500))
     const c = await api(`/api/captures/${id}`).catch(() => null)
     if (!c) continue
-    if (c.status === 'filed') return c.result?.reply || `Filed: ${c.title || 'voice note'}`
-    if (c.status === 'new' || c.status === 'later') return 'Got it. Kairo files it in a moment.'
+    if (c.status === 'filed' || c.status === 'asking') return c.line || c.result?.reply || `Filed: ${c.title || 'done'}`
   }
   return 'Got it. Kairo is still on it; the answer lands in Chat.'
 }
@@ -107,8 +108,9 @@ export function CaptureSheet({ open, onClose }) {
     if (!file) return
     onClose()
     try {
-      await upload(file, file.type)
-      toast.show({ text: `Sent “${file.name}”. Kairo files it on the PC.` })
+      const r = await upload(file, file.type, file.name)
+      toast.show({ text: r.message?.startsWith('Already') ? r.message : `Sent “${file.name}”…` })
+      if (!r.message?.startsWith('Already')) toast.show({ text: await oneLine(r.id), duration: 6000 })
     } catch (e) { toast.show({ text: e.message }) }
   }
 
@@ -116,10 +118,11 @@ export function CaptureSheet({ open, onClose }) {
     const t = text.trim()
     if (!t) return
     try {
-      await api('/api/captures', { method: 'POST', body: /^https?:\/\/\S+$/.test(t) ? { url: t } : { text: t } })
+      const r = await api('/api/captures', { method: 'POST', body: /^https?:\/\/\S+$/.test(t) ? { url: t } : { text: t } })
       setText('')
       onClose()
-      toast.show({ text: 'Captured. Kairo files it.' })
+      toast.show({ text: 'Captured…' })
+      toast.show({ text: await oneLine(r.id), duration: 6000 })
     } catch (e) { toast.show({ text: e.message }) }
   }
 

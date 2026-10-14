@@ -79,6 +79,8 @@ class Capture(SQLModel, table=True):
     question: str | None = Field(default=None, sa_column=Column(Text))  # Kairo's question when unclear
     result_json: str | None = Field(default=None, sa_column=Column(Text))
     filed_at: datetime | None = None
+    file_name: str | None = None          # v8 B: the original name of a shared file (kept when filed)
+    file_hash: str | None = Field(default=None, index=True)   # sha256: the same file is filed once
 
 
 class TriagedEmail(SQLModel, table=True):
@@ -305,6 +307,22 @@ class Person(SQLModel, table=True):
     last_contact: dt.date | None = None
     contact_every_days: int | None = None
     email: str | None = None                 # for ready-to-send drafts (birthday, catching up)
+
+
+class WishItem(SQLModel, table=True):
+    """A gift idea on a person's wishlist (v8 B/E): from a share, a capture or chat."""
+
+    __tablename__ = "wish_items"
+    id: int | None = Field(default=None, primary_key=True)
+    person_id: int = Field(foreign_key="people.id", index=True)
+    title: str
+    price_chf: float | None = None
+    url: str | None = None
+    note: str | None = Field(default=None, sa_column=Column(Text))
+    source: str = "chat"                  # chat / share / capture
+    capture_id: int | None = None
+    status: str = Field(default="open", index=True)   # open / bought / dropped
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Chore(SQLModel, table=True):
