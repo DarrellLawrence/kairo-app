@@ -7,3 +7,11 @@ context: "work, school, training, side projects"
 gmail: owner@example.com
 quiet_hours: { start: "23:00", end: "06:00" }
 push_devices: [owner-phone]
+# Places (first start copies them into Settings; change them there or by voice).
+# Only the station name is ever sent anywhere. Stations marked "check" are guesses.
+places:
+  - { name: Home, kind: home, station: Hometown }
+  - { name: Boxing, kind: training, station: Hometown }          # check: Gym location
+  - { name: School, kind: school, station: Schooltown }             # Vocational School, Berufsschule
+  - { name: Work (Employer), kind: work, station: Worktown }   # check: Workstreet; until the job changes
+  - { name: Work (Employer 2), kind: work, station: Worktown }   # from next year, 2 years: start date to set

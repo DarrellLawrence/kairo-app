@@ -72,7 +72,7 @@ def test_tool_list_has_no_write_tools(setup):
                      "calendar_tag",
                      # open loops: Kairo's own table
                      "loops_list", "loops_add", "loops_snooze", "loops_close",
-                     "debrief"}
+                     "debrief", "settings_list", "settings_set", "place_set", "place_remove"}
     propose = [t for t in tools if t["name"] == "propose_action"][0]
     assert "gmail.send" in propose["inputSchema"]["properties"]["action"]["enum"]
     assert not any("pay" in a or "money" in a for a in propose["inputSchema"]["properties"]["action"]["enum"])

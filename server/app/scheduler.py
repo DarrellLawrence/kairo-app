@@ -345,6 +345,17 @@ class Jobs:
         self.scheduler = sched
         threading.Thread(target=self.catch_up, name="jobs-catch-up", daemon=True).start()
 
+    def reload(self) -> None:
+        """Settings changed (quiet hours, brief or review times): recompute and re-plan the jobs."""
+        self.times = review_times(self.schedule)
+        qw = (self.schedule.get("quiet_window") or {})
+        self.quiet = (qw.get("start") if _is_hhmm(qw.get("start")) else DEFAULT_QUIET[0],
+                      qw.get("end") if _is_hhmm(qw.get("end")) else DEFAULT_QUIET[1])
+        if self.scheduler:
+            self.scheduler.shutdown(wait=False)
+            self.scheduler = None
+            self.start()
+
     def stop(self) -> None:
         if self.scheduler:
             self.scheduler.shutdown(wait=False)

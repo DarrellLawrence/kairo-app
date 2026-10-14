@@ -149,6 +149,32 @@ class Debrief(Strict):
     topic: Literal["calendar", "mail", "school", "tasks", "people", "money", "health", "loops"] | None = None
 
 
+class SettingsList(Strict):
+    pass
+
+
+class SettingsSet(Strict):
+    """Owner settings only (quiet hours, brief times, ping limit, ...). Never the gate or permissions."""
+
+    key: Literal["quiet_hours", "brief_times", "max_pings", "good_times", "review_times", "language", "models"]
+    value: dict | int | str
+
+
+class PlaceSet(Strict):
+    """'My home station is X', 'school is in Schooltown'. Address stays on the PC; only the station is sent."""
+
+    name: str = Field(min_length=1, max_length=40)
+    kind: Literal["home", "school", "work", "training", "other"]
+    station: str | None = Field(default=None, max_length=80)
+    address: str | None = Field(default=None, max_length=160)
+    valid_from: date | None = None
+    valid_until: date | None = None
+
+
+class PlaceRemove(Strict):
+    name: str = Field(min_length=1, max_length=40)
+
+
 class LoopsList(Strict):
     include_snoozed: bool = True
 
@@ -319,6 +345,10 @@ SCHEMAS: dict[str, type[Strict]] = {
     "health.list": HealthList,
     "calendar.tag": CalendarTag,
     "debrief": Debrief,
+    "settings.list": SettingsList,
+    "settings.set": SettingsSet,
+    "place.set": PlaceSet,
+    "place.remove": PlaceRemove,
     "loops.list": LoopsList,
     "loops.add": LoopsAdd,
     "loops.snooze": LoopsSnooze,
@@ -344,7 +374,7 @@ MIN_TIER: dict[str, int] = {
     "shopping.add": 1, "people.note": 1,
     "gmail.label": 2, "gmail.create_draft": 2, "calendar.create_hold": 2,
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
-    "calendar.tag": 1, "loops.list": 0, "debrief": 0, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
+    "calendar.tag": 1, "loops.list": 0, "debrief": 0, "settings.list": 0, "settings.set": 1, "place.set": 1, "place.remove": 1, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
     "gmail.send_self": 2, "calendar.move": 2,
     "gmail.trash": 2,   # v7: Gmail keeps trash 30 days
     "calendar.delete": 4,
@@ -369,6 +399,10 @@ DIRECT_TOOLS: dict[str, str] = {
     "health_list": "health.list",
     "calendar_tag": "calendar.tag",
     "debrief": "debrief",
+    "settings_list": "settings.list",
+    "settings_set": "settings.set",
+    "place_set": "place.set",
+    "place_remove": "place.remove",
     "loops_list": "loops.list",
     "loops_add": "loops.add",
     "loops_snooze": "loops.snooze",
