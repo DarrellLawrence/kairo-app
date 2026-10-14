@@ -30,8 +30,24 @@ TIMEOUT_MS = 30_000
 
 def available(site_dir: Path | None = None) -> bool:
     _use_site(site_dir)
-    import importlib.util
-    return importlib.util.find_spec("playwright") is not None
+    from ..tool_sites import is_real_package
+    return is_real_package("playwright")[0]
+
+
+def selftest(site_dir: Path | None = None) -> dict:
+    """For the installer and the boot check: import Playwright as Kairo's account and start Chromium once."""
+    _use_site(site_dir)
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            b = p.chromium.launch(headless=True, executable_path=os.environ.get("KAIRO_BROWSER_EXECUTABLE") or None)
+            page = b.new_page()
+            page.set_content("<p>ok</p>")
+            ok = page.inner_text("p") == "ok"
+            b.close()
+        return {"ok": ok, "reason": "" if ok else "Chromium did not render"}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:240]}
 
 
 def _use_site(site_dir: Path | None) -> None:

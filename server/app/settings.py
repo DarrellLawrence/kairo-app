@@ -17,13 +17,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 class Settings(BaseModel):
     data_dir: Path
-    config_dir: Path
+    config_dir: Path                 # what Kairo and the safety hook read
     db_url: str
     workspace_dir: Path
     brain: str
     claude_bin: str
     brain_timeout_s: int
     web_dist_dir: Path
+    # Config in layers (fix P0.4): the owner's changes only. Set -> config_dir is built at start
+    # from the release's config/ plus these (app/config_layers.py). Unset (dev, tests): config_dir as is.
+    config_overrides: Path | None = None
 
     @property
     def db_path(self) -> Path:
@@ -49,9 +52,12 @@ def _env(name: str, default: str) -> str:
 
 def load_settings() -> Settings:
     data_dir = Path(_env("KAIRO_DATA_DIR", str(REPO_ROOT / "devdata")))
+    overrides = _env("KAIRO_CONFIG_OVERRIDES", "")
     return Settings(
         data_dir=data_dir,
-        config_dir=Path(_env("KAIRO_CONFIG_DIR", str(REPO_ROOT / "config"))),
+        # KAIRO_CONFIG_DIR stays for releases from before the layers (a rollback reads it).
+        config_dir=data_dir / "config-effective" if overrides else Path(_env("KAIRO_CONFIG_DIR", str(REPO_ROOT / "config"))),
+        config_overrides=Path(overrides) if overrides else None,
         db_url=_env("KAIRO_DB_URL", f"sqlite:///{(data_dir / 'db' / 'kairo.sqlite').as_posix()}"),
         workspace_dir=Path(_env("KAIRO_WORKSPACE_DIR", str(data_dir / "workspace"))),
         brain=_env("KAIRO_BRAIN", "claude_cli"),

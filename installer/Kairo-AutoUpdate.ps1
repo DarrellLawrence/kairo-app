@@ -74,6 +74,21 @@ function Write-UpdateNote([string]$Message, [bool]$Ok, [string]$From, [string]$T
         ConvertTo-Json | Set-Content -Path (Join-Path $dir 'last-update.json') -Encoding ASCII
 }
 
+# The self-test result of this install (Deploy-Release writes it), for the note on the iPhone.
+function Read-SelfTest([string]$Version, [datetime]$Since) {
+    $f = Join-Path $P.Data 'updates\selftest.json'
+    if (-not (Test-Path $f)) { return $null }
+    try { $j = Get-Content -Raw $f | ConvertFrom-Json } catch { return $null }
+    if ([string]$j.version -ne $Version -or [datetime]$j.at -lt $Since) { return $null }
+    return $j
+}
+
+function Format-Reason([string]$Text) {
+    $t = ($Text -replace '\s+', ' ').Trim()
+    if ($t.Length -gt 90) { $t = $t.Substring(0, 87) + '...' }
+    return $t
+}
+
 $exitCode = 0
 $held = $false
 try {
@@ -124,6 +139,7 @@ try {
     $held = [bool]$ready   # Kairo now holds new chats off; released below if we stop early
 
     Write-Log "Installing Kairo $latest (running: $installed$(if ($urgent) { ', urgent' }))."
+    $startedAt = Get-Date
     # A separate process with its output in files: in PowerShell 5.1, redirecting the
     # output of a script in-process turns any program's stderr line (a pip warning)
     # into a fatal error.
@@ -138,13 +154,17 @@ try {
     foreach ($f in @($out, $err)) { if (Test-Path $f) { Get-Content $f | ForEach-Object { Write-Log "  $_" } } }
     $now = (Read-State $P).current
     $s.waiting = ''
+    $st = Read-SelfTest $latest $startedAt
     if ($code -eq 0 -and $now -eq $latest) {
-        Write-UpdateNote "Kairo updated to $latest." $true $installed $latest
-        Write-Log "Done: running $latest."
+        $msg = "Kairo updated to $latest."
+        if ($st -and -not $st.ok) { $msg += " Self-test: $(Format-Reason $st.reason)" }
+        Write-UpdateNote $msg $true $installed $latest
+        Write-Log "Done: running $latest. $(if ($st) { "Self-test: ok=$($st.ok) $($st.reason)" })"
         $held = $false
     } else {
         $s.failed = @(@($s.failed) + $latest | Select-Object -Unique)
-        Write-UpdateNote "Kairo update to $latest failed and was undone. Still on $now." $false $installed $latest
+        $why = if ($st -and -not $st.ok) { " (self-test: $(Format-Reason $st.reason))" } else { '' }
+        Write-UpdateNote "Kairo update to $latest failed and was undone$why. Still on $now." $false $installed $latest
         Write-Log "Failed: still on $now. $latest will not be tried again automatically."
         $exitCode = 1
     }

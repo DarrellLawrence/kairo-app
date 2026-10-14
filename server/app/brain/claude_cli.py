@@ -118,6 +118,7 @@ class ClaudeCLIBrain:
         self._env.update(extra_env or {})
         self._status = BrainStatus.ok
         self._run_limited = False
+        self.mcp_status: dict[str, str] = {}   # from the CLI's system/init event: server -> connected / failed / ...
         self._proc: subprocess.Popen | None = None
         self._cancelled = threading.Event()
 
@@ -178,6 +179,19 @@ class ClaudeCLIBrain:
             return BrainStatus.unavailable
         return self._status
 
+    def hook_env(self, origin: str) -> dict[str, str]:
+        """The environment the CLI (and so the PreToolUse hook it starts) runs with."""
+        return {**self._env, "KAIRO_HOOK_ORIGIN": origin}
+
+    def tools_status(self) -> str:
+        """Did the CLI's last run connect Kairo's MCP server? (system/init mcp_servers)"""
+        if self.mcp_config is None:
+            return "none"
+        if not self.mcp_status:
+            return "unknown"
+        bad = [f"{n}: {st}" for n, st in sorted(self.mcp_status.items()) if st != "connected"]
+        return "connected" if not bad else "failed (" + ", ".join(bad) + ")"
+
     def run(
         self,
         prompt: str,
@@ -195,7 +209,7 @@ class ClaudeCLIBrain:
                         "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}}
                        for data, mt in images]
             prompt = json.dumps({"type": "user", "message": {"role": "user", "content": content + [{"type": "text", "text": prompt}]}}) + "\n"
-        run_env = {**self._env, "KAIRO_HOOK_ORIGIN": origin}
+        run_env = self.hook_env(origin)
         self._run_limited = False
         self._cancelled.clear()
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -271,7 +285,11 @@ class ClaudeCLIBrain:
             return  # stray non-JSON output; ignore
         kind = msg.get("type")
         if kind == "system" and msg.get("subtype") == "init":
-            yield BrainEvent(EventKind.session, session_id=msg.get("session_id"))
+            servers = [x for x in (msg.get("mcp_servers") or []) if isinstance(x, dict)]
+            if servers:
+                self.mcp_status = {str(x.get("name")): str(x.get("status")) for x in servers}
+            yield BrainEvent(EventKind.session, session_id=msg.get("session_id"),
+                             data={"mcp_servers": servers, "tools": msg.get("tools") or []})
         elif kind == "assistant":
             for block in (msg.get("message") or {}).get("content") or []:
                 if block.get("type") == "text" and block.get("text"):

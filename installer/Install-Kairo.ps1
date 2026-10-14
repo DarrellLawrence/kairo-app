@@ -85,10 +85,13 @@ try {
             }
         }
 
-        # 3. Settings file
+        # 3. Settings file. Config: release defaults + data\config (owner changes only);
+        #    KAIRO_CONFIG_DIR is for releases from before that (see Save-LegacyConfig).
+        Save-LegacyConfig $P
         Write-EnvFile $P @{
             KAIRO_DATA_DIR    = $P.Data
-            KAIRO_CONFIG_DIR  = $P.Config
+            KAIRO_CONFIG_DIR  = $P.ConfigLegacy
+            KAIRO_CONFIG_OVERRIDES = $P.Config
             KAIRO_CLAUDE_BIN  = $claudeExe
             CLAUDE_CONFIG_DIR = $P.ClaudeConfig
             KAIRO_PORT        = '8000'

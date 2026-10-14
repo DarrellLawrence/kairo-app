@@ -36,7 +36,7 @@ root="$stage/$name"
 mkdir -p "$root/app/server" "$root/app/web" "$root/installer"
 
 echo "==> Staging $name"
-cp -r server/app server/migrations server/alembic.ini server/requirements.txt server/requirements-voice.txt server/requirements-browser.txt "$root/app/server/"
+cp -r server/app server/mcp_kairo server/hooks server/migrations server/alembic.ini server/requirements.txt server/requirements-voice.txt server/requirements-browser.txt "$root/app/server/"
 cp -r web/dist "$root/app/web/dist"
 cp -r config "$root/app/config"
 cp installer/*.ps1 installer/*.psm1 installer/versions.json "$root/installer/"
@@ -76,5 +76,7 @@ h = hashlib.sha256(open(p, "rb").read()).hexdigest()
 open(p + ".sha256", "w").write(f"{h}  {os.path.basename(p)}\n")
 PY
 rm -rf "$stage"
+# Nothing the app needs at run time may be missing (2026-10-14: no release ever had mcp_kairo/hooks).
+"$PY" scripts/check_release.py "$zip"
 echo "$version" > "$out/VERSION"
 echo "==> $zip"

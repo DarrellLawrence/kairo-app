@@ -18,9 +18,10 @@ if ($Interactive) {
 $P = Get-KairoPaths $Root
 $checks = New-Object System.Collections.Generic.List[object]
 
-function Add-Check([string]$Name, [bool]$Ok, [string]$Detail) {
-    $checks.Add([pscustomobject]@{ name = $Name; ok = $Ok; detail = $Detail })
-    if ($Ok) { Write-Ok "$Name - $Detail" } else { Write-Bad "$Name - $Detail" }
+# Level 'warn': nothing is broken, but there is something to do (yellow on the More screen).
+function Add-Check([string]$Name, [bool]$Ok, [string]$Detail, [string]$Level = '') {
+    $checks.Add([pscustomobject]@{ name = $Name; ok = $Ok; detail = $Detail; level = $Level })
+    if (-not $Ok) { Write-Bad "$Name - $Detail" } elseif ($Level -eq 'warn') { Write-Warn "$Name - $Detail" } else { Write-Ok "$Name - $Detail" }
 }
 
 if ($Interactive) { Write-Step 'Kairo check' }
@@ -34,11 +35,38 @@ $owners = @(Get-KairoProcesses $P | ForEach-Object { (Invoke-CimMethod -InputObj
 $svcOk = $owners.Count -gt 0 -and @($owners | Where-Object { $_ -ne 'kairo-svc' }).Count -eq 0
 Add-Check 'Own account' $svcOk $(if ($owners.Count) { "runs as: $($owners -join ', ')" } else { 'no Kairo process found' })
 
-# 3. Claude login works for that account
-$r = if ($h) { Invoke-SelfTest } else { $null }
-$claudeOk = ($null -ne $r) -and [bool]$r.ok
-$claudeDetail = if ($claudeOk) { "replied in $($r.seconds)s" } elseif ($r) { "$($r.brain): $($r.error)" } else { 'not tested (Kairo not running)' }
-Add-Check 'Claude login' $claudeOk $claudeDetail
+# 3. Kairo has hands, as kairo-svc: the safety hook blocks, the tool server is connected, one
+#    real tool call arrives, Claude answers, voice and the browser work. Kairo pushes a failure.
+$t = if ($h) { Invoke-ToolsSelfTest } else { $null }
+if ($t -and $t.PSObject.Properties['checks'] -and $t.checks) {
+    $c = $t.checks
+    $missing = @(if ($c.PSObject.Properties['tools_missing']) { $c.tools_missing } else { @() })
+    $toolsOk = [bool]$c.hook_deny -and [bool]$c.hook_allow -and [string]$c.mcp -eq 'connected' -and $missing.Count -eq 0 -and
+        ($(if ($c.PSObject.Properties['task_added']) { [bool]$c.task_added } else { [bool]$c.tool_call }))
+    Add-Check 'Kairo tools' $toolsOk $(if ($toolsOk) { 'safety hook, tool server, all tools, and a real task added like a chat message' } else { [string]$t.reason })
+    if ($c.PSObject.Properties['context']) {
+        # An empty vault (new install) is a to-do, not a failure; notes that don't reach the model are.
+        $state = [string]$c.context
+        $ctxOk = $state -ne 'missing' -and [string]$c.personality -ne 'older'
+        $warn = @(if ($t.PSObject.Properties['warnings']) { $t.warnings } else { @() }) | Select-Object -First 1
+        $detail = if (-not $ctxOk) { [string]$t.reason } elseif ($state -eq 'empty') { [string]$warn } else { 'Profile, Goals and the current personality reach the model' }
+        Add-Check 'Context' $ctxOk $detail $(if ($ctxOk -and $state -eq 'empty') { 'warn' } else { '' })
+    }
+    $claudeOk = [string]$c.claude -eq 'ok'
+    Add-Check 'Claude login' $claudeOk $(if ($claudeOk) { "answers ($($t.seconds)s for the whole self-test)" } else { [string]$t.reason })
+    foreach ($kind in @('voice', 'browser')) {
+        if ($c.PSObject.Properties[$kind] -and $null -ne $c.$kind) {
+            $d = $t.details.$kind
+            Add-Check $(if ($kind -eq 'voice') { 'Voice' } else { 'Browser' }) ([bool]$c.$kind) $(if ($c.$kind) { 'imports and works for kairo-svc' } else { [string]$d.reason })
+        }
+    }
+} else {
+    # A release from before the tools self-test: only the Claude login check exists there.
+    $r = if ($h) { Invoke-SelfTest } else { $null }
+    $claudeOk = ($null -ne $r) -and [bool]$r.ok
+    $claudeDetail = if ($claudeOk) { "replied in $($r.seconds)s" } elseif ($r) { "$($r.brain): $($r.error)" } else { 'not tested (Kairo not running)' }
+    Add-Check 'Claude login' $claudeOk $claudeDetail
+}
 
 if (-not $CI) {
     # 4. Tailscale came back by itself

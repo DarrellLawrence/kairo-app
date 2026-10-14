@@ -86,6 +86,21 @@ if (Test-Path -LiteralPath $downloads) { Remove-Item -LiteralPath $downloads -Re
 Expand-Archive -LiteralPath $Zip -DestinationPath $downloads -Force
 $s1 = (Get-ChildItem -LiteralPath $downloads -Directory | Select-Object -First 1).FullName
 $v1 = (Get-Content -Raw (Join-Path $s1 'app\release.json') | ConvertFrom-Json).version
+# What kairo-home has: full config copies from its first install (fewer actions), one owner edit.
+# (-Encoding UTF8: Windows PowerShell would read the umlauts in profile.yaml as ANSI.)
+# And a vault with a Profile and Goals, like after the onboarding interview (the self-test checks they reach the model).
+foreach ($f in @(@('10 Profile', 'me.md', 'CI owner: apprentice, likes short answers.'), @('20 Goals', '2026.md', 'Finish the apprenticeship.'))) {
+    $d = Join-Path $Root "data\vault\$($f[0])"
+    [void](New-Item -ItemType Directory -Force $d)
+    Set-Content -Path (Join-Path $d $f[1]) -Value $f[2] -Encoding UTF8
+}
+$cfg = Join-Path $Root 'data\config'
+[void](New-Item -ItemType Directory -Force $cfg)
+Get-Content -Encoding UTF8 (Join-Path $s1 'app\config\permissions.yaml') | Where-Object { $_ -notmatch '^\s+(calendar\.tag|gmail\.send_self):' } |
+    Set-Content -Path (Join-Path $cfg 'permissions.yaml') -Encoding UTF8
+(Get-Content -Encoding UTF8 (Join-Path $s1 'app\config\profile.yaml')) -replace '^context: .*$', 'context: "ci owner context"' |
+    Set-Content -Path (Join-Path $cfg 'profile.yaml') -Encoding UTF8
+Copy-Item (Join-Path $s1 'app\config\personality.md') (Join-Path $cfg 'personality.md')
 Set-Blocked $s1
 Check ((Get-BlockedCount $s1) -gt 10) 'setup files are marked as downloaded from the internet'
 $oldPolicy = Get-ExecutionPolicy -Scope CurrentUser
@@ -189,6 +204,37 @@ Check (@($codeAcl | Where-Object { $_.FileSystemRights -match 'Write|Modify|Full
 Check ((Test-Path (Join-Path $Root 'Update Kairo.bat')) -and (Test-Path (Join-Path $Root 'Kairo Check.bat'))) 'Update/Rollback/Uninstall/Check .bat files placed in the Kairo folder'
 Check ((Invoke-Install $s1) -eq 0) 'running the same version again is harmless'
 
+# ---- config in layers (fix P0.4): new actions arrive, the owner's edit stays, older versions keep a full copy
+$eff = Join-Path $Root 'data\config-effective'
+Check ((Get-Content -Raw (Join-Path $eff 'permissions.yaml')) -match 'calendar\.tag' -and (Get-Content -Raw (Join-Path $eff 'permissions.yaml')) -match 'gmail\.send_self') 'the running config has the actions the old copy lacked'
+Check ((Get-Content -Raw (Join-Path $eff 'profile.yaml')) -match 'ci owner context') "the owner's own edit is in the running config"
+$own = Get-Content -Raw (Join-Path $cfg 'profile.yaml')
+Check ($own -match 'ci owner context' -and $own -notmatch 'timezone') 'data\config\profile.yaml now holds only the owner''s change'
+Check (-not (Test-Path (Join-Path $cfg 'personality.md')) -and (Test-Path (Join-Path $cfg 'README.txt'))) 'unchanged defaults left data\config; a README explains it'
+Check (@(Get-ChildItem (Join-Path $Root 'data\backups') -Directory -Filter 'config-before-overrides-*').Count -eq 1) 'the full copies were backed up first'
+Check ((Get-Content -Raw (Join-Path $Root 'data\config-legacy\permissions.yaml')) -notmatch 'calendar\.tag') 'older versions keep their full copy (data\config-legacy)'
+$cu = Get-Content -Raw (Join-Path $Root 'data\updates\config-update.json') | ConvertFrom-Json
+Check ($cu.message -match '^Config updated: 2 new actions') "one note for the iPhone: $($cu.message)"
+$envText = Get-Content -Raw (Join-Path $Root 'data\kairo.env')
+Check ($envText -match 'KAIRO_CONFIG_OVERRIDES=.*data\\config\r?\n' -and $envText -match 'KAIRO_CONFIG_DIR=.*config-legacy') 'kairo.env: owner changes for this version, the full copy for older ones'
+
+# ---- Kairo has hands (fix P0): the self-test the installer ran after the switch, as kairo-svc
+$stj = Get-Content -Raw (Join-Path $Root 'data\updates\selftest.json') | ConvertFrom-Json
+Check ($stj.version -eq $v1 -and $stj.ok) "the install ran the self-test and it passed ($($stj.reason))"
+$tools = (Invoke-WebRequest 'http://127.0.0.1:8000/api/selftest/tools?notify=0' -Method Post -Body '{}' -ContentType 'application/json' -UseBasicParsing -TimeoutSec 900).Content | ConvertFrom-Json
+Check ($tools.ok) "tools self-test passes ($($tools.reason))"
+Check ($tools.checks.hook_deny -and $tools.checks.hook_allow) 'the shipped safety hook blocks a forbidden tool (exit 2) and lets a Kairo tool through'
+Check ($tools.checks.mcp -eq 'connected') "the CLI reports Kairo's tool server as connected"
+Check ($tools.checks.tool_call -and $tools.checks.task_added -and @($tools.checks.tools_missing).Count -eq 0) 'like a chat message: all tools listed, a real task added through mcp_kairo (and removed again)'
+Check ($tools.proof.task.title -like 'Kairo self-test*' -and $tools.proof.task.removed) "proof: $($tools.proof.task.title), due $($tools.proof.task.due)"
+Check ($tools.checks.profile -and $tools.checks.goals -and $tools.checks.personality -eq 'current') 'Profile, Goals and the current personality reach the model'
+Check ($tools.checks.browser -eq $true) "Kairo's browser imports and renders a page as kairo-svc ($($tools.details.browser.reason))"
+$siteFile = Join-Path $Root "app\releases\$v1\browser-site.txt"
+$site = if (Test-Path $siteFile) { (Get-Content -Raw $siteFile).Trim() } else { '' }
+Check ($site -match '\\tools\\browser-[0-9a-f]{12}$' -and (Test-Path (Join-Path $site '.complete'))) "the release points to its own complete browser folder ($site)"
+$pwAcl = @((Get-Acl (Join-Path $site 'playwright\__init__.py')).Access | ForEach-Object { $_.IdentityReference.Value })
+Check (@($pwAcl | Where-Object { $_ -match 'kairo-svc' }).Count -ge 1) "kairo-svc may read the installed packages ($($pwAcl -join ', '))"
+
 # ---- what can Kairo's account see? (fake CLI probe, run by the app as kairo-svc)
 $canary = Join-Path $env:USERPROFILE 'kairo-canary.txt'
 Set-Content -Path $canary -Value 'private'
@@ -213,9 +259,11 @@ Check ($null -ne (Wait-Healthy 90)) 'restarted without the probe'
 
 # ---- the boot check (what runs after every reboot), minus the Tailscale parts
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Kairo-BootCheck.ps1') -Root $Root -CI | Out-Host
-Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, Claude answers)'
+Check ($LASTEXITCODE -eq 0) 'boot check passes (Kairo up, own account, tools, Claude, browser)'
 $bc = Get-Content -Raw (Join-Path $Root 'data\logs\boot-check.json') | ConvertFrom-Json
-Check ($bc.all_ok -and @($bc.checks).Count -eq 3) 'boot-check.json written with 3 green checks'
+$names = @($bc.checks | ForEach-Object { $_.name })
+$missing = @(@('Kairo running', 'Own account', 'Kairo tools', 'Context', 'Claude login', 'Browser') | Where-Object { $names -notcontains $_ })
+Check ($bc.all_ok -and $missing.Count -eq 0) "boot-check.json: all green ($($names -join ', '))"
 $status = (Invoke-WebRequest 'http://127.0.0.1:8000/api/status' -UseBasicParsing).Content | ConvertFrom-Json
 Check ($status.boot_check.all_ok) 'the app shows the boot check result (More screen)'
 
@@ -227,6 +275,7 @@ Check ((Invoke-Install $s2) -eq 0) 'update to v2 exits 0'
 $st = Get-StateObj
 Check ($st.current -eq $v2 -and $st.previous -eq $v1) 'v2 running, v1 kept for rollback'
 Check ((Get-Content -Raw (Join-Path $Root 'data\config\profile.yaml')) -match 'ci-marker') 'owner config untouched by the update'
+Check ((Get-Content -Raw (Join-Path $Root 'data\config-effective\profile.yaml')) -match 'ci owner context') 'the owner''s edit survives the update'
 
 # ---- broken update with a schema change: must roll back by itself
 $v3 = "$v1-ci3-broken"
@@ -253,6 +302,17 @@ $tables = Get-Tables
 Check ($tables -contains 'tasks') 'table probe works (sees the tasks table)'
 Check (-not ($tables -contains 'ci_probe')) 'schema change of the broken release was undone'
 
+
+# ---- an update without Kairo's tool bridge (what every release before 2026-10-14 was): the
+#      self-test after the switch fails, the update rolls back by itself and says why
+$v5 = "$v1-ci5-notools"
+$s5 = Copy-Setup $s1 'v5' $v5
+Remove-Item -Recurse -Force (Join-Path $s5 'app\server\mcp_kairo')
+Check ((Invoke-Install $s5) -ne 0) 'an update without the tool bridge reports failure'
+Check ((Get-StateObj).current -eq $v2) 'still on v2 after the tool-less update'
+Check ((Get-HealthObj).status -eq 'ok') 'v2 answers again after rolling back the tool-less update'
+$stj = Get-Content -Raw (Join-Path $Root 'data\updates\selftest.json') | ConvertFrom-Json
+Check ($stj.version -eq $v5 -and -not $stj.ok -and $stj.category -eq 'toolchain') "the reason is recorded for the update note ($($stj.reason))"
 
 # ---- manual rollback
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Rollback-Kairo.ps1') -CI -Root $Root | Out-Host

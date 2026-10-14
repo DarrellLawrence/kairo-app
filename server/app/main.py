@@ -22,6 +22,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
+from . import config_layers
+from . import selftest as selftest_mod
+from . import tool_sites
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
 from .scheduler import JOB_TITLES, Jobs
 from .voice import NotInstalled, Voice, VoiceError
@@ -42,9 +45,9 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .workspace import write_workspace
 from .brain import BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, make_engine, session_for
+from .db import Approval, AuditLog, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
 from .profile import load_profile, render_personality
-from .settings import Settings, get_settings
+from .settings import REPO_ROOT, Settings, get_settings
 
 MAX_PROMPT_CHARS = 20_000
 
@@ -63,6 +66,8 @@ def same_origin(origin: str | None, *hosts: str | None) -> bool:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    if settings.config_overrides is not None:
+        _build_config(settings)
     profile = load_profile(settings.config_dir)
     base_prompt = render_personality(settings.config_dir, profile)
     vault.ensure_structure(settings.vault_dir)
@@ -129,6 +134,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     runner.on_usage = lambda purpose, usage, ok: model_table.record(engine, purpose, usage, ok)
     model_tools = tool_names(gate)
 
+    def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
+                   system: str | None = None):
+        """The one way an owner message reaches the model: chat, calls and the self-test (fix P0,
+        2026-10-14: a self-test with its own prompt and tools was green while chat had none)."""
+        return runner.stream(text, session_id=session_id, system=system or system_prompt(), tools=model_tools,
+                             origin="owner_chat", thread_id=thread_id, purpose=purpose,
+                             model=model or model_table.pick(purpose, app.state.jobs.schedule))
+
     def google_read() -> GoogleAPI:
         return GoogleAPI(settings.secrets_dir, "read", transport=getattr(app.state, "google_transport", None))
 
@@ -168,7 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine, gate=gate, executor=lambda: app.state.executor, google_read=google_read,
         on_flag=lambda m: pusher.notify("Suspicious mail flagged", f"{m.sender}: {m.subject}. Kairo did nothing with it.", "/#today"))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
-    app.state.voice = Voice(settings.data_dir / "models", site_dir=settings.data_dir.parent / "tools" / "voice")
+    app.state.voice = Voice(settings.data_dir / "models", site_dir=tool_sites.site("voice", settings.data_dir))
 
     def _transcribe_for_capture(data: bytes) -> str:
         return app.state.voice.transcribe(data).text
@@ -197,7 +210,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def backup_job(ctx):
         try:
-            path = backup.make(db_path=settings.db_path, data_dir=settings.data_dir, config_dir=settings.config_dir,
+            path = backup.make(db_path=settings.db_path, data_dir=settings.data_dir,
+                               config_dir=settings.config_overrides or settings.config_dir,   # the owner's changes
                                dest_dir=backup_dir)
         except Exception as exc:
             _backup_status(ctx.session, last_error=f"{dt.datetime.now(profile.tz):%Y-%m-%d %H:%M}: {exc}")
@@ -280,6 +294,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                              executor=lambda: app.state.executor, gate=gate, vault_dir=settings.vault_dir, config_dir=settings.config_dir)
     app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
+    app.state.tool_calls = {}           # tool name -> calls that reached the backend (self-test)
     app.state.oauth = GoogleOAuth(settings.secrets_dir, expected_email=profile.gmail,
                                   redirect_uri=f"http://127.0.0.1:{settings.port}/setup/google/callback")
 
@@ -308,6 +323,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "migrated": migrated,
             "brain": brain.value,
             "brain_busy": runner.busy,
+            "tools": getattr(runner.brain, "tools_status", lambda: "unknown")(),
         }
         if not ok:
             raise HTTPException(status_code=503, detail=body)
@@ -351,6 +367,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Every model tool call lands here: gate first, then do it. Runs in a worker thread."""
         _check_tool_caller(request)
         name = str(body.get("name") or "")
+        app.state.tool_calls[name] = app.state.tool_calls.get(name, 0) + 1   # the self-test checks this
         arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else {}
         origin = runner.current_origin
         with session_for(engine) as s:
@@ -603,9 +620,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        async for event in runner.stream(text_in, session_id=session_id, system=system_prompt(), tools=model_tools,
-                                         origin="owner_chat", thread_id=tid, purpose=chat_purpose,
-                                         model=model_table.pick(chat_purpose, app.state.jobs.schedule)):
+        async for event in owner_turn(text_in, session_id=session_id, thread_id=tid, purpose=chat_purpose):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
@@ -653,6 +668,94 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": ok, "brain": status, "reply": reply.strip()[:200],
                 "error": error.text[:500] if error else None,
                 "seconds": round(time.monotonic() - started, 1)}
+
+    async def _owner_path_run(token: str, due_iso: str, system: str) -> dict:
+        """The self-test's turn, through owner_turn() exactly like an owner message (fix P0, 2026-10-14)."""
+        before = app.state.tool_calls.get(selftest_mod.TOOL, 0)
+        out = {"used": False, "error": None, "mcp": "unknown", "listed": []}
+        async for event in owner_turn(selftest_mod.prompt(token, due_iso), session_id=None, thread_id=None,
+                                      purpose="selftest", model="haiku", system=system):
+            if event.kind is EventKind.session:
+                data = event.data or {}
+                servers = {x.get("name"): x.get("status") for x in data.get("mcp_servers") or []}
+                out["mcp"] = servers.get("kairo") or ("not listed" if data.get("mcp_servers") is not None else "unknown")
+                out["listed"] = [str(t) for t in data.get("tools") or []]
+            elif event.kind is EventKind.tool_use and str((event.data or {}).get("name", "")).startswith(TOOL_PREFIX):
+                out["used"] = True
+            elif event.kind is EventKind.error:
+                out["error"] = event.text or "error"
+        out["arrived"] = app.state.tool_calls.get(selftest_mod.TOOL, 0) > before
+        return out
+
+    def _take_test_task(token: str) -> dict | None:
+        """The task the self-test asked for: proof it exists, then it goes again."""
+        with session_for(engine) as s:
+            t = s.exec(select(Task).where(Task.title.contains(token))).first()
+            if t is None:
+                return None
+            proof = {"id": t.id, "title": t.title, "due": t.due.isoformat() if t.due else None, "removed": True}
+            s.delete(t)
+            s.commit()
+            audit(s, actor="backend", action="selftest.task", outcome=f"test task #{proof['id']} found and removed")
+            return proof
+
+    @app.post("/api/selftest/tools")
+    async def selftest_tools(request: Request, notify: int = 1, voice: int = 1, browser: int = 1):
+        """Kairo proves it has hands (fix P0, app/selftest.py): the real hook, the owner-chat path with
+        its prompt, MCP server and tools adding a real task, Profile/Goals and personality version,
+        a real transcription, a real browser page. Only from this PC (installer after every
+        install/update, boot check). notify=0: the installer reports instead (it may roll back)."""
+        if not is_local_request(request):
+            raise HTTPException(403, "self-test only from this PC")
+        started = time.monotonic()
+        env = runner.brain.hook_env("owner_chat") if hasattr(runner.brain, "hook_env") else {}
+        hooks = await asyncio.to_thread(selftest_mod.hook_checks, settings.workspace_dir, env)
+        system = system_prompt()
+        context = selftest_mod.context_checks(system, settings.config_dir, REPO_ROOT / "config", settings.vault_dir)
+        due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        token = secrets.token_hex(4)
+        run = await _owner_path_run(token, due.isoformat(), system)
+        task = await asyncio.to_thread(_take_test_task, token)
+        if not run["error"] and run["mcp"] == "connected" and not run["used"] and task is None:
+            token = secrets.token_hex(4)
+            run = await _owner_path_run(token, due.isoformat(), system)   # the model skipped it once: one more try
+            task = await asyncio.to_thread(_take_test_task, token)
+        result = selftest_mod.verdict(hooks=hooks, mcp=run["mcp"], listed=run["listed"], expected=list(model_tools),
+                                      tool_used=run["used"], tool_arrived=run["arrived"], task_found=task is not None,
+                                      claude_error=run["error"], claude_status=runner.brain.health().value, context=context)
+        result["proof"] = {"task": task}
+        # Voice and browser: only where the installer set them up for this release (else "skipped").
+        extras = {}
+        if voice:
+            extras["voice"] = (await asyncio.to_thread(app.state.voice.selftest)) if tool_sites.configured("voice") \
+                else {"ok": None, "reason": "not set up for this release"}
+        if browser:
+            extras["browser"] = (await asyncio.to_thread(portal_browser.selftest, browser_site)) \
+                if tool_sites.configured("browser") else {"ok": None, "reason": "not set up for this release"}
+        result["checks"].update({k: v.get("ok") for k, v in extras.items()})
+        result["details"] = extras
+        if extras.get("voice", {}).get("heard"):
+            result["proof"]["transcription"] = extras["voice"]["heard"]
+        problems = [] if result["ok"] else [result["reason"]]
+        for kind, r in extras.items():
+            if r.get("ok") is False:
+                problems.append(f"{kind}: {r.get('reason')}")
+                if result["category"] not in ("toolchain", "claude"):   # a broken install outranks the rest (rollback)
+                    result.update(ok=False, category=kind, reason=f"{kind}: {r.get('reason')}")
+        result["problems"] = problems
+        result["seconds"] = round(time.monotonic() - started, 1)
+        result["at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        log.info("self-test: %s", json.dumps({k: result[k] for k in ("ok", "category", "reason", "checks", "proof")}, default=str))
+        with session_for(engine) as s:
+            row = s.get(SettingKV, "selftest.tools") or SettingKV(key="selftest.tools")
+            prev = json.loads(row.value) if row.value else {}
+            row.value = json.dumps(result, default=str)
+            s.add(row)
+            audit(s, actor="backend", action="selftest.tools",
+                  outcome="ok" if result["ok"] else f"failed ({result['category']}): {result['reason'][:200]}")
+        if notify and not result["ok"] and (prev.get("ok", True) or prev.get("reason") != result["reason"]):
+            pusher.notify("Kairo", f"Self-test failed: {result['reason']}"[:200], "/#today")
+        return result
 
     # ---------------------------------------------------------------- auto-update (installer/Kairo-AutoUpdate.ps1)
 
@@ -769,7 +872,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from .portal import olat as portal_olat
 
     LOGIN_SITES = {"olat": "School portal (OLAT)"}
-    browser_site = settings.data_dir.parent / "tools" / "browser"
+    browser_site = tool_sites.site("browser", settings.data_dir)
 
     def _login_path(site: str) -> Path:
         return settings.secrets_dir / "logins" / f"{site}.bin"
@@ -1029,9 +1132,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         boot = (status() or {}).get("boot_check") or {}
         if boot and boot.get("all_ok") is False:
             issues.append("Last boot check found a problem")
+        tools_now = getattr(runner.brain, "tools_status", lambda: "unknown")()
+        if tools_now.startswith("failed"):
+            issues.append("Kairo's tools are not connected: it can't act until this is fixed")
         with session_for(engine) as s:
+            last = s.get(SettingKV, "selftest.tools")
+            last = json.loads(last.value) if last and last.value else None
+            notices = []
+            if last and not last.get("ok"):
+                issues.append(f"Self-test failed: {last.get('reason')}")
+            elif last:
+                notices += last.get("warnings") or []          # yellow: not broken, something to do
             issues += brief._warnings(s)
-            return today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
+            out = today_mod.home(s, profile=profile, events=events, calendar_error=cal_error, issues=issues)
+            out["notices"] = notices
+            return out
 
     @app.get("/api/brief")
     def brief_get(date: str | None = None):
@@ -1833,13 +1948,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 boot = json.loads(path.read_text(encoding="utf-8-sig"))
             except (OSError, ValueError):
                 boot = {"error": "boot-check.json unreadable"}
-        return {"brain": runner.brain.health().value, "boot_check": boot}
+        with session_for(engine) as s:
+            row = s.get(SettingKV, "selftest.tools")
+            selftest_last = json.loads(row.value) if row and row.value else None
+        return {"brain": runner.brain.health().value, "boot_check": boot, "selftest": selftest_last}
 
     _mount_web(app, settings.web_dist_dir)
     return app
 
 
 log = logging.getLogger("kairo.main")
+
+
+def _build_config(settings: Settings) -> None:
+    """The config Kairo runs with: this release's defaults + the owner's changes (fix P0.4).
+    New actions are announced once (housekeeping pushes data/updates/config-update.json)."""
+    report = config_layers.build(REPO_ROOT / "config", settings.config_overrides, settings.config_dir,
+                                 backup_root=settings.data_dir / "backups")
+    for note in report["ignored"]:
+        log.warning("config: ignored %s", note)
+    n = len(report["new_actions"])
+    merged = report.get("merged") or []
+    if not n and not report["migrated"] and not merged:
+        return
+    msg = f"Config updated: {n} new action{'s' if n != 1 else ''}." if n else "Config updated."
+    if report["migrated"]:
+        msg += " Your settings were kept; data/config now holds only your changes."
+    if merged:
+        both = sum(m["conflicts"] for m in merged)
+        msg += (f" Your edits in {', '.join(m['file'] for m in merged)} were carried into the new version"
+                + (f" ({both} spot{'s' if both != 1 else ''} changed on both sides: yours kept)." if both else "."))
+    if report["ignored"]:
+        msg += f" {len(report['ignored'])} of them would loosen the rules and are ignored (see kairo.log)."
+    path = settings.data_dir / "updates" / "config-update.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"message": msg, "new_actions": report["new_actions"], "ignored": report["ignored"],
+                                "at": dt.datetime.now(dt.timezone.utc).isoformat(), "notified": False}), encoding="utf-8")
+    log.info("config: %s %s", msg, ", ".join(report["new_actions"]))
 
 LOCAL_HOSTS = {"127.0.0.1", "::1"}
 

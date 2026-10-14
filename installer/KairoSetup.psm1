@@ -290,6 +290,15 @@ function Invoke-SelfTest {
     } catch { return $null }
 }
 
+# The full self-test (server/app/selftest.py); Kairo pushes a failure itself. $null: older release or no answer.
+function Invoke-ToolsSelfTest {
+    try {
+        $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/selftest/tools?notify=1' -Method Post -Body '{}' `
+            -ContentType 'application/json' -UseBasicParsing -TimeoutSec 900
+        return ($resp.Content | ConvertFrom-Json)
+    } catch { return $null }
+}
+
 # ---------------------------------------------------------------- Google
 
 function Get-GoogleStatus {
