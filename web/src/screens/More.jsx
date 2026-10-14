@@ -110,6 +110,45 @@ function CapturePage() {
   )
 }
 
+function BackupsPage() {
+  const toast = useToast()
+  const [d, setD] = useState(null)
+  const load = useCallback(() => api('/api/backups').then(setD).catch(() => setD(null)), [])
+  useEffect(() => { load() }, [load])
+  const run = async (name, label) => {
+    await api(`/api/jobs/${name}/run`, { method: 'POST', body: {} })
+    toast.show({ text: `${label} started.` })
+    setTimeout(load, 4000)
+  }
+  const st = d?.status || {}
+  const mb = (n) => `${(n / 1048576).toFixed(1)} MB`
+  return (
+    <Page title="Backups" onRefresh={load}>
+      <p className="k-hello">Every night at 03:30: database, vault, settings and captures. Every Sunday Kairo restores the newest one into a test folder and checks it.</p>
+      {!d && <SkeletonCard />}
+      {d && (
+        <>
+          <List>
+            <ListRow icon={<IconShield />} title="Last backup" wrap
+              subtitle={st.last_error ? `Failed: ${st.last_error}` : st.last_backup_at ? `${new Date(st.last_backup_at).toLocaleString()} · ${mb(st.last_size || 0)}` : 'Not yet'}
+              value={<Badge tone={st.last_error ? 'danger' : st.last_backup_at ? 'ok' : 'neutral'} pop={false}>{st.last_error ? 'Failed' : st.last_backup_at ? 'OK' : '–'}</Badge>} />
+            <ListRow icon={<IconCheck />} title="Last restore test" wrap
+              subtitle={st.test_at ? `${new Date(st.test_at).toLocaleString()}${st.test_ok ? ` · ${st.test_detail?.rows} rows, ${st.test_detail?.vault_files} vault files` : ` · ${st.test_detail}`}` : 'Not yet'}
+              value={<Badge tone={st.test_ok === false ? 'danger' : st.test_ok ? 'ok' : 'neutral'} pop={false}>{st.test_ok === false ? 'Failed' : st.test_ok ? 'OK' : '–'}</Badge>} />
+          </List>
+          <div className="k-pad" style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+            <Button variant="secondary" block onClick={() => run('backup', 'Backup')}>Back up now</Button>
+            <Button variant="secondary" block onClick={() => run('restore_test', 'Restore test')}>Test restore</Button>
+          </div>
+          <SectionTitle>Kept ({d.backups.length})</SectionTitle>
+          <List>{d.backups.map((b) => <ListRow key={b.name} title={b.name} subtitle={mb(b.size)} />)}</List>
+          <p className="k-muted k-small k-pad">On the PC in {d.folder}. Google sign-ins and keys are not in backups: after a restore, run Kairo Logins again.</p>
+        </>
+      )}
+    </Page>
+  )
+}
+
 function LocationPage() {
   const toast = useToast()
   const [d, setD] = useState(null)
@@ -389,6 +428,8 @@ function Root() {
 
           <SectionTitle>Work</SectionTitle>
           <List>
+            <ListRow icon={<IconRefresh />} title="Reviews" subtitle="Check-ins and weekly to yearly reviews" chevron
+              onClick={() => { window.location.hash = '#reviews' }} />
             <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron
               onClick={() => stack.push('Jobs', () => <JobsPage />)} />
             <ListRow icon={<IconInbox />} title="Capture" subtitle="Action button and share sheet setup" chevron
@@ -401,6 +442,8 @@ function Root() {
           <List>
             <ListRow icon={<IconList />} title="Activity" subtitle="Everything Kairo did, newest first" chevron
               onClick={() => stack.push('Activity', () => <ActivityPage />)} />
+            <ListRow icon={<IconShield />} title="Backups" subtitle="Nightly backup and weekly restore test" chevron
+              onClick={() => stack.push('Backups', () => <BackupsPage />)} />
             {TODOS.filter((t) => todos[t.id]).map((t) => (
               <ListRow key={t.id} icon={<IconCheck />} title={t.title} subtitle="Done" chevron
                 onClick={() => stack.push(t.title, () => <TodoPage todo={t} done onToggle={() => toggleTodo(t.id)} />)} />

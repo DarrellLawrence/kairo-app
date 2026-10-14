@@ -77,7 +77,7 @@ class BriefMaker:
         week_end = dt.datetime.combine(day + dt.timedelta(days=7), dt.time.max, tzinfo=tz)
         day_start = dt.datetime.combine(day, dt.time.min, tzinfo=tz)
         events, cal_error = self.calendar(day)
-        open_tasks = s.exec(select(Task).where(Task.status == "open")).all()
+        open_tasks = s.exec(select(Task).where(Task.status.in_(["open", "doing"]))).all()
 
         def due_local(t: Task):
             d = t.due if t.due.tzinfo else t.due.replace(tzinfo=dt.timezone.utc)

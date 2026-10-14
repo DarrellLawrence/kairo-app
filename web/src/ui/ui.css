@@ -249,3 +249,11 @@
 .k-top3-n { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font: var(--t-caption); font-weight: 700; color: var(--on-accent, #fff); background: var(--accent); }
 .k-code { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-strong); padding: 10px 12px; border-radius: var(--r-md); word-break: break-all; user-select: all; -webkit-user-select: all; }
 .k-steps { margin: 0; padding: 0 0 0 20px; font: var(--t-sub); color: var(--text); display: flex; flex-direction: column; gap: var(--s-2); }
+
+/* Board: stacked sections on a phone, three columns on a wide screen */
+.k-kanban { display: flex; flex-direction: column; gap: var(--s-4); padding: 0 var(--s-4); }
+.k-kanban-col .k-card { margin: 0 0 var(--s-2); }
+@media (min-width: 720px) {
+  .k-kanban { flex-direction: row; align-items: flex-start; }
+  .k-kanban-col { flex: 1; min-width: 0; }
+}

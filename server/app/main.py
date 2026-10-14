@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from sqlalchemy import inspect, text
 from sqlmodel import select
 
-from . import approvals, backup, brief, capture, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
+from . import approvals, backup, board, brief, capture, chat, killswitch, location, lookup, onboarding, reviews, triage, vault
 from .scheduler import JOB_TITLES, Jobs
 from .audit import audit
 from .executor import Executor
@@ -801,6 +801,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             out["transport_error"] = f"Timetable not available ({type(exc).__name__})"
         return out
+
+    # ---------------------------------------------------------------- board (Milestone D)
+
+    from .db import Goal, Project, Task as TaskRow
+    from pydantic import ValidationError
+
+    def _parse(model, body):
+        try:
+            return model.model_validate(body or {})
+        except ValidationError as exc:
+            raise HTTPException(400, "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:3]))
+
+    @app.get("/api/board")
+    def board_get():
+        with session_for(engine) as s:
+            return board.board(s)
+
+    for _path, _row, _in, _patch, _dict in (
+        ("goals", Goal, board.GoalIn, board.GoalPatch, board.goal_dict),
+        ("projects", Project, board.ProjectIn, board.ProjectPatch, board.project_dict),
+        ("tasks", TaskRow, board.TaskIn, board.TaskPatch, board.task_dict),
+    ):
+        def _make(row=_row, in_=_in, patch=_patch, to_dict=_dict, path=_path):
+            def create_(body: dict):
+                with session_for(engine) as s:
+                    try:
+                        return to_dict(board.create(s, row, _parse(in_, body)))
+                    except board.BoardError as exc:
+                        raise HTTPException(400, str(exc))
+
+            def update_(item_id: int, body: dict):
+                with session_for(engine) as s:
+                    try:
+                        return to_dict(board.update(s, row, item_id, _parse(patch, body)))
+                    except board.BoardError as exc:
+                        raise HTTPException(404 if str(exc).startswith(f"no {row.__tablename__[:-1]} ") else 400, str(exc))
+
+            app.post(f"/api/{path}", name=f"{path}_create")(create_)
+            app.patch(f"/api/{path}/{{item_id}}", name=f"{path}_update")(update_)
+        _make()
 
     @app.get("/api/backups")
     def backups_list():

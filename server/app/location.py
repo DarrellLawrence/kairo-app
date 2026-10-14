@@ -151,7 +151,7 @@ def places(s: Session) -> list[str]:
 # ---------------------------------------------------------------- reminders
 
 def tasks_for(s: Session, place: str) -> list[Task]:
-    return list(s.exec(select(Task).where(Task.status == "open").where(Task.place == place)).all())
+    return list(s.exec(select(Task).where(Task.status.in_(["open", "doing"])).where(Task.place == place)).all())
 
 
 def arrival_reminder(s: Session, place: str) -> tuple[str, str] | None:

@@ -57,7 +57,7 @@ class VaultRead(Strict):
 
 
 class TasksList(Strict):
-    status: Literal["open", "done", "dropped"] | None = "open"
+    status: Literal["open", "doing", "done", "dropped"] | None = "open"
 
 
 # ---------------------------------------------------------------- tier 1: internal
@@ -78,7 +78,7 @@ class TasksUpdate(Strict):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     due: datetime | None = None
     priority: int | None = Field(default=None, ge=0, le=3)
-    status: Literal["open", "done", "dropped"] | None = None
+    status: Literal["open", "doing", "done", "dropped"] | None = None
     place: str | None = Field(default=None, pattern=_PLACE)
 
 

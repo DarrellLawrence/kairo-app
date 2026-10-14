@@ -2,24 +2,26 @@ import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { api } from './api.js'
 import { spring, tabVariants } from './design/motion.js'
-import { Badge, IconChat, IconMore, IconReview, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
+import { Badge, IconBoard, IconChat, IconMore, IconShield, IconToday, TabBar, ToastProvider } from './ui/index.js'
 import Today from './screens/Today.jsx'
 import Chat from './screens/Chat.jsx'
 import Approvals from './screens/Approvals.jsx'
 import More from './screens/More.jsx'
 import Reviews from './screens/Reviews.jsx'
+import Board from './screens/Board.jsx'
 import Onboarding from './screens/Onboarding.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
 
-// Board joins the tab bar when it is built (Milestone D).
 const TABS = [
   { id: 'today', label: 'Today', Icon: IconToday },
   { id: 'chat', label: 'Chat', Icon: IconChat },
+  { id: 'board', label: 'Board', Icon: IconBoard },
   { id: 'approvals', label: 'Approvals', Icon: IconShield },
-  { id: 'reviews', label: 'Reviews', Icon: IconReview },
   { id: 'more', label: 'More', Icon: IconMore },
 ]
+// Screens without their own tab, and the tab that stays lit while they are open.
+const HIDDEN = { reviews: 'more', school: 'more', lerndoku: 'more' }
 
 // Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
 function readRoute() {
@@ -27,7 +29,7 @@ function readRoute() {
   if (hash === 'dev/components' || window.location.pathname === '/dev/components') return 'dev'
   if (hash === 'onboarding') return 'onboarding'
   const base = hash.split('/')[0]
-  return TABS.some((t) => t.id === base) ? base : 'today'
+  return TABS.some((t) => t.id === base) || base in HIDDEN ? base : 'today'
 }
 
 function readParam() {
@@ -55,7 +57,7 @@ export default function App() {
   }, [])
 
   const go = useCallback((id) => {
-    const from = TABS.findIndex((t) => t.id === route)
+    const from = TABS.findIndex((t) => t.id === (HIDDEN[route] || route))
     const to = TABS.findIndex((t) => t.id === id)
     setDir(to >= from ? 1 : -1)
     window.history.replaceState(null, '', `#${id}`)
@@ -70,6 +72,7 @@ export default function App() {
   const screen = {
     today: <Today openCards={openCards} go={go} onboarding={() => { window.location.hash = '#onboarding' }} />,
     reviews: <Reviews key={param ?? 'list'} openId={param} />,
+    board: <Board />,
     onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,
     approvals: <Approvals onCount={setOpenCards} />,
@@ -97,7 +100,7 @@ export default function App() {
               </motion.div>
             </AnimatePresence>
           </main>
-          {route !== 'dev' && route !== 'onboarding' && <TabBar tabs={tabs} active={route} onSelect={go} />}
+          {route !== 'dev' && route !== 'onboarding' && <TabBar tabs={tabs} active={HIDDEN[route] || route} onSelect={go} />}
         </div>
       </ToastProvider>
     </MotionConfig>

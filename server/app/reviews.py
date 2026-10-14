@@ -137,7 +137,7 @@ def _between(col, start: dt.date, end: dt.date):
 def prefill(session: Session, kind: str, start: dt.date, end: dt.date, tz=None) -> dict:
     """What Kairo already knows about the period, shown above the questions."""
     done = session.exec(select(Task).where(Task.status == "done").where(_between(Task.done_at, start, end))).all()
-    open_tasks = session.exec(select(Task).where(Task.status == "open")).all()
+    open_tasks = session.exec(select(Task).where(Task.status.in_(["open", "doing"]))).all()
     overdue = [t for t in open_tasks if t.due and t.due.date() < end]
     sent = session.exec(select(Approval).where(Approval.status == "done").where(_between(Approval.decided_at, start, end))).all()
     checkins = session.exec(select(Checkin).where(Checkin.date >= start).where(Checkin.date <= end)).all()
