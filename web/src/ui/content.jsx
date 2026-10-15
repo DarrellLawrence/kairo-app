@@ -56,8 +56,8 @@ export function InputBar({ value, onChange, onSend, disabled, placeholder = 'Mes
       {mic && (!value.trim() || mic.state !== 'idle') ? (
         <motion.button type="button" className={`k-send k-mic ${mic.state}`} disabled={mic.state === 'busy'}
           onClick={mic.onPress} whileTap={{ scale: 0.85 }} transition={spring.snappy}
-          aria-label={mic.state === 'recording' ? 'Stop and send' : 'Talk'}>
-          {mic.state === 'recording' ? <span className="k-mic-stop" /> : mic.state === 'busy' ? <span className="k-spin-dot" /> : <IconMic />}
+          aria-label={mic.state === 'recording' ? 'Stop and send' : mic.state === 'speaking' ? 'Stop Kairo' : 'Talk'}>
+          {mic.state === 'recording' || mic.state === 'speaking' ? <span className="k-mic-stop" /> : mic.state === 'busy' ? <span className="k-spin-dot" /> : <IconMic />}
         </motion.button>
       ) : (
         <motion.button type="submit" className="k-send" disabled={!canSend} whileTap={canSend ? { scale: 0.85 } : undefined}

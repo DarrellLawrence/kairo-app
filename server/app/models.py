@@ -20,7 +20,9 @@ from .db import ModelRun, utcnow
 
 ALIASES = ("haiku", "sonnet", "opus")
 DEFAULTS = {
-    "chat": "sonnet", "call": "haiku", "voice_note": "sonnet",
+    # Voice V1 (owner's request 2026-10-15): chat, calls and voice notes on Haiku; Sonnet only when needed
+    # (conversation.route: writing in the owner's voice, judgment calls, several steps; or Haiku hands over).
+    "chat": "haiku", "call": "haiku", "voice_note": "haiku", "chat_heavy": "sonnet",
     "triage": "haiku", "capture": "haiku", "letters": "haiku", "brief": "haiku", "reminder": "haiku",
     "summary": "haiku", "promises": "haiku", "reply_check": "haiku",
     "draft": "sonnet", "document": "sonnet", "gauntlet": "sonnet", "study": "sonnet", "lerndoku": "sonnet",
@@ -32,7 +34,8 @@ DEFAULTS = {
 }
 JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
                "open_loops": "draft", "promises": "promises", "pa": "judgment", "coach": "coach", "document": "document"}
-NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review", "coach", "plan", "review_big"}
+NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review", "coach", "plan", "review_big",
+               "chat_heavy"}
 OPUS_ONLY = {"judgment_high", "money", "money_review"}
 RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 

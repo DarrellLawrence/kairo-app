@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-15 — build: fast voice (owner's priority #1)
+- One Claude for the whole conversation: started when the PC starts, the app opens or a call starts, and kept until 2 hours after the last word (12 hours at most). Chat, calls and spoken messages are turns on it. No start-up per message any more.
+- Models: chat, calls and voice notes run on Haiku. Drafting in your voice, judgment calls and planning go to Sonnet (by the words you use), and Haiku hands a turn to Sonnet itself when it needs to (on a call you hear "One moment."). Money stays on Opus. More → System → Voice speed shows the model of every turn.
+- Slim prompt: personality, a short profile card and the conversation memory stay the same all conversation long, so the CLI can cache them. The time, what your notes say about this message and recent files go with each message. Kairo looks up the rest with its memory and vault tools.
+- Calls and the chat mic stream your voice to the PC while you talk. Kairo notices you stopped after about half a second of quiet, and starts transcribing at a shorter pause already. Whisper runs on the GPU in its fast mode and finds English or German by itself.
+- The answer streams back as audio, sentence by sentence: the first sentence plays while the next is made.
+- Talk over Kairo on a call and it stops at once and listens. What it said so far is kept. In chat, tap the mic to stop it.
+- Jobs never make you wait. A job running when you talk is stopped and tries again later; jobs wait while a call is on and for a minute after you talk.
+- Hanging up keeps the conversation's Claude. If you hang up mid-sentence, what you said is answered in chat.
+- Removed: the Claude start per message; the call's own warm process (closed at hang-up); for calls and the chat mic, the recording upload, the speech fetch per sentence, the sentence splitter on the phone and the talk-over level monitor; the 1.3 s silence wait.
+
 ## 2026-10-15 — plan + build: fixed destinations for the backend's own calls (owner's decision)
 - Web Push, the health watch, the heartbeat and the offsite backup stay outside the gate (nothing the model chose), but only to destinations fixed in `server/app/outbound.py`. KICKOFF §14 and CLAUDE.md say so.
 - Push subscriptions are accepted and sent to only on the browsers' push services (Apple, Google, Mozilla, Microsoft); the health watch calls only Kairo's own `*.ts.net` address. A test fails when any other module starts using the network.

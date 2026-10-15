@@ -22,6 +22,12 @@ Flags verified against Claude Code 2.1.296 (`claude --help` and real runs):
   once, at the first turn: a warm process only serves turns that can keep the
   system prompt, which is why only calls use one (chat rebuilds it per message).
 
+- Control requests on stdin of a stream-json process (verified with 2.1.300, real turns):
+  {"type":"control_request","request_id":..,"request":{"subtype":"set_model","model":"sonnet"}}
+  -> control_response success; the next turns run on that model, same process and conversation.
+  {"subtype":"interrupt"} -> the running turn ends at once with result subtype
+  error_during_execution; the process keeps serving turns (voice V1: barge-in, model per turn).
+
 Stream events seen: system/init (session_id), stream_event (event.delta),
 assistant (message.content), rate_limit_event (rate_limit_info.status), result
 (is_error, result, api_error_status, session_id).
@@ -140,6 +146,8 @@ class ClaudeCLIBrain:
         self._streamed = False                 # this message's text already went out as deltas
         self._t0 = 0.0                         # when this run (or warm turn) started
         self._timing: dict[str, Any] = {}
+        self._turn_warm: _Warm | None = None     # the warm process answering right now (interrupt)
+        self._interrupted = threading.Event()   # the owner talked over the answer: not a failure
 
     # -- command ---------------------------------------------------------
 
@@ -196,14 +204,14 @@ class ClaudeCLIBrain:
     # -- warm process (fix plan 30) ----------------------------------------
 
     def warm_up(self, *, key: Any, session_id: str | None, system: str, tools: list[str], model: str | None = None,
-                origin: str = "owner_chat") -> bool:
+                origin: str = "owner_chat", idle_s: float = None, max_age_s: float = None) -> bool:
         """Start the CLI for the next turn now, so that turn doesn't wait for it to start (a call).
         It waits on stdin; nothing reaches the model until run(warm=key) sends the turn. Returns
         False when a matching warm process is already there."""
         with self._warm_lock:
             w = self._warm
-            if w is not None and w.usable(key, session_id):
-                return False
+            if w is not None and (w.busy or w.usable(key, session_id)):
+                return False               # never cut off a turn that is running
             self._close_warm_locked()
             cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=True, model=model,
                                      prompt_file="system-prompt-warm.md")
@@ -213,7 +221,8 @@ class ClaudeCLIBrain:
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
             except OSError:
                 return False
-            self._warm = _Warm(proc, key, session_id, on_idle=self._close_if_idle)
+            self._warm = _Warm(proc, key, session_id, on_idle=self._close_if_idle, model=model or self.model,
+                               idle_s=idle_s or WARM_IDLE_S, max_age_s=max_age_s or WARM_MAX_AGE_S)
             return True
 
     def warm_ready(self, key: Any, session_id: str | None) -> bool:
@@ -283,7 +292,7 @@ class ClaudeCLIBrain:
         if warm is not None:
             w = self._take_warm(warm, session_id)
             if w is not None:
-                done = yield from self._run_warm(w, prompt, images)
+                done = yield from self._run_warm(w, prompt, images, model)
                 if done:
                     return
         if session_id is not None:
@@ -295,9 +304,24 @@ class ClaudeCLIBrain:
         yield from self._run_cold(prompt, session_id=session_id, system=system, tools=tools, origin=origin,
                                   images=images, model=model)
 
+    def interrupt(self) -> bool:
+        """The owner talked over the answer: stop the running turn now. A warm process keeps running
+        (control request interrupt); a cold one is stopped. False when nothing was running."""
+        w = self._turn_warm
+        if w is not None:
+            self._interrupted.set()
+            return w.control({"subtype": "interrupt"}, wait=False)
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            self._interrupted.set()
+            proc.kill()
+            return True
+        return False
+
     def _start_turn(self) -> None:
         self._run_limited = False
         self._cancelled.clear()
+        self._interrupted.clear()
         self._streamed = False
         self._t0 = time.monotonic()
         self._timing = {}
@@ -363,6 +387,10 @@ class ClaudeCLIBrain:
         stderr_reader.join(timeout=5)
         if not finished:
             stderr = "".join(stderr_chunks).strip()
+            if self._interrupted.is_set():
+                yield BrainEvent(EventKind.error, text="Interrupted.", status=self._status,
+                                 data={"cancelled": True, "interrupted": True})
+                return
             if self._cancelled.is_set():
                 yield BrainEvent(EventKind.error, text="Stopped by the kill switch.", status=self._status, data={"cancelled": True})
                 return
@@ -370,12 +398,21 @@ class ClaudeCLIBrain:
             self._status = classify_error(msg, None)
             yield BrainEvent(EventKind.error, text=msg, status=self._status)
 
-    def _run_warm(self, w: "_Warm", prompt: str, images) -> Iterator[BrainEvent]:
+    def _run_warm(self, w: "_Warm", prompt: str, images, model: str | None = None) -> Iterator[BrainEvent]:
         """One turn on the warm process. Returns True when the turn is done (answered or failed after
-        it started), False when the process was already gone: then the caller runs it cold."""
+        it started), False when the process was already gone: then the caller runs it cold.
+        model: switched first when the process runs another one (control request set_model)."""
         self._start_turn()
         self._timing["warm"] = True
         proc = w.proc
+        if model and w.model != model:
+            if not w.control({"subtype": "set_model", "model": model}):
+                with self._warm_lock:
+                    w.busy = False
+                    if self._warm is w:
+                        self._close_warm_locked()
+                return False      # no answer to the switch: run it cold, on the right model
+            w.model = model
         timed_out = threading.Event()
 
         def on_timeout() -> None:
@@ -383,13 +420,11 @@ class ClaudeCLIBrain:
             proc.kill()
 
         self._proc = proc
+        self._turn_warm = w
         timer = threading.Timer(self.timeout_s, on_timeout)
         finished = started = False
         try:
-            try:
-                proc.stdin.write(_user_message(prompt, images or []))
-                proc.stdin.flush()
-            except (OSError, ValueError):
+            if not w.write(_user_message(prompt, images or [])):
                 return False
             timer.start()
             while True:
@@ -408,6 +443,7 @@ class ClaudeCLIBrain:
         finally:
             timer.cancel()
             self._proc = None
+            self._turn_warm = None
             with self._warm_lock:
                 w.busy = False
                 if not finished or proc.poll() is not None:
@@ -476,7 +512,10 @@ class ClaudeCLIBrain:
         elif kind == "result":
             sid = msg.get("session_id")
             usage = {**_usage(msg), **self._timing}
-            if msg.get("is_error") or msg.get("subtype") != "success":
+            if self._interrupted.is_set() and msg.get("subtype") == "error_during_execution":
+                yield BrainEvent(EventKind.error, text="Interrupted.", session_id=sid, status=self._status,
+                                 data={"usage": usage, "cancelled": True, "interrupted": True})
+            elif msg.get("is_error") or msg.get("subtype") != "success":
                 text = str(msg.get("result") or msg.get("subtype") or "error")
                 self._status = classify_error(text, msg.get("api_error_status"))
                 yield BrainEvent(EventKind.error, text=text, session_id=sid, status=self._status, data={"usage": usage})
@@ -491,17 +530,62 @@ class ClaudeCLIBrain:
 
 
 class _Warm:
-    """A CLI process waiting for its next turn on stdin (fix plan 30)."""
+    """A CLI process waiting for its next turn on stdin (fix plan 30). Voice V1: the conversation
+    process for chat and calls lives long (idle_s, max_age_s) and runs the model each turn asks for."""
 
-    def __init__(self, proc: subprocess.Popen, key: Any, session_id: str | None, *, on_idle) -> None:
+    def __init__(self, proc: subprocess.Popen, key: Any, session_id: str | None, *, on_idle, model: str | None = None,
+                 idle_s: float = WARM_IDLE_S, max_age_s: float = WARM_MAX_AGE_S) -> None:
         self.proc, self.key, self.session_id = proc, key, session_id
+        self.model = model
+        self.idle_s, self.max_age_s = idle_s, max_age_s
         self.started = time.monotonic()
         self.busy = False
         self.stderr: deque[str] = deque(maxlen=40)
         self._on_idle = on_idle
         self._idle: threading.Timer | None = None
+        self._stdin = threading.Lock()
+        self._seq = 0
         threading.Thread(target=self._drain, name="brain-warm-stderr", daemon=True).start()
         self.touch()
+
+    def write(self, line: str) -> bool:
+        with self._stdin:
+            try:
+                self.proc.stdin.write(line)
+                self.proc.stdin.flush()
+                return True
+            except (OSError, ValueError):
+                return False
+
+    def control(self, request: dict, *, wait: bool = True, timeout: float = 5.0) -> bool:
+        """Send a control request. wait: read stdout until its answer (only between turns, when
+        nothing else is written there); a running turn's reader skips control responses itself."""
+        self._seq += 1
+        rid = f"kairo-{self._seq}"
+        if not self.write(json.dumps({"type": "control_request", "request_id": rid, "request": request}) + "\n"):
+            return False
+        if not wait:
+            return True
+        result: list[bool] = []
+
+        def read() -> None:
+            try:
+                for line in self.proc.stdout:
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    resp = msg.get("response") or {} if msg.get("type") == "control_response" else {}
+                    if resp.get("request_id") == rid:
+                        result.append(resp.get("subtype") == "success")
+                        return
+            except (OSError, ValueError):
+                return
+
+        reader = threading.Thread(target=read, name="brain-warm-control", daemon=True)
+        reader.start()
+        reader.join(timeout)
+        return bool(result and result[0])
 
     def _drain(self) -> None:
         try:
@@ -513,13 +597,13 @@ class _Warm:
     def touch(self) -> None:
         if self._idle is not None:
             self._idle.cancel()
-        self._idle = threading.Timer(WARM_IDLE_S, self._on_idle, args=(self,))
+        self._idle = threading.Timer(self.idle_s, self._on_idle, args=(self,))
         self._idle.daemon = True
         self._idle.start()
 
     def usable(self, key: Any, session_id: str | None) -> bool:
         return (not self.busy and self.key == key and self.session_id == session_id and self.proc.poll() is None
-                and time.monotonic() - self.started < WARM_MAX_AGE_S)
+                and time.monotonic() - self.started < self.max_age_s)
 
     def close(self) -> None:
         if self._idle is not None:

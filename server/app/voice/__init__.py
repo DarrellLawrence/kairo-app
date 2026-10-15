@@ -255,11 +255,27 @@ class Voice:
             raise VoiceError("no audio")
         if len(audio) > MAX_AUDIO:
             raise VoiceError("recording too long")
+        return self._stt_run(lambda: io.BytesIO(audio), language, beam_size=5)
+
+    def transcribe_pcm(self, pcm: bytes, language: str | None = None) -> Transcript:
+        """Voice V1: 16 kHz 16-bit mono samples straight from the phone (no file to decode), greedy
+        decoding (beam 1): the fast path for a spoken turn."""
+        if len(pcm) < 3200:   # under 0.1 s
+            raise VoiceError("no audio")
+        if len(pcm) > MAX_AUDIO:
+            raise VoiceError("recording too long")
+
+        def samples():
+            import numpy as np
+            return np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
+        return self._stt_run(samples, language, beam_size=1, condition_on_previous_text=False, without_timestamps=True)
+
+    def _stt_run(self, audio, language: str | None, **opts) -> Transcript:
         with self._lock:
             model = self._load_stt()
         t = time.monotonic()
         try:
-            segments, info = model.transcribe(io.BytesIO(audio), language=language, vad_filter=True, beam_size=5)
+            segments, info = model.transcribe(audio(), language=language, vad_filter=True, **opts)
             text = " ".join(s.text.strip() for s in segments).strip()
         except Exception as exc:
             if self._stt_device == "cuda" and GPU_RUNTIME.search(str(exc)):
@@ -271,7 +287,7 @@ class Voice:
                     except Exception as exc2:
                         self._stt, self.last_error = None, f"load: {type(exc2).__name__}: {exc2}"
                         raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
-                return self.transcribe(audio, language)
+                return self._stt_run(audio, language, **opts)
             self.last_error = f"transcribe: {exc}"
             raise VoiceError(f"could not understand the audio ({type(exc).__name__})") from exc
         return Transcript(text=text, language=info.language, seconds=round(info.duration, 1), took=round(time.monotonic() - t, 2))

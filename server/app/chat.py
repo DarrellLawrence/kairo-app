@@ -25,13 +25,19 @@ from .profile import Profile
 
 
 
-# A job call is stopped for the owner at most this often; after that it finishes first.
+# A job call is stopped for the owner at most this often; after that it gives up until its next run
+# (Voice V1: the owner never waits for a job).
 MAX_JOB_PREEMPTS = 2
+OWNER_QUIET_S = 60        # after an owner turn, jobs wait this long: the owner may go on talking
+MAX_QUIET_WAIT_S = 1800   # ... but never longer than this in a row (a call left open all day)
 
 
 class BrainRunner:
-    def __init__(self, brain: Brain) -> None:
+    def __init__(self, brain: Brain, quiet_s: float = 0.0) -> None:
         self.brain = brain
+        self.quiet_s = quiet_s                # main.py: OWNER_QUIET_S; tests: none
+        self._owner_done_at = float("-inf")
+        self._lines = 0                       # voice lines open (a call, a spoken message)
         self._cond = threading.Condition()
         self._held_by: str | None = None      # "owner" | "job"
         self._owners_waiting = 0
@@ -55,16 +61,32 @@ class BrainRunner:
     def busy(self) -> bool:
         return self._held_by is not None
 
+    def line_open(self) -> None:
+        with self._cond:
+            self._lines += 1
+
+    def line_closed(self) -> None:
+        with self._cond:
+            self._lines = max(0, self._lines - 1)
+            self._cond.notify_all()
+
+    def _owner_near(self) -> bool:
+        """The owner is in a conversation: on a call, or talked a moment ago."""
+        return self._lines > 0 or time.monotonic() - self._owner_done_at < self.quiet_s
+
     @contextmanager
     def hold(self, *, owner: bool, preemptible: bool = False) -> Iterator[None]:
         """The brain, one call at a time. owner=True: before every waiting job, and a running job
         call that is preemptible gets stopped (re-checked every half second, so a call that was
-        just starting is caught too). Not re-entrant."""
+        just starting is caught too). A job also waits while the owner is in a conversation (a voice
+        line is open, or they talked less than quiet_s ago). Not re-entrant."""
         with self._cond:
             if owner:
                 self._owners_waiting += 1
+            asked = time.monotonic()
             try:
-                while self._held_by is not None or (not owner and self._owners_waiting):
+                while self._held_by is not None or (not owner and (
+                        self._owners_waiting or (self._owner_near() and time.monotonic() - asked < MAX_QUIET_WAIT_S))):
                     if owner and self._held_by == "job" and self._job_preemptible:
                         self._job_preempted = True
                         self._stop_brain()
@@ -79,6 +101,8 @@ class BrainRunner:
             yield
         finally:
             with self._cond:
+                if self._held_by == "owner":
+                    self._owner_done_at = time.monotonic()
                 self._held_by = None
                 self._job_preemptible = False
                 self._cond.notify_all()
@@ -148,8 +172,8 @@ def ask_sync(runner: BrainRunner, prompt: str, *, system: str, origin: str = "jo
     """One brain run for a job, blocking (jobs run in scheduler threads). No
     tools: jobs give the model the data and get JSON back; the backend acts.
     Waits while the owner talks; stopped for the owner, it runs again after."""
-    for attempt in range(MAX_JOB_PREEMPTS + 1):
-        with runner.hold(owner=False, preemptible=attempt < MAX_JOB_PREEMPTS):
+    for _attempt in range(MAX_JOB_PREEMPTS + 1):
+        with runner.hold(owner=False, preemptible=True):
             result = _ask_once(runner, prompt, system=system, origin=origin, images=images, model=model, purpose=purpose)
             preempted = runner._job_preempted
         if not (preempted and result is None):

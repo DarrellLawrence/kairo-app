@@ -12,7 +12,7 @@ import { clientLog, device } from './clientlog.js'
 
 let outCtx = null      // Kairo's voice: one AudioContext, started inside a tap
 let element = null     // <audio> fallback, primed inside a tap
-let current = null     // the reply playing now: { stop(), level() }
+let current = null     // the reply playing now: { stop() }
 let last = null        // the last reply, for "tap to play": { buf, call }
 const RELEASE_KEY = 'voice.release-mic-while-speaking'
 
@@ -32,7 +32,7 @@ export function setReleaseWhileSpeaking(on) {
   clientLog('audio.release_mode', { on })
 }
 
-function setSession(type) {
+export function setSession(type) {
   if (!('audioSession' in navigator)) return
   try { if (navigator.audioSession.type !== type) navigator.audioSession.type = type } catch (e) { clientLog('audio.session_error', { type, err: errName(e) }) }
 }
@@ -47,41 +47,6 @@ function silentWav(seconds = 0.05, rate = 8000) {
   return URL.createObjectURL(new Blob([b.buffer], { type: 'audio/wav' }))
 }
 let SILENCE = null
-
-function wavEnvelope(buf) {
-  try {
-    const v = new DataView(buf)
-    let off = 12
-    let rate = 24000
-    let bits = 16
-    let ch = 1
-    while (off + 8 <= v.byteLength) {
-      const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3))
-      const size = v.getUint32(off + 4, true)
-      if (id === 'fmt ') { ch = v.getUint16(off + 10, true); rate = v.getUint32(off + 12, true); bits = v.getUint16(off + 22, true) }
-      if (id === 'data') {
-        if (bits !== 16) return null
-        const step = Math.max(1, Math.round(rate * 0.03)) * ch
-        const n = Math.floor(Math.min(size, v.byteLength - off - 8) / 2)
-        const out = []
-        for (let i = 0; i < n; i += step) {
-          let sum = 0
-          const end = Math.min(n, i + step)
-          for (let j = i; j < end; j += ch) { const x = v.getInt16(off + 8 + j * 2, true) / 32768; sum += x * x }
-          out.push(Math.min(1, Math.sqrt(sum / ((end - i) / ch)) * 5))
-        }
-        return out
-      }
-      off += 8 + size + (size % 2)
-    }
-  } catch { /* not a WAV we understand: orb just breathes */ }
-  return null
-}
-
-/* How loud Kairo is right now (drives the call orb). */
-export function speakingLevel() {
-  return current ? current.level() : 0
-}
 
 /* iOS lets a page start sound only inside a tap: call this in every tap that can lead to Kairo
    talking. Starts Kairo's AudioContext and primes the <audio> fallback with real (silent) samples. */
@@ -104,8 +69,6 @@ export function unlockAudio() {
 }
 
 async function play(buf, { signal, call = false, keepMic = false, viaTap = false, fetchMs = null, onPlaying } = {}) {
-  const env = wavEnvelope(buf)
-  const levelAt = (t) => (env ? env[Math.min(env.length - 1, Math.floor(t / 0.03))] || 0 : 0)
   const micWasOpen = Boolean(mic)
   if (mic && !keepMic && (!call || viaTap || releaseWhileSpeaking())) {
     closeMic()
@@ -123,9 +86,8 @@ async function play(buf, { signal, call = false, keepMic = false, viaTap = false
         const src = outCtx.createBufferSource()
         src.buffer = audio
         src.connect(outCtx.destination)
-        const t0 = outCtx.currentTime
         const done = () => { if (current?.src === src) current = null; resolve() }
-        current = { src, stop: () => { try { src.stop() } catch { /* already stopped */ } done() }, level: () => levelAt(outCtx.currentTime - t0) }
+        current = { src, stop: () => { try { src.stop() } catch { /* already stopped */ } done() } }
         src.onended = done
         signal?.addEventListener('abort', () => current?.src === src && current.stop())
         src.start()
@@ -154,7 +116,7 @@ async function play(buf, { signal, call = false, keepMic = false, viaTap = false
       el.onended = () => finish()
       el.onerror = () => finish(new NeedTap(`media error ${el.error?.code}`))
       signal?.addEventListener('abort', () => finish())
-      current = { el, stop: () => finish(), level: () => levelAt(el.currentTime) }
+      current = { el, stop: () => finish() }
       el.src = url
       el.play().then(() => { onPlaying?.(); clientLog('audio.play', { ...info, path: 'element', ctx: outCtx?.state ?? 'none' }) })
         .catch((e) => finish(new NeedTap(errName(e))))
@@ -186,52 +148,6 @@ async function fetchSpeech(text, signal) {
     throw new Error(detail)
   }
   return res.arrayBuffer()
-}
-
-/* Fix plan 29: speak an answer while it is still being written. push() each sentence as it
-   comes; the next one's audio is made on the PC while the current one plays. done resolves once
-   everything pushed before end() was spoken, or at once on abort. onNeedTap(): iOS didn't play a
-   sentence; return a promise that resolves after "Tap to play" replayed it, and the rest follows. */
-export function speechQueue({ signal, call = false, onNeedTap, onStart, onFirstAudio } = {}) {
-  const items = []
-  let ended = false
-  let wake = null
-  const poke = () => { const w = wake; wake = null; w?.() }
-  signal?.addEventListener('abort', poke)
-  const push = (text) => {
-    if (!text || ended || signal?.aborted) return
-    const t0 = performance.now()
-    const first = items.length === 0
-    const item = fetchSpeech(text, signal).then((buf) => {
-      if (first) onFirstAudio?.()
-      return { buf, fetchMs: Math.round(performance.now() - t0) }
-    })
-    item.catch(() => {})   // awaited in order below; an aborted one is never awaited
-    items.push(item)
-    poke()
-  }
-  const end = () => { ended = true; poke() }
-  const done = (async () => {
-    let i = 0
-    for (;;) {
-      if (signal?.aborted) return
-      if (i >= items.length) {
-        if (ended) return
-        await new Promise((resolve) => { wake = resolve })
-        continue
-      }
-      const { buf, fetchMs } = await items[i++]
-      if (signal?.aborted) return
-      last = { buf: buf.slice(0), call }
-      try {
-        await play(buf, { signal, call, fetchMs, onPlaying: i === 1 ? onStart : undefined })
-      } catch (e) {
-        if (e.name !== 'NeedTap' || !onNeedTap) throw e
-        await onNeedTap()
-      }
-    }
-  })()
-  return { push, end, done }
 }
 
 /* "No sound? Tap to play": inside the tap, through the speaker, without the mic. On a call that
@@ -292,7 +208,7 @@ async function openMic() {
   return mic
 }
 
-function closeMic() {
+export function closeMic() {
   clearTimeout(releaseTimer)
   if (!mic) return
   mic.stream.getTracks().forEach((t) => t.stop())
@@ -304,6 +220,15 @@ function closeMic() {
 function idleMic() {
   clearTimeout(releaseTimer)
   if (!held) releaseTimer = setTimeout(closeMic, KEEP_MIC_MS)
+}
+
+/* The open mic ({ stream, ctx }) for streaming it (voicelink.js). */
+export async function micStream() { return openMic() }
+
+/* Kairo's AudioContext (started by unlockAudio inside a tap). */
+export function outputContext() {
+  if (!outCtx || outCtx.state === 'closed') unlockAudio()
+  return outCtx
 }
 
 /* A call holds the mic for its whole length; releaseMic() at hang-up turns it off. */
@@ -319,12 +244,6 @@ function levelOf(m) {
   let sum = 0
   for (let i = 0; i < m.buf.length; i++) sum += m.buf[i] * m.buf[i]
   return Math.min(1, Math.sqrt(sum / m.buf.length) * 8)
-}
-
-/* Just the loudness, no recording (to hear you talk over Kairo). */
-export async function listenLevel() {
-  const m = await openMic()
-  return { level: () => (mic === m ? levelOf(m) : 0), cancel: idleMic }
 }
 
 /* Starts recording. Returns { stop(): Promise<Blob>, cancel(), level(): 0..1, heard(): speech so far? }.

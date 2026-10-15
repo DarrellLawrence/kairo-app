@@ -1,6 +1,13 @@
+import re
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+
+
+def said(prompt: str) -> str:
+    """What the owner said in a turn, without the per-turn context Kairo puts in front (V1)."""
+    return re.sub(r"<kairo-context>.*?</kairo-context>\s*", "", prompt, flags=re.S)
 
 
 def converse(ws, text, thread_id=None):
@@ -27,18 +34,20 @@ def test_chat_streams_and_persists(migrated):
         assert [(m["role"], m["text"]) for m in r["messages"]] == [("owner", "hello kairo"), ("kairo", "echo: hello kairo")]
 
 
-def test_follow_up_resumes_same_brain_session(migrated, tmp_path, monkeypatch):
+def test_follow_up_continues_on_the_same_process(migrated, tmp_path, monkeypatch):
+    """V1: the one conversation runs on one warm process; a follow-up doesn't start a new one."""
     import json
 
     rec = tmp_path / "rec.json"
     monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
     with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
         first = converse(ws, "one")
-        assert "--resume" not in json.loads(rec.read_text())["argv"]
+        one = json.loads(rec.read_text())
+        assert "--resume" not in one["argv"] and "--input-format" in one["argv"]
         second = converse(ws, "two", thread_id=first[0]["id"])
         assert second[0]["id"] == first[0]["id"]
-        argv = json.loads(rec.read_text())["argv"]
-        assert "--resume" in argv
+        two = json.loads(rec.read_text())
+        assert two["pid"] == one["pid"] and [said(t) for t in two["turns"]] == ["one", "two"]
 
 
 def test_usage_limit_is_reported_not_crashed(migrated, monkeypatch):
@@ -92,17 +101,17 @@ def test_every_message_gets_its_own_answer(migrated, tmp_path, monkeypatch):
         first = json.loads(rec.read_text())
         b = converse(ws, "Move gym to tomorrow")
         second = json.loads(rec.read_text())
-    assert first["stdin"] == "Quiz me for my Mathe test on Friday"
-    assert second["stdin"] == "Move gym to tomorrow"
+    assert said(first["stdin"]) == "Quiz me for my Mathe test on Friday"
+    assert said(second["stdin"]) == "Move gym to tomorrow"
     assert a[-1]["text"] != b[-1]["text"]
-    system = second["argv"][second["argv"].index("--system-prompt-file") + 1]
-    text = open(system, encoding="utf-8").read()
-    assert "Morning brief" not in text and "Answer first" in text and "Right now:" in text
+    # V1: the system prompt stays the same all conversation long (cached); "now" goes with each turn
+    assert "Morning brief" not in second["system"] and "Answer first" in second["system"]
+    assert "Right now:" not in second["system"] and "Right now:" in second["stdin"]
 
 
-def test_a_call_runs_on_a_warm_claude_process(migrated, tmp_path, monkeypatch):
-    """Fix plan 30: Claude is started when the call starts and serves every turn of it; hanging up
-    closes it."""
+def test_a_call_runs_on_the_warm_conversation_process(migrated, tmp_path, monkeypatch):
+    """Fix plan 30 + V1: the conversation's process is ready when the call starts, serves every turn
+    and stays after hanging up (the conversation goes on in chat)."""
     import json
     import time
 
@@ -114,22 +123,24 @@ def test_a_call_runs_on_a_warm_claude_process(migrated, tmp_path, monkeypatch):
         deadline = time.monotonic() + 15
         while brain._warm is None and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert brain._warm is not None
+        warm = brain._warm
+        assert warm is not None
         with client.websocket_connect("/ws/chat") as ws:
             one = converse(ws, "(spoken, on a call) one")
             two = converse(ws, "(spoken, on a call) two")
-        assert one[-1]["text"] == "echo: (spoken, on a call) one"
-        assert two[-1]["text"] == "echo: (spoken, on a call) two"
-        data = json.loads(rec.read_text())
-        assert data["turns"] == ["(spoken, on a call) one", "(spoken, on a call) two"]   # one process
-        assert "--input-format" in data["argv"]
-        client.post(f"/api/voice/calls/{call['id']}/end")
-        assert brain._warm is None
+            assert one[-1]["text"] == "echo: (spoken, on a call) one"
+            assert two[-1]["text"] == "echo: (spoken, on a call) two"
+            data = json.loads(rec.read_text())
+            assert [said(t) for t in data["turns"]] == ["(spoken, on a call) one", "(spoken, on a call) two"]
+            assert "--input-format" in data["argv"] and data["pid"] == warm.proc.pid
+            client.post(f"/api/voice/calls/{call['id']}/end")
+            assert brain._warm is warm
+            converse(ws, "typed after the call")
+        assert json.loads(rec.read_text())["pid"] == warm.proc.pid
 
 
-def test_typing_during_a_call_retires_the_warm_process(migrated):
-    """A typed message continues the conversation without the warm process, which would then be a
-    turn behind: it goes, and the call's next turn starts a fresh one."""
+def test_typing_during_a_call_uses_the_same_process(migrated):
+    """V1: spoken and typed turns are one conversation on one process (before, typing retired it)."""
     import time
 
     with TestClient(create_app(migrated)) as client:
@@ -143,5 +154,4 @@ def test_typing_during_a_call_retires_the_warm_process(migrated):
             old = brain._warm
             assert old is not None and old.session_id
             converse(ws, "typed meanwhile")
-            assert brain._warm is not old
-            old.proc.wait(timeout=10)
+            assert brain._warm is old and old.proc.poll() is None

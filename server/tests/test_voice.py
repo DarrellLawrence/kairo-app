@@ -188,6 +188,15 @@ def test_real_voice_round_trip(tmp_path):
     t = v.transcribe(de, language="de")
     print("WHISPER HEARD (de):", t.text)
     assert heard(de_text, t.text), t.text
+    # Voice V1: the phone streams 16 kHz PCM; the fast path (no file, greedy) hears it too, language found by itself
+    import numpy as np
+    from app.voicelink import wav_pcm
+    pcm, rate = wav_pcm(wav)
+    x = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+    x16 = np.interp(np.arange(0, len(x), rate / 16000), np.arange(len(x)), x).astype("<i2").tobytes()
+    t = v.transcribe_pcm(x16)
+    print("WHISPER HEARD (pcm):", t.text, t.took, t.language)
+    assert t.language == "en" and heard(en_text, t.text) and "dentist" in t.text.lower()
 
 
 def test_owner_calls_kairo(client):

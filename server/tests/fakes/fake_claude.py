@@ -21,7 +21,13 @@ the environment are written there as JSON (plus the pid and every turn's prompt)
 
 --include-partial-messages: text also comes as stream_event deltas before the full assistant
 message, like the real CLI (2.1.299). --input-format stream-json: one user message per stdin line,
-one turn each, until stdin closes (a warm process serves several turns).
+one turn each, until stdin closes (a warm process serves several turns). Control requests on stdin,
+like the real CLI (verified with 2.1.300): set_model {model} -> control_response success, the next
+turns run on that model; interrupt -> the running turn ends with result subtype
+error_during_execution, the process keeps serving turns.
+
+Modes for a warm process: FAKE_CLAUDE_MODE=long answers in 40 small pieces 50 ms apart (interrupt
+tests). A prompt with [[fake-escalate]] gets exactly "[[sonnet]]" while the model is haiku.
 
 Tools, like the real CLI (used by the release tool test and the self-test): when the
 prompt contains `[[fake-tool NAME {json args}]]`, the fake starts the MCP servers from
@@ -33,9 +39,11 @@ TOOL-UNAVAILABLE NAME: ... for each directive.
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -203,7 +211,21 @@ def say(text, sid, partial, pause=0.0):
     out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text[half:]}]}, "session_id": sid})
 
 
-def turn(args, prompt, sid, mode, partial):
+def say_long(text, sid, interrupted):
+    """The answer in 40 small pieces, 50 ms apart; stops when interrupted() says so. True = finished."""
+    out({"type": "stream_event", "event": {"type": "message_start"}, "session_id": sid})
+    pieces = [text[i::40] for i in range(40)] if len(text) >= 40 else [text] + [" ."] * 39
+    for chunk in pieces:
+        if interrupted():
+            return False
+        out({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                               "delta": {"type": "text_delta", "text": chunk}}, "session_id": sid})
+        time.sleep(0.05)
+    out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "".join(pieces)}]}, "session_id": sid})
+    return True
+
+
+def turn(args, prompt, sid, mode, partial, model=None, interrupted=lambda: False):
     """One turn: init, the answer, the result. Returns the exit code for a one-turn process."""
     clients, mcp_status = start_mcp(args) if DIRECTIVE.search(prompt) else ({}, [])
     # Like the real CLI (2.1.296): init lists every tool of every connected MCP server.
@@ -232,10 +254,21 @@ def turn(args, prompt, sid, mode, partial):
              "result": "Invalid API key · Please run /login", "session_id": sid})
         return 1
 
-    reply = "echo: " + prompt
+    model_id = {"haiku": "claude-haiku-fake", "sonnet": "claude-sonnet-fake", "opus": "claude-opus-fake"}.get(model or "", "claude-fake")
+    usage = {model_id: {"inputTokens": 10, "outputTokens": 5}}
+    if "[[fake-escalate]]" in prompt and model == "haiku":
+        reply = "[[sonnet]]"
+    else:   # like a model: it answers the owner's words, not Kairo's context block in front of them
+        reply = "echo: " + re.sub(r"(?s)^<kairo-context>.*?</kairo-context>\s*", "", prompt)
     out({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}, "session_id": sid})
-    say(reply, sid, partial, pause=1.5 if mode == "pause" else 0.0)
-    out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid})
+    if mode == "long" and partial:
+        if not say_long(reply, sid, interrupted):
+            out({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "",
+                 "session_id": sid, "modelUsage": usage})
+            return 0
+    else:
+        say(reply, sid, partial, pause=1.5 if mode == "pause" else 0.0)
+    out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid, "modelUsage": usage})
     return 0
 
 
@@ -260,13 +293,16 @@ def main():
         with open(args[args.index("--system-prompt-file") + 1], encoding="utf-8") as fh:
             system = fh.read()   # read once at start, like the real CLI
     turns = []
+    models = []
+    model = args[args.index("--model") + 1] if "--model" in args else None
 
     def write_record(prompt):
         turns.append(prompt)
+        models.append(model)
         if record:
             with open(record, "w", encoding="utf-8") as fh:
                 json.dump({"argv": args, "stdin": prompt, "cwd": os.getcwd(), "env": dict(os.environ), "system": system,
-                           "pid": os.getpid(), "turns": turns}, fh)
+                           "pid": os.getpid(), "turns": turns, "models": models}, fh)
 
     probe = env("FAKE_CLAUDE_PROBE")
     if probe:
@@ -288,13 +324,59 @@ def main():
         prompt = sys.stdin.read()
         write_record(prompt)
         return turn(args, prompt, sid, mode, partial)
+    # Like the real CLI: stdin is read all the time (control requests arrive while a turn runs);
+    # one user message per line, one turn each.
+    lines = queue.Queue()
+
+    def read():
+        for raw in sys.stdin:
+            lines.put(raw)
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+    pending = []
+    interrupt = threading.Event()
+
+    def control(msg):
+        nonlocal model
+        req = msg.get("request") or {}
+        if req.get("subtype") == "set_model":
+            model = req.get("model")
+        elif req.get("subtype") == "interrupt":
+            interrupt.set()
+        out({"type": "control_response", "response": {"subtype": "success", "request_id": msg.get("request_id"), "response": {}}})
+
+    def interrupted():
+        while True:      # handle control requests that arrived while answering; keep user messages for later
+            try:
+                raw = lines.get_nowait()
+            except queue.Empty:
+                break
+            if raw is None:
+                pending.append(None)
+                break
+            msg = json.loads(raw) if raw.strip() else {}
+            if msg.get("type") == "control_request":
+                control(msg)
+            elif raw.strip():
+                pending.append(raw)
+        return interrupt.is_set()
+
     code = 0
-    for line in sys.stdin:   # like the real CLI: one user message per line, one turn each
-        if not line.strip():
+    while True:
+        raw = pending.pop(0) if pending else lines.get()
+        if raw is None:
+            break
+        if not raw.strip():
             continue
-        prompt = user_text(line)
+        msg = json.loads(raw)
+        if msg.get("type") == "control_request":
+            control(msg)
+            continue
+        prompt = user_text(raw)
         write_record(prompt)
-        code = turn(args, prompt, sid, mode, partial)
+        interrupt.clear()
+        code = turn(args, prompt, sid, mode, partial, model=model, interrupted=interrupted)
     return code
 
 

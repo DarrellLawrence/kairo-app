@@ -14,7 +14,7 @@ Google account and the owner's real iPhone. Green CI is not done.
 |---|---|---|---|
 | 1 | Tools | Chat "add task KAIRO-TEST buy milk tomorrow" | The task exists with tomorrow's date; Kairo confirms in 1 line; no question back |
 | 2 | Memory | Chat "remember: my KAIRO-TEST kite lesson is on Thursdays at 07:40"; then, in a new conversation, "when is my kite lesson?" (automated; real life: tell a fact, ask hours later) | Correct answer; the fact is in the vault |
-| 3 | Voice (M) | Chat: tap the mic, say a sentence, stop; at least 10 turns, English and German (More → System → Voice speed) | Correct transcript; end of your speech → first audio p50 < 1.5 s, p95 < 3 s; typed message → first words p50 < 1.5 s; every reply audible (no "not played") |
+| 3 | Voice (M) | Chat: tap the mic, say a sentence (it stops by itself when you do); at least 10 turns, English and German (More → System → Voice speed) | Correct transcript; end of your speech → first audio p50 < 1.5 s, p95 < 3 s; typed message → first words p50 < 1.5 s; every reply audible (no "not played") |
 | 4 | Call (M) | "Call Kairo" Shortcut; at least 10 turns (More → System → Voice speed) | Mic on; end of your speech → first audio p50 < 1.5 s, p95 < 3 s; talking over Kairo stops it at once and it listens; hanging up mid-sentence still handles what was said |
 | 5 | Voice note (M) | Shortcut records "remind me to call mom Friday" | No app opens; the reminder exists in < 30 s |
 | 6 | Approvals | A test mail from another address that needs a reply | Within 15 min: push + card in Approvals with a draft in the owner's voice and the full To address → approve → sent from the owner's Gmail → loop closes |

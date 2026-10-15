@@ -7,7 +7,8 @@ import {
   useToast,
 } from '../ui/index.js'
 import { CaptureSheet } from './CaptureSheet.jsx'
-import { playLastAgain, speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
+import { playLastAgain, speak, stopSpeaking, unlockAudio } from '../voice.js'
+import { startVoice } from '../voicelink.js'
 import { audioOutcome, startTurn } from '../turns.js'
 
 const STATUS_TEXT = {
@@ -39,11 +40,10 @@ export default function Chat() {
   const scrollRef = useRef(null)
   const toast = useToast()
   const [mic, setMic] = useState('idle')   // idle | recording | busy
-  const recRef = useRef(null)
+  const voiceRef = useRef(null)            // a spoken message on the voice line (voicelink.js)
   const [speakOn, setSpeakOn] = useState(() => { try { return localStorage.getItem('chat.speak') === '1' } catch { return false } })
   const speakRef = useRef(speakOn)
   speakRef.current = speakOn
-  const spokenRef = useRef(false)   // the last message was spoken: Kairo answers out loud too
   const turnRef = useRef(null)       // the turn being measured (turns.js -> More -> System -> Voice speed)
 
   const loadMessages = useCallback(async () => {
@@ -90,9 +90,8 @@ export default function Chat() {
           turnRef.current = null
           turn?.model(msg.model)
           turn?.server(msg.server)
-          if (speakRef.current || spokenRef.current) say(msg.text, turn?.path === 'chat_voice' ? turn : null)
-          if (turn && turn.path !== 'chat_voice') turn.finish('text')
-          spokenRef.current = false
+          if (speakRef.current) say(msg.text)
+          turn?.finish('text')
         } else if (msg.type === 'error') {
           turnRef.current?.finish('failed', msg.status || msg.message)
           turnRef.current = null
@@ -111,26 +110,21 @@ export default function Chat() {
   useStickToBottom(scrollRef, [messages, chunks])
 
   const busy = chunks !== null
-  // turn: a spoken message's measured turn (the whole answer is spoken once it is written).
-  const say = (text, turn = null) => {
-    turn?.mark('first_sentence')
-    return speak(text, { onFetched: () => turn?.mark('audio_ready'), onPlaying: () => turn?.mark('playing') })
-      .then(() => turn?.finish('played'), (e) => {
-        turn?.finish(...(turn?.has('playing') ? ['played', null] : audioOutcome(e)))
-        if (e.name === 'NeedTap') toast.show({ text: 'No sound?', duration: 8000, action: { label: 'Tap to play', onAction: () => playLastAgain().catch(() => {}) } })
-        else toast.show({ text: e.message })
-      })
-  }
-  const send = (spoken, turn = null) => {
-    const text = (typeof spoken === 'string' ? spoken : draft).trim()
+  // "Read replies aloud" for typed messages (a spoken message is answered on the voice line).
+  const say = (text) => speak(text).catch((e) => {
+    if (e.name === 'NeedTap') toast.show({ text: 'No sound?', duration: 8000, action: { label: 'Tap to play', onAction: () => playLastAgain().catch(() => {}) } })
+    else toast.show({ text: audioOutcome(e)[1] || e.message })
+  })
+  const send = (chip) => {
+    const text = (typeof chip === 'string' ? chip : draft).trim()
     if (!text || !connected || busy) return
     setError(null)
     setMessages((m) => [...m, { id: `o${Date.now()}`, role: 'owner', text }])
     setChunks([])
-    turnRef.current = turn || startTurn('chat_text')
+    turnRef.current = startTurn('chat_text')
     wsRef.current.send(JSON.stringify({ type: 'message', text }))
     turnRef.current.mark('sent')
-    if (typeof spoken !== 'string') setDraft('')
+    if (typeof chip !== 'string') setDraft('')
   }
 
   // A chip tapped on Today: ask it as soon as the line is open.
@@ -142,29 +136,50 @@ export default function Chat() {
     }
   })   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const pressMic = async () => {
-    if (mic === 'idle') {
-      unlockAudio()
-      stopSpeaking()
-      try {
-        recRef.current = await startRecording()
-        setMic('recording')
-      } catch { toast.show({ text: 'Microphone not allowed. iPhone Settings → Safari → Microphone.' }) }
+  // Voice V1: tap the mic and talk; it stops by itself when you do (or tap again). The answer is
+  // written here and spoken while it is written. Tap while Kairo talks to stop it.
+  const endVoice = () => { voiceRef.current?.close(); voiceRef.current = null; setMic('idle') }
+  const pressMic = () => {
+    const v = voiceRef.current
+    if (v) {
+      if (v.state === 'speaking') { v.stop(); endVoice(); return }
+      if (mic === 'recording' && !v.finish()) { endVoice(); toast.show({ text: 'Did not catch that.' }) }
       return
     }
-    if (mic === 'recording') {
-      setMic('busy')
-      const turn = startTurn('chat_voice')   // you tapped stop: that is the end of your speech here
-      try {
-        const blob = await recRef.current.stop()
-        turn.mark('endpoint')
-        const t = await transcribe(blob)
-        turn.server({ stt_ms: (t.took || 0) * 1000 })
-        turn.mark('transcribed')
-        if (t.text) { spokenRef.current = true; send(t.text, turn) } else { turn.finish('no_speech'); toast.show({ text: 'Did not catch that.' }) }
-      } catch (e) { turn.finish('failed', e.message); toast.show({ text: e.message, duration: 5000 }) } finally { setMic('idle') }
-    }
+    if (busy) return
+    unlockAudio()
+    stopSpeaking()
+    setError(null)
+    setMic('recording')
+    voiceRef.current = startVoice({
+      path: 'chat_voice', on: {
+        transcript: (text) => {
+          setMic('busy')
+          setMessages((m) => [...m, { id: `o${Date.now()}`, role: 'owner', text }])
+          setChunks([])
+        },
+        state: (s) => { if (s === 'thinking') setMic('busy'); else if (s === 'speaking') setMic('speaking') },
+        delta: (text) => setChunks((c) => [...(c ?? []), text]),
+        done: (f) => {
+          setChunks(null)
+          setMessages((m) => [...m, { id: f.message_id, role: 'kairo', text: f.text }])
+        },
+        noSpeech: () => { endVoice(); toast.show({ text: 'Did not catch that.' }) },
+        answered: endVoice,
+        error: (f) => {
+          if (f.status === 'voice') { toast.show({ text: f.message }); return }
+          setChunks(null)
+          setError(STATUS_TEXT[f.status] ?? f.message)
+          endVoice()
+        },
+        needTap: () => toast.show({
+          text: 'No sound?', duration: 8000,
+          action: { label: 'Tap to play', onAction: () => voiceRef.current?.tapToPlay() },
+        }),
+      },
+    })
   }
+  useEffect(() => () => voiceRef.current?.close(), [])
 
   const toggleSpeak = () => {
     const next = !speakOn

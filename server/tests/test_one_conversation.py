@@ -123,17 +123,21 @@ def test_memory_and_recent_messages_reach_the_model_and_the_session_rotates(migr
     with TestClient(create_app(migrated)) as c, c.websocket_connect("/ws/chat") as ws:
         converse(ws, "hello")
         converse(ws, "and again")
-        assert "--resume" in json.loads(rec.read_text())["argv"]
+        first = json.loads(rec.read_text())
+        assert len(first["turns"]) == 2                                  # V1: one process for the conversation
         with Session(engine) as s:
             memory.save(s, "- The dentist appointment is on Thursday.", upto=1)
             memory.set_fresh(s)
         converse(ws, "when is the dentist?")
         run = json.loads(rec.read_text())
-        assert "--resume" not in run["argv"]                             # rotated: fresh session ...
+        assert run["pid"] != first["pid"] and "--resume" not in run["argv"]   # rotated: fresh session ...
         assert "# Conversation memory" in run["system"] and "dentist appointment is on Thursday" in run["system"]
         assert "# Recent conversation" in run["system"] and "and again" in run["system"]   # ... with the recent messages
         assert "when is the dentist?" not in run["system"]               # the new message goes as the message itself
         converse(ws, "thanks")
+        assert json.loads(rec.read_text())["pid"] == run["pid"]          # the new session's process goes on
+        c.app.state.runner.brain.close_warm()                            # e.g. it was idle for hours
+        converse(ws, "back again")
         run = json.loads(rec.read_text())
         assert "--resume" in run["argv"] and "# Conversation memory" in run["system"]
         assert "# Recent conversation" not in run["system"]              # the resumed session has them already

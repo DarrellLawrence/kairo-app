@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("KAIRO_SCHEDULER", "0")   # no background jobs in tests; test_reviews drives them directly
+os.environ.setdefault("KAIRO_OWNER_QUIET_S", "0")   # jobs right after an owner turn (test_brain_priority checks the wait)
 from pathlib import Path
 
 import pytest

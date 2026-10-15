@@ -124,3 +124,48 @@ def test_a_job_holds_the_brain_for_one_call_at_a_time():
     owner.join(10)
     starts = [p for kind, p in brain.log if kind == "start"]
     assert starts.index("owner") < starts.index("second")
+
+
+def test_a_job_call_never_runs_unstoppable_while_the_owner_talks():
+    """Voice V1: the owner never waits for a job. A job stopped too often gives up for now (it runs
+    again on its next schedule) instead of finishing first."""
+    brain = FakeBrain()
+    runner = BrainRunner(brain)
+    result = {}
+    job = threading.Thread(target=lambda: result.setdefault("r", ask_sync(runner, "slow 1", system="s")))
+    brain._slow_seen.clear()
+    job.start()
+    for i in range(3):                               # the owner talks over every try of the job
+        assert brain.started.wait(5)
+        brain.started.clear()
+        while ("start", "slow 1") not in brain.log[-1:]:
+            time.sleep(0.01)
+        brain._slow_seen.discard("slow 1")           # it would be slow again
+        t0 = time.monotonic()
+        owner_turn(runner, f"owner {i}")
+        assert time.monotonic() - t0 < 5
+    job.join(10)
+    assert not result["r"].ok and "too often" in result["r"].error
+
+
+def test_jobs_wait_while_the_owner_is_in_a_conversation():
+    """After an owner turn, jobs keep off the brain for a quiet moment (the owner may go on talking)."""
+    brain = FakeBrain()
+    runner = BrainRunner(brain, quiet_s=0.6)
+    owner_turn(runner, "owner")
+    t0 = time.monotonic()
+    ask_sync(runner, "job", system="s")
+    assert time.monotonic() - t0 >= 0.5
+    assert [p for kind, p in brain.log if kind == "start"] == ["owner", "job"]
+
+
+def test_jobs_wait_while_a_voice_line_is_open():
+    brain = FakeBrain()
+    runner = BrainRunner(brain, quiet_s=0.0)
+    runner.line_open()
+    done = threading.Event()
+    job = threading.Thread(target=lambda: (ask_sync(runner, "job", system="s"), done.set()))
+    job.start()
+    assert not done.wait(0.8)                        # a call is on: the job waits
+    runner.line_closed()
+    assert done.wait(5)

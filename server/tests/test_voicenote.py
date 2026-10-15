@@ -67,7 +67,7 @@ def test_voice_note_is_handled_like_a_chat_message(client, tmp_path):
         ("kairo", "echo: (voice note) Remind me to call the dentist tomorrow")]
     run = json.loads(rec.read_text())
     assert run["env"]["KAIRO_HOOK_ORIGIN"] == "voice_note"      # gate: no approval cards from a voice note
-    assert run["argv"][run["argv"].index("--model") + 1] == "sonnet"
+    assert run["models"][-1] == "haiku"                         # V1: voice notes default to Haiku
     assert client.pushes == []                                  # not urgent: no push
 
 

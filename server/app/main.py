@@ -17,6 +17,7 @@ import secrets
 import threading
 import urllib.parse
 import time
+import types
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -34,8 +35,10 @@ from . import config_layers
 from . import files as files_mod
 from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
+from . import conversation
 from . import memory
 from . import turns
+from . import voicelink
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
@@ -60,7 +63,7 @@ from .push import Pusher, in_quiet_hours
 from .tools import ToolRunner
 from .brain.claude_cli import ClaudeCLIBrain
 from .workspace import write_workspace
-from .brain import BrainStatus, EventKind, make_brain
+from .brain import BrainEvent, BrainStatus, EventKind, make_brain
 from .db import Approval, AuditLog, Call, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import REPO_ROOT, Settings, get_settings
@@ -177,7 +180,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mcp_config = write_workspace(settings.workspace_dir,
                                  tool_url=f"http://127.0.0.1:{settings.port}/internal/tools", token=tool_token)
     hook_env = {"KAIRO_HOOK_CONFIG_DIR": str(settings.config_dir), "KAIRO_HOOK_DB_URL": settings.db_url}
-    runner = chat.BrainRunner(make_brain(settings, mcp_config=mcp_config, hook_env=hook_env))
+    runner = chat.BrainRunner(make_brain(settings, mcp_config=mcp_config, hook_env=hook_env),
+                              quiet_s=float(os.environ.get("KAIRO_OWNER_QUIET_S", chat.OWNER_QUIET_S)))
     from . import models as model_table
     runner.on_usage = lambda purpose, usage, ok: model_table.record(engine, purpose, usage, ok)
     model_tools = tool_names(gate)
@@ -193,29 +197,97 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """The one way an owner message reaches the model: chat, calls, the self-test and the acceptance
         tests (fix P0, 2026-10-14: a self-test with its own prompt and tools was green while chat had
         none). via: another runner, only for acceptance's deliberately broken tool-server copy.
-        v8 C6: what the owner's notes say about this message goes in too (memory search)."""
-        model = model or model_table.pick(purpose, app.state.jobs.schedule)
+        v8 C6: what the owner's notes say about this message goes in too (memory search).
+
+        Voice V1 (2026-10-15): the one conversation runs on one warm process (conversation.py): a system
+        prompt that stays the same (personality, profile card, memory), the per-turn context in front of
+        the message, the model chosen per turn (Haiku unless needed; Haiku can hand over to Sonnet with
+        conversation.ESCALATE, never shown). A hand-over yields a usage event {"escalated": model}."""
+        model = model or conversation.route(text, purpose=purpose, schedule=app.state.jobs.schedule)
         hits = await asyncio.to_thread(recall, text)
-        base = system or system_prompt(thread_id=thread_id, fresh=session_id is None, before_id=before_id)
-        warm = call_key(thread_id, model) if purpose == "call" and system is None and via is None else None
-        if warm is not None and getattr(runner.brain, "warm_ready", lambda *a: False)(warm, session_id):
-            # Fix plan 30: the call's warm process keeps the system prompt it started with (the CLI reads
-            # it once), so what the notes say about this message goes with the message. `base` is only
-            # used if that process died meanwhile and the turn runs the normal way.
-            prompt, system = text + hits, base
-        else:
-            prompt, system, warm = text, base + hits, None
-        async for event in (via or runner).stream(prompt, session_id=session_id, system=system, tools=model_tools,
-                                                  origin="owner_chat", thread_id=thread_id, purpose=purpose,
-                                                  model=model, warm=warm):
+        if system is not None or via is not None:
+            # the self-test's own prompt, acceptance's broken tool-server copy: one plain run
+            async for event in (via or runner).stream(text, session_id=session_id, system=system or "", tools=model_tools,
+                                                      origin="owner_chat", thread_id=thread_id, purpose=purpose, model=model):
+                yield event
+            return
+        if thread_id is not None and session_id is not None and conversation_hash() != (
+                await asyncio.to_thread(conversation_parts, thread_id, False, before_id))[1]:
+            session_id = None              # the lasting part of the prompt changed: a fresh session gets it
+        static, stable = await asyncio.to_thread(conversation_parts, thread_id, session_id is None, before_id)
+        warm = None
+        if thread_id is not None:          # the owner's conversation; acceptance turns run on their own
+            warm = conversation_key(thread_id, stable)
+            await asyncio.to_thread(warm_conversation, warm, session_id, static, model)
+            set_conversation_hash(stable)
+        fast = model == "haiku" and purpose not in ("learn_call", "selftest")
+        prompt = conversation.header(right_now=right_now(), hits=hits, extras=quick_questions() + recent_files(),
+                                     fast=fast) + text
+        filt = conversation.MarkerFilter()
+        handed_over_sid = None
+        async for event in runner.stream(prompt, session_id=session_id, system=static, tools=model_tools,
+                                         origin="owner_chat", thread_id=thread_id, purpose=purpose, model=model, warm=warm):
+            if event.kind is EventKind.text:
+                out = filt.feed(event.text)
+                if out:
+                    yield BrainEvent(EventKind.text, text=out)
+                continue
+            if event.kind is EventKind.result:
+                if filt.escalated():
+                    handed_over_sid = event.session_id or session_id
+                    break
+                rest = filt.flush()
+                if rest:
+                    yield BrainEvent(EventKind.text, text=rest)
+            yield event
+        if handed_over_sid is None and not filt.escalated():
+            return
+        heavy = model_table.pick("chat_heavy", app.state.jobs.schedule)
+        yield BrainEvent(EventKind.usage, data={"escalated": heavy})
+        follow = ("<kairo-context>\nThe stronger model takes this turn. Answer the owner's last message now, "
+                  "fully and in their language.\n</kairo-context>")
+        async for event in runner.stream(follow, session_id=handed_over_sid, system=static, tools=model_tools,
+                                         origin="owner_chat", thread_id=thread_id, purpose=purpose, model=heavy, warm=warm):
             yield event
 
-    def call_key(thread_id, model) -> tuple:
-        return ("call", thread_id, model, tuple(model_tools))
+    def conversation_parts(thread_id, fresh: bool, before_id=None) -> tuple[str, str]:
+        """(the conversation process's system prompt, the hash of its lasting part)."""
+        card = conversation.profile_card(settings.vault_dir)
+        try:
+            with session_for(engine) as s_:
+                mem_text = memory.get(s_)["text"]
+                block = memory.block(s_, thread_id, fresh=fresh, before_id=before_id)
+        except Exception:   # never lose a turn over the memory block
+            log.exception("conversation memory unavailable")
+            mem_text, block = "", ""
+        return (conversation.static_prompt(base_prompt, card, block),
+                conversation.stable_hash(base_prompt, card, mem_text))
 
-    def warm_call() -> None:
-        """Fix plan 30: start Claude for the call's next turn now, while the owner is still talking.
-        Called when a call starts and after each of its turns; a no-op when one is ready."""
+    def conversation_hash() -> str | None:
+        with session_for(engine) as s_:
+            row = s_.get(SettingKV, "conversation.prompt_hash")
+            return row.value if row else None
+
+    def set_conversation_hash(value: str) -> None:
+        with session_for(engine) as s_:
+            row = s_.get(SettingKV, "conversation.prompt_hash") or SettingKV(key="conversation.prompt_hash")
+            if row.value != value:
+                row.value = value
+                s_.add(row)
+                s_.commit()
+
+    def conversation_key(thread_id, stable: str) -> tuple:
+        return ("conversation", thread_id, stable, tuple(model_tools))
+
+    def warm_conversation(key, session_id, static: str, model: str) -> None:
+        """Start the conversation process if it isn't there (a no-op when it is)."""
+        if getattr(runner.brain, "warm_up", None) is None:
+            return
+        runner.brain.warm_up(key=key, session_id=session_id, system=static, tools=model_tools, model=model,
+                             origin="owner_chat", idle_s=conversation.CONV_IDLE_S, max_age_s=conversation.CONV_MAX_AGE_S)
+
+    def warm_conversation_now() -> None:
+        """Have the conversation process ready before the owner talks (app opened, a call starts)."""
         if getattr(runner.brain, "warm_up", None) is None:
             return
         try:
@@ -224,17 +296,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return
                 thread = chat.main_thread(s_, brain_name=runner.brain.name)
                 tid, sid = thread.id, thread.brain_session_id
-            model = model_table.pick("call", app.state.jobs.schedule)
-            key = call_key(tid, model)
-            if runner.brain.warm_ready(key, sid):
-                return
-            runner.brain.warm_up(key=key, session_id=sid, system=system_prompt(thread_id=tid, fresh=sid is None),
-                                 tools=model_tools, model=model, origin="owner_chat")
-        except Exception:   # a call works without it, just slower
-            log.exception("warm call process")
+                last = s_.exec(select(ChatMessage).where(ChatMessage.thread_id == tid)
+                               .order_by(ChatMessage.id.desc()).limit(1)).first()
+            # only messages there now; one being answered right now goes as its turn, never also in the prompt
+            before = (last.id if last.role == "owner" else last.id + 1) if last is not None else 1
+            if sid is not None and conversation_hash() != conversation_parts(tid, False, before)[1]:
+                return                     # the next turn starts a fresh session anyway
+            static, stable = conversation_parts(tid, sid is None, before)
+            warm_conversation(conversation_key(tid, stable), sid, static, conversation.route("", schedule=app.state.jobs.schedule))
+        except Exception:   # a turn works without it, just slower
+            log.exception("warm conversation process")
 
-    def warm_call_soon() -> None:
-        threading.Thread(target=warm_call, name="warm-call", daemon=True).start()
+    def warm_conversation_soon() -> None:
+        threading.Thread(target=warm_conversation_now, name="warm-conversation", daemon=True).start()
 
     def recall(text: str) -> str:
         """v8 C6: the best hits for the owner's message (keywords + meaning), with the note they come from."""
@@ -266,6 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             background.append(asyncio.create_task(memory_loop(app)))
             if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
                 asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
+            warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
         yield
         app.state.jobs.stop()
         if getattr(runner.brain, "close_warm", None) is not None:
@@ -330,7 +405,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.voice_notes = voicenote.VoiceNotes(
         engine=engine, inbox_dir=inbox_dir, profile=profile, runner=runner, state=app.state, system=system_prompt,
         tools=model_tools, pick_model=lambda purpose: model_table.pick(purpose, app.state.jobs.schedule), paused=_paused,
-        recall=recall)
+        recall=recall, after=warm_conversation_soon)
     backup_dir = settings.data_dir / "backups" / "nightly"
 
     def _backup_status(s, **update):
@@ -735,6 +810,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await ws.close(code=1008)
             return
         await ws.accept()
+        warm_conversation_soon()           # the app is open: the owner may talk any second
         try:
             while True:
                 data = await ws.receive_json()
@@ -750,7 +826,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     continue
                 # Shielded: hanging up cancels this handler, not the turn (v7).
                 turn = asyncio.get_running_loop().create_task(
-                    _handle_message(ws, data.get("thread_id"), text_in, call_id=data.get("call_id")))
+                    _handle_message(_ws_sink(ws), text_in, call_id=data.get("call_id")))
                 _turns.add(turn)
                 turn.add_done_callback(_turns.discard)
                 await asyncio.shield(turn)
@@ -767,19 +843,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return None
             return knowledge.agenda_prompt(s_, c)
 
-    async def _handle_message(ws: WebSocket, thread_id, text_in: str, call_id=None) -> None:
+    def _ws_sink(ws: WebSocket):
+        """Frames to the phone. The owner may hang up mid-answer (v7): the run finishes and the
+        reply is saved anyway, so a closed line is not an error."""
         gone = False
 
-        async def send(frame: dict) -> None:
-            """The owner may hang up mid-answer (v7): finish the run and save the reply anyway."""
+        async def send(frame) -> None:
             nonlocal gone
             if gone:
                 return
             try:
-                await ws.send_json(frame)
+                if isinstance(frame, (bytes, bytearray)):
+                    await ws.send_bytes(bytes(frame))
+                else:
+                    await ws.send_json(frame)
             except Exception:
                 gone = True
+        return send
 
+    async def _handle_message(send, text_in: str, call_id=None, server_extra: dict | None = None) -> None:
+        """One owner message, start to end: saved, answered (frames to send()), the answer saved.
+        A turn the owner talked over (interrupted) keeps what was said so far."""
         if time.time() < app.state.maintenance_until:
             await send({"type": "error", "status": "updating",
                                 "message": "Kairo is installing an update. Try again in a minute."})
@@ -811,12 +895,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        model = model_table.pick(chat_purpose, app.state.jobs.schedule)
+        model = conversation.route(text_in, purpose=chat_purpose, schedule=app.state.jobs.schedule)
         received = time.monotonic()
         first_words_ms = None
         async for event in owner_turn(prompt_in, session_id=session_id, thread_id=tid, purpose=chat_purpose,
                                       model=model, before_id=msg_in.id):
-            if event.kind is EventKind.session and event.session_id:
+            if event.kind is EventKind.usage and (event.data or {}).get("escalated"):
+                model = event.data["escalated"]     # Haiku handed this turn over
+                await send({"type": "model", "model": model, "escalated": True})
+            elif event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
                 if first_words_ms is None:
@@ -836,21 +923,177 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 thread.brain_session_id = new_sid
                 s.add(thread)
                 s.commit()
-            if error is not None:
+            interrupted = error is not None and bool((error.data or {}).get("interrupted"))
+            if error is not None and not interrupted:
                 status = "paused" if error.data.get("cancelled") else (error.status or BrainStatus.unavailable).value
                 chat.add_message(s, tid, "system", f"[{status}] {error.text}")
                 await send({"type": "error", "message": error.text, "status": status})
                 return
+            if interrupted:                    # talked over: what was said so far is what Kairo said
+                final_text = "".join(parts).strip()
+                final_text = f"{final_text} …" if final_text else "(interrupted)"
             msg = chat.add_message(s, tid, "kairo", (final_text or "").replace("[[hang up]]", "").strip())
         # app/turns.py: which model answered and how long the PC took (queue: waiting for the brain)
         queue_ms = min(runner.last_owner_wait_ms, first_words_ms or runner.last_owner_wait_ms)
         await send({"type": "done", "text": final_text or "", "message_id": msg.id, "model": model,
+                    "interrupted": interrupted,
                     "server": {"queue_ms": queue_ms,
                                "first_words_ms": first_words_ms if first_words_ms is not None
-                               else int((time.monotonic() - received) * 1000)}})
+                               else int((time.monotonic() - received) * 1000), **(server_extra or {})}})
         fold_memory_soon()
-        if chat_purpose == "call":
-            warm_call_soon()
+
+    @app.websocket("/ws/voice")
+    async def voice_ws(ws: WebSocket):
+        """Voice V1: a spoken turn both ways on one line (the protocol is in app/voicelink.py).
+        One turn at a time: an utterance that ends while Kairo still answers waits its turn."""
+        if not same_origin(ws.headers.get("origin"), ws.headers.get("host"), ws.headers.get("x-forwarded-host")):
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        warm_conversation_soon()
+        runner.line_open()                 # jobs keep off the brain while the owner is on the line
+        # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
+        line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
+                                     current=0, stopped=0, carry="", interrupt=None)
+
+        def interrupt() -> None:
+            """The answer of a talked-over turn stops being written (what was said so far is kept)."""
+            if (line.writing is not None and line.writing <= line.stopped and runner.current_origin == "owner_chat"
+                    and hasattr(runner.brain, "interrupt") and runner.brain.interrupt()):
+                line.writing = None
+        line.interrupt = interrupt
+
+        def stop(number: int) -> None:
+            """Talked over: the voice stops now, and so does the answer."""
+            line.stopped = max(line.stopped, number)
+            if line.speaker is not None:
+                line.speaker.stop()
+            interrupt()
+
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                if msg.get("bytes") is not None:
+                    if line.utt is not None and not line.utt.add(msg["bytes"]):
+                        line.utt = None
+                        await line.send({"type": "error", "status": "too_long",
+                                         "message": f"That was over {voicelink.MAX_SECONDS} seconds. Say it in parts."})
+                    continue
+                try:
+                    data = json.loads(msg.get("text") or "")
+                except ValueError:
+                    data = None
+                kind = data.get("type") if isinstance(data, dict) else None
+                if kind == "start":
+                    line.utt = voicelink.Utterance()
+                elif kind == "cancel":
+                    line.utt = None
+                elif kind == "pause" and line.utt is not None and line.utt.pcm:
+                    if line.utt.early is None or line.utt.early[0] != len(line.utt.pcm):
+                        pcm = bytes(line.utt.pcm)
+                        line.utt.early = (len(pcm), asyncio.get_running_loop().create_task(
+                            asyncio.to_thread(app.state.voice.transcribe_pcm, pcm)))
+                elif kind == "end":
+                    if line.utt is None:
+                        await line.send({"type": "error", "status": "no_audio", "message": "Nothing was recorded."})
+                        continue
+                    utt, line.utt = line.utt, None
+                    before = line.last
+                    path = "chat_voice" if data.get("path") == "chat_voice" else "call"
+                    number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
+                    line.current = number
+                    turn = asyncio.get_running_loop().create_task(
+                        _voice_turn(line, utt, path, data.get("call_id"), number, after=before))
+                    line.last = turn
+                    _turns.add(turn)               # hanging up doesn't cancel it: the answer is saved (v7)
+                    turn.add_done_callback(_turns.discard)
+                elif kind == "stop":
+                    stop(data.get("turn") if isinstance(data.get("turn"), int) else line.current)
+                elif kind == "say":
+                    text = str(data.get("text") or "")[:voicelink.MAX_SAY]
+                    if line.speaker is not None:
+                        line.speaker.stop()
+                    number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
+                    line.current = number
+                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number)
+                    line.speaker.say(text)
+                    line.speaker.finish()
+                else:
+                    await line.send({"type": "error", "message": "unknown message type"})
+        except WebSocketDisconnect:
+            pass
+        finally:
+            runner.line_closed()
+            if line.speaker is not None:   # nobody to hear it; the answer itself goes on and is saved
+                line.speaker.stop()
+
+    async def _voice_turn(line, utt: "voicelink.Utterance", path: str, call_id, number: int, after=None) -> None:
+        if after is not None:
+            await asyncio.gather(after, return_exceptions=True)
+        started = time.monotonic()
+        tr, failure = None, None
+        try:
+            if utt.early is not None and utt.early[0] == len(utt.pcm):
+                tr = await utt.early[1]            # transcribed at the pause, nothing came after
+            else:
+                tr = await asyncio.to_thread(app.state.voice.transcribe_pcm, bytes(utt.pcm))
+        except NotInstalled as exc:
+            failure = {"type": "error", "status": "voice_missing", "message": str(exc)}
+        except VoiceError:
+            tr = None                              # nothing that sounds like words
+        except Exception as exc:   # never a silent call: say why
+            log.exception("voice: speech to text")
+            failure = {"type": "error", "status": "stt_failed",
+                       "message": f"Speech recognition failed on the PC: {type(exc).__name__}: {exc}"}
+        stt_ms = int((time.monotonic() - started) * 1000)
+        if failure is not None:
+            await line.send({**failure, "turn": number})
+            return
+        text = voicelink.heard(tr.text if tr else "")
+        language = tr.language if tr else None
+        latency.record(engine, "stt", stt_ms)
+        await line.send({"type": "transcript", "text": text, "language": language, "stt_ms": stt_ms, "turn": number})
+        if not text:
+            return
+        if number <= line.stopped:
+            line.carry = f"{line.carry} {text}".strip()   # talked on before Kairo answered: one message
+            return
+        text, line.carry = f"{line.carry} {text}".strip(), ""
+        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number)
+        if line.speaker is not None:
+            line.speaker.stop()
+        line.speaker = speaker
+
+        async def sink(frame) -> None:
+            kind = frame.get("type") if isinstance(frame, dict) else None
+            if line.writing == number and number <= line.stopped:
+                line.interrupt()                   # talked over before the brain had started
+            if kind == "delta":
+                speaker.feed(frame["text"])
+            elif kind == "model" and frame.get("escalated"):
+                speaker.say(voicelink.filler(language))
+            elif kind == "done":
+                line.writing = None
+                if frame.get("interrupted"):
+                    speaker.stop()
+                else:
+                    speaker.finish(frame.get("text"))
+            elif kind == "error":
+                line.writing = None
+                speaker.finish()
+            await line.send({**frame, "turn": number} if kind else frame)
+
+        line.writing = number
+        try:
+            await _handle_message(sink, f"(spoken, on a call) {text}" if path == "call" else text,
+                                  call_id=call_id, server_extra={"stt_ms": stt_ms})
+        finally:
+            if line.writing == number:
+                line.writing = None
+            speaker.finish()                       # a no-op after done/error; else (cancelled) it closes
+        await speaker.done()
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -940,7 +1183,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hooks = await asyncio.to_thread(selftest_mod.hook_checks, settings.workspace_dir, env)
         with session_for(engine) as s:
             main_id = chat.main_thread(s, brain_name=runner.brain.name).id
-        system = system_prompt(thread_id=main_id, fresh=True)
+        system = conversation_parts(main_id, True)[0]    # what the owner's conversation process starts with
         context = selftest_mod.context_checks(system, settings.config_dir, REPO_ROOT / "config", settings.vault_dir)
         due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
         token = secrets.token_hex(4)
@@ -1037,7 +1280,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                                         timeout_s=settings.brain_timeout_s, extra_env=hook_env))
         due = (dt.datetime.now(profile.tz) + dt.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
         token = secrets.token_hex(4)
-        system = system_prompt(thread_id=None, fresh=True)
+        system = conversation_parts(None, True)[0]
         r = await _owner_path_run(token, due.isoformat(), system, via=broken_runner)
         await asyncio.to_thread(_take_test_task, token)
         ok_ctx = {"profile": True, "goals": True, "state": "ok", "personality": "current", "detail": ""}
@@ -2097,7 +2340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def voice_call_now(body: dict):
         """'Call me now' (also how the owner tests it), or {"outgoing": true} when the owner calls Kairo."""
         if body.get("outgoing"):   # "Call Kairo": no ringing, the mic opens at once
-            warm_call_soon()
+            warm_conversation_soon()
             with session_for(engine) as s:
                 c = voice_calls.start(s, "You called Kairo", "", None)
                 return voice_calls.as_dict(voice_calls.set_status(s, c.id, "answered"))
@@ -2210,9 +2453,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if action not in ("answer", "end"):
             raise HTTPException(404, "unknown action")
         if action == "answer":
-            warm_call_soon()
-        elif getattr(runner.brain, "close_warm", None) is not None:
-            runner.brain.close_warm()
+            warm_conversation_soon()   # hanging up keeps it: the conversation goes on in chat
         with session_for(engine) as s:
             try:
                 before = voice_calls.get(s, call_id)

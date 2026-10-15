@@ -41,11 +41,13 @@ must act within the next hour."""
 
 
 class VoiceNotes:
-    def __init__(self, *, engine, inbox_dir, profile, runner, state, system, tools, pick_model, paused, recall=None):
+    def __init__(self, *, engine, inbox_dir, profile, runner, state, system, tools, pick_model, paused, recall=None,
+                 after=None):
         self.engine, self.inbox_dir, self.profile = engine, inbox_dir, profile
         self.runner, self.state = runner, state   # app.state: voice and pusher are looked up when used
         self.system, self.tools, self.pick_model, self.paused = system, tools, pick_model, paused
         self.recall = recall                      # v8 C6: what the owner's notes say about this note
+        self.after = after                        # V1: the note retired the chat's warm process; start a new one
         self._tasks: set[asyncio.Task] = set()
 
     def accept(self, data: bytes, content_type: str, source: str) -> Capture:
@@ -158,3 +160,5 @@ class VoiceNotes:
             s.commit()
         if urgent and error is None:
             self.state.pusher.notify("Kairo", clip(reply, 160), "/#chat", source="voicenote")
+        if self.after is not None:
+            self.after()

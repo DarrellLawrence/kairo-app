@@ -179,10 +179,12 @@ class StubRunner:
 
     def __init__(self):
         self.systems = []
+        self.prompts = []
 
     async def stream(self, prompt, **kw):
         from app.brain.base import BrainEvent, EventKind
         self.systems.append(kw["system"])
+        self.prompts.append(prompt)
         yield BrainEvent(EventKind.result, text="Monday 18:30 (from 70 Health/training.md).", session_id="s1")
 
 
@@ -198,8 +200,10 @@ def test_chat_searches_memory_before_answering(migrated):
             ws.send_json({"type": "message", "text": text})
             while ws.receive_json()["type"] not in ("done", "error"):
                 pass
-    assert "[70 Health/training.md] Boxing training is on Monday at 18:30." in stub.systems[0]
-    assert "memory search for this message" not in stub.systems[1]
+    # V1: the hits go with the message (the system prompt stays the same, so the CLI can cache it)
+    assert "[70 Health/training.md] Boxing training is on Monday at 18:30." in stub.prompts[0]
+    assert "memory search for this message" not in stub.prompts[1]
+    assert not any("memory search for this message" in s for s in stub.systems)
 
 
 def test_personality_says_to_name_the_note():

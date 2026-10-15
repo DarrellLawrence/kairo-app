@@ -258,3 +258,62 @@ def test_the_kill_switch_closes_the_warm_process(tmp_path):
     BrainRunner(brain).cancel()
     assert brain._warm is None
     proc.wait(timeout=10)
+
+
+# ---------------------------------------------------------------- the conversation process (voice V1, 2026-10-15)
+# One warm process for chat and calls: the model is switched per turn (control request set_model,
+# verified with the real CLI 2.1.300) and a turn can be interrupted (control request interrupt) without
+# losing the process. Written before the code.
+
+def test_the_warm_process_switches_model_per_turn(tmp_path):
+    rec = tmp_path / "rec.json"
+    brain = make(tmp_path, KAIRO_HOOK_FAKE_RECORD=rec)
+    assert brain.warm_up(key="conv", session_id=None, system="s", tools=[], model="haiku") is True
+    try:
+        a = list(brain.run("quick one", session_id=None, system="s", tools=[], warm="conv", model="haiku"))
+        sid = a[-1].session_id
+        b = list(brain.run("write my reply", session_id=sid, system="s", tools=[], warm="conv", model="sonnet"))
+        c = list(brain.run("thanks", session_id=sid, system="s", tools=[], warm="conv", model="haiku"))
+        data = json.loads(rec.read_text())
+        assert data["models"] == ["haiku", "sonnet", "haiku"]          # one process, the model per turn
+        assert [e[-1].data["usage"]["warm"] for e in (a, b, c)] == [True, True, True]
+        assert b[-1].data["usage"]["model"] == "claude-sonnet-fake"
+    finally:
+        brain.close_warm()
+
+
+def test_interrupt_stops_the_turn_and_keeps_the_process(tmp_path):
+    rec = tmp_path / "rec.json"
+    brain = make(tmp_path, KAIRO_HOOK_FAKE_RECORD=rec, KAIRO_HOOK_FAKE_MODE="long")
+    brain.warm_up(key="conv", session_id=None, system="s", tools=[], model="haiku")
+    try:
+        events = []
+        for ev in brain.run("tell me a long story", session_id=None, system="s", tools=[], warm="conv", model="haiku"):
+            events.append(ev)
+            if ev.kind is EventKind.text and len([e for e in events if e.kind is EventKind.text]) == 3:
+                assert brain.interrupt() is True
+        last = events[-1]
+        assert last.kind is EventKind.error and last.data.get("interrupted") and last.data.get("cancelled")
+        assert len([e for e in events if e.kind is EventKind.text]) < 40          # stopped early
+        assert brain.health() is BrainStatus.ok                                   # an interrupt is not a failure
+        pid = json.loads(rec.read_text())["pid"]
+        after = list(brain.run("next", session_id=last.session_id, system="s", tools=[], warm="conv", model="haiku"))
+        assert after[-1].kind is EventKind.result and json.loads(rec.read_text())["pid"] == pid
+    finally:
+        brain.close_warm()
+
+
+def test_interrupt_when_nothing_runs_is_harmless(tmp_path):
+    brain = make(tmp_path)
+    assert brain.interrupt() is False
+
+
+def test_a_conversation_process_lives_long(tmp_path):
+    brain = make(tmp_path)
+    brain.warm_up(key="conv", session_id=None, system="s", tools=[], model="haiku", idle_s=3600, max_age_s=12 * 3600)
+    try:
+        w = brain._warm
+        w.started -= 2 * 3600                       # two hours old: still usable (the call process: 15 min)
+        assert brain.warm_ready("conv", None)
+    finally:
+        brain.close_warm()
