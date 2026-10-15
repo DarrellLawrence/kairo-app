@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 from sqlmodel import Session
 
-from . import vault
+from . import outbound, vault
 from .db import SettingKV
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected, load_token
 
@@ -106,7 +106,7 @@ def kairo_url(data_dir: Path) -> str | None:
     from . import status_files
     data = status_files.read_json(data_dir, "boot-check.json")
     url = data.get("kairo_url") if isinstance(data, dict) else None
-    return url if isinstance(url, str) and url.startswith("https://") else None
+    return url if outbound.tailnet_url_ok(url) else None    # never anywhere else (a planted file can't redirect it)
 
 
 class HealthWatch:

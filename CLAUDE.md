@@ -27,6 +27,13 @@ start the next until its checks pass and the owner says go.
   only in server/app/executor.py (backend credentials), only after the gate
   allowed them. Never call Gmail, Calendar or any outbound API from anywhere
   else.
+- The backend's own outbound calls (Web Push to the owner's devices, the health
+  watch, the heartbeat, the offsite backup) carry nothing the model chose and
+  don't go through the gate. Their destinations are fixed in code
+  (server/app/outbound.py: the browsers' push services, Kairo's own *.ts.net
+  address, the heartbeat and backup hosts). No model input, mail, web page, file
+  or setting can change them; only the modules listed there may use the network
+  (owner's decision 2026-10-15).
 - The model never gets an external write tool. Its tools: read tools, internal
   Kairo tools (tasks, notes, captures) and mcp_kairo.propose_action. Nothing
   else, for every brain adapter.

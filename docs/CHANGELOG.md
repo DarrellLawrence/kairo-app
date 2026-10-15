@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-15 — plan + build: fixed destinations for the backend's own calls (owner's decision)
+- Web Push, the health watch, the heartbeat and the offsite backup stay outside the gate (nothing the model chose), but only to destinations fixed in `server/app/outbound.py`. KICKOFF §14 and CLAUDE.md say so.
+- Push subscriptions are accepted and sent to only on the browsers' push services (Apple, Google, Mozilla, Microsoft); the health watch calls only Kairo's own `*.ts.net` address. A test fails when any other module starts using the network.
+
 ## 2026-10-15 — plan + build: no personal data in the repo (owner's decision)
 - `config/profile.yaml` holds placeholders only; KICKOFF §1, the §10 profile block and the §15 check say so. The owner's real values live only on the PC (`data\config\profile.yaml`, the vault).
 - On the first start of this release Kairo copies the profile it was running with into `data\config\profile.yaml` (only what differs from the placeholders; backup in `data\backups\config-before-profile-pin-*`), so nothing changes on the PC.

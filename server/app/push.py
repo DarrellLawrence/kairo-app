@@ -23,6 +23,7 @@ from typing import Callable
 
 from sqlmodel import Session, select
 
+from . import outbound
 from .db import PushLog, PushSubscription
 from .profile import Profile
 
@@ -75,8 +76,10 @@ class Pusher:
         self._send = sender
 
     def subscribe(self, endpoint: str, keys: dict, device: str | None) -> None:
-        if not endpoint.startswith("https://") or not {"p256dh", "auth"} <= set(keys):
+        if not {"p256dh", "auth"} <= set(keys):
             raise ValueError("not a push subscription")
+        if not outbound.push_endpoint_ok(endpoint):
+            raise ValueError("not a browser push service")
         with Session(self.engine) as s:
             row = s.exec(select(PushSubscription).where(PushSubscription.endpoint == endpoint)).first()
             row = row or PushSubscription(endpoint=endpoint, keys_json="{}")
@@ -165,6 +168,9 @@ class Pusher:
         claims = {"sub": f"mailto:{self.profile.gmail or 'kairo@localhost'}"}
         with Session(self.engine) as s:
             for sub in s.exec(select(PushSubscription)).all():
+                if not outbound.push_endpoint_ok(sub.endpoint):
+                    log.warning("push skipped: subscription %s is not on a browser push service", sub.id)
+                    continue
                 info = {"endpoint": sub.endpoint, "keys": json.loads(sub.keys_json)}
                 try:
                     self._send(subscription_info=info, data=payload, vapid_private_key=str(self.pem),

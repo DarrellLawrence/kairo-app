@@ -31,7 +31,7 @@ class Sent:
 def push(migrated):
     engine = make_engine(migrated.db_url)
     with Session(engine) as s:
-        s.add(PushSubscription(endpoint="https://push.example/1", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
+        s.add(PushSubscription(endpoint="https://web.push.apple.com/1", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
         s.commit()
     sent = Sent()
     p = Pusher(engine=engine, secrets_dir=migrated.data_dir / "secrets", profile=PROFILE, sender=sent, max_per_day=lambda: 2)
