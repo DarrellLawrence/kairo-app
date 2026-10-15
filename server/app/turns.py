@@ -19,7 +19,8 @@ from .latency import pct
 
 KEEP_DAYS = 30
 MAX_MS = 10 * 60 * 1000
-PATHS = {"call": "Call", "chat_voice": "Chat, spoken", "chat_text": "Chat, typed"}
+PATHS = {"call": "Call", "chat_voice": "Chat, spoken", "chat_text": "Chat, typed",
+         "call_live": "Call, realtime", "chat_live": "Voice button, realtime"}
 OUTCOMES = {"played", "text", "blocked", "failed", "interrupted", "no_speech"}
 MARKS = ("endpoint", "transcribed", "sent", "first_words", "first_sentence", "audio_ready", "playing")
 STEPS = {   # step -> title, in the order they happen
@@ -33,7 +34,9 @@ STEPS = {   # step -> title, in the order they happen
     "play_start_ms": "Playback starts",
     "total_ms": "Total: you stop -> Kairo speaks (typed: first words)",
 }
-TARGETS = {"call": {"p50": 1500, "p95": 3000}, "chat_voice": {"p50": 1500, "p95": 3000}, "chat_text": {"p50": 1500, "p95": None}}
+TARGETS = {"call": {"p50": 1500, "p95": 3000}, "chat_voice": {"p50": 1500, "p95": 3000}, "chat_text": {"p50": 1500, "p95": None},
+           # realtime (owner's request 2026-10-15): end of speech -> first audio on the iPhone
+           "call_live": {"p50": 800, "p95": 1500}, "chat_live": {"p50": 800, "p95": 1500}}
 
 
 class TurnError(ValueError):
@@ -85,7 +88,7 @@ def record(s: Session, data: dict, *, version: str) -> VoiceTurn:
     if outcome not in OUTCOMES:
         raise TurnError("unknown outcome")
     model = data.get("model")
-    if model is not None and (not isinstance(model, str) or len(model) > 20):
+    if model is not None and (not isinstance(model, str) or len(model) > 40):
         raise TurnError("model is a short name")
     st = steps(data.get("marks") or {}, data.get("server") or {}, path)
     device = data.get("device") if isinstance(data.get("device"), dict) else {}

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-15 — build: realtime voice (owner's decision: an API for voice only)
+- Calls and the voice button talk to OpenAI's realtime model (gpt-realtime-2.1-mini). Your voice goes from the iPhone straight to OpenAI and its voice comes straight back, so a reply can start about half a second after you stop, and you can talk over it like on a phone call.
+- The real work still goes to Claude: the voice model has one tool, ask_kairo. It says something short ("Sec, checking") while Claude works, then says Claude's answer. It can't do anything itself; anything for another person is still an approval card.
+- At call start it gets a short context: the time, two days of calendar, your top 5 open loops, the start of your profile and the memory gist. Event titles and loops are marked as data, not instructions. Claude acts only on what you said yourself on the call.
+- Both sides' words go into the one conversation. An answer you hung up before hearing is saved in the chat.
+- Hard monthly cap, default 10 CHF (More → Settings → Realtime voice). At 80% one push; at 100% the call goes on with the local voice and no realtime call starts until next month. Every answer's real cost is counted; if Kairo can't follow a call (and count its cost), it ends it.
+- The local voice is the fallback, by itself: realtime off, no key, cap reached, OpenAI down, no internet or a dropped connection, also mid-call. The call screen shows which voice is on.
+- The OpenAI key is typed in Settings, kept encrypted on the PC only, never shown again (only its last 4 characters) and never on the phone.
+- More → Usage shows the month's realtime spend against the cap. More → System → Voice speed has "Call, realtime" and "Voice button, realtime" with the new targets (p50 < 0.8 s, p95 < 1.5 s). Run diagnosis lists the spend, the fallbacks and the last calls.
+- Acceptance test 39 (realtime voice on the iPhone).
+- Fixed: More → Usage crashed (a component wasn't imported).
+- Removed: nothing yet. The local voice stays as the fallback.
+
 ## 2026-10-15 — build: open loops done right (owner's request)
 - Kairo knows who you are: every name and address of yours, from the PC's profile and from Google (the Gmail account and every "send as" address). No loop, draft or card is ever addressed to you. Mail you sent yourself (Kairo's recap, files) is never read for promises, and mail from your own address never becomes a loop.
 - A promise is always to the other people on the mail. Kairo keeps that mail and the people on it, so Send knows who they are.

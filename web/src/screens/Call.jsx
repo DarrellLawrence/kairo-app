@@ -11,7 +11,7 @@ import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
 import { releaseWhileSpeaking, setReleaseWhileSpeaking, unlockAudio } from '../voice.js'
-import { startVoice } from '../voicelink.js'
+import { realtimeStatus, startLine } from '../realtime.js'
 
 const HANG_UP = /\s*\[\[hang up\]\]\s*$/i
 const HANG_UP_ANY = /\s*\[\[hang up\]\]\s*/gi   // the marker is never spoken or shown
@@ -34,6 +34,8 @@ export default function Call({ callId: initialId, onClose }) {
   const [log, setLog] = useState([])
   const [err, setErr] = useState('')
   const [needTap, setNeedTap] = useState(false)   // iOS didn't play Kairo's voice: "Tap to play"
+  const [engine, setEngine] = useState(null)      // 'realtime' (OpenAI) or 'local' (the PC's own voice)
+  const rtStatus = useRef(null)
   const [secs, setSecs] = useState(0)
   const [captions, setCaptions] = useState(() => { try { return localStorage.getItem('call.captions') !== '0' } catch { return true } })
   const live = useRef({ on: false, ringing: false, voice: null, empty: 0, phase: 'connecting', started: 0, muted: false, reply: '', at: -1, endAfter: false })
@@ -60,6 +62,7 @@ export default function Call({ callId: initialId, onClose }) {
     }).catch((e) => { setErr(e.message); set('error') })
   }, [initialId])   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => hangup(false), [])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { realtimeStatus().then((s) => { rtStatus.current = s }) }, [])   // the PC also reads the call context now
   useEffect(() => {
     if (!['listening', 'thinking', 'speaking', 'paused', 'muted'].includes(phase)) return undefined
     const t = setInterval(() => setSecs(Math.round((Date.now() - live.current.started) / 1000)), 1000)
@@ -87,8 +90,13 @@ export default function Call({ callId: initialId, onClose }) {
     const l = live.current
     l.on = true
     l.started = Date.now()
-    const voice = startVoice({
-      path: 'call', callId: idRef.current, on: {
+    const voice = startLine({
+      path: 'call', callId: idRef.current, status: rtStatus.current, on: {
+        engine: (name, why) => {
+          setEngine(name)
+          if (name === 'local' && why?.message && !['off', 'no_key'].includes(why.reason)) setErr(why.message)
+        },
+        budget: (pct) => setErr(`Realtime voice: ${pct}% of this month’s budget used.`),
         state: (s) => {
           if (!l.on || s === 'idle') return
           if (s === 'speaking') setNeedTap(false)
@@ -109,7 +117,7 @@ export default function Call({ callId: initialId, onClose }) {
         delta: (text) => { l.reply += text; caption(l.reply.replace(HANG_UP_ANY, ' ').trim()) },
         done: (f) => {
           caption((f.text || '').replace(HANG_UP_ANY, ' ').trim())
-          if (!f.interrupted && HANG_UP.test(f.text || '')) l.endAfter = true   // a getting-to-know-you call wraps up itself
+          if (!f.interrupted && (f.hangUp || HANG_UP.test(f.text || ''))) l.endAfter = true   // a getting-to-know-you call wraps up itself
         },
         answered: () => { if (l.endAfter && l.on) hangup(true) },
         error: (f) => { if (f.message) setErr(f.message) },
@@ -187,6 +195,7 @@ export default function Call({ callId: initialId, onClose }) {
           </motion.p>
         </AnimatePresence>
         <p className="k-call-sub">{phase === 'error' ? err : ringing && call ? call.reason : HINT[phase] || ''}</p>
+        {engine && !over && <p className="k-call-sub" style={{ opacity: 0.55 }}>{engine === 'realtime' ? 'Realtime voice' : 'Local voice'}</p>}
         {err && phase !== 'error' && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{err}</p>}
         {(needTap || phase === 'speaking') && (
           <button type="button" className={needTap ? 'k-btn primary sm' : 'k-btn ghost sm'} style={{ marginTop: 10 }} onClick={tapToPlay}>

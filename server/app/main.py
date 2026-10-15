@@ -2502,6 +2502,287 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except KeyError:
                 raise HTTPException(404, "unknown option")
 
+    # ---------------------------------------------------------------- realtime voice (owner's decision 2026-10-15)
+    # Calls and the voice button talk to OpenAI's Realtime model (app/realtime.py); the brain stays Claude.
+    # The settings are the owner's only (here, not prefs: the model's settings_set can't touch them).
+
+    from . import realtime
+
+    app.state.realtime_client = lambda key, region: realtime.OpenAIRealtime(key, region)
+    app.state.realtime_down_until = 0.0
+    _rt_cache: dict = {"at": 0.0, "text": None, "busy": False}
+
+    def _rt_status() -> dict:
+        now = dt.datetime.now(profile.tz)
+        with session_for(engine) as s:
+            cfg = realtime.load_settings(s)
+            b = realtime.budget(s, now, profile.tz, cfg)
+            reason = realtime.unavailable(s, settings.secrets_dir, now, profile.tz)
+        if reason is None and time.time() < app.state.realtime_down_until:
+            reason = "down"
+        return {"available": reason is None, "reason": reason, "message": realtime.REASONS.get(reason) if reason else None,
+                "settings": cfg, "budget": b, "key": realtime.key_hint(settings.secrets_dir),
+                "models": list(realtime.PRICES), "short": realtime.SHORT, "voices": list(realtime.VOICES),
+                "regions": list(realtime.HOSTS), "reasoning": list(realtime.REASONING)}
+
+    def _rt_context_now() -> str:
+        """Today, the next events, the top open loops, the profile card and the memory gist."""
+        now = dt.datetime.now(profile.tz)
+        try:
+            with session_for(engine) as s:
+                events = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s).text(profile.tz)
+        except Exception as exc:   # never lose a call over the calendar: the model is told it can't know
+            events = calendar_read.UNREADABLE.format(why=type(exc).__name__)
+        try:
+            with session_for(engine) as s:
+                shown = [f"{l.kind}: {l.what}" + (f" ({l.who})" if l.who else "")
+                         + (f", due {loops.aware(l.due).astimezone(profile.tz):%a %d %b %H:%M}" if l.due else "")
+                         for l in loops.shown_loops(s, profile=profile)[:5]]
+                gist = memory.get(s)["text"] or ""
+        except Exception:
+            log.exception("realtime: loops or memory for the call context")
+            shown, gist = [], ""
+        card = vault.context(settings.vault_dir, limit=1200)
+        return realtime.context_block(now=f"{now:%A %d %B %Y, %H:%M} ({profile.timezone})", events=events,
+                                      loops=shown, card=card, gist=gist[-800:])
+
+    def _rt_context(max_age_s: float = 300) -> str:
+        if _rt_cache["text"] is None or time.time() - _rt_cache["at"] > max_age_s:
+            _rt_cache.update(text=_rt_context_now(), at=time.time())
+        return _rt_cache["text"]
+
+    def _rt_prefetch() -> None:
+        """Opening Call or the voice button reads the context ahead, so the call starts fast."""
+        if _rt_cache["busy"] or time.time() - _rt_cache["at"] < 60:
+            return
+        _rt_cache["busy"] = True
+
+        def run():
+            try:
+                _rt_context(max_age_s=60)
+            except Exception:
+                log.exception("realtime: context")
+            finally:
+                _rt_cache["busy"] = False
+        threading.Thread(target=run, name="realtime-context", daemon=True).start()
+
+    def _rt_said(role: str, text_: str) -> None:
+        """A line of the live call, into the one conversation (the owner's words as said on a call)."""
+        text_ = clip_text(text_, 4000)
+        with session_for(engine) as s:
+            thread = chat.main_thread(s, brain_name=runner.brain.name)
+            chat.add_message(s, thread.id, role, f"(spoken, on a call) {text_}" if role == "owner" else text_)
+
+    def _rt_spend(model: str, usd: float, usage, kind: str) -> dict:
+        u = usage if isinstance(usage, dict) else {}
+        model_table.record(engine, "voice_realtime" if kind == "response" else "voice_realtime_stt",
+                           {"model": model if kind == "response" else realtime.TRANSCRIBE_MODEL,
+                            "input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
+                            "cost_usd": round(usd, 6)}, True)
+        with session_for(engine) as s:
+            state = realtime.add_spend(s, usd, dt.datetime.now(profile.tz), profile.tz)
+        if state["warn_now"]:
+            pusher.notify("Realtime voice", f"{state['pct']}% of this month's {state['cap_chf']:g} CHF voice budget is "
+                          "used. At 100% calls switch to the local voice.", "/#more", source="realtime")
+        if state["over_now"]:
+            pusher.notify("Realtime voice", f"This month's {state['cap_chf']:g} CHF voice budget is used up. Calls use "
+                          "the local voice until next month (or raise the cap in Settings).", "/#more", source="realtime")
+        return state
+
+    async def _rt_ask(request: str, lines: list[str]) -> tuple[str, bool]:
+        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call."""
+        if time.time() < app.state.maintenance_until:
+            return "Kairo is installing an update. Try again in a minute.", False
+        with session_for(engine) as s:
+            if killswitch.is_paused(s):
+                return "Kairo is paused with the kill switch. Resume it under More.", False
+            thread = chat.main_thread(s, brain_name=runner.brain.name)
+            if memory.take_fresh(s):
+                thread.brain_session_id = None
+                s.add(thread)
+                s.commit()
+            sid, tid = thread.brain_session_id, thread.id
+        prompt = realtime.brain_prompt(request, lines)
+        model = conversation.route(prompt, purpose="call", schedule=app.state.jobs.schedule)
+        parts: list[str] = []
+        final, error, new_sid = None, None, None
+        async for event in owner_turn(prompt, session_id=sid, thread_id=tid, purpose="call", model=model):
+            if event.kind is EventKind.session and event.session_id:
+                new_sid = event.session_id
+            elif event.kind is EventKind.text:
+                parts.append(event.text)
+            elif event.kind is EventKind.result:
+                final, new_sid = event.text or "".join(parts), event.session_id or new_sid
+            elif event.kind is EventKind.error:
+                error, new_sid = event, event.session_id or new_sid
+        if new_sid:
+            with session_for(engine) as s:
+                thread = s.get(ChatThread, tid)
+                if thread.brain_session_id != new_sid:
+                    thread.brain_session_id = new_sid
+                    s.add(thread)
+                    s.commit()
+        fold_memory_soon()
+        if error is not None:
+            return f"I couldn't get that done: {clip_text(error.text, 160)}", False
+        answer = (final or "".join(parts)).strip()
+        return answer.replace("[[hang up]]", "").strip() or "Done.", "[[hang up]]" in answer
+
+    @app.get("/api/voice/realtime")
+    def realtime_get():
+        _rt_prefetch()
+        return _rt_status()
+
+    @app.put("/api/voice/realtime/settings")
+    def realtime_settings(body: dict):
+        with session_for(engine) as s:
+            try:
+                realtime.save_settings(s, body)
+            except realtime.RealtimeError as exc:
+                raise HTTPException(400, str(exc))
+            audit(s, actor="owner", action="realtime.settings", outcome=", ".join(sorted(body)))
+        return _rt_status()
+
+    @app.put("/api/voice/realtime/key")
+    def realtime_key_set(body: dict):
+        try:
+            realtime.save_key(settings.secrets_dir, str((body or {}).get("key") or ""))
+        except realtime.RealtimeError as exc:
+            raise HTTPException(400, str(exc))
+        app.state.realtime_down_until = 0.0
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="realtime.key", outcome="saved (encrypted on the PC)")
+        return _rt_status()
+
+    @app.delete("/api/voice/realtime/key")
+    def realtime_key_delete():
+        removed = realtime.remove_key(settings.secrets_dir)
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="realtime.key", outcome="removed" if removed else "none")
+        return _rt_status()
+
+    @app.websocket("/ws/realtime")
+    async def realtime_ws(ws: WebSocket):
+        """Realtime voice: the phone's WebRTC offer in, OpenAI's answer out, and the PC follows the call.
+        client -> {"type": "offer", "sdp": "...", "path": "call" | "chat_voice"}, later {"type": "hangup"}
+        server -> {"type": "answer", "sdp": "...", "model": "...", "short": "..."} or
+                  {"type": "fallback", "reason": ..., "message": ...} (use the local voice);
+                  during the call {"type": "asking"} / {"type": "asked"} (Kairo's brain is on it / done),
+                  {"type": "budget", "pct": 80}, {"type": "fallback", "reason": "cap" | "sideband"},
+                  {"type": "end"} (Kairo said goodbye). The line closes when the call is over."""
+        if not same_origin(ws.headers.get("origin"), ws.headers.get("host"), ws.headers.get("x-forwarded-host")):
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        send = _ws_sink(ws)
+        try:
+            data = await asyncio.wait_for(ws.receive_json(), 20)
+        except Exception:   # no offer, gone, not JSON
+            await ws.close()
+            return
+        sdp = data.get("sdp") if isinstance(data, dict) and data.get("type") == "offer" else None
+        if not isinstance(sdp, str) or not sdp.startswith("v=") or len(sdp) > 30000:
+            await send({"type": "error", "message": "an SDP offer is needed"})
+            await ws.close()
+            return
+
+        async def fallback(reason: str, detail: str | None = None) -> None:
+            msg = realtime.REASONS[reason] + (f" ({detail})" if detail else "")
+            await send({"type": "fallback", "reason": reason, "message": msg})
+            with session_for(engine) as s:
+                audit(s, actor="kairo", action="realtime.fallback", outcome=clip_text(f"{reason}: {msg}", 300))
+
+        reason = "updating" if time.time() < app.state.maintenance_until else None
+        with session_for(engine) as s:
+            if reason is None and killswitch.is_paused(s):
+                reason = "paused"
+        status = _rt_status()
+        reason = reason or status["reason"]
+        if reason:
+            await fallback(reason)
+            await ws.close()
+            return
+        cfg = status["settings"]
+        client = app.state.realtime_client(realtime.load_key(settings.secrets_dir), cfg["region"])
+        try:
+            try:                           # a slow Google read must not hold up the call
+                context = await asyncio.wait_for(asyncio.to_thread(_rt_context), 3)
+            except asyncio.TimeoutError:
+                context = _rt_cache["text"] or realtime.context_block(
+                    now=f"{dt.datetime.now(profile.tz):%A %d %B %Y, %H:%M}", loops=[], card="", gist="",
+                    events=calendar_read.UNREADABLE.format(why="not read in time"))
+            answer, call_id = await client.create_call(
+                sdp, realtime.session_config(cfg, realtime.instructions(profile.name, context)))
+        except realtime.RealtimeError as exc:
+            down = exc.status is None or exc.status >= 500 or exc.status == 429
+            if down:
+                app.state.realtime_down_until = time.time() + 120   # the next calls go local at once for a while
+            await fallback("down" if down else "api", clip_text(str(exc), 200))
+            await ws.close()
+            return
+
+        runner.line_open()                 # jobs keep off the brain: ask_kairo must get it at once
+        warm_conversation_soon()
+        started = time.monotonic()
+        bridge = realtime.Bridge(model=cfg["model"], send=None, ask=_rt_ask, said=_rt_said, client=send,
+                                 spend=lambda usd, usage, kind: _rt_spend(cfg["model"], usd, usage, kind))
+
+        async def follow() -> str:
+            """The sideband first, then the answer: no audio flows before every cost is counted."""
+            try:
+                async with client.sideband(call_id) as sb:
+                    async def out(ev: dict) -> None:
+                        await sb.send(json.dumps(ev))
+                    bridge.send = out
+                    await send({"type": "answer", "sdp": answer, "model": cfg["model"],
+                                "short": realtime.SHORT.get(cfg["model"], cfg["model"][:20])})
+                    async for raw in sb:
+                        try:
+                            ev = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if isinstance(ev, dict):
+                            await bridge.handle(ev)
+                        if bridge.over:
+                            return "cap"
+                return "closed"
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("realtime: sideband: %s: %s", type(exc).__name__, exc)
+                return "sideband"
+
+        async def listen() -> str:
+            try:
+                while True:
+                    m = await ws.receive_json()
+                    if isinstance(m, dict) and m.get("type") == "hangup":
+                        return "hangup"
+            except Exception:   # gone
+                return "gone"
+
+        tasks = {asyncio.get_running_loop().create_task(follow()), asyncio.get_running_loop().create_task(listen())}
+        why = "?"
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            why = next(iter(done)).result()
+            if why == "sideband":
+                await fallback("sideband")
+        finally:
+            for t_ in tasks:
+                t_.cancel()
+            bridge.close()
+            runner.line_closed()
+            await client.hang_up(call_id)
+            seconds = time.monotonic() - started
+            with session_for(engine) as s:
+                realtime.add_spend(s, 0.0, dt.datetime.now(profile.tz), profile.tz, seconds=seconds, call=True)
+                audit(s, actor="kairo", action="realtime.call", outcome=f"{cfg['model']}, {seconds:.0f} s, ended: {why}")
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
     # ---------------------------------------------------------------- phase 3: life (lists, people, money, health)
 
     from .db import Chore, Person, Transaction
@@ -2722,7 +3003,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def usage_get(days: int = 7):
         with session_for(engine) as s:
             return {**model_table.usage(s, max(1, min(days, 366))), "models": {p: model_table.pick(p, app.state.jobs.schedule)
-                                                                              for p in model_table.DEFAULTS}}
+                                                                              for p in model_table.DEFAULTS},
+                    "realtime": realtime.budget(s, dt.datetime.now(profile.tz), profile.tz)}   # real money, vs the cap
 
     @app.get("/api/backups")
     def backups_list():

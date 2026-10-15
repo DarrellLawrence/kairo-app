@@ -285,6 +285,17 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
         for k, v in sorted((hs.get("problems") or {}).items()):
             r.add(f"  {k} | {v.get('since')} | {v.get('text')}")
 
+    r.h("Realtime voice (OpenAI; owner's decision 2026-10-15)")
+    cfg = one("SELECT value FROM settings WHERE key='realtime.settings'")
+    r.add(f"  settings: {cfg or 'defaults'}")
+    r.add("  months: month | spend + flags")
+    r.rows(q("SELECT substr(key, 16), value FROM settings WHERE key LIKE 'realtime.month.%' ORDER BY key DESC LIMIT 3"))
+    r.add(f"  fallbacks to the local voice ({DAYS} d): reason | n")
+    r.rows(q("SELECT substr(outcome, 1, instr(outcome || ':', ':') - 1), COUNT(*) FROM audit_log "
+             "WHERE action='realtime.fallback' AND ts>=? GROUP BY 1 ORDER BY 2 DESC", since))
+    r.add("  last calls: when | model, length, how it ended")
+    r.rows(q("SELECT ts, outcome FROM audit_log WHERE action='realtime.call' ORDER BY id DESC LIMIT 10"))
+
     r.h("Last self-test")
     value = one("SELECT value FROM settings WHERE key='selftest.tools'")
     try:

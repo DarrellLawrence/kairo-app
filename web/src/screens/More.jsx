@@ -4,8 +4,8 @@ import { clientLog, device } from '../clientlog.js'
 import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
 import {
   Badge, Button, Card, EmptyState, IconBell, IconBolt, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower,
-  IconPulse, IconRefresh, IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Sheet, SkeletonCard, Stack, useStack,
-  useToast,
+  IconPulse, IconRefresh, IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Segmented, Sheet, SkeletonCard, Stack,
+  useStack, useToast,
 } from '../ui/index.js'
 
 const STATUS_TONE = { ok: 'ok', skipped: 'neutral', error: 'danger', running: 'warn' }
@@ -151,14 +151,15 @@ function UsagePage() {
         <Segmented id="usagedays" value={days} onChange={setDays} options={[{ value: 1, label: 'Today' }, { value: 7, label: '7 days' }, { value: 30, label: '30 days' }]} />
       </div>
       {!u && <SkeletonCard />}
+      {u?.realtime && <RealtimeSpend b={u.realtime} />}
       {u && (
         <>
           <SectionTitle>By model</SectionTitle>
           <List>{['haiku', 'sonnet', 'opus'].filter((m) => u.by_model[m]).map((m) => row([m[0].toUpperCase() + m.slice(1), u.by_model[m]]))}
             {u.total_runs === 0 && <ListRow title="No runs yet" />}</List>
           <SectionTitle>By job</SectionTitle>
-          <List>{Object.entries(u.by_purpose).map(row)}</List>
-          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it. Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews.</p>
+          <List>{Object.entries(u.by_purpose).filter(([k]) => !k.startsWith('voice_realtime')).map(row)}</List>
+          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it (realtime voice above is real money). Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews.</p>
         </>
       )}
     </Page>
@@ -1012,6 +1013,88 @@ function LoginsPage() {
   )
 }
 
+// Realtime voice (owner's decision 2026-10-15): this month's spend against the cap (real money).
+function RealtimeSpend({ b }) {
+  const tone = b.over ? 'danger' : b.pct >= 80 ? 'warn' : 'ok'
+  return (
+    <>
+      <SectionTitle>Realtime voice · {b.month}</SectionTitle>
+      <List>
+        <ListRow icon={<IconMic />} title={`${b.spent_chf.toFixed(2)} of ${b.cap_chf} CHF`}
+          subtitle={`${b.calls} calls · ${b.minutes} min · $${b.spent_usd.toFixed(2)} at OpenAI${b.over ? ' · cap reached: local voice until next month' : ''}`}
+          value={<Badge tone={tone} pop={false}>{b.pct}%</Badge>} />
+      </List>
+    </>
+  )
+}
+
+const REALTIME_REASON = {
+  off: 'Off: calls use the local voice.', no_key: 'No OpenAI key yet: calls use the local voice.',
+  cap: 'This month’s cap is reached: local voice until next month.', down: 'OpenAI didn’t answer a moment ago: local voice for now.',
+}
+
+function RealtimePage() {
+  const toast = useToast()
+  const [st, setSt] = useState(null)
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(() => api('/api/voice/realtime').then(setSt).catch(() => setSt(null)), [])
+  useEffect(() => { load() }, [load])
+  const save = async (changes) => {
+    try { setSt(await api('/api/voice/realtime/settings', { method: 'PUT', body: changes })); toast.show({ text: 'Saved.' }) } catch (e) { toast.show({ text: e.message }) }
+  }
+  const saveKey = async () => {
+    setBusy(true)
+    try { setSt(await api('/api/voice/realtime/key', { method: 'PUT', body: { key: key.trim() } })); setKey(''); toast.show({ text: 'Saved, encrypted on your PC.' }) } catch (e) { toast.show({ text: e.message }) } finally { setBusy(false) }
+  }
+  const removeKey = async () => { setSt(await api('/api/voice/realtime/key', { method: 'DELETE' })); toast.show({ text: 'Key removed from the PC.' }) }
+  if (!st) return <Page title="Realtime voice"><SkeletonCard lines={4} /></Page>
+  const s = st.settings
+  return (
+    <Page title="Realtime voice" onRefresh={load}>
+      <p className="k-hello">Calls and the voice button talk to OpenAI’s realtime model, so Kairo answers in about half a second. The real work still goes to Claude. Your voice and the words of the call go to OpenAI; everything else stays on your PC.</p>
+      <List>
+        <ListRow icon={<IconMic />} title={st.available ? 'On' : 'Local voice'} subtitle={st.available ? `${s.model} · voice ${s.voice}` : (REALTIME_REASON[st.reason] || st.message)}
+          value={<Badge tone={st.available ? 'ok' : 'warn'} pop={false}>{st.available ? 'Realtime' : 'Local'}</Badge>} />
+      </List>
+      <RealtimeSpend b={st.budget} />
+      <SectionTitle>OpenAI key</SectionTitle>
+      <div className="k-pad">
+        {st.key ? <p className="k-muted k-small">Saved on the PC, encrypted: {st.key}. It never leaves the PC and is never shown again.</p>
+          : <p className="k-muted k-small">Paste the key from platform.openai.com (it starts with sk-). It is stored encrypted on the PC only.</p>}
+        <label className="k-field">{st.key ? 'Replace key' : 'API key'}<input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sk-…" /></label>
+        <Button variant="primary" block loading={busy} disabled={!key.trim()} onClick={saveKey}>Save key</Button>
+        {st.key && <Button variant="danger" block style={{ marginTop: 8 }} onClick={removeKey}>Remove key</Button>}
+      </div>
+      <SectionTitle>Budget and voice</SectionTitle>
+      <div className="k-pad">
+        <label className="k-field">Monthly cap (CHF): at 80% a warning, at 100% the local voice
+          <input type="number" min={0} max={200} step={1} defaultValue={s.cap_chf} onBlur={(e) => Number(e.target.value) !== s.cap_chf && save({ cap_chf: Number(e.target.value) })} />
+        </label>
+        <label className="k-field">Model
+          <select value={s.model} onChange={(e) => save({ model: e.target.value })}>{st.models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
+        </label>
+        <label className="k-field">Voice
+          <select value={s.voice} onChange={(e) => save({ voice: e.target.value })}>{st.voices.map((v) => <option key={v} value={v}>{v}</option>)}</select>
+        </label>
+        <label className="k-field">Quiet before Kairo answers
+          <select value={s.silence_ms} onChange={(e) => save({ silence_ms: Number(e.target.value) })}>
+            {[300, 400, 500, 700].map((v) => <option key={v} value={v}>{v} ms{v === 400 ? ' (default)' : v < 400 ? ' (faster, may cut you off)' : ''}</option>)}
+          </select>
+        </label>
+        <label className="k-field">Where OpenAI handles it
+          <select value={s.region} onChange={(e) => save({ region: e.target.value })}>
+            <option value="global">Standard (api.openai.com)</option>
+            <option value="eu">EU data residency (needs an EU project approved by OpenAI)</option>
+          </select>
+        </label>
+        <Button variant="secondary" size="sm" onClick={() => save({ enabled: !s.enabled })}>{s.enabled ? 'Turn realtime voice off' : 'Turn realtime voice on'}</Button>
+        <p className="k-muted k-small" style={{ marginTop: 12 }}>Speed per turn is in System → Voice speed (“Call, realtime”). Cost per minute of talk: about 2–3 Rappen.</p>
+      </div>
+    </Page>
+  )
+}
+
 function SettingsPage() {
   const toast = useToast()
   const stack = useStack()
@@ -1044,6 +1127,8 @@ function SettingsPage() {
           onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
         <ListRow icon={<IconKey />} title="Logins" subtitle="School portal (OLAT), read-only" chevron
           onClick={() => stack.push('Logins', () => <LoginsPage />)} />
+        <ListRow icon={<IconMic />} title="Realtime voice" subtitle="OpenAI key, monthly cap, model" chevron
+          onClick={() => stack.push('Realtime voice', () => <RealtimePage />)} />
       </List>
       <SectionTitle>Developer</SectionTitle>
       <List>
@@ -1105,7 +1190,7 @@ function Root() {
               onClick={() => stack.push('Capture', () => <CapturePage />)} />
             <ListRow icon={<IconPin />} title="Location" subtitle="Places, history, pause" chevron
               onClick={() => stack.push('Location', () => <LocationPage />)} />
-            <ListRow icon={<IconChart />} title="Usage" subtitle="Claude runs per model and job" chevron
+            <ListRow icon={<IconChart />} title="Usage" subtitle="Claude runs per model and job, realtime voice spend" chevron
               onClick={() => stack.push('Usage', () => <UsagePage />)} />
             <ListRow icon={<IconPulse />} title="System" subtitle={issues.length ? issues.join(' · ') : 'Kairo, Claude, Google, backups'} chevron
               value={issues.length ? <Badge tone="warn" pop={false}>{issues.length}</Badge> : <Badge tone="ok" pop={false}>OK</Badge>}

@@ -85,6 +85,14 @@ def test_only_known_modules_talk_to_the_network():
     found = set()
     for f in app.rglob("*.py"):
         text = f.read_text(encoding="utf-8")
-        if any(k in text for k in ("import httpx", "urllib.request", "import requests", "pywebpush", "http.client")):
+        if any(k in text for k in ("import httpx", "urllib.request", "import requests", "pywebpush", "http.client",
+                                   "import websockets", "from websockets")):
             found.add(f.relative_to(app).as_posix())
     assert found == set(outbound.MODULES), sorted(found ^ set(outbound.MODULES))
+
+
+def test_realtime_voice_only_talks_to_openai():
+    """Owner's decision 2026-10-15: the realtime voice layer reaches OpenAI's API and nothing else."""
+    from app import realtime
+    assert set(realtime.HOSTS.values()) == {"api.openai.com", "eu.api.openai.com"}
+    assert "realtime.py" in outbound.MODULES

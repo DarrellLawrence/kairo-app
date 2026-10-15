@@ -8,7 +8,7 @@ import {
 } from '../ui/index.js'
 import { CaptureSheet } from './CaptureSheet.jsx'
 import { playLastAgain, speak, stopSpeaking, unlockAudio } from '../voice.js'
-import { startVoice } from '../voicelink.js'
+import { realtimeStatus, startLine } from '../realtime.js'
 import { audioOutcome, startTurn } from '../turns.js'
 
 const STATUS_TEXT = {
@@ -40,7 +40,8 @@ export default function Chat() {
   const scrollRef = useRef(null)
   const toast = useToast()
   const [mic, setMic] = useState('idle')   // idle | recording | busy
-  const voiceRef = useRef(null)            // a spoken message on the voice line (voicelink.js)
+  const voiceRef = useRef(null)            // a spoken message on the voice line (realtime.js or voicelink.js)
+  const rtStatus = useRef(null)            // realtime voice available? (asked when the chat opens)
   const [speakOn, setSpeakOn] = useState(() => { try { return localStorage.getItem('chat.speak') === '1' } catch { return false } })
   const speakRef = useRef(speakOn)
   speakRef.current = speakOn
@@ -150,9 +151,12 @@ export default function Chat() {
     unlockAudio()
     stopSpeaking()
     setError(null)
-    setMic('recording')
-    voiceRef.current = startVoice({
-      path: 'chat_voice', on: {
+    setMic('busy')                           // connecting; talk once the mic shows recording
+    voiceRef.current = startLine({
+      path: 'chat_voice', status: rtStatus.current, on: {
+        engine: (name, why) => {
+          if (name === 'local' && why?.message && !['off', 'no_key'].includes(why.reason)) toast.show({ text: why.message })
+        },
         transcript: (text) => {
           setMic('busy')
           setMessages((m) => [...m, { id: `o${Date.now()}`, role: 'owner', text }])
@@ -162,7 +166,7 @@ export default function Chat() {
         delta: (text) => setChunks((c) => [...(c ?? []), text]),
         done: (f) => {
           setChunks(null)
-          setMessages((m) => [...m, { id: f.message_id, role: 'kairo', text: f.text }])
+          if (f.text) setMessages((m) => [...m, { id: f.message_id ?? `k${Date.now()}`, role: 'kairo', text: f.text }])
         },
         noSpeech: () => { endVoice(); toast.show({ text: 'Did not catch that.' }) },
         answered: endVoice,
@@ -178,8 +182,11 @@ export default function Chat() {
         }),
       },
     })
+    const line = voiceRef.current
+    line.ready.then(() => { if (voiceRef.current === line) setMic((m) => (m === 'busy' ? 'recording' : m)) })
   }
   useEffect(() => () => voiceRef.current?.close(), [])
+  useEffect(() => { realtimeStatus().then((s) => { rtStatus.current = s }) }, [])
 
   const toggleSpeak = () => {
     const next = !speakOn

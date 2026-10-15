@@ -9,6 +9,7 @@ input, mail, web page, file or setting can point them anywhere else.
 - Google: only Google's API hosts (google/client.py, google/oauth.py, executor.py).
 - Weather and stations: lookup.ALLOWED_HOSTS.
 - Model downloads (installer/first start): fixed URLs in semantic.py and voice/__init__.py.
+- Realtime voice (owner's decision 2026-10-15, voice only): only OpenAI's API (realtime.HOSTS).
 
 MODULES lists every module that may talk to the network; a test fails when another one does.
 """
@@ -29,6 +30,7 @@ MODULES = {
     "housekeeping.py": "Google token check (via google/client.py)",
     "lookup.py": "weather and stations (lookup.ALLOWED_HOSTS)",
     "push.py": "Web Push to the owner's devices (push_endpoint_ok)",
+    "realtime.py": "realtime voice: OpenAI's API only (realtime.HOSTS)",
     "semantic.py": "the memory model download (fixed host)",
     "voice/__init__.py": "the voice model download (fixed URLs)",
 }

@@ -163,7 +163,7 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 | Host | Home PC **`kairo-home`**, RTX 3060, always on, Ethernet, **Windows (existing install, nothing wiped)**. Kairo runs natively: no Docker, no WSL | LOCKED (v4) |
 | Spare | Second PC (RTX 2070), off by default, wake-on-LAN for heavy one-off jobs | LOCKED |
 | Network | **Tailscale** mesh; no public ports; app via `tailscale serve` (HTTPS) | LOCKED |
-| Brain (phases 1–3) | **Claude only**, via the official **Claude Code CLI** logged in with the owner's subscription. **No Agent SDK, no API key, no subscription-proxy tools.** | LOCKED |
+| Brain (phases 1–3) | **Claude only**, via the official **Claude Code CLI** logged in with the owner's subscription. **No Agent SDK, no API key, no subscription-proxy tools.** Voice only: OpenAI's Realtime model talks, Claude still does the work (owner's decision 2026-10-15, section 13e) | LOCKED |
 | Brain interface | All model calls go through `server/app/brain/` (adapters, section 7b) | LOCKED |
 | Local LLM | Added **last (phase 4)**. Candidates: Qwen3.5 9B, Gemma 4 12B, or a 30–35B MoE with llama.cpp expert offload if RAM ≥ 32 GB | LOCKED (timing) / OPEN (model) |
 | Memory | Obsidian vault (Markdown) + SQLite | LOCKED |
@@ -621,6 +621,36 @@ everything important is an open loop until done or dropped. Statements, not ques
 12. **Big vague tasks**: small = just do it and deliver. Big, costly or important = 2-3 key
     questions first (budget, dates, style), then a full version.
 
+## 13e. Realtime voice (owner's decision 2026-10-15)
+
+Calls and the voice button must feel like talking to a person (about 0.5 s replies, natural
+interruptions). The local pipeline (speech to text, Claude, text to speech) can't get there, so the
+rule changes for voice only. Everything else stays on the Claude subscription.
+
+- **Provider:** OpenAI Realtime, `gpt-realtime-2.1-mini` by default (Settings can pick
+  `gpt-realtime-mini`; Voice speed shows each turn's model). Gemini Live is out: the Gemini API
+  terms require users to be 18 or older.
+- **How:** the iPhone talks to OpenAI over WebRTC. kairo-home creates the call with the API key
+  (encrypted on the PC, `secrets\logins\openai.bin`, never on the phone) and follows it on a
+  second line (the sideband). The voice model gets a compact context at call start (the time, two
+  days of calendar, the top 5 open loops, the profile card up to 1200 characters, the memory gist up
+  to 800) and ONE tool, `ask_kairo`: the request goes to Claude as an owner turn on a call (tools,
+  memory, approval cards as always). It says a short filler ("Sec, checking") while Claude works.
+  No other tool and no outbound action: anything that reaches another person is a card.
+- **Budget:** a hard monthly cap, default 10 CHF (Settings). 80%: one push. 100%: the call ends and
+  goes on with the local voice; no realtime call until next month or a higher cap. No sideband means
+  no cost count, so no sideband means no realtime call. Usage shows the month's spend.
+- **Fallback:** the local pipeline whenever realtime is off, has no key, is over the cap, or OpenAI,
+  the internet or WebRTC fails, also in the middle of a call.
+- **Privacy:** to OpenAI go the owner's voice during the call, Kairo's spoken words, the call
+  context, the transcript of the owner's words and Claude's answers to ask_kairo. Not the vault,
+  mail, files, the Google tokens or anything else. API data is not used for training by default;
+  OpenAI keeps it up to 30 days for abuse monitoring. Zero Data Retention and EU data residency need
+  OpenAI's approval; once granted, nothing changes in Kairo (Settings → region "eu" for the EU host).
+- **Targets:** end of speech → first audio p50 < 0.8 s, p95 < 1.5 s on the iPhone (acceptance 39).
+- **Account:** OpenAI's terms may require a parent's or guardian's permission, so
+  the account holder creates the account and owns the payment method; prepaid credits with auto-recharge off.
+
 ## 14. CLAUDE.md (write exactly)
 
 ```markdown
@@ -657,9 +687,9 @@ start the next until its checks pass and the owner says go.
   watch, the heartbeat, the offsite backup) carry nothing the model chose and
   don't go through the gate. Their destinations are fixed in code
   (server/app/outbound.py: the browsers' push services, Kairo's own *.ts.net
-  address, the heartbeat and backup hosts). No model input, mail, web page, file
-  or setting can change them; only the modules listed there may use the network
-  (owner's decision 2026-10-15).
+  address, the heartbeat and backup hosts, OpenAI's API for realtime voice). No
+  model input, mail, web page, file or setting can change them; only the
+  modules listed there may use the network (owner's decision 2026-10-15).
 - The model never gets an external write tool. Its tools: read tools, internal
   Kairo tools (tasks, notes, captures) and mcp_kairo.propose_action. Nothing
   else, for every brain adapter.
@@ -681,6 +711,13 @@ start the next until its checks pass and the owner says go.
   re-generated by the model.
 - The model is only reached through server/app/brain/ (adapters).
 - No Anthropic API key, no Agent SDK, no subscription-proxy tools.
+- Only exception to the two rules above (owner's decision 2026-10-15): calls
+  and the voice button talk to OpenAI's Realtime model through
+  server/app/realtime.py, with an OpenAI API key kept encrypted on kairo-home
+  only. Its one tool is ask_kairo, which hands the request to the Claude brain
+  as an owner turn; it gets no other tool and never acts. Hard monthly cap
+  (default 10 CHF), the local voice as fallback. Everything else stays on the
+  Claude subscription (KICKOFF 13e).
 - Nothing personal hardcoded: use config/profile.yaml and .env.
 - Secrets only in .env (never committed), the data folder's secrets\, or the
   OS keyring.

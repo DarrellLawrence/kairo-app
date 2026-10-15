@@ -15,7 +15,7 @@ export function startTurn(path, t0 = performance.now()) {
   const id = `${Date.now().toString(36)}-${(seq += 1)}`
   return {
     path,
-    mark(name) { if (!(name in marks)) marks[name] = Math.max(0, Math.round(performance.now() - t0)) },
+    mark(name, at = performance.now()) { if (!(name in marks)) marks[name] = Math.max(0, Math.round(at - t0)) },
     has(name) { return name in marks },
     server(values) {
       for (const [k, v] of Object.entries(values || {})) if (typeof v === 'number' && Number.isFinite(v)) server[k] = Math.max(0, Math.round(v))
