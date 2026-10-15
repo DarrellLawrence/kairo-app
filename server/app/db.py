@@ -411,13 +411,29 @@ class ShoppingItem(SQLModel, table=True):
     source: str = "app"
 
 
+class VoiceTurn(SQLModel, table=True):
+    """One voice or chat turn, step by step (owner's request 2026-10-15; app/turns.py)."""
+
+    __tablename__ = "voice_turns"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=utcnow, index=True)
+    version: str = Field(index=True)
+    path: str = Field(index=True)            # call / chat_voice / chat_text
+    model: str | None = None
+    total_ms: int | None = None
+    steps_json: str = Field(sa_column=Column(Text, nullable=False))
+    outcome: str                              # played / text / blocked / failed / interrupted / no_speech
+    reason: str | None = None
+    device_json: str | None = Field(default=None, sa_column=Column(Text))
+
+
 class Latency(SQLModel, table=True):
     """Fix plan 31: how long the owner waited, in ms (speech to text, Kairo's voice, a call turn)."""
 
     __tablename__ = "latency"
     id: int | None = Field(default=None, primary_key=True)
     ts: datetime = Field(default_factory=utcnow, index=True)
-    kind: str = Field(index=True)          # stt / tts / call_turn
+    kind: str = Field(index=True)          # stt / tts (a whole turn: VoiceTurn)
     ms: int
 
 

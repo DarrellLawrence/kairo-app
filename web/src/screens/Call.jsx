@@ -9,6 +9,7 @@ import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
 import { takeSentences } from '../sentences.js'
+import { audioOutcome, startTurn } from '../turns.js'
 import {
   holdMic, listenLevel, playLastAgain, releaseMic, releaseWhileSpeaking, speak, speakingLevel, speechQueue, startRecording, stopSpeaking,
   transcribe, unlockAudio,
@@ -143,7 +144,7 @@ export default function Call({ callId: initialId, onClose }) {
 
   // One turn at a time on the call's line: a turn that is still being written (you talked over
   // Kairo) finishes before the next is sent, so each answer's words reach its own listener.
-  const ask = (text, onDelta) => {
+  const ask = (text, onDelta, turn) => {
     const l = live.current
     const mine = (l.turn || Promise.resolve()).then(() => new Promise((resolve) => {
       const ws = l.ws
@@ -152,25 +153,22 @@ export default function Call({ callId: initialId, onClose }) {
         if (m.type === 'delta') onDelta?.(m.text)
         else if (m.type === 'done' || m.type === 'error') {
           ws.removeEventListener('message', onMsg)
+          turn?.model(m.model)
+          turn?.server(m.server)
           resolve(m.type === 'done' ? { text: m.text } : { text: m.message || 'Sorry, something went wrong.', error: true })
         }
       }
       ws.addEventListener('message', onMsg)
       ws.send(JSON.stringify({ type: 'message', text: `(spoken, on a call) ${text}`, call_id: idRef.current }))
+      turn?.mark('sent')
     }))
     l.turn = mine.catch(() => {})
     return mine
   }
 
   // Fix plan 29: Kairo starts talking after its first sentence while the rest is still being written.
-  // Fix plan 31: you stop talking -> Kairo's voice starts, for the p50/p95 in More -> System.
-  const timeTurn = (since) => {
-    const ms = Math.round(performance.now() - since)
-    fetch('/api/latency', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'call_turn', ms }) })
-      .catch(() => {})
-  }
-
-  const reply = async (heard, speechEndedAt) => {
+  // Every step of the turn is measured (turns.js -> More -> System -> Voice speed).
+  const reply = async (heard, turn) => {
     const l = live.current
     const abort = new AbortController()
     l.abort = abort
@@ -183,10 +181,15 @@ export default function Call({ callId: initialId, onClose }) {
       at = x.length
       return [...x, { who: 'kairo', text }]
     })
+    let blocked = null
     const q = speechQueue({
       signal: abort.signal, call: true,
-      onNeedTap: () => { stopMonitor(); setNeedTap(true); return new Promise((resolve) => { l.afterTap = resolve }) },
-      onStart: () => { if (speechEndedAt) timeTurn(speechEndedAt) },
+      onNeedTap: () => {
+        if (!turn.has('playing')) blocked = blocked || 'NeedTap'
+        stopMonitor(); setNeedTap(true); return new Promise((resolve) => { l.afterTap = resolve })
+      },
+      onFirstAudio: () => turn.mark('audio_ready'),
+      onStart: () => turn.mark('playing'),
     })
     const out = (piece) => {
       const sentence = (piece || '').replace(HANG_UP_ANY, ' ').trim()
@@ -197,14 +200,16 @@ export default function Call({ callId: initialId, onClose }) {
       }
       spoken = spoken ? `${spoken} ${sentence}` : sentence
       caption(spoken)
+      turn.mark('first_sentence')
       q.push(sentence)
     }
     const writing = ask(heard, (delta) => {
+      turn.mark('first_words')
       buf += delta
       const r = takeSentences(buf, { first: !spoken })
       buf = r.rest
       r.sentences.forEach(out)
-    })
+    }, turn)
     // Talked over, paused or hung up: stop now, not when the answer is finished.
     const stopped = new Promise((resolve) => abort.signal.addEventListener('abort', () => resolve(null), { once: true }))
     const answer = await Promise.race([writing, stopped])
@@ -217,11 +222,17 @@ export default function Call({ callId: initialId, onClose }) {
       writing.then((a) => { if (!spoken && l.on && l.phase === 'paused') caption(a.text.replace(HANG_UP_ANY, ' ').trim()) })
     }
     q.end()
+    let failure = null
     try {
       await q.done
     } catch (e) {
+      failure = e
       if (e.name !== 'AbortError') setErr(e.message)
     }
+    if (turn.has('playing')) turn.finish(blocked ? 'blocked' : 'played', blocked)
+    else if (blocked) turn.finish('blocked', blocked)
+    else if (l.interrupted || abort.signal.aborted) turn.finish('interrupted')
+    else turn.finish(...audioOutcome(failure || new Error(answer?.error ? 'model error' : 'nothing played')))
     while (l.replay) await l.replay   // tapped "No sound?": let the replay finish first
     stopMonitor()
     return Boolean(answer && !answer.error && HANG_UP.test(answer.text))
@@ -238,10 +249,18 @@ export default function Call({ callId: initialId, onClose }) {
           if (!live.current.on) { sendAsVoiceNote(blob); return }
           if (live.current.phase !== 'listening') return   // paused or muted meanwhile
           set('thinking')
+          const turn = startTurn('call', speechEndedAt)
+          turn.mark('endpoint')
           let heard = ''
-          try { heard = (await transcribe(blob)).text?.trim() || '' } catch (e) { setErr(e.message) }
+          try {
+            const t = await transcribe(blob)
+            heard = t.text?.trim() || ''
+            turn.server({ stt_ms: (t.took || 0) * 1000 })
+            turn.mark('transcribed')
+          } catch (e) { setErr(e.message); turn.finish('failed', `speech to text: ${e.message}`) }
           if (!live.current.on) { if (heard) sendAsVoiceNote(blob); return }   // hung up while Kairo was listening
           if (!heard) {
+            turn.finish('no_speech')
             live.current.empty += 1
             if (live.current.empty >= 3) { await say('I can’t hear you. Let’s talk later.'); hangup(true); return }
             listen()
@@ -251,7 +270,7 @@ export default function Call({ callId: initialId, onClose }) {
           setLog((x) => [...x, { who: 'me', text: heard }])
           if (BYE.test(heard)) { await say('Bye!'); hangup(true); return }
           // Kairo wraps up a getting-to-know-you call itself ([[hang up]], never spoken).
-          const ending = await reply(heard, speechEndedAt)
+          const ending = await reply(heard, turn)
           if (ending && live.current.on && !live.current.interrupted) { hangup(true); return }
           if (['speaking', 'thinking'].includes(live.current.phase) || live.current.interrupted) listen()
         },

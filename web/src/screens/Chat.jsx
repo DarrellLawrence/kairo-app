@@ -8,6 +8,7 @@ import {
 } from '../ui/index.js'
 import { CaptureSheet } from './CaptureSheet.jsx'
 import { playLastAgain, speak, startRecording, stopSpeaking, transcribe, unlockAudio } from '../voice.js'
+import { audioOutcome, startTurn } from '../turns.js'
 
 const STATUS_TEXT = {
   usage_limited: 'Usage limit reached. Kairo pauses until it resets.',
@@ -43,6 +44,7 @@ export default function Chat() {
   const speakRef = useRef(speakOn)
   speakRef.current = speakOn
   const spokenRef = useRef(false)   // the last message was spoken: Kairo answers out loud too
+  const turnRef = useRef(null)       // the turn being measured (turns.js -> More -> System -> Voice speed)
 
   const loadMessages = useCallback(async () => {
     const res = await fetch('/api/chat/messages?limit=60')
@@ -79,13 +81,21 @@ export default function Chat() {
         if (msg.type === 'thread') {
           // one conversation: nothing to switch
         } else if (msg.type === 'delta') {
+          turnRef.current?.mark('first_words')
           setChunks((c) => [...(c ?? []), msg.text])
         } else if (msg.type === 'done') {
           setChunks(null)
           setMessages((m) => [...m, { id: msg.message_id, role: 'kairo', text: msg.text }])
-          if (speakRef.current || spokenRef.current) say(msg.text)
+          const turn = turnRef.current
+          turnRef.current = null
+          turn?.model(msg.model)
+          turn?.server(msg.server)
+          if (speakRef.current || spokenRef.current) say(msg.text, turn?.path === 'chat_voice' ? turn : null)
+          if (turn && turn.path !== 'chat_voice') turn.finish('text')
           spokenRef.current = false
         } else if (msg.type === 'error') {
+          turnRef.current?.finish('failed', msg.status || msg.message)
+          turnRef.current = null
           setChunks(null)
           setError(STATUS_TEXT[msg.status] ?? msg.message)
           setMessages((m) => [...m, { id: `e${Date.now()}`, role: 'system', text: msg.message }])
@@ -101,17 +111,25 @@ export default function Chat() {
   useStickToBottom(scrollRef, [messages, chunks])
 
   const busy = chunks !== null
-  const say = (text) => speak(text).catch((e) => {
-    if (e.name === 'NeedTap') toast.show({ text: 'No sound?', duration: 8000, action: { label: 'Tap to play', onAction: () => playLastAgain().catch(() => {}) } })
-    else toast.show({ text: e.message })
-  })
-  const send = (spoken) => {
+  // turn: a spoken message's measured turn (the whole answer is spoken once it is written).
+  const say = (text, turn = null) => {
+    turn?.mark('first_sentence')
+    return speak(text, { onFetched: () => turn?.mark('audio_ready'), onPlaying: () => turn?.mark('playing') })
+      .then(() => turn?.finish('played'), (e) => {
+        turn?.finish(...(turn?.has('playing') ? ['played', null] : audioOutcome(e)))
+        if (e.name === 'NeedTap') toast.show({ text: 'No sound?', duration: 8000, action: { label: 'Tap to play', onAction: () => playLastAgain().catch(() => {}) } })
+        else toast.show({ text: e.message })
+      })
+  }
+  const send = (spoken, turn = null) => {
     const text = (typeof spoken === 'string' ? spoken : draft).trim()
     if (!text || !connected || busy) return
     setError(null)
     setMessages((m) => [...m, { id: `o${Date.now()}`, role: 'owner', text }])
     setChunks([])
+    turnRef.current = turn || startTurn('chat_text')
     wsRef.current.send(JSON.stringify({ type: 'message', text }))
+    turnRef.current.mark('sent')
     if (typeof spoken !== 'string') setDraft('')
   }
 
@@ -136,11 +154,15 @@ export default function Chat() {
     }
     if (mic === 'recording') {
       setMic('busy')
+      const turn = startTurn('chat_voice')   // you tapped stop: that is the end of your speech here
       try {
         const blob = await recRef.current.stop()
-        const { text } = await transcribe(blob)
-        if (text) { spokenRef.current = true; send(text) } else toast.show({ text: 'Did not catch that.' })
-      } catch (e) { toast.show({ text: e.message, duration: 5000 }) } finally { setMic('idle') }
+        turn.mark('endpoint')
+        const t = await transcribe(blob)
+        turn.server({ stt_ms: (t.took || 0) * 1000 })
+        turn.mark('transcribed')
+        if (t.text) { spokenRef.current = true; send(t.text, turn) } else { turn.finish('no_speech'); toast.show({ text: 'Did not catch that.' }) }
+      } catch (e) { turn.finish('failed', e.message); toast.show({ text: e.message, duration: 5000 }) } finally { setMic('idle') }
     }
   }
 

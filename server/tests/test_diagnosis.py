@@ -14,7 +14,7 @@ from sqlmodel import Session
 
 import app.main as main_mod
 from app import diagnosis
-from app.db import (Approval, AuditLog, Capture, ChatMessage, ChatThread, JobRun, ModelRun, OpenLoop, SettingKV,
+from app.db import (Approval, AuditLog, Capture, ChatMessage, ChatThread, JobRun, ModelRun, OpenLoop, SettingKV, VoiceTurn,
                     make_engine)
 from app.main import create_app
 
@@ -52,6 +52,10 @@ def seed(settings) -> None:
             ChatMessage(thread_id=t.id, role="owner", text="(spoken, on a call) hi", created_at=now - dt.timedelta(seconds=3)),
             ChatMessage(thread_id=t.id, role="kairo", text="Hi.", created_at=now),
             Capture(kind="audio", source="voice_note", status="filed", created_at=now - dt.timedelta(seconds=20), filed_at=now),
+            VoiceTurn(version="2026.10.15.1", path="call", model="haiku", total_ms=2400, outcome="played",
+                      steps_json=json.dumps({"stt_ms": 250, "total_ms": 2400})),
+            VoiceTurn(version="2026.10.15.1", path="call", model="haiku", outcome="blocked", reason="NotAllowedError",
+                      steps_json=json.dumps({"stt_ms": 300})),
             AuditLog(actor="backend", action="proactive.ping", outcome="sent"),
             SettingKV(key="selftest.tools", value=json.dumps({"ok": True, "at": now.isoformat(), "seconds": 9,
                                                               "checks": {"mcp": "connected"}, "warnings": []})),
@@ -86,7 +90,7 @@ def report(settings) -> str:
 def test_every_query_runs_on_the_real_schema(migrated):
     seed(migrated)
     text = report(migrated)
-    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "G.5d", "Health watch", "Last self-test", "G.6", "Logs"):
+    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "G.5d", "G.5e", "Health watch", "Last self-test", "G.6", "Logs"):
         assert f"== {section}" in text, section
     assert "ERROR" not in text and "no such" not in text, text
     assert "  done | 1 | 1" in text and "  open | 1 | 0" in text          # approvals, from loop Send
@@ -94,6 +98,8 @@ def test_every_query_runs_on_the_real_schema(migrated):
     assert "chat 1 | 7.0 | 7.0" in text and "call 1 | 3.0 | 3.0" in text
     assert "call | warm | 1 | 40 | 40 | 1300 | 1300" in text and "chat | cold | 1 | 2400 | 2400 | 3600 | 3600" in text
     assert "briefs ok: 1" in text and "ok=True" in text
+    assert "2026.10.15.1 | call | haiku | 2 | 1 | total_ms | 2400 | 2400" in text
+    assert "not played: call: blocked (NotAllowedError) x1" in text
 
 
 def test_it_never_writes(migrated):

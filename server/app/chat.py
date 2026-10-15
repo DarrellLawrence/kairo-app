@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, AsyncIterator, Iterator
@@ -41,6 +42,7 @@ class BrainRunner:
         self.current_origin: str | None = None
         self.current_thread_id: int | None = None
         self.on_usage = None   # (purpose, usage dict, ok) -> None: More -> Usage
+        self.last_owner_wait_ms = 0   # how long the last owner turn waited for the brain (app/turns.py)
 
     def _note(self, purpose: str, event: BrainEvent) -> None:
         if self.on_usage and event.kind in (EventKind.result, EventKind.error):
@@ -108,7 +110,9 @@ class BrainRunner:
                 pass  # the caller's event loop is gone (shutdown); finish the run anyway
 
         def work() -> None:
+            asked = time.monotonic()
             with self.hold(owner=True):
+                self.last_owner_wait_ms = int((time.monotonic() - asked) * 1000)
                 self.current_origin, self.current_thread_id = origin, thread_id
                 try:
                     kwargs = {"model": model} if model else {}

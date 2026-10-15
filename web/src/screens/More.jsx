@@ -709,6 +709,58 @@ function ConflictsPage() {
 
 const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
 
+// Every voice and chat turn, step by step (owner's request 2026-10-15; server/app/turns.py):
+// p50 / p95 per step for this version and the one before, the targets, and the last turns.
+function VoiceSpeedPage() {
+  const [rep, setRep] = useState(null)
+  const load = useCallback(() => api('/api/voice/turns?days=7').then(setRep).catch(() => setRep({ versions: [], recent: [] })), [])
+  useEffect(() => { load() }, [load])
+  if (!rep) return <Page title="Voice speed"><SkeletonCard lines={6} /></Page>
+  const [now, before] = rep.versions
+  const pathsOf = (v) => Object.entries(v?.paths || {})
+  return (
+    <Page title="Voice speed" onRefresh={load}>
+      {!now ? <p className="k-muted k-small k-pad">No turns measured yet: talk to Kairo (Chat or a call) and come back.</p> : null}
+      {pathsOf(now).map(([path, p]) => {
+        const tgt = rep.targets?.[path] || {}
+        const tot = p.steps.total_ms
+        const ok = tot && tgt.p50 && tot.p50 <= tgt.p50 && (!tgt.p95 || tot.p95 <= tgt.p95)
+        return (
+          <div key={path}>
+            <SectionTitle>{p.title} · {p.n} turns · played {p.played}/{p.n}</SectionTitle>
+            <List>
+              {Object.entries(p.steps).map(([k, s]) => {
+                const old = before?.paths?.[path]?.steps?.[k]
+                return (
+                  <ListRow key={k} title={s.title}
+                    subtitle={`p50 ${secs(s.p50)} · p95 ${secs(s.p95)}${old ? ` (before: ${secs(old.p50)} · ${secs(old.p95)})` : ''}`}
+                    value={k === 'total_ms' && tgt.p50 ? <Badge tone={ok ? 'ok' : 'warn'} pop={false}>{ok ? 'On target' : `Target ${secs(tgt.p50)}${tgt.p95 ? ` / ${secs(tgt.p95)}` : ''}`}</Badge> : undefined} />
+                )
+              })}
+              {Object.entries(p.failures || {}).map(([why, n]) => (
+                <ListRow key={why} icon={<IconWarn />} title={`Not played: ${why}`} value={<Badge tone="warn" pop={false}>{n}</Badge>} />
+              ))}
+            </List>
+          </div>
+        )
+      })}
+      {before && now && <p className="k-muted k-small k-pad">Now = version {now.version}. Before = version {before.version}.</p>}
+      {rep.recent.length > 0 && (
+        <>
+          <SectionTitle>Last turns</SectionTitle>
+          <List>
+            {rep.recent.map((r, i) => (
+              <ListRow key={i} title={`${new Date(parseTs(r.ts)).toLocaleTimeString()} · ${r.path.replace('_', ' ')} · ${r.model || '?'}`}
+                subtitle={`${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''} · STT ${secs(r.steps.stt_ms)} · first words ${secs(r.steps.first_words_ms)} · voice ${secs(r.steps.tts_ms)}`}
+                value={<Badge tone={['played', 'text'].includes(r.outcome) ? 'ok' : 'warn'} pop={false}>{r.outcome}</Badge>} />
+            ))}
+          </List>
+        </>
+      )}
+    </Page>
+  )
+}
+
 function SystemPage() {
   const stack = useStack()
   const toast = useToast()
@@ -777,13 +829,13 @@ function SystemPage() {
             </List>
           )}
           <SectionTitle>Speed (last 7 days)</SectionTitle>
-          {speed.length === 0 ? <p className="k-muted k-small k-pad">No numbers yet: they come with use.</p> : (
-            <List>
-              {speed.map((r) => (
-                <ListRow key={r.kind} icon={<IconBolt />} title={r.title} subtitle={`Typical ${secs(r.p50_ms)} · slow ones ${secs(r.p95_ms)} · ${r.n}×`} />
-              ))}
-            </List>
-          )}
+          <List>
+            <ListRow icon={<IconBolt />} title="Voice speed" subtitle="Every turn, step by step: before and after, model, played or not" chevron
+              onClick={() => stack.push('Voice speed', () => <VoiceSpeedPage />)} />
+            {speed.map((r) => (
+              <ListRow key={r.kind} icon={<IconBolt />} title={r.title} subtitle={`Typical ${secs(r.p50_ms)} · slow ones ${secs(r.p95_ms)} · ${r.n}×`} />
+            ))}
+          </List>
           <SectionTitle>Behind the scenes</SectionTitle>
           <List>
             <ListRow icon={<IconRefresh />} title="Jobs" subtitle="Brief, email triage, captures, reviews" chevron

@@ -35,6 +35,7 @@ from . import files as files_mod
 from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
 from . import memory
+from . import turns
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
@@ -810,10 +811,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        async for event in owner_turn(prompt_in, session_id=session_id, thread_id=tid, purpose=chat_purpose, before_id=msg_in.id):
+        model = model_table.pick(chat_purpose, app.state.jobs.schedule)
+        received = time.monotonic()
+        first_words_ms = None
+        async for event in owner_turn(prompt_in, session_id=session_id, thread_id=tid, purpose=chat_purpose,
+                                      model=model, before_id=msg_in.id):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
+                if first_words_ms is None:
+                    first_words_ms = int((time.monotonic() - received) * 1000)
                 parts.append(event.text)
                 await send({"type": "delta", "text": event.text})
             elif event.kind is EventKind.result:
@@ -835,7 +842,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await send({"type": "error", "message": error.text, "status": status})
                 return
             msg = chat.add_message(s, tid, "kairo", (final_text or "").replace("[[hang up]]", "").strip())
-        await send({"type": "done", "text": final_text or "", "message_id": msg.id})
+        # app/turns.py: which model answered and how long the PC took (queue: waiting for the brain)
+        queue_ms = min(runner.last_owner_wait_ms, first_words_ms or runner.last_owner_wait_ms)
+        await send({"type": "done", "text": final_text or "", "message_id": msg.id, "model": model,
+                    "server": {"queue_ms": queue_ms,
+                               "first_words_ms": first_words_ms if first_words_ms is not None
+                               else int((time.monotonic() - received) * 1000)}})
         fold_memory_soon()
         if chat_purpose == "call":
             warm_call_soon()
@@ -2160,14 +2172,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             audit(s, actor="owner", action="vault.conflict", outcome=f"kept {keep}", args={"note": r["original"]})
         return r
 
-    @app.post("/api/latency")
-    def latency_report(body: dict):
-        """Fix plan 31: what only the phone can time (a call turn: you stop talking -> Kairo's voice starts)."""
-        kind, ms = body.get("kind"), body.get("ms")
-        if kind not in latency.CLIENT_KINDS or not isinstance(ms, (int, float)) or not 0 <= ms <= latency.MAX_MS:
-            raise HTTPException(400, "kind must be call_turn and ms a number of milliseconds")
-        latency.record(engine, kind, ms)
-        return {"ok": True}
+    @app.post("/api/voice/turns")
+    def voice_turn_report(body: dict):
+        """app/turns.py: the phone's marks for one voice or chat turn, with the PC's numbers."""
+        with session_for(engine) as s:
+            try:
+                row = turns.record(s, body, version=release_version())
+            except turns.TurnError as exc:
+                raise HTTPException(400, str(exc))
+            return {"ok": True, "id": row.id}
+
+    @app.get("/api/voice/turns")
+    def voice_turns(days: int = 7):
+        with session_for(engine) as s:
+            return turns.summary(s, days=min(max(days, 1), 30))
 
     @app.get("/api/latency")
     def latency_get(days: int = 7):

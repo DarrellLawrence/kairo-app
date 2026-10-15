@@ -103,7 +103,7 @@ export function unlockAudio() {
   }
 }
 
-async function play(buf, { signal, call = false, keepMic = false, viaTap = false, fetchMs = null } = {}) {
+async function play(buf, { signal, call = false, keepMic = false, viaTap = false, fetchMs = null, onPlaying } = {}) {
   const env = wavEnvelope(buf)
   const levelAt = (t) => (env ? env[Math.min(env.length - 1, Math.floor(t / 0.03))] || 0 : 0)
   const micWasOpen = Boolean(mic)
@@ -129,6 +129,7 @@ async function play(buf, { signal, call = false, keepMic = false, viaTap = false
         src.onended = done
         signal?.addEventListener('abort', () => current?.src === src && current.stop())
         src.start()
+        onPlaying?.()
       })
       return
     } catch (e) { clientLog('audio.webaudio_error', { ...info, err: errName(e) }) }
@@ -155,7 +156,7 @@ async function play(buf, { signal, call = false, keepMic = false, viaTap = false
       signal?.addEventListener('abort', () => finish())
       current = { el, stop: () => finish(), level: () => levelAt(el.currentTime) }
       el.src = url
-      el.play().then(() => clientLog('audio.play', { ...info, path: 'element', ctx: outCtx?.state ?? 'none' }))
+      el.play().then(() => { onPlaying?.(); clientLog('audio.play', { ...info, path: 'element', ctx: outCtx?.state ?? 'none' }) })
         .catch((e) => finish(new NeedTap(errName(e))))
     })
   } catch (e) {
@@ -167,11 +168,12 @@ async function play(buf, { signal, call = false, keepMic = false, viaTap = false
 /* Speak a reply. call=true keeps the call's mic open (unless this phone needs it paused).
    keepMic forces the mic to stay open (the sound check's call test).
    Throws NeedTap when iOS didn't let it play: show "No sound? Tap to play" -> playLastAgain(). */
-export async function speak(text, { signal, call = false, keepMic = false } = {}) {
+export async function speak(text, { signal, call = false, keepMic = false, onFetched, onPlaying } = {}) {
   const t0 = performance.now()
   const buf = await fetchSpeech(text, signal)
+  onFetched?.()
   last = { buf: buf.slice(0), call }
-  return play(buf, { signal, call, keepMic, fetchMs: Math.round(performance.now() - t0) })
+  return play(buf, { signal, call, keepMic, fetchMs: Math.round(performance.now() - t0), onPlaying })
 }
 
 async function fetchSpeech(text, signal) {
@@ -190,7 +192,7 @@ async function fetchSpeech(text, signal) {
    comes; the next one's audio is made on the PC while the current one plays. done resolves once
    everything pushed before end() was spoken, or at once on abort. onNeedTap(): iOS didn't play a
    sentence; return a promise that resolves after "Tap to play" replayed it, and the rest follows. */
-export function speechQueue({ signal, call = false, onNeedTap, onStart } = {}) {
+export function speechQueue({ signal, call = false, onNeedTap, onStart, onFirstAudio } = {}) {
   const items = []
   let ended = false
   let wake = null
@@ -199,7 +201,11 @@ export function speechQueue({ signal, call = false, onNeedTap, onStart } = {}) {
   const push = (text) => {
     if (!text || ended || signal?.aborted) return
     const t0 = performance.now()
-    const item = fetchSpeech(text, signal).then((buf) => ({ buf, fetchMs: Math.round(performance.now() - t0) }))
+    const first = items.length === 0
+    const item = fetchSpeech(text, signal).then((buf) => {
+      if (first) onFirstAudio?.()
+      return { buf, fetchMs: Math.round(performance.now() - t0) }
+    })
     item.catch(() => {})   // awaited in order below; an aborted one is never awaited
     items.push(item)
     poke()
@@ -217,9 +223,8 @@ export function speechQueue({ signal, call = false, onNeedTap, onStart } = {}) {
       const { buf, fetchMs } = await items[i++]
       if (signal?.aborted) return
       last = { buf: buf.slice(0), call }
-      if (i === 1) onStart?.()
       try {
-        await play(buf, { signal, call, fetchMs })
+        await play(buf, { signal, call, fetchMs, onPlaying: i === 1 ? onStart : undefined })
       } catch (e) {
         if (e.name !== 'NeedTap' || !onNeedTap) throw e
         await onNeedTap()

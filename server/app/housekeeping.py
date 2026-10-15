@@ -78,9 +78,10 @@ class Housekeeping:
         watch.run(full=full)
         if full:
             from sqlmodel import Session
-            from . import latency
+            from . import latency, turns
             with Session(self.app.state.health.engine) as s:
                 latency.prune(s)
+                turns.prune(s)
 
     # ---------------------------------------------------------------- updates
 

@@ -1,8 +1,8 @@
 """Fix plan item 31: how long the owner waits, as p50/p95 (More -> System -> Speed, Run diagnosis).
 
-Measured where it happens: speech to text and Kairo's voice on the PC (each request), a call turn
-on the phone (you stop talking -> Kairo's voice starts; POST /api/latency), Claude's first words
-from model_runs (fix plan 26/30), a voice note from its capture (upload -> filed).
+Measured where it happens: speech to text and Kairo's voice on the PC (each request), Claude's first
+words from model_runs (fix plan 26/30), a voice note from its capture (upload -> filed). A voice or
+chat turn as a whole, step by step: app/turns.py (More -> System -> Voice speed).
 """
 
 from __future__ import annotations
@@ -14,10 +14,8 @@ from sqlmodel import Session, delete, select
 from .db import Capture, Latency, ModelRun, utcnow
 
 KEEP_DAYS = 30
-CLIENT_KINDS = {"call_turn"}            # what the phone may report
 MAX_MS = 10 * 60 * 1000
 TITLES = {
-    "call_turn": "Call: you stop, Kairo speaks",
     "first_words_call": "Claude's first words (call)",
     "first_words_chat": "Claude's first words (chat)",
     "stt": "Speech to text",

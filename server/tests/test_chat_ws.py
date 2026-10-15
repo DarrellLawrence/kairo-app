@@ -18,7 +18,9 @@ def test_chat_streams_and_persists(migrated):
         frames = converse(ws, "hello kairo")
         assert frames[0]["type"] == "thread"
         assert any(f["type"] == "delta" for f in frames)
-        assert frames[-1] == {"type": "done", "text": "echo: hello kairo", "message_id": frames[-1]["message_id"]}
+        done = frames[-1]
+        assert {k: done[k] for k in ("type", "text")} == {"type": "done", "text": "echo: hello kairo"}
+        assert isinstance(done["message_id"], int) and done["model"] and set(done["server"]) == {"queue_ms", "first_words_ms"}
         tid = frames[0]["id"]
         r = client.get("/api/chat/messages").json()
         assert r["thread_id"] == tid

@@ -186,6 +186,27 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
     r.rows([(*k, max(len(a[0]), len(a[1])), _pct(a[0], .5), _pct(a[0], .95), _pct(a[1], .5), _pct(a[1], .95))
             for k, a in sorted(starts.items())])
 
+    r.h(f"G.5e voice and chat turns ({DAYS} d), ms: version | path | model | n | played | step | p50 | p95")
+    rows = q("SELECT version, path, model, outcome, reason, steps_json FROM voice_turns WHERE ts>=? ORDER BY ts", since)
+    turn_steps: dict[tuple, dict[str, list]] = {}
+    played: dict[tuple, list] = {}
+    fails: dict[str, int] = {}
+    for version, path, model, outcome, reason, steps_json in [] if failed(rows) else rows:
+        key = (version, path, model or "?")
+        played.setdefault(key, []).append(outcome in ("played", "text"))
+        if outcome not in ("played", "text"):
+            why = f"{path}: {outcome}" + (f" ({reason})" if reason else "")
+            fails[why[:160]] = fails.get(why[:160], 0) + 1
+        try:
+            for step, ms in json.loads(steps_json or "{}").items():
+                turn_steps.setdefault(key, {}).setdefault(step, []).append(ms)
+        except ValueError:
+            continue
+    r.rows([(*k, len(played[k]), sum(played[k]), step, _pct(v, .5), _pct(v, .95))
+            for k, steps in sorted(turn_steps.items()) for step, v in steps.items()])
+    if fails:
+        r.add("  not played: " + "; ".join(f"{k} x{n}" for k, n in sorted(fails.items(), key=lambda x: -x[1])))
+
     r.h(f"G.5d waiting ({DAYS} d), ms: kind | n | p50 | p95")
     rows = q("SELECT kind, ms FROM latency WHERE ts>=?", since)
     waits: dict[str, list] = {}
