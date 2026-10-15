@@ -107,7 +107,7 @@ def vault(data_dir: Path, profile=True, goals=True) -> None:
     v = Path(data_dir) / "vault"
     if profile:
         (v / "10 Profile").mkdir(parents=True, exist_ok=True)
-        (v / "10 Profile" / "me.md").write_text("Apprentice, Boxing, likes short answers.", encoding="utf-8")
+        (v / "10 Profile" / "me.md").write_text("Apprentice, football, likes short answers.", encoding="utf-8")
     if goals:
         (v / "20 Goals").mkdir(parents=True, exist_ok=True)
         (v / "20 Goals" / "2026.md").write_text("Finish the apprenticeship with a 5.", encoding="utf-8")

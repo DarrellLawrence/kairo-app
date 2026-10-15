@@ -359,7 +359,7 @@ def test_knowledge_call_fails_off_haiku_or_outside_the_one_call_budget(migrated,
     r = run(acceptance.t_knowledge_call(_knowledge_ctx(migrated, {"models": {"learn_call": "sonnet"}})))
     assert not r["ok"] and r["checks"]["learning calls on Haiku"] is False
     from app.voice import calls
-    monkeypatch.setattr(calls, "MAX_KAIRO_CALLS_A_DAY", 2)
+    monkeypatch.setattr(calls, "MAX_KAIRO_CALLS_A_DAY", 3)        # the planned call and the earlier one both fit
     r = run(acceptance.t_knowledge_call(_knowledge_ctx(migrated)))
     assert not r["ok"] and r["checks"]["no learning call once Kairo called that day"] is False
 

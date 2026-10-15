@@ -76,7 +76,7 @@ def test_destination_from_calendar_or_today_place():
               prefs.Place(name="Training", kind="training", station="T")]
     ev = [{"summary": "ABU", "location": "Schulstrasse 5, Testingen", "start": "2026-10-14T08:00:00+02:00"}]
     assert pa.destination(places, ev, now)[0].name == "School"
-    ev = [{"summary": "Boxing at Training", "location": None, "start": "2026-10-14T18:00:00+02:00"}]
+    ev = [{"summary": "Football at Training", "location": None, "start": "2026-10-14T18:00:00+02:00"}]
     assert pa.destination(places, ev, now)[0].name == "Training"
     assert pa.destination(places, [], now)[0].name == "School"
 

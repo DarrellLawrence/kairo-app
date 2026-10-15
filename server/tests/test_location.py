@@ -152,7 +152,7 @@ class FakeOutside:
                 return httpx.Response(200, json={"stations": [{"id": "8503000", "name": "Zürich HB", "distance": 240},
                                                               {"id": None, "name": "Some address"}]})
             if req.url.path == "/v1/stationboard":
-                return httpx.Response(200, json={"stationboard": [{"category": "S", "number": "8", "to": "Schooltown",
+                return httpx.Response(200, json={"stationboard": [{"category": "S", "number": "8", "to": "Olten",
                                                                    "stop": {"departure": "2026-10-14T07:42:00+0200", "platform": "33", "delay": 2}}]})
             return httpx.Response(404)
         return httpx.MockTransport(handle)
@@ -164,7 +164,7 @@ def test_lookup_rounds_coordinates_and_stores_nothing(client):
     r = client.post("/api/location/lookup", json={"lat": 47.378177, "lon": 8.540192}).json()
     assert r["weather"] == {"now_c": 11.2, "now": "light rain", "min_c": 7.5, "max_c": 14.0, "rain_pct": 70, "today": "rain"}
     assert r["stations"] == [{"name": "Zürich HB", "distance_m": 240, "departures": [
-        {"line": "S8", "to": "Schooltown", "time": "2026-10-14T07:42:00+0200", "platform": "33", "delay": 2}]}]
+        {"line": "S8", "to": "Olten", "time": "2026-10-14T07:42:00+0200", "platform": "33", "delay": 2}]}]
     sent = " ".join(str(u) for u in out.calls)
     assert "47.378177" not in sent and "8.540192" not in sent
     assert "latitude=47.4" in sent and "x=47.38" in sent

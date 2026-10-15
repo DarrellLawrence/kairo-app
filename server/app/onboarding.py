@@ -51,7 +51,7 @@ QUESTIONS: list[Question] = [
     Q("apprenticeship_hours", "Apprenticeship", "Your usual work days and hours?", "", "text", "50 Apprenticeship/Apprenticeship.md"),
     Q("apprenticeship_lerndoku", "Apprenticeship", "How do you do the Lerndokumentation now, and what's hard about it?", "", "text", "50 Apprenticeship/Apprenticeship.md"),
     # training / health
-    Q("training", "Training", "Your training: what, when, how often?", "e.g. Boxing Tue/Thu 19:00", "lines", "70 Health/Training.md"),
+    Q("training", "Training", "Your training: what, when, how often?", "e.g. Football Tue/Thu 19:00", "lines", "70 Health/Training.md"),
     Q("health", "Training", "Sleep, food, anything health-related Kairo should keep in mind?", "", "text", "70 Health/Training.md"),
     # people
     Q("people", "People", "The important people in your life, and how Kairo should treat their emails?",

@@ -37,7 +37,7 @@ def make(migrated):
     secrets = migrated.data_dir / "secrets"
     connect(secrets, fake)
     engine = make_engine(migrated.db_url)
-    imp = timetable.Importer(engine=engine, gate=load_gate(REPO_ROOT / "config"), tz=TZ, school_class="class-x",
+    imp = timetable.Importer(engine=engine, gate=load_gate(REPO_ROOT / "config"), tz=TZ, school_class="zz99x",
                              executor=lambda: Executor(secrets_dir=secrets, transport=fake.transport()))
     return engine, imp, fake
 

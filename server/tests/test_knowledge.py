@@ -174,14 +174,14 @@ def test_after_the_call_one_line_and_unanswered_come_back(engine, tmp_path):
         s.commit()
         cat = s.exec(select(KnowledgeItem).where(KnowledgeItem.about == "Alex")).one()
         knowledge.answered(s, cat.id, "Alex: partner, birthday 9 March")
-        knowledge.learn_fact(s, tmp_path / "vault", "Spends weekends hiking or at the gym")
+        knowledge.learn_fact(s, tmp_path / "vault", "Spends weekends cycling or at the gym")
         line = knowledge.finish(s, call)
-    assert line == "Saved from our call: Alex: partner, birthday 9 March; Spends weekends hiking or at the gym."
+    assert line == "Saved from our call: Alex: partner, birthday 9 March; Spends weekends cycling or at the gym."
     with Session(engine) as s:
         left = {q.about: (q.status, q.asks) for q in s.exec(select(KnowledgeItem).where(KnowledgeItem.kind == "question")).all()}
     assert left["Alex"][0] == "answered" and left["Mum"] == ("open", 1)
     profile_md = (tmp_path / "vault" / "10 Profile" / "Learned by Kairo.md").read_text(encoding="utf-8")
-    assert "Spends weekends hiking or at the gym" in profile_md
+    assert "Spends weekends cycling or at the gym" in profile_md
 
 
 def test_asked_three_times_is_dropped(engine):

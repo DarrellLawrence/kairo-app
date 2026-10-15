@@ -21,13 +21,13 @@ pytestmark = pytest.mark.skipif(os.environ.get("KAIRO_BROWSER_TEST") != "1",
 
 COURSE = '/auth/RepositoryEntry/12'
 PAGES = {
-    "/url/MyCoursesSite/0": f'<a href="{COURSE}">Mathe class-x</a><a href="/dmz/logout">Logout</a>',
+    "/url/MyCoursesSite/0": f'<a href="{COURSE}">Math zz99x</a><a href="/dmz/logout">Logout</a>',
     COURSE: (f'<a href="{COURSE}/CourseNode/1"><i class="o_icon o_bc_icon"></i>Unterlagen</a>'
              f'<a href="{COURSE}/CourseNode/2"><i class="o_icon o_iqtest_icon"></i>Test</a>'
              f'<a href="{COURSE}/CourseNode/3"><i class="o_icon o_gta_icon"></i>Abgabe</a>'
              f'<a href="{COURSE}/CourseNode/5"><i class="o_icon o_info_icon"></i>Infos</a>'),
     f"{COURSE}/CourseNode/1": ('<div id="o_main_center_content">Ordner</div>'
-                               '<a href="/m/abc/Skript.pdf">Skript.pdf</a><a href="/m/abc/Stundenplan_class-x.pdf">Stundenplan_class-x.pdf</a>'
+                               '<a href="/m/abc/Skript.pdf">Skript.pdf</a><a href="/m/abc/Stundenplan_zz99x.pdf">Stundenplan_zz99x.pdf</a>'
                                f'<script>fetch("/auth/ajax", {{method: "POST", body: "x=1"}}); fetch("{COURSE}/CourseNode/2/test/start")</script>'),
     f"{COURSE}/CourseNode/5": ('<div id="o_main_center_content">Prüfung am 28.10.2026</div>'
                                '<form method="post" action="/auth/x"><input name="a" value="1"></form>'
@@ -92,7 +92,7 @@ def make_reader(tmp_path, base, password, drivers):
         d = PlaywrightDriver(base)
         drivers.append(d)
         return d
-    return OlatReader(engine=engine, vault_dir=tmp_path / "vault", base=base, school_class="class-x",
+    return OlatReader(engine=engine, vault_dir=tmp_path / "vault", base=base, school_class="zz99x",
                       driver_factory=factory, credentials=lambda: ("student", password))
 
 
@@ -112,4 +112,4 @@ def test_real_browser_only_reads(tmp_path, portal):
     assert any("/auth/ajax" in b for b in drivers[0].blocked) and any("/test/start" in b for b in drivers[0].blocked)
     assert report["new_files"] == 2 and report["timetable"]["found"] is True
     assert report["skipped"] == {"iqtest": 1, "gta": 1}
-    assert (tmp_path / "vault" / "40 School" / "OLAT" / "Mathe class-x" / "Skript.pdf").read_bytes().startswith(b"%PDF")
+    assert (tmp_path / "vault" / "40 School" / "OLAT" / "Math zz99x" / "Skript.pdf").read_bytes().startswith(b"%PDF")

@@ -225,48 +225,6 @@
     "48c4ee8f1739566a5ab22826"
    ]
   },
-  "profile.yaml": {
-   "[\"context\"]": [
-    "cd517e2c4f64f5b6ae2d96e5"
-   ],
-   "[\"default_language\"]": [
-    "32889a931b08ba01dadfc309"
-   ],
-   "[\"gmail\"]": [
-    "74234e98afe7498fb5daf1f3",
-    "d377deba574b15dfce723a21"
-   ],
-   "[\"languages\"]": [
-    "b5fe2006b018dc94c93f5e3e"
-   ],
-   "[\"name\"]": [
-    "e05b9a91d584b7f6ac7ede4a"
-   ],
-   "[\"places\"]": [
-    "761b6959449c86521d4af435"
-   ],
-   "[\"push_devices\"]": [
-    "f3b3956f457bbae7256d2e67"
-   ],
-   "[\"quiet_hours\", \"end\"]": [
-    "8d2fc1259d29722da6cc88d1"
-   ],
-   "[\"quiet_hours\", \"start\"]": [
-    "59d811673dd998f488e3f045"
-   ],
-   "[\"school_portal\", \"class\"]": [
-    "32b9a4e85781d851e8f5dcdf"
-   ],
-   "[\"school_portal\", \"kind\"]": [
-    "cda2dc22b93838cbe7cff641"
-   ],
-   "[\"school_portal\", \"url\"]": [
-    "2c6ca9cb4df661560d5c419c"
-   ],
-   "[\"timezone\"]": [
-    "8d23c1c74fe773f6292f253f"
-   ]
-  },
   "schedule.yaml": {
    "[\"brain\", \"max_runs_per_day\"]": [
     "39fa9ec190eee7b6f4dff110"

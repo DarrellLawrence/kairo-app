@@ -262,7 +262,7 @@ class SettingsSet(Strict):
 
 
 class PlaceSet(Strict):
-    """'My home station is X', 'school is in Schooltown'. Address stays on the PC; only the station is sent."""
+    """'My home station is X', 'school is in Bern'. Address stays on the PC; only the station is sent."""
 
     name: str = Field(min_length=1, max_length=40)
     kind: Literal["home", "school", "work", "training", "other"]

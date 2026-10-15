@@ -1,4 +1,6 @@
-# Who the owner is. Everything personal lives here or in .env (KICKOFF 2c).
+# Who the owner is: PLACEHOLDERS ONLY (owner's decision 2026-10-15). Never put real values here:
+# the repo is on GitHub. The real values live on the PC only, in data\config\profile.yaml (Kairo
+# writes them there itself on the first start of a release with placeholders; change them there).
 name: Owner
 default_language: English
 languages: [English, German]
@@ -6,15 +8,11 @@ timezone: Europe/Zurich
 context: "work, school, training, side projects"
 gmail: owner@example.com
 quiet_hours: { start: "23:00", end: "06:00" }
-push_devices: [owner-phone]
+push_devices: []
 # Places (first start copies them into Settings; change them there or by voice).
-# Only the station name is ever sent anywhere. Stations marked "check" are guesses.
-places:
-  - { name: Home, kind: home, station: Hometown }
-  - { name: Boxing, kind: training, station: Hometown }          # check: Gym location
-  - { name: School, kind: school, station: Schooltown }             # Vocational School, Berufsschule
-  - { name: Work (Employer), kind: work, station: Worktown }   # check: Workstreet; until the job changes
-  - { name: Work (Employer 2), kind: work, station: Worktown }   # from next year, 2 years: start date to set
-# School portal: read-only (never tests, quizzes, assignments; never posts). Username and
-# password are entered in the app (More -> Logins) and stored encrypted on the PC only.
-school_portal: { kind: olat, url: "https://olat.school.example", class: class-x }
+# Only the station name is ever sent anywhere.
+places: []
+# School portal: read-only (never tests, quizzes, assignments; never posts). On the PC:
+# school_portal: { kind: olat, url: "https://...", class: "..." }. Username and password are
+# entered in the app (More -> Logins) and stored encrypted on the PC only.
+school_portal: null

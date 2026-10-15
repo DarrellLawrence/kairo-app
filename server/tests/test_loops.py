@@ -390,7 +390,7 @@ def mail(s, mid, sender, subject, summary="", personal=None):
     ("Swisscom <kundenservice@swisscom.ch>", "Ihr Bestätigungscode", "Code 482913"),
     ("Microsoft account team <account-security-noreply@accountprotection.microsoft.com>", "Microsoft account security code", ""),
     ("Digitec <info@digitec.ch>", "Your order 1234 has shipped", "Tracking number inside"),
-    ("SBB <sbb@sbb.ch>", "Ihre Quittung", "Billett Zürich - Schooltown"),
+    ("SBB <sbb@sbb.ch>", "Ihre Quittung", "Billett Bern - Olten"),
     ("Apple <apple@email.apple.com>", "Your receipt from Apple", ""),
     ("Lisa from Notion <team@mail.notion.so>", "Verify your email", "Click to confirm your email address"),
     ("Anna <anna@example.com>", "Your login code", "Use 123456 to log in"),

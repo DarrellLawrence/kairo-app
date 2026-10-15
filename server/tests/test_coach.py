@@ -295,7 +295,7 @@ def test_christmas_from_november_with_wishlists_and_budget(migrated):
 def test_partner_date_ideas_and_family_time(migrated):
     engine, p_, fake, vault_dir = make(migrated)
     with Session(engine) as s:
-        s.add(Person(name="Alex", relation="partner", notes="Loves sushi and hiking"))
+        s.add(Person(name="Alex", relation="partner", notes="Loves sushi and cycling"))
         s.add(Person(name="Dad", relation="father", last_contact=dt.date(2026, 9, 1)))
         s.commit()
         ctx = Ctx(s, {"text": "Lunch Saturday?"}, {}, {"ideas": [{"idea": "Sushi night", "why": "loves sushi"}]})   # Dad + polish, then the date

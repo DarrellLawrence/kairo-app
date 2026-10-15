@@ -144,7 +144,7 @@ def history() -> dict:
     return json.loads((DEFAULTS / cl.HISTORY).read_text(encoding="utf-8"))
 
 
-OLD_END = "05:30"
+OLD_BIG = "17:30"
 
 
 def old_install(tmp: Path) -> tuple[Path, Path]:
@@ -152,9 +152,9 @@ def old_install(tmp: Path) -> tuple[Path, Path]:
     Returns (data/config, the release's config folder)."""
     release = defaults_copy(tmp)
     h = history()
-    older = read_yaml(DEFAULTS / "profile.yaml")
-    older["quiet_hours"]["end"] = OLD_END               # a default that has changed since
-    cl.add_to_history(h, "profile.yaml", yaml.safe_dump(older).encode())
+    older = read_yaml(DEFAULTS / "schedule.yaml")
+    older["reviews"]["big"] = OLD_BIG                   # a default that has changed since
+    cl.add_to_history(h, "schedule.yaml", yaml.safe_dump(older).encode())
     (release / cl.HISTORY).write_text(json.dumps(h), encoding="utf-8")
 
     o = tmp / "data" / "config"
@@ -170,10 +170,10 @@ def old_install(tmp: Path) -> tuple[Path, Path]:
     prof = read_yaml(o / "profile.yaml")
     prof.pop("school_portal")                            # did not exist yet
     prof["context"] = "owner edited this"
-    prof["quiet_hours"]["end"] = OLD_END                 # untouched by the owner, old default
     write_yaml(o / "profile.yaml", prof)
     sched = read_yaml(o / "schedule.yaml")
     sched["reviews"]["daily"] = "20:45"                  # owner edit
+    sched["reviews"]["big"] = OLD_BIG                    # untouched by the owner, old default
     write_yaml(o / "schedule.yaml", sched)
     (o / "personality.md").write_text((DEFAULTS / "personality.md").read_text(encoding="utf-8").replace("\n", "\r\n"),
                                       encoding="utf-8", newline="")   # opened and saved in Notepad
@@ -192,7 +192,8 @@ def test_migration_keeps_only_what_the_owner_changed(tmp_path):
     assert len(backups) == 1 and {f.name: f.read_bytes() for f in backups[0].iterdir()} == original
     # deltas only
     assert read_yaml(o / "permissions.yaml") == {"actions": {"gmail.search": "1_internal"}}
-    assert read_yaml(o / "profile.yaml") == {"context": "owner edited this"}
+    assert read_yaml(o / "profile.yaml") == {k: v for k, v in read_yaml(DEFAULTS / "profile.yaml").items()
+                                             if k != "school_portal"} | {"context": "owner edited this"}   # personal: all kept
     assert read_yaml(o / "schedule.yaml") == {"reviews": {"daily": "20:45"}}
     assert not (o / "personality.md").exists()          # only line endings differed: the release's applies
     assert (o / "voice.md").read_text(encoding="utf-8") == "owner's voice notes\n"
@@ -205,8 +206,8 @@ def test_migration_keeps_only_what_the_owner_changed(tmp_path):
     assert len(report["new_actions"]) == 23
     prof = read_yaml(out / "profile.yaml")
     assert prof["context"] == "owner edited this" and prof["school_portal"] == read_yaml(DEFAULTS / "profile.yaml")["school_portal"]
-    assert prof["quiet_hours"]["end"] == read_yaml(DEFAULTS / "profile.yaml")["quiet_hours"]["end"] != OLD_END   # new default arrived
     assert read_yaml(out / "schedule.yaml")["reviews"]["daily"] == "20:45"
+    assert read_yaml(out / "schedule.yaml")["reviews"]["big"] == read_yaml(DEFAULTS / "schedule.yaml")["reviews"]["big"] != OLD_BIG
     assert (out / "voice.md").read_text(encoding="utf-8") == "owner's voice notes\n"
     load_gate(out)
     load_profile(out)
@@ -231,10 +232,9 @@ def test_fresh_install_gets_marker_and_readme(tmp_path):
 
 # ---------------------------------------------------------------- the defaults history (migration needs it)
 
-@pytest.mark.parametrize("f", sorted(p.name for p in DEFAULTS.iterdir() if p.name != cl.HISTORY))
+@pytest.mark.parametrize("f", sorted(p.name for p in DEFAULTS.iterdir() if p.name != cl.HISTORY and p.name not in cl.NO_HISTORY))
 def test_every_current_default_is_in_the_history(f):
     """Change a default -> run scripts/config_history.py (else an old install would pin the old value)."""
-    assert "surname" not in (DEFAULTS / cl.HISTORY).read_text(encoding="utf-8").lower()   # fingerprints only
     h = history()
     if f.endswith(".yaml"):
         for path, value in cl.flatten(read_yaml(DEFAULTS / f)).items():
@@ -347,3 +347,63 @@ def test_merge3_basics():
     assert merged == "a\nB\nc\nd\n" and conflicts == 0
     merged, conflicts = cl.merge3("a\nb\nc\n", "a\nX\nc\n", "a\nY\nc\n")
     assert merged == "a\nX\nc\n" and conflicts == 1
+
+
+# ---------------------------------------------------------------- the owner's profile is never in the repo (2026-10-15)
+
+REAL = {"name": "Pat Example", "gmail": "pat@example.org", "context": "real context",
+        "places": [{"name": "Home", "kind": "home", "station": "Olten"}],
+        "school_portal": {"kind": "olat", "url": "https://olat.school.example", "class": "zz9"}}
+
+
+def test_the_profile_is_never_fingerprinted():
+    """Owner's decision 2026-10-15: no personal values in the repo, not even as fingerprints."""
+    assert not any("profile.yaml" in history().get(k, {}) for k in ("yaml", "text", "texts"))
+
+
+def _ran_on(tmp_path, o, release):
+    """The PC as it is before the placeholder release: built from a release without the pin step."""
+    build(tmp_path, o, release)
+    (o / cl.PROFILE_PINNED).unlink(missing_ok=True)
+
+
+def test_the_profile_in_use_is_kept_when_the_defaults_become_placeholders(tmp_path):
+    o = fresh_overrides(tmp_path)
+    old = defaults_copy(tmp_path / "old")
+    write_yaml(old / "profile.yaml", {**read_yaml(DEFAULTS / "profile.yaml"), **REAL})
+    write_yaml(o / "profile.yaml", {"quiet_hours": {"start": "22:30"}})     # an owner change from before
+    _ran_on(tmp_path, o, old)
+    out, report = build(tmp_path, o)                                         # the placeholder release
+    p = read_yaml(out / "profile.yaml")
+    assert {k: p[k] for k in REAL} == REAL and p["quiet_hours"]["start"] == "22:30"
+    mine = read_yaml(o / "profile.yaml")
+    assert mine["gmail"] == REAL["gmail"] and "timezone" not in mine         # only what differs from the new defaults
+    assert (o / cl.PROFILE_PINNED).is_file() and report["profile_kept"] is True
+    assert list((tmp_path / "data" / "backups").glob("config-before-profile-pin-*"))
+    load_profile(out)
+
+
+def test_profile_pin_runs_once_and_the_owner_wins_afterwards(tmp_path):
+    o = fresh_overrides(tmp_path)
+    old = defaults_copy(tmp_path / "old")
+    write_yaml(old / "profile.yaml", {**read_yaml(DEFAULTS / "profile.yaml"), **REAL})
+    _ran_on(tmp_path, o, old)
+    build(tmp_path, o)
+    write_yaml(o / "profile.yaml", {**read_yaml(o / "profile.yaml"), "name": "Pat"})   # the owner edits later
+    out, report = build(tmp_path, o)
+    assert read_yaml(out / "profile.yaml")["name"] == "Pat" and report["profile_kept"] is False
+
+
+def test_a_fresh_install_starts_on_the_placeholders(tmp_path):
+    o = fresh_overrides(tmp_path)
+    out, report = build(tmp_path, o)
+    assert load_profile(out) == load_profile(DEFAULTS) and report["profile_kept"] is False
+    assert (o / cl.PROFILE_PINNED).is_file() and not (o / "profile.yaml").exists()
+
+
+def test_old_full_copies_keep_every_profile_value(tmp_path):
+    """Migration of an old full copy never drops a profile value as 'a default': profile values are personal."""
+    o, release = old_install(tmp_path)
+    write_yaml(o / "profile.yaml", {**read_yaml(o / "profile.yaml"), **REAL})
+    out, _ = build(tmp_path, o, release)
+    assert {k: read_yaml(out / "profile.yaml")[k] for k in REAL} == REAL

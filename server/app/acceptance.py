@@ -585,7 +585,7 @@ async def t_people_faith_style(ctx: Context) -> dict:
     from . import coach, pa, prefs
     from .db import Person, WishItem
     with Session(ctx.engine) as s:
-        p = Person(name=f"{MARK} Robin", relation="friend", notes="Likes hiking.")
+        p = Person(name=f"{MARK} Robin", relation="friend", notes="Likes cycling.")
         s.add(p)
         s.commit()
         s.refresh(p)

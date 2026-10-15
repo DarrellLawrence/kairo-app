@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-15 — plan + build: no personal data in the repo (owner's decision)
+- `config/profile.yaml` holds placeholders only; KICKOFF §1, the §10 profile block and the §15 check say so. The owner's real values live only on the PC (`data\config\profile.yaml`, the vault).
+- On the first start of this release Kairo copies the profile it was running with into `data\config\profile.yaml` (only what differs from the placeholders; backup in `data\backups\config-before-profile-pin-*`), so nothing changes on the PC.
+- profile.yaml is no longer fingerprinted in `config/defaults-history.json`, and a migration never drops a profile value as "a default".
+- Tests and examples use made-up names, places and class codes.
+
 ## 2026-10-14 — plan: KICKOFF v8 (real-use batch after P0; owner's request)
 - Done now means proven on kairo-home with the real Claude and the real iPhone: `docs/ACCEPTANCE.md` (20 tests), run on the PC after every release, results in More → System → Acceptance.
 - Every PR also removes what it replaces and says what it removed.

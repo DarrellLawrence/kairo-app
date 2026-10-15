@@ -517,8 +517,8 @@ def test_people_note_can_store_an_email_but_only_a_valid_one(gate):
     ("settings_list", {}, 0),
     ("settings_set", {"key": "quiet_hours", "value": {"start": "23:00", "end": "06:30"}}, 1),
     ("settings_set", {"key": "max_pings", "value": 8}, 1),
-    ("place_set", {"name": "Home", "kind": "home", "station": "Hometown"}, 1),
-    ("place_set", {"name": "Work 2", "kind": "work", "station": "Worktown", "valid_from": "2027-08-01"}, 1),
+    ("place_set", {"name": "Home", "kind": "home", "station": "Olten"}, 1),
+    ("place_set", {"name": "Work 2", "kind": "work", "station": "Basel SBB", "valid_from": "2027-08-01"}, 1),
     ("place_remove", {"name": "Home"}, 1),
 ])
 def test_settings_tools_are_internal(gate, tool, args, tier):

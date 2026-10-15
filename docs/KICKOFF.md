@@ -142,7 +142,7 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 
 ## 1. What we are building
 
-**Kairo** (from *kairos*, "the right moment") is a single-user personal assistant for **the owner** (a Swiss apprentice: apprenticeship + vocational school, training, side projects). It runs his days: email, calendar, school, apprenticeship, goals, projects, chores, people, health, money (read-only). One iPhone app controls everything. It acts freely on low-risk things and asks before anything leaves the system.
+**Kairo** (from *kairos*, "the right moment") is a single-user personal assistant for **the owner** (a Swiss apprentice: apprenticeship + vocational school, training, side projects; the personal details live only on the PC, never in the repo). It runs his days: email, calendar, school, apprenticeship, goals, projects, chores, people, health, money (read-only). One iPhone app controls everything. It acts freely on low-risk things and asks before anything leaves the system.
 
 **Principles (LOCKED)**
 - **One app, one assistant.** iPhone PWA: chat, approvals, board, reviews, activity, (later) voice.
@@ -488,16 +488,18 @@ focus on what matters: {{context}}.
 - Write only in Kairo-owned vault files; never overwrite the owner's text.
 ```
 
-`config/profile.yaml` (the owner's values):
+`config/profile.yaml` holds **placeholders only** (owner's decision 2026-10-15: no personal data in the repo, tests, fixtures, logs, issues or PR text). The real values live only on the PC in `data\config\profile.yaml` (the owner layer); on the first start of the placeholder release Kairo copied the values it was running with there by itself. Tests use made-up data.
 ```yaml
 name: Owner
 default_language: English
 languages: [English, German]
 timezone: Europe/Zurich
 context: "work, school, training, side projects"
-gmail: OPEN            # ask the owner
+gmail: owner@example.com
 quiet_hours: { start: "23:00", end: "06:00" }
-push_devices: [owner-phone]
+push_devices: []
+places: []
+school_portal: null
 ```
 
 ---
@@ -787,7 +789,7 @@ Read-only: Kairo's own browser logs in daily and reads course folders, pages, an
 | Silent alarm | Stop API container | Heartbeat alert within 10 min |
 | Backup restore | Restore to temp | DB opens, vault complete |
 | Usage limit | Simulate limit | Jobs pause, banner, no crash |
-| No personal hardcoding | grep repo for the owner's name, email, paths | Only in config/profile.yaml, docs, .env |
+| No personal data in the repo | `tests/test_no_personal_hardcoding.py` (placeholders only, no personal mail address anywhere); grep for the owner's places, school, class | Only placeholders in config/profile.yaml; real values only on the PC (`data\config\profile.yaml`, vault) and .env |
 | Daily use | 2 weeks | Brief read every weekday; check-in ≥ 5/7 |
 
 ---

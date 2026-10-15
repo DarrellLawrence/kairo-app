@@ -182,7 +182,8 @@ class Caller:
             opening = (f"Hi, it's Kairo. Got two or three minutes? I'd like to get to know you a bit better. "
                        f"{agenda[0].question}")
             call = Call(reason="Getting to know you (2–3 min)", opening=opening, purpose="learn",
-                        agenda_json=json.dumps([q.id for q in agenda]))
+                        agenda_json=json.dumps([q.id for q in agenda]),
+                        created_at=now.astimezone(dt.timezone.utc))   # the call budget counts it on the day it was decided
             s.add(call)
             s.commit()
             s.refresh(call)

@@ -100,7 +100,7 @@ class FakeDriver:
         c = f"{BASE}/auth/RepositoryEntry"
         self.pages = {
             f"{BASE}/url/MyCoursesSite/0": PageView(url=f"{BASE}/url/MyCoursesSite/0", title="My courses", text="", links=[
-                Link("Mathematik class-x", f"{c}/12", ""), Link("ABU class-x", f"{c}/13", ""),
+                Link("Mathematik zz99x", f"{c}/12", ""), Link("ABU zz99x", f"{c}/13", ""),
                 Link("Logout", f"{BASE}/dmz/logout", "")]),
             f"{c}/12": PageView(url=f"{c}/12", title="Mathematik", text="", links=[
                 Link("Unterlagen", f"{c}/12/CourseNode/1", "o_icon o_bc_icon"),
@@ -110,7 +110,7 @@ class FakeDriver:
                 Link("Infos", f"{c}/12/CourseNode/5", "o_icon o_info_icon")]),
             f"{c}/12/CourseNode/1": PageView(url=f"{c}/12/CourseNode/1", title="Unterlagen", text="", links=[
                 Link("Skript_Kap3.pdf", f"{BASE}/m/x1/Skript_Kap3.pdf", "o_icon o_filetype_pdf")]
-                + ([Link("Stundenplan class-x.pdf", f"{BASE}/m/x2/Stundenplan_class-x.pdf", "")] if timetable else [])),
+                + ([Link("Stundenplan zz99x.pdf", f"{BASE}/m/x2/Stundenplan_zz99x.pdf", "")] if timetable else [])),
             f"{c}/12/CourseNode/5": PageView(url=f"{c}/12/CourseNode/5", title="Infos",
                                              text="Prüfung Kapitel 3 am 28.10.2026. Bitte Taschenrechner mitnehmen.", links=[]),
             f"{c}/13": PageView(url=f"{c}/13", title="ABU", text="", links=[
@@ -143,7 +143,7 @@ def env(migrated, tmp_path):
 
 
 def reader(env, driver):
-    return OlatReader(engine=env["engine"], vault_dir=env["vault"], base=BASE, school_class="class-x",
+    return OlatReader(engine=env["engine"], vault_dir=env["vault"], base=BASE, school_class="zz99x",
                       driver_factory=lambda: driver, credentials=lambda: ("student.example", PASSWORD))
 
 
@@ -155,7 +155,7 @@ def test_reads_material_and_never_touches_tests_tasks_or_enrollment(env):
         assert node not in opened                                         # test, task, enrollment, quiz: never opened
     assert "CourseNode/1" in opened and "CourseNode/5" in opened
     assert "dmz/logout" not in opened
-    assert (env["vault"] / "40 School" / "OLAT" / "Mathematik class-x" / "Skript_Kap3.pdf").read_bytes().startswith(b"%PDF")
+    assert (env["vault"] / "40 School" / "OLAT" / "Mathematik zz99x" / "Skript_Kap3.pdf").read_bytes().startswith(b"%PDF")
     assert report["skipped"] == {"iqtest": 1, "gta": 1, "en": 1, "iqself": 1}
     assert report["new_files"] == 2 and report["timetable"]["found"] is True
     with Session(env["engine"]) as s:

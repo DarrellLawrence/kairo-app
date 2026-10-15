@@ -2527,6 +2527,9 @@ def _build_config(settings: Settings) -> None:
                                  backup_root=settings.data_dir / "backups")
     for note in report["ignored"]:
         log.warning("config: ignored %s", note)
+    if report.get("profile_kept"):
+        log.info("config: the profile in use was kept in %s (the release has placeholders only)",
+                 settings.config_overrides / config_layers.PROFILE)
     n = len(report["new_actions"])
     merged = report.get("merged") or []
     if not n and not report["migrated"] and not merged:

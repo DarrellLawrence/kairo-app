@@ -21,6 +21,11 @@ Migration (once, data/config without MARKER): the old full copies become overrid
 equal to any default the file ever had (defaults-history.json: fingerprints only, built from
 git by scripts/config_history.py) is not an owner change and is dropped, so new defaults arrive;
 everything else stays. A full backup goes to data/backups/config-before-overrides-<time>/.
+
+profile.yaml (owner's decision 2026-10-15): the repo holds placeholders only. Its values are
+never fingerprinted and never dropped as "a default". Once (PROFILE_PINNED), the profile Kairo
+ran with until now is written into data/config/profile.yaml (only what differs from the new
+defaults), so a release with placeholders never replaces the owner's real values.
 """
 
 from __future__ import annotations
@@ -42,7 +47,10 @@ PERMISSIONS = "permissions.yaml"
 TIERS = ("0_read", "1_internal", "2_reversible", "3_outbound", "4_destructive", "5_money")
 OFF = ("deny", "off", None)
 LIMITS = ("approvals_open_max", "outbound_per_day_max")
-NOT_CONFIG = {HISTORY, MARKER, README}
+PROFILE = "profile.yaml"
+PROFILE_PINNED = ".profile-pinned-v1"
+NO_HISTORY = {PROFILE}         # personal values: no fingerprints in the repo, never dropped as "a default"
+NOT_CONFIG = {HISTORY, MARKER, README, PROFILE_PINNED}
 BASE_SUFFIX = ".base"          # personality.md.base: digest of the default the owner's copy is based on
 
 README_TEXT = """\
@@ -85,8 +93,8 @@ def path_key(path: tuple) -> str:
 
 
 def value_key(value: Any) -> str:
-    """A value's fingerprint. Only fingerprints go into the history: it is in the repo, and
-    profile.yaml's values are personal (they live only in profile.yaml)."""
+    """A value's fingerprint. Only fingerprints go into the history (it is in the repo);
+    profile.yaml is left out of it entirely (NO_HISTORY)."""
     canon = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:24]
 
@@ -103,7 +111,7 @@ def normalized(raw: bytes) -> str:
 
 def add_to_history(history: dict, name: str, raw: bytes) -> None:
     """Record one version of a default file (used by scripts/config_history.py). YAML: value
-    fingerprints only (profile.yaml is personal). Text files: their digests and full text (the
+    fingerprints only (profile.yaml not at all: NO_HISTORY). Text files: their digests and full text (the
     base for carrying the owner's edits into a new version; they hold no personal values)."""
     history.setdefault("version", 1)
     if name.endswith(".yaml"):
@@ -307,7 +315,7 @@ def _migrate(overrides: Path, defaults: Path, backup_root: Path) -> bool:
         if not (defaults / f.name).is_file():
             continue                                    # the owner's own file: kept as is
         if f.suffix == ".yaml":
-            known = history.get("yaml", {}).get(f.name, {})
+            known = {} if f.name in NO_HISTORY else history.get("yaml", {}).get(f.name, {})
             data = _load_yaml(f)
             if f.name == PERMISSIONS:
                 data = {k: v for k, v in data.items() if k in ("actions", "limits")}
@@ -323,11 +331,45 @@ def _migrate(overrides: Path, defaults: Path, backup_root: Path) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- the profile in use stays the owner's
+
+_MISSING = object()
+
+
+def _pin_profile(defaults: Path, overrides: Path, out: Path, backup_root: Path) -> bool:
+    """Once: the profile values Kairo ran with (the last effective config) that differ from this
+    release's defaults become the owner's. Returns True when something was written."""
+    if (overrides / PROFILE_PINNED).is_file():
+        return False
+    kept = False
+    in_use, release = out / PROFILE, defaults / PROFILE
+    if in_use.is_file() and release.is_file():
+        new_default = flatten(_load_yaml(release))
+        mine_file = overrides / PROFILE
+        mine = _load_yaml(mine_file)
+        for path, value in flatten(_load_yaml(in_use)).items():
+            if new_default.get(path, _MISSING) != value:
+                _set(mine, path, value)
+                kept = True
+        if kept:
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = Path(backup_root) / f"config-before-profile-pin-{stamp}"
+            backup.mkdir(parents=True, exist_ok=True)
+            if mine_file.is_file():
+                shutil.copyfile(mine_file, backup / PROFILE)
+            shutil.copyfile(in_use, backup / f"in-use-{PROFILE}")
+            header = f"# Your profile (kept from the version you ran on {stamp}; see README.txt).\n"
+            mine_file.write_text(header + yaml.safe_dump(mine, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    (overrides / PROFILE_PINNED).write_text(dt.datetime.now().isoformat(timespec="seconds") + "\n", encoding="utf-8")
+    return kept
+
+
 # ---------------------------------------------------------------- build
 
 def build(defaults: Path, overrides: Path, out: Path, *, backup_root: Path) -> dict:
     """Build `out` from the release defaults and the owner's overrides. Returns a report:
-    {"migrated": bool, "new_actions": [...], "ignored": [...], "merged": [{"file", "conflicts"}]}"""
+    {"migrated": bool, "new_actions": [...], "ignored": [...], "merged": [{"file", "conflicts"}],
+     "profile_kept": bool}"""
     defaults, overrides, out = Path(defaults), Path(overrides), Path(out)
     overrides.mkdir(parents=True, exist_ok=True)
     migrated = False
@@ -340,6 +382,7 @@ def build(defaults: Path, overrides: Path, out: Path, *, backup_root: Path) -> d
         (overrides / MARKER).write_text(dt.datetime.now().isoformat(timespec="seconds") + "\n", encoding="utf-8")
     if previous_actions is None and (out / PERMISSIONS).is_file():
         previous_actions = set((_load_yaml(out / PERMISSIONS).get("actions") or {}))
+    profile_kept = _pin_profile(defaults, overrides, out, backup_root)
 
     ignored: list[str] = []
     merged_files: list[dict] = []
@@ -375,4 +418,5 @@ def build(defaults: Path, overrides: Path, out: Path, *, backup_root: Path) -> d
 
     now_actions = set((_load_yaml(out / PERMISSIONS).get("actions") or {}))
     new_actions = sorted(now_actions - previous_actions) if previous_actions is not None else []
-    return {"migrated": migrated, "new_actions": new_actions, "ignored": ignored, "merged": merged_files}
+    return {"migrated": migrated, "new_actions": new_actions, "ignored": ignored, "merged": merged_files,
+            "profile_kept": profile_kept}

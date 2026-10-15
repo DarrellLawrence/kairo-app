@@ -209,7 +209,9 @@ $eff = Join-Path $Root 'data\config-effective'
 Check ((Get-Content -Raw (Join-Path $eff 'permissions.yaml')) -match 'calendar\.tag' -and (Get-Content -Raw (Join-Path $eff 'permissions.yaml')) -match 'gmail\.send_self') 'the running config has the actions the old copy lacked'
 Check ((Get-Content -Raw (Join-Path $eff 'profile.yaml')) -match 'ci owner context') "the owner's own edit is in the running config"
 $own = Get-Content -Raw (Join-Path $cfg 'profile.yaml')
-Check ($own -match 'ci owner context' -and $own -notmatch 'timezone') 'data\config\profile.yaml now holds only the owner''s change'
+# profile.yaml is personal (owner's decision 2026-10-15): every value of the old full copy stays the owner's
+Check ($own -match 'ci owner context' -and $own -match 'timezone') 'data\config\profile.yaml keeps every profile value of the old copy'
+Check (Test-Path (Join-Path $cfg '.profile-pinned-v1')) 'the one-time profile pin ran'
 Check (-not (Test-Path (Join-Path $cfg 'personality.md')) -and (Test-Path (Join-Path $cfg 'README.txt'))) 'unchanged defaults left data\config; a README explains it'
 Check (@(Get-ChildItem (Join-Path $Root 'data\backups') -Directory -Filter 'config-before-overrides-*').Count -eq 1) 'the full copies were backed up first'
 Check ((Get-Content -Raw (Join-Path $Root 'data\config-legacy\permissions.yaml')) -notmatch 'calendar\.tag') 'older versions keep their full copy (data\config-legacy)'

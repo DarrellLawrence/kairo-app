@@ -867,9 +867,9 @@ function PrefsBlock() {
       <Sheet open={!!edit} onClose={() => setEdit(null)} title={edit?.name ? edit.name : 'New place'}>
         {edit && (
           <>
-            <label className="k-field">Name<input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="Home, School, Boxing" /></label>
+            <label className="k-field">Name<input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} placeholder="Home, School, Gym" /></label>
             <label className="k-field">Kind<select value={edit.kind} onChange={(e) => setEdit({ ...edit, kind: e.target.value })}>{KINDS.map((k) => <option key={k}>{k}</option>)}</select></label>
-            <label className="k-field">Nearest station<input value={edit.station || ''} onChange={(e) => setEdit({ ...edit, station: e.target.value })} placeholder="e.g. Schooltown" /></label>
+            <label className="k-field">Nearest station<input value={edit.station || ''} onChange={(e) => setEdit({ ...edit, station: e.target.value })} placeholder="e.g. Bern" /></label>
             <label className="k-field">Address (private, stays on the PC)<input value={edit.address || ''} onChange={(e) => setEdit({ ...edit, address: e.target.value })} /></label>
             <label className="k-field">From (optional)<input type="date" value={edit.valid_from || ''} onChange={(e) => setEdit({ ...edit, valid_from: e.target.value })} /></label>
             <label className="k-field">Until (optional)<input type="date" value={edit.valid_until || ''} onChange={(e) => setEdit({ ...edit, valid_until: e.target.value })} /></label>
