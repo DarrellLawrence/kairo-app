@@ -280,7 +280,7 @@ def test_send_respects_the_kill_switch(client, env):
 
 def test_later_close_add_and_today(client):
     a = client.post("/api/loops", json={"kind": "promise", "who": "Lea", "what": "send her the ABU notes",
-                                        "due": (dt.date.today() + dt.timedelta(days=1)).isoformat()}).json()
+                                        "due": (dt.datetime.now(TZ).date() + dt.timedelta(days=1)).isoformat()}).json()   # the owner's tomorrow
     assert a["urgency"] == "normal" and a["can_send"] is False      # due tomorrow evening: not today
     assert client.post(f"/api/loops/{a['id']}/later", json={"when": "in_1h"}).json()["next_at"]
     assert client.get("/api/today").json()["loops"]["count"] == 1

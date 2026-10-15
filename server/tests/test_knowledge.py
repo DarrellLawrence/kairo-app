@@ -126,7 +126,7 @@ def test_not_enough_to_ask_waits(engine):
     assert not caller(engine, Pushes()).run(WED_EVENING)["called"]
     with Session(engine) as s:                                                     # but not forever: 3 days old
         for q in s.exec(select(KnowledgeItem)).all():
-            q.created_at = q.created_at - dt.timedelta(days=4)
+            q.created_at = (WED_EVENING - dt.timedelta(days=4)).astimezone(dt.timezone.utc)   # the test clock, not the real one
             s.add(q)
         s.commit()
     assert caller(engine, Pushes()).run(WED_EVENING)["called"]

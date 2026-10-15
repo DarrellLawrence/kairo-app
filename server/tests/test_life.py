@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import zoneinfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +14,11 @@ from app import life
 from app.db import make_engine
 from app.main import create_app
 from tests.test_internal_tools import setup  # noqa: F401  (fixture)
+
+
+def owner_today() -> dt.date:
+    """Today where the owner lives (config/profile.yaml), not on the test machine: they differ around midnight."""
+    return dt.datetime.now(zoneinfo.ZoneInfo("Europe/Zurich")).date()
 
 CAMT = b"""<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08"><BkToCstmrStmt><Stmt>
@@ -75,7 +81,7 @@ def test_shopping_chores_people(client):
     c = client.post("/api/chores", json={"title": "Bad putzen", "every_days": 7}).json()
     assert c["due"] is True
     assert client.post(f"/api/chores/{c['id']}/done").json()["due"] is False
-    tomorrow = (dt.date.today() + dt.timedelta(days=1)).replace(year=2000)
+    tomorrow = (owner_today() + dt.timedelta(days=1)).replace(year=2000)
     client.post("/api/people", json={"name": "Anna", "relation": "friend", "birthday": tomorrow.isoformat(), "contact_every_days": 14})
     p = client.get("/api/people").json()
     assert p["birthdays"] == [{"name": "Anna", "in_days": 1}] and p["reach_out"][0]["name"] == "Anna"
@@ -99,7 +105,7 @@ def test_brief_and_capture_use_life_data(migrated):
     app = create_app(migrated)
     with TestClient(app) as c:
         c.post("/api/chores", json={"title": "Müll raus", "every_days": 3})
-        c.post("/api/people", json={"name": "Ben", "birthday": dt.date.today().replace(year=2001).isoformat()})
+        c.post("/api/people", json={"name": "Ben", "birthday": owner_today().replace(year=2001).isoformat()})
         app.state.jobs._ask = lambda p, s, images=None: AskResult("not json")
         assert app.state.jobs.run_job("morning_brief", forced=True).status == "ok"
         b = c.get("/api/brief").json()["brief"]
