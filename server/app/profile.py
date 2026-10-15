@@ -22,6 +22,8 @@ class Profile(BaseModel):
     timezone: str
     context: str
     gmail: str | None = None
+    emails: list[str] = []    # the owner's other addresses (Google adds every Gmail "send as" address itself)
+    aliases: list[str] = []   # other names the owner goes by (app/identity.py)
     quiet_hours: QuietHours
     push_devices: list[str] = []
     places: list[dict] = []   # seeds Settings -> Places on first start

@@ -80,8 +80,8 @@ def test_promise_with_several_recipients_takes_the_one_the_model_named_only_if_i
     lid = add_loop(env["engine"], who_email="tom@example.com")
     assert preview(client, lid).json()["to"] == "tom@example.com"
     lid2 = add_loop(env["engine"], source_ref="s1:other", who_email="x@evil.example")
-    p = preview(client, lid2)
-    assert p.status_code == 400 and "doesn't know" in p.json()["detail"]
+    p = preview(client, lid2).json()                          # loops block L: the owner picks, never "send it yourself"
+    assert [x["email"] for x in p["pick"]] == ["lea@example.com", "tom@example.com", "boss@example.com"]
 
 
 def test_an_address_the_model_wrote_needs_the_owner_once(client, env):

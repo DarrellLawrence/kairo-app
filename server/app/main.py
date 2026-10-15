@@ -479,9 +479,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "knowledge_call": lambda ctx: json.dumps(app.state.knowledge.run()),
                 "evening_recap": lambda ctx: json.dumps(app.state.recap.run()),
                 "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id)})
-    app.state.loops = loops.LoopEngine(engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
-                                       calendar=lambda day: app.state.brief.calendar(day), pusher=pusher,
-                                       vault_dir=settings.vault_dir, config_dir=settings.config_dir)
+    from . import calendar_read, own_calendar
+
+    def _calendar_week(start: dt.date):
+        """Loops block L: 7 days of every calendar; a read that failed says so (never "empty")."""
+        with session_for(engine) as s_:
+            return calendar_read.read_days(google_read, profile.tz, start, days=7, session=s_)
+
+    from . import loop_check
+
+    def _own_hold(args: dict, reason: str):
+        return own_calendar.hold(engine, gate, lambda: app.state.executor, args, reason=reason)
+
+    def _tell(line: str) -> None:
+        pusher.notify("Kairo", line, "/#today", source="system")
+
+    app.state.loops = loops.LoopEngine(
+        engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read, calendar=_calendar_week,
+        pusher=pusher, vault_dir=settings.vault_dir, config_dir=settings.config_dir,
+        checker=loop_check.LoopChecker(profile=profile, google_read=google_read, calendar=_calendar_week, hold=_own_hold,
+                                       tell=_tell), hold=_own_hold, tell=_tell)
     from . import prefs as prefs_mod
 
     def _apply_prefs() -> None:
@@ -543,7 +560,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from . import recap as recap_mod
     app.state.recap = recap_mod.Recap(engine=engine, gate=gate, executor=lambda: app.state.executor, tz=profile.tz,
                                       calendar=lambda day: app.state.brief.calendar(day))
-    app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read)
+    app.state.promises = loops.PromiseFinder(profile=profile, schedule=app.state.jobs.schedule, google_read=google_read,
+                                             hold=_own_hold, tell=_tell)
     app.state.coach = coach_mod.Coacher(engine=engine, profile=profile, schedule=app.state.jobs.schedule,
                                         vault_dir=settings.vault_dir)
     app.state.maintenance_until = 0.0   # set while the auto-updater installs a new version
@@ -1632,7 +1650,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def loops_get(status: str = "open"):
         now = _loop_now()
         with session_for(engine) as s:
-            rows = loops.open_loops(s) if status == "open" else s.exec(
+            rows = loops.shown_loops(s, profile=profile) if status == "open" else s.exec(
                 select(OpenLoop).where(OpenLoop.status != "open").order_by(OpenLoop.closed_at.desc()).limit(50)).all()
             return [loops.as_dict(l, now, profile.tz) for l in rows]
 
@@ -1718,13 +1736,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             text_ = str(body.get("text") or d.get("text") or "").strip()
             if not text_:
                 raise HTTPException(400, "nothing to send yet")
+            picked = body.get("to") if isinstance(body.get("to"), list) else None   # chosen in the picker
             try:
                 p = loop_send_mod.plan(s, loop, google_read=google_read, text=text_, owner_email=profile.gmail,
-                                       subject=str(body.get("subject") or d.get("subject") or "") or None)
+                                       subject=str(body.get("subject") or d.get("subject") or "") or None,
+                                       chosen=[str(a) for a in picked] if picked is not None else None)
             except loop_send_mod.SendRefused as exc:
-                raise HTTPException(400, str(exc))
+                raise HTTPException(409 if picked is not None else 400, str(exc))
             except (GoogleNotConnected, GoogleError) as exc:
                 raise HTTPException(400, f"Gmail: {exc}")
+            if p.get("pick"):                  # several people on the mail: the owner picks (name + full address)
+                if body.get("preview"):
+                    return {"pick": p["pick"], "action": p["action"], "text": text_,
+                            "subject": str(body.get("subject") or d.get("subject") or loop.what or "")[:200]}
+                raise HTTPException(409, "Pick who gets it first.")
             # The open-cards limit stops the model piling up cards; this one is decided right away.
             ctx = dataclasses.replace(read_context(engine, "owner_chat"), open_approvals=0)
             decision = gate.decide(TOOL_PREFIX + "propose_action",
@@ -1732,10 +1757,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if decision.verdict != "approve":
                 raise HTTPException(400, decision.reason)
             if body.get("preview"):
-                return {"to": p["to"], "verified": p["verified"], "how": p["how"], "action": p["action"],
-                        "subject": p["args"].get("subject"), "text": text_, "tier": decision.tier,
+                return {"to": p["to"], "recipients": p["recipients"], "verified": p["verified"], "how": p["how"],
+                        "action": p["action"], "subject": p["args"].get("subject"), "text": text_, "tier": decision.tier,
                         "confirm_twice": decision.tier >= 4}
-            if str(body.get("to") or "").strip().lower() != p["to"]:
+            if picked is None and str(body.get("to") or "").strip().lower() != p["to"]:
                 raise HTTPException(409, "Check the address first: tap Send again to see it.")
             if not p["verified"]:
                 if str(body.get("confirm_address") or "").strip().lower() != p["to"]:
@@ -1751,7 +1776,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                              thread_id=None, reason=f"Open loop #{loop.id}: {loop.what}", actor="owner")
             except (approvals.ApprovalError, GoogleNotConnected, GoogleError) as exc:
                 raise HTTPException(400, str(exc))
-            audit(s, actor="owner", action="loop.send", outcome=f"loop #{loop.id} -> card #{card.id} to {p['to']}")
+            audit(s, actor="owner", action="loop.send", outcome=f"loop #{loop.id} -> card #{card.id} to {', '.join(p['recipients'])}")
             try:
                 card = approvals.approve(s, card.id, executor=app.state.executor, gate=gate, confirm=confirm)
             except approvals.ApprovalError as exc:

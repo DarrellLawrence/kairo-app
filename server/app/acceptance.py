@@ -113,6 +113,14 @@ SPECS = [
     Spec(35, "Document", "auto", "With the real Claude and Kairo's browser: a one-page document is written, rendered, checked "
                                  "and fixed (max 3 rounds), saved as a PDF in the vault and would go only to your own Gmail.",
          "#18"),
+    Spec(36, "Promise to attend", "auto", "A made-up sent mail where you promise to be at a meeting Thursday 17:30: it goes "
+                                          "in your calendar with a reminder (one line to you); no message, nobody gets anything.",
+         "L"),
+    Spec(37, "Never to you", "auto", "No open loop is addressed to you (every name and address of yours, from the PC and "
+                                     "Google); mail from your own address never becomes a loop; one addressed to you is never shown.",
+         "L"),
+    Spec(38, "Recipient picker", "auto", "Send on a promise with two people on the mail: you pick one or both (name + full "
+                                         "address), then the normal card; nobody who wasn't on the mail can be picked.", "L"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -971,11 +979,145 @@ async def t_document(ctx: Context) -> dict:
                     s.commit()
 
 
+# ---------------------------------------------------------------- 36-38 open loops done right (loops block L)
+
+class _JobCtx:
+    """A job's context for code that runs as a job (session + the model call)."""
+
+    def __init__(self, session, ask):
+        self.session, self._ask = session, ask
+
+    def ask(self, prompt, system, images=None, purpose=None):
+        return self._ask(prompt, system, purpose=purpose)
+
+
+def _next_thursday(now: dt.datetime) -> dt.datetime:
+    days = (3 - now.weekday()) % 7 or 7
+    if days < 2:
+        days += 7
+    return (now + dt.timedelta(days=days)).replace(hour=17, minute=30, second=0, microsecond=0)
+
+
+def _owner(ctx: Context):
+    from . import identity
+    with Session(ctx.engine) as s:
+        return identity.load(s, ctx.profile)
+
+
+async def t_promise_attend(ctx: Context) -> dict:
+    from . import loops
+    from .db import OpenLoop
+    me = _owner(ctx)
+    thu = _next_thursday(dt.datetime.now(ctx.tz))
+    mine = sorted(me.emails)[0] if me.emails else None
+    mid = f"{MARK}-attend-{int(time.time())}"
+    mail = {"message_id": mid, "to": "Lena Probst <lena.probst@example.com>, Jonas Keller <jonas.keller@example.com>",
+            "cc": mine, "subject": f"{MARK} project meeting", "date": dt.datetime.now(ctx.tz).strftime("%a, %d %b %Y %H:%M"),
+            "text": f"Hi both, yes: I'll be at the project meeting on {thu:%A} at 17:30. See you there! ({MARK})"}
+    people = {mid: [{"name": "Lena Probst", "email": "lena.probst@example.com"},
+                    {"name": "Jonas Keller", "email": "jonas.keller@example.com"}]}
+    holds, told = [], []
+    finder = loops.PromiseFinder(profile=ctx.profile, schedule=ctx.schedule, google_read=None,
+                                 hold=lambda args, reason: holds.append(args) or f"{MARK}-event", tell=told.append)
+
+    def work():
+        with Session(ctx.engine) as s:
+            counts = finder.handle(_JobCtx(s, ctx.ask), [mail], people, me, dt.datetime.now(ctx.tz))
+            rows = s.exec(select(OpenLoop).where(OpenLoop.mail_ref == mid)).all()
+            got = [(r.action, r.who, r.who_email, r.draft_json) for r in rows]
+            for r in rows:
+                s.delete(r)
+            s.commit()
+            return counts, got
+    counts, rows = await asyncio.to_thread(work)
+    ev = holds[0] if holds else {}
+    checks = {
+        "the promise was found": bool(rows),
+        "a calendar event, no message": bool(holds) and all(a == "calendar" and d is None for a, _, _, d in rows),
+        "on the right day and time": str(ev.get("start", "")).startswith(thu.strftime("%Y-%m-%dT17:30")),
+        "with a reminder, no guests": bool(ev.get("reminders")) and "attendees" not in ev,
+        "one line to you": len(told) == 1,
+        "never to you": all(not me.is_me(email=e, name=None if e else w) for _, w, e, _ in rows),
+    }
+    return _result(True, checks, f"{counts}; told: {told[:1]}")
+
+
+async def t_never_owner(ctx: Context) -> dict:
+    from . import loop_check, loops
+    from .db import OpenLoop, TriagedEmail
+    me = _owner(ctx)
+    checks: dict[str, bool] = {}
+    with Session(ctx.engine) as s:
+        bad = [l.id for l in loops.open_loops(s) if loop_check.addressed_to_owner(l, me)]
+        checks["no open loop is addressed to you"] = not bad
+        checks["Kairo knows your address"] = bool(me.emails)
+        mine = sorted(me.emails)[0] if me.emails else "owner@example.invalid"
+        mid = f"{MARK}-self-{int(time.time())}"
+        s.add(TriagedEmail(message_id=mid, thread_id=mid, sender=f"{ctx.profile.name} <{mine}>", subject=f"{MARK} note",
+                           summary="a note to self", category="reply", personal_reply=True,
+                           received_at=dt.datetime.now(dt.timezone.utc), triaged_at=dt.datetime.now(dt.timezone.utc)))
+        s.commit()
+        now = dt.datetime.now(ctx.tz)
+        loops.sync(s, now=now, tz=ctx.tz, times=loops.good_times(ctx.schedule), owner=me)
+        made = s.exec(select(OpenLoop).where(OpenLoop.source_ref == mid)).all()
+        checks["mail from your own address makes no loop"] = not made
+        probe = OpenLoop(kind="reply", source="email", source_ref=f"{mid}-probe", what=f"{MARK}", who=ctx.profile.name,
+                         who_email=mine, since=dt.datetime.now(dt.timezone.utc))
+        checks["one addressed to you is never shown"] = not loop_check.visible(probe, me)
+        for r in made:
+            s.delete(r)
+        m = s.get(TriagedEmail, mid)
+        if m is not None:
+            s.delete(m)
+        s.commit()
+    return _result(True, checks, f"open loops addressed to you: {bad}" if bad else "")
+
+
+async def t_picker(ctx: Context) -> dict:
+    from . import loop_send
+    from .db import OpenLoop
+    from .gate import TOOL_PREFIX
+    from .gate_context import read_context
+    people = [{"name": "Lena Probst", "email": "lena.probst@example.com"},
+              {"name": "Jonas Keller", "email": "jonas.keller@example.com"}]
+    checks: dict[str, bool] = {}
+    with Session(ctx.engine) as s:
+        before = s.exec(select(func.count()).select_from(Approval)).one()
+        loop = OpenLoop(kind="promise", source="promise", source_ref=f"p:{MARK}|picker {int(time.time())}",
+                        what=f"send the slides ({MARK})", who="Lena Probst / Jonas Keller", action="message",
+                        people_json=json.dumps(people), since=dt.datetime.now(dt.timezone.utc),
+                        draft_json=json.dumps({"text": f"Here are the slides. ({MARK})"}))
+        s.add(loop)
+        s.commit()
+        s.refresh(loop)
+        try:
+            p = loop_send.plan(s, loop, google_read=None, text="x", subject=None, owner_email=ctx.profile.gmail)
+            checks["both people offered, name + full address"] = p.get("pick") == people
+            both = loop_send.plan(s, loop, google_read=None, text="x", subject=None, owner_email=ctx.profile.gmail,
+                                  chosen=[x["email"] for x in people])
+            checks["both can be picked"] = both["args"]["to"] == [x["email"] for x in people]
+            d = ctx.gate.decide(TOOL_PREFIX + "propose_action", {"action": both["action"], "args": both["args"],
+                                                                 "reason": MARK}, read_context(ctx.engine, "owner_chat"))
+            checks["then the normal card (your approval)"] = d.verdict == "approve"
+            try:
+                loop_send.plan(s, loop, google_read=None, text="x", subject=None, owner_email=ctx.profile.gmail,
+                               chosen=["someone@else.example"])
+                checks["nobody else can be picked"] = False
+            except loop_send.SendRefused:
+                checks["nobody else can be picked"] = True
+        finally:
+            s.delete(s.get(OpenLoop, loop.id))
+            s.commit()
+        checks["nothing was sent or left open"] = s.exec(select(func.count()).select_from(Approval)).one() == before
+    return _result(True, checks)
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
     20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
     29: t_lag, 30: t_health, 31: t_graph, 33: t_knowledge_call, 34: t_recap, 35: t_document,
+    36: t_promise_attend, 37: t_never_owner, 38: t_picker,
 }
 
 

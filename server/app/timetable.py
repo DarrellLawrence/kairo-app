@@ -16,7 +16,7 @@ import re
 
 from sqlmodel import Session
 
-from .db import CalendarTag, SettingKV
+from .db import SettingKV
 from .jobkit import JOB_RULES, clip, extract_json
 
 log = logging.getLogger("kairo.timetable")
@@ -133,21 +133,8 @@ class Importer:
         return {"created": len(created), "until": until.isoformat()}
 
     def _hold(self, args: dict) -> str | None:
-        from .gate import TOOL_PREFIX
-        from .gate_context import read_context
-        d = self.gate.decide(TOOL_PREFIX + "propose_action", {"action": "calendar.create_hold", "args": args,
-                                                              "reason": "school timetable"}, read_context(self.engine, "job"))
-        if d.verdict != "execute":
-            log.warning("timetable event denied: %s", d.reason)
-            return None
-        ex = self._executor() if callable(self._executor) else self._executor
-        res = ex.run(d.action, d.args)
-        eid = res.get("event_id")
-        if eid:
-            with Session(self.engine) as s2:
-                s2.merge(CalendarTag(event_id=eid, type="FIXED"))
-                s2.commit()
-        return eid
+        from . import own_calendar
+        return own_calendar.hold(self.engine, self.gate, self._executor, args, reason="school timetable", tag="FIXED")
 
 
 def _update(row: SettingKV, value: dict) -> SettingKV:

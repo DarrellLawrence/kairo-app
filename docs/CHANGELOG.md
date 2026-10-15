@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-10-15 — build: open loops done right (owner's request)
+- Kairo knows who you are: every name and address of yours, from the PC's profile and from Google (the Gmail account and every "send as" address). No loop, draft or card is ever addressed to you. Mail you sent yourself (Kairo's recap, files) is never read for promises, and mail from your own address never becomes a loop.
+- A promise is always to the other people on the mail. Kairo keeps that mail and the people on it, so Send knows who they are.
+- The right action per loop:
+  - a promise to be somewhere at a time goes in your calendar with a reminder, and you get one line;
+  - a promise to send or do something gets a ready message;
+  - a mail gets a draft only when a reply is expected;
+  - everything else is a reminder.
+- Calendar truth: Kairo reads 7 days of every calendar you show, not just today and tomorrow on the main one. A read that fails says so, and nothing then says you're free or busy (the morning brief too). Once a day Kairo checks that school is in your calendar as weekly fixed blocks, and puts back any that went missing.
+- Send with several people on the mail: you pick one or more (name and full address), then the normal approval. No more "send it yourself".
+- Urgent only when something bad happens if you don't act today: due today, overdue, or due tomorrow before 10:00. Waiting long makes Kairo more direct, not urgent.
+- A sanity check before anything is shown: Sonnet checks each loop for the right person, the right action, true facts, not a duplicate and worth your attention, then fixes it or drops it.
+  - What was dropped, and why, is listed in Run diagnosis (G.2a).
+  - On the first run it checks all your open loops and tells you how many were fixed and dropped.
+  - Loops you add yourself need no check.
+- Acceptance tests 36 (promise to attend → calendar event, no message), 37 (never addressed to you) and 38 (recipient picker).
+- Removed: Kairo's "send it yourself and tap Done" answer, the 2-day primary-calendar read in drafts and the brief, the "waiting 3 days = urgent" rule, the timetable's own calendar-hold code (one shared helper now), and the broken lookup that took "p" as a message id.
+
 ## 2026-10-15 — build: fast voice (owner's priority #1)
 - One Claude for the whole conversation: started when the PC starts, the app opens or a call starts, and kept until 2 hours after the last word (12 hours at most). Chat, calls and spoken messages are turns on it. No start-up per message any more.
 - Models: chat, calls and voice notes run on Haiku. Drafting in your voice, judgment calls and planning go to Sonnet (by the words you use), and Haiku hands a turn to Sonnet itself when it needs to (on a call you hear "One moment."). Money stays on Opus. More → System → Voice speed shows the model of every turn.

@@ -40,6 +40,16 @@ def seed(settings) -> None:
             Approval(tool="gmail.send", args_json="{}", summary="x", tier=2, status="open"),
             OpenLoop(kind="reply", source="email", source_ref="m1", who="Alex", who_email="alex@example.com",
                      what="Answer Alex about Friday"),
+            OpenLoop(kind="promise", source="promise", source_ref="p:x|y", who="Owner", what="attend the meeting",
+                     status="stale", closed_at=now, close_reason="check: addressed to you",
+                     check_json=json.dumps({"verdict": "drop", "why": "owner", "reason": "addressed to you"})),
+            OpenLoop(kind="waiting", source="email", source_ref="m2", who="Bo", what="the offer", checked_at=now,
+                     check_json=json.dumps({"verdict": "fix", "why": "urgency", "reason": "not today", "fixed": ["urgency"]})),
+            SettingKV(key="calendar.last_read", value=json.dumps({"ok": False, "error": "Google API error 500: Backend Error",
+                                                                   "calendars": 0, "events": 0, "days": 7, "at": now.isoformat()})),
+            SettingKV(key="timetable.check", value=json.dumps({"state": "events missing", "present": 1,
+                                                                "missing": ["FR 08:00–12:00"], "until": "2027-01-31",
+                                                                "at": now.isoformat()})),
             JobRun(job="morning_brief", started_at=now - dt.timedelta(minutes=5), finished_at=now, status="ok"),
             JobRun(job="email_triage", started_at=now - dt.timedelta(minutes=1), finished_at=now, status="error",
                    error=f"refresh failed: token={GOOGLE_REFRESH}"),
@@ -90,7 +100,8 @@ def report(settings) -> str:
 def test_every_query_runs_on_the_real_schema(migrated):
     seed(migrated)
     text = report(migrated)
-    for section in ("G.1", "G.2", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "G.5d", "G.5e", "Health watch", "Last self-test", "G.6", "Logs"):
+    for section in ("G.1", "G.2", "G.2a", "G.2b", "G.3", "G.4", "G.5 ", "G.5a", "G.5b", "G.5c", "G.5d", "G.5e", "Health watch",
+                    "Last self-test", "G.6", "Logs"):
         assert f"== {section}" in text, section
     assert "ERROR" not in text and "no such" not in text, text
     assert "  done | 1 | 1" in text and "  open | 1 | 0" in text          # approvals, from loop Send
@@ -100,6 +111,10 @@ def test_every_query_runs_on_the_real_schema(migrated):
     assert "briefs ok: 1" in text and "ok=True" in text
     assert "2026.10.15.1 | call | haiku | 2 | 1 | total_ms | 2400 | 2400" in text
     assert "not played: call: blocked (NotAllowedError) x1" in text
+    assert "drop | owner | 1" in text and "fix | urgency | 1" in text                 # loops block L: the sanity check
+    assert "promise | Owner | addressed to you" in text
+    assert "last calendar read: FAILED" in text and "Backend Error" in text
+    assert "timetable: events missing" in text and "FR 08:00–12:00" in text
 
 
 def test_it_never_writes(migrated):

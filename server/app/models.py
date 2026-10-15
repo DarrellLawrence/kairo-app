@@ -29,13 +29,14 @@ DEFAULTS = {
     "voice_check": "sonnet", "acceptance": "sonnet", "coach": "sonnet",
     "learn_call": "haiku",               # fix plan 29: a getting-to-know-you call answers fast
     "proactive": "sonnet", "judgment": "sonnet", "judgment_high": "opus",
+    "loop_check": "sonnet",              # loops block L: the sanity check before a loop is shown
     "money": "opus", "money_review": "opus",
     "plan": "opus", "review_big": "opus",
 }
 JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
                "open_loops": "draft", "promises": "promises", "pa": "judgment", "coach": "coach", "document": "document"}
 NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review", "coach", "plan", "review_big",
-               "chat_heavy"}
+               "chat_heavy", "loop_check"}
 OPUS_ONLY = {"judgment_high", "money", "money_review"}
 RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 

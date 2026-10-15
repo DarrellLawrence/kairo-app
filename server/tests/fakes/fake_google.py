@@ -37,6 +37,9 @@ class FakeGoogle:
         self.trashed: set[str] = set()
         self.deleted_events: list[tuple[str, str | None]] = []
         self.revoked = False
+        self.send_as: list[dict] = [{"sendAsEmail": owner, "displayName": "", "isPrimary": True}]
+        self.calendars: dict[str, dict] = {}          # other calendars: id -> {"summary", "events": {id: event}}
+        self.calendar_down = False                    # every calendar read fails (500)
         self.grant_scope = " ".join([
             "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/calendar.readonly",
             "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.compose",
@@ -59,9 +62,29 @@ class FakeGoogle:
                               "internalDate": "1760252400000",   # 2026-10-12
                               "payload": {"mimeType": "text/plain", "headers": headers, "body": {"data": b64(body)}}}
 
-    def add_event(self, eid: str, *, summary: str, start: str, attendees: list[dict] | None = None, organizer: str | None = None):
-        self.events[eid] = {"id": eid, "summary": summary, "start": {"dateTime": start}, "end": {"dateTime": start},
-                            "attendees": attendees or [], "organizer": {"email": organizer or self.owner}}
+    def add_event(self, eid: str, *, summary: str, start: str, attendees: list[dict] | None = None, organizer: str | None = None,
+                  end: str | None = None, calendar: str = "primary"):
+        ev = {"id": eid, "summary": summary, "start": {"dateTime": start}, "end": {"dateTime": end or start},
+              "attendees": attendees or [], "organizer": {"email": organizer or self.owner}}
+        if calendar == "primary":
+            self.events[eid] = ev
+        else:
+            self.calendars.setdefault(calendar, {"summary": calendar, "events": {}})["events"][eid] = ev
+
+    @staticmethod
+    def _window(events, params: dict) -> list[dict]:
+        """Like Google with timeMin/timeMax: only events that overlap the window (all of them without one)."""
+        import datetime as _dt
+        lo, hi = params.get("timeMin"), params.get("timeMax")
+        out = []
+        for ev in events:
+            start = _start_of(ev)
+            if lo and hi and start and "T" in start:
+                st = _dt.datetime.fromisoformat(start)
+                if not (_dt.datetime.fromisoformat(lo) <= st < _dt.datetime.fromisoformat(hi)):
+                    continue
+            out.append(ev)
+        return out
 
     # ---- transport
 
@@ -96,6 +119,8 @@ class FakeGoogle:
         g = "/gmail/v1/users/me"
         if path == f"{g}/profile":
             return httpx.Response(200, json={"emailAddress": self.owner})
+        if path == f"{g}/settings/sendAs":
+            return httpx.Response(200, json={"sendAs": self.send_as})
         if path == f"{g}/messages" and m == "GET":
             ids = [{"id": k, "threadId": v["threadId"]} for k, v in self.messages.items() if k not in self.trashed]
             return httpx.Response(200, json={"messages": ids[: int(params.get("maxResults", 10))]})
@@ -138,9 +163,21 @@ class FakeGoogle:
             self.drafts.append(body)
             return httpx.Response(200, json={"id": f"d{len(self.drafts)}"})
 
+        if path.startswith("/calendar/") and m == "GET" and self.calendar_down:
+            return httpx.Response(500, json={"error": {"message": "Backend Error"}})
+        if path == "/calendar/v3/users/me/calendarList" and m == "GET":
+            items = [{"id": "primary", "summary": self.owner, "primary": True, "selected": True}]
+            items += [{"id": k, "summary": v["summary"], "selected": True} for k, v in self.calendars.items()]
+            return httpx.Response(200, json={"items": items})
         c = "/calendar/v3/calendars/primary/events"
         if path == c and m == "GET":
-            return httpx.Response(200, json={"items": list(self.events.values())})
+            return httpx.Response(200, json={"items": self._window(self.events.values(), params)})
+        if path.startswith("/calendar/v3/calendars/") and path.endswith("/events") and m == "GET":
+            from urllib.parse import unquote
+            cal = self.calendars.get(unquote(path[len("/calendar/v3/calendars/"):-len("/events")]))
+            if cal is None:
+                return httpx.Response(404, json={"error": {"message": "Not Found"}})
+            return httpx.Response(200, json={"items": self._window(cal["events"].values(), params)})
         if path == c and m == "POST":
             eid = f"ev{self._next}"
             self._next += 1
@@ -162,6 +199,11 @@ class FakeGoogle:
                 del self.events[eid]
                 return httpx.Response(204)
         return httpx.Response(404, json={"error": {"message": f"fake: no route {m} {path}"}})
+
+
+def _start_of(ev: dict) -> str:
+    st = ev.get("start") or {}
+    return st.get("dateTime") or st.get("date") or ""
 
 
 def connect(secrets_dir, fake: FakeGoogle | None = None) -> None:

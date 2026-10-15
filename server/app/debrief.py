@@ -88,7 +88,8 @@ def _local_date(iso: str, tz) -> dt.date:
     return dt.datetime.fromisoformat(iso).astimezone(tz).date()
 
 
-def gather(s: Session, *, now: dt.datetime, tz, google_read, scope: str = "auto", topic: str | None = None) -> dict:
+def gather(s: Session, *, now: dt.datetime, tz, google_read, scope: str = "auto", topic: str | None = None,
+           profile=None) -> dict:
     today = now.date()
     if scope == "everything":
         mode = "everything"
@@ -126,7 +127,7 @@ def gather(s: Session, *, now: dt.datetime, tz, google_read, scope: str = "auto"
                      for t in open_tasks if t.due and t.due.replace(tzinfo=t.due.tzinfo or dt.timezone.utc) <= task_end][:10]
     data["mail_to_answer"] = [{"from": m.sender, "subject": m.subject, "summary": m.summary} for m in triage.needs_reply(s, limit=5)]
     from . import loops
-    data["open_loops"] = [loops.phrase(l, now, tz) for l in loops.open_loops(s)[:3]]
+    data["open_loops"] = [loops.phrase(l, now, tz) for l in loops.shown_loops(s, profile=profile)[:3]]
     if horizon or mode == "everything":
         days = 90 if mode == "everything" else horizon
         until = today + dt.timedelta(days=days)

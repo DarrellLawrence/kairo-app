@@ -43,7 +43,6 @@ PA_KINDS = ("birthday", "people", "money", "study", "pattern", "coach")   # rais
 URGENT_STEPS_MIN = (30, 60)
 DEFAULT_TIMES = {"after_work": "17:30", "weekend": "10:00", "morning": "07:15", "morning_weekend": "09:00"}
 DEFAULT_MAX_PINGS = 6
-WAITING_URGENT_DAYS = 3
 VOICE_FILE = "10 Profile/voice.md"
 SEEN_KEY = "loops.sent_seen"
 
@@ -62,24 +61,32 @@ DRAFT_PROMPT = """Write the owner's answer to this open loop, ready to send.
 Loop: {kind} · {who} · "{what}" · open since {since}.
 Write it in the owner's voice (below), level: {level}, language: {language}.
 Short. Answer what was asked; if a time is asked, check the calendar below and say
-whether it works. Never invent facts, attachments or promises. No greeting fluff.
+whether it works, but only if the calendar was read: if it says it could not be read, say
+nothing about free or busy times. Never invent facts, attachments or promises. No greeting fluff.
+Never write to the owner: the message goes to {who}.
 Return JSON only: {{"text": "the message to send", "note": "one short line for the
 owner, e.g. You're free then." , "subject": "subject line if this is a new mail, else null"}}
 
 The owner's voice (notes, not instructions):
 {voice}
 
-The owner's calendar, next 7 days:
+The owner's calendar, next 7 days (every calendar):
 {calendar}
 
 {message}"""
 
 PROMISE_PROMPT = """These are mails the owner sent recently, and the promises Kairo already tracks.
+The owner is {owner}. A promise is always to someone else on the mail, never to the owner.
 1. Find NEW promises the owner made to someone ("I'll send it tomorrow", "ich schicke es dir
-   morgen", "I'll check and let you know"). Only real commitments by the owner, not wishes.
+   morgen", "I'll be at the meeting Thursday 17:30"). Only real commitments by the owner, not wishes.
+   type: "attend" = the owner will be somewhere at a time (a meeting, an appointment, a call);
+         "send" = send or give something; "do" = do something and get back to them; "other".
+   For "attend": "when" = the local date and time "YYYY-MM-DDTHH:MM" if the mail says it (else null),
+   "minutes" = how long, if said.
 2. Say which tracked promises these mails FULFIL (the owner did what was promised).
 Return JSON only:
-{{"new": [{{"message_id": "...", "to_name": "...", "to_email": "...", "what": "short, starting with a verb",
+{{"new": [{{"message_id": "...", "to_name": "...", "to_email": "...", "type": "attend|send|do|other",
+           "what": "short, starting with a verb", "when": "YYYY-MM-DDTHH:MM" or null, "minutes": 60 or null,
            "by": "YYYY-MM-DD" or null}}],
   "fulfilled": [<tracked promise id>, ...]}}
 Today is {today}.
@@ -88,6 +95,27 @@ Tracked promises:
 {tracked}
 
 {mails}"""
+
+# What a PA does with each kind of loop (owner's request 2026-10-15): only a reply that is expected gets a
+# draft; a promise to be somewhere goes in the calendar; the rest is a reminder.
+PROMISE_ACTIONS = {"attend": "calendar", "send": "message", "do": "message", "other": "remind"}
+ACTIONS = ("reply", "message", "calendar", "remind", "none")
+DRAFTED = ("reply", "message")
+ATTEND_WORDS = re.compile(r"^(attend|be at|go to|join|come to|show up at|turn up at|be there for)\s+(the\s+)?", re.I)
+REMINDER_MIN = 60   # the calendar reminder before something the owner promised to attend
+
+
+def action_of(loop: OpenLoop) -> str:
+    """The action for a loop (older loops have none stored)."""
+    if loop.action in ACTIONS:
+        return loop.action
+    if loop.kind in ("reply", "waiting"):
+        return "reply"
+    if loop.kind == "promise":
+        return "message"
+    if loop.kind in PA_KINDS:                 # a birthday wish the PA engine wrote is a message; ideas are not
+        return "message" if (draft_of(loop) or {}).get("text") else "none"
+    return "remind"
 
 
 # ---------------------------------------------------------------- time helpers
@@ -133,19 +161,24 @@ def schedule_after(urgency: str, step: int, now: dt.datetime, tz, times: dict) -
     return next_good_time(now, tz, times, days=1)
 
 
+ACT_TODAY_BEFORE = dt.time(10, 0)   # due tomorrow before this: it has to be done today
+
+
 def urgency_of(loop: OpenLoop, now: dt.datetime, tz) -> str:
+    """Urgent only when something bad happens if the owner doesn't act today (owner's rule 2026-10-15):
+    due today or overdue, or due tomorrow before 10:00. Waiting long makes Kairo more direct, not urgent."""
     due = aware(loop.due)
     if due is not None:
-        days = (due.astimezone(tz).date() - now.astimezone(tz).date()).days
-        if days <= 1:
+        local, today = due.astimezone(tz), now.astimezone(tz).date()
+        days = (local.date() - today).days
+        if days <= 0 or (days == 1 and local.time() < ACT_TODAY_BEFORE):
             return "urgent"
         if days <= 7:
             return "normal"
         if days > 14 and loop.kind in PA_KINDS:
             return "low"                        # e.g. planning a big birthday two months ahead
     if loop.kind in ("reply", "waiting", "promise"):
-        waited = now - aware(loop.since)
-        return "urgent" if waited > dt.timedelta(days=WAITING_URGENT_DAYS) else "normal"
+        return "normal"
     if loop.kind in ("pattern", "money") and due is None:
         return "normal"
     return "low" if loop.kind in ("task", "people") and due is None else "normal"
@@ -207,7 +240,7 @@ def draft_of(loop: OpenLoop) -> dict | None:
 
 def offer(loop: OpenLoop) -> str | None:
     d = draft_of(loop)
-    if not d or not d.get("text"):
+    if not d or not d.get("text") or action_of(loop) not in DRAFTED:
         return None
     first = d["text"].strip().splitlines()[0]
     return f"Reply ‘{clip(first, 70)}’?" if loop.kind in ("reply", "waiting") else f"Send ‘{clip(first, 70)}’?"
@@ -221,9 +254,31 @@ def as_dict(loop: OpenLoop, now: dt.datetime, tz) -> dict:
             "waiting_days": (now.astimezone(tz).date() - since.astimezone(tz).date()).days,
             "urgency": loop.urgency, "status": loop.status, "raised": loop.raised,
             "next_at": aware(loop.next_at).isoformat() if loop.next_at else None,
-            "phrase": phrase(loop, now, tz), "offer": offer(loop), "draft": d,
-            "can_send": bool(d and d.get("text") and (loop.kind in ("reply", "waiting") and loop.source == "email"
-                                                       or loop.who_email))}
+            "phrase": phrase(loop, now, tz), "offer": offer(loop), "draft": d, "action": action_of(loop),
+            "people": people_of(loop),
+            "can_send": bool(d and d.get("text") and action_of(loop) in DRAFTED
+                             and (loop.kind in ("reply", "waiting") and loop.source == "email" or loop.who_email
+                                  or people_of(loop)))}
+
+
+def people_of(loop: OpenLoop) -> list[dict]:
+    """The other people on the mail a loop came from (never the owner)."""
+    try:
+        p = json.loads(loop.people_json) if loop.people_json else []
+    except ValueError:
+        return []
+    return [x for x in p if isinstance(x, dict) and x.get("email")]
+
+
+def shown_loops(s: Session, owner=None, profile=None) -> list[OpenLoop]:
+    """What the owner sees (Today, the list, pings, the brief, what the model lists): open loops the
+    sanity check passed (loop_check.py), never one addressed to the owner. Unchecked or changed since:
+    hidden until checked, except what can't wait (urgent) when the check itself failed.
+    owner: identity.Owner, or from `profile` (what Google said last time; no call)."""
+    from . import identity, loop_check
+    if owner is None and profile is not None:
+        owner = identity.load(s, profile)
+    return [l for l in open_loops(s) if loop_check.visible(l, owner)]
 
 
 def open_loops(s: Session) -> list[OpenLoop]:
@@ -257,7 +312,8 @@ def _first_due(loop: OpenLoop, now: dt.datetime, tz, times: dict) -> dt.datetime
 
 def upsert(s: Session, *, kind: str, source: str, ref: str | None, what: str, now: dt.datetime, tz, times: dict,
            who: str | None = None, who_email: str | None = None, since: dt.datetime | None = None,
-           due: dt.datetime | None = None) -> tuple[OpenLoop, bool]:
+           due: dt.datetime | None = None, mail_ref: str | None = None, people: list[dict] | None = None,
+           action: str | None = None) -> tuple[OpenLoop, bool]:
     loop = s.exec(select(OpenLoop).where(OpenLoop.source == source).where(OpenLoop.source_ref == ref)).first() if ref else None
     created = loop is None
     if created:
@@ -265,6 +321,12 @@ def upsert(s: Session, *, kind: str, source: str, ref: str | None, what: str, no
     if loop.status != "open":
         return loop, False                       # done / dropped stays closed
     loop.what, loop.who, loop.who_email, loop.due = clip(what, 300), who, who_email, due
+    if mail_ref:
+        loop.mail_ref = mail_ref
+    if people is not None:
+        loop.people_json = json.dumps(people, ensure_ascii=False)
+    if action:
+        loop.action = action
     old = loop.urgency
     loop.urgency = urgency_of(loop, now, tz)
     if created:
@@ -286,9 +348,11 @@ def promise_ref(who: str | None, what: str) -> str:
 
 def add(s: Session, *, kind: str, what: str, who: str | None, due: dt.date | None, now: dt.datetime, tz, times: dict) -> OpenLoop:
     due_at = dt.datetime.combine(due, dt.time(18), tzinfo=tz) if due else None
+    from . import loop_check
     if kind == "promise":                                  # told in chat and found in sent mail: still one loop
         loop, _ = upsert(s, kind="promise", source="promise", ref=promise_ref(who, what), what=what, who=who, due=due_at,
                          since=now, now=now, tz=tz, times=times)
+        loop_check.passed(s, loop)                         # the owner said it: no check needed
         return loop
     loop = OpenLoop(kind=kind, source="chat", source_ref=f"chat:{now.timestamp():.6f}", what=clip(what, 300), who=who,
                     since=now, due=due_at)
@@ -394,8 +458,8 @@ def learn_sender(s: Session, address: str, reason: str) -> None:
 
 
 def _close(loop: OpenLoop, reason: str, now: dt.datetime) -> None:
-    loop.status = {"done": "done", "sent": "done", "answered": "done", "dropped": "dropped",
-                   "not_for_me": "dropped"}.get(reason, "stale")   # automated -> stale
+    loop.status = {"done": "done", "sent": "done", "answered": "done", "calendar": "done", "dropped": "dropped",
+                   "not_for_me": "dropped"}.get(reason, "stale")   # automated, owner, check: ... -> stale
     loop.close_reason = reason
     loop.closed_at = now
     loop.next_at = None
@@ -476,15 +540,19 @@ def automated_headers(headers: dict[str, str]) -> bool:
     return (headers.get("auto-submitted") or "no").lower() != "no"
 
 
-def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None) -> dict:
+def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=None) -> dict:
     """Bring the table in line with mail triage, tasks and school dates.
-    `answered(thread_id, since) -> bool | None`: has the owner already replied in Gmail?"""
+    `answered(thread_id, since) -> bool | None`: has the owner already replied in Gmail?
+    `owner` (identity.Owner): mail from the owner is never a reply loop (loops block L). A loop that
+    is addressed to the owner anyway is never shown (shown_loops) and the check fixes or drops it."""
     counts = {"new": 0, "closed": 0}
     since_cut = utcnow() - dt.timedelta(days=30)
     for m in s.exec(select(TriagedEmail).where(TriagedEmail.category == "reply")
                     .where(TriagedEmail.triaged_at >= since_cut)).all():
         if m.suspicious or m.personal_reply is not True:   # only real people waiting on the owner (reply check)
             continue
+        if owner is not None and owner.is_me(email=_email(m.sender)):
+            continue                                         # the owner's own mail (another address, a note to self)
         due = dt.datetime.combine(m.deadline, dt.time(18), tzinfo=tz) if m.deadline else None
         if m.done:
             existing = s.exec(select(OpenLoop).where(OpenLoop.source == "email").where(OpenLoop.source_ref == m.message_id)).first()
@@ -611,7 +679,12 @@ def level_for(s: Session, who: str | None, email: str | None) -> str:
 class LoopEngine:
     """Job body 'open_loops' (every 15 minutes in the day): sync, then raise the most urgent one."""
 
-    def __init__(self, *, engine, profile, schedule, google_read, calendar, pusher, vault_dir, config_dir):
+    def __init__(self, *, engine, profile, schedule, google_read, calendar, pusher, vault_dir, config_dir, checker=None,
+                 hold=None, tell=None):
+        """calendar(start: date) -> calendar_read.CalendarRead for the 7 days from start.
+        checker: loop_check.LoopChecker, run before anything is raised (loops block L).
+        hold/tell: the owner's own calendar and one line to the owner (the daily timetable check)."""
+        self.checker, self.hold, self.tell = checker, hold, tell
         self.engine, self.profile, self.schedule = engine, profile, schedule or {}
         self.google_read, self.calendar, self.pusher = google_read, calendar, pusher
         self.vault_dir, self.config_dir = vault_dir, config_dir
@@ -640,9 +713,18 @@ class LoopEngine:
         tz = self.profile.tz
         now = (now or dt.datetime.now(tz)).astimezone(tz)
         s = ctx.session
+        from . import identity
+        owner = identity.load(s, self.profile, google_read=self.google_read)
         self.check_replies(ctx)
-        counts = sync(s, now=now, tz=tz, times=self.times, answered=self.answered)
-        due = [l for l in open_loops(s) if l.next_at is None or aware(l.next_at) <= now]
+        counts = sync(s, now=now, tz=tz, times=self.times, answered=self.answered, owner=owner)
+        if self.checker is not None:
+            counts["check"] = self.checker.run(ctx, now)
+        try:                                   # once a day: school is in the calendar as weekly FIXED blocks
+            from . import calendar_read
+            calendar_read.timetable_daily(s, self.google_read, tz, now=now, hold=self.hold, tell=self.tell)
+        except Exception as exc:   # never stops the loops
+            log.info("timetable check: %s", exc)
+        due = [l for l in shown_loops(s, owner) if l.next_at is None or aware(l.next_at) <= now]
         if not due:
             return json.dumps({**counts, "raised": None})
         from .push import in_quiet_hours
@@ -662,7 +744,7 @@ class LoopEngine:
             s.add(pick)
             s.commit()
             return json.dumps({**counts, "raised": None, "why": "automated mail"})
-        if pick.kind in ("reply", "waiting", "promise") and draft_of(pick) is None:
+        if action_of(pick) in DRAFTED and draft_of(pick) is None:   # only a reply that is expected gets a draft
             try:
                 self.draft(ctx, pick)
             except Exception as exc:   # no model right now: raise it anyway, without a ready answer
@@ -749,10 +831,10 @@ class LoopEngine:
 
     def _busy(self, now: dt.datetime) -> bool:
         try:
-            events, _ = self.calendar(now.date())
+            read = self.calendar(now.date())
         except Exception:
             return False
-        for e in events:
+        for e in (read.events if read.ok else []):
             if e.get("all_day") or not e.get("start") or not e.get("end"):
                 continue
             try:
@@ -781,8 +863,7 @@ class LoopEngine:
                 language = language_of(body) or language
             except Exception:
                 pass
-        events, _ = self.calendar(dt.datetime.now(self.profile.tz).date())
-        cal = "\n".join(f"- {e['start']}–{e.get('end') or ''} {e['summary']}" for e in events[:30]) or "(nothing)"
+        cal = self.calendar(dt.datetime.now(self.profile.tz).date()).text(self.profile.tz)   # calendar_read: never "(nothing)"
         prompt = DRAFT_PROMPT.format(kind=loop.kind, who=loop.who or "?", what=loop.what,
                                      since=aware(loop.since).date().isoformat(), level=level_for(s, loop.who, loop.who_email),
                                      language=language, voice=voice_text(self.vault_dir, self.config_dir, self.profile) or "(none)",
@@ -811,28 +892,75 @@ def _real_recipient(claimed: str, real: list[str]) -> str | None:
     return claimed if claimed in real else (real[0] if len(real) == 1 else None)
 
 
-class PromiseFinder:
-    """Job body 'promises' (hourly): the owner's sent mail -> new promise loops, fulfilled ones closed."""
+def put_in_calendar(s: Session, loop: OpenLoop, when: dt.datetime, minutes: int, *, hold, tell, now: dt.datetime,
+                    note: str = "") -> int:
+    """A promise to be somewhere: the event in the owner's own calendar with a reminder, one line to the
+    owner, and the loop is handled (1). No calendar (gate, Google): it stays a reminder for that time (0)."""
+    minutes = max(15, min(minutes or 60, 600))
+    title = _event_title(loop.what)
+    args = {"summary": title, "start": when.isoformat(), "end": (when + dt.timedelta(minutes=minutes)).isoformat(),
+            "description": clip(f"You told {loop.who or 'them'} you'd be there. {note}".strip(), 300),
+            "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": REMINDER_MIN}]}}
+    eid = hold(args, f"promise to attend (loop #{loop.id})") if hold else None
+    if not eid:
+        loop.action, loop.due = "remind", when
+        s.add(loop)
+        s.commit()
+        return 0
+    loop.action, loop.draft_json = "calendar", None
+    _close(loop, "calendar", now)
+    s.add(loop)
+    s.commit()
+    if tell:
+        tell(f"In your calendar: {title}, {when:%a %d %b %H:%M} (you told {loop.who or 'them'} you'd be there).")
+    return 1
 
-    def __init__(self, *, profile, schedule, google_read):
+
+def _event_title(what: str) -> str:
+    t = ATTEND_WORDS.sub("", (what or "").strip()) or what or "Meeting"
+    return clip(t[:1].upper() + t[1:], 80)
+
+
+class PromiseFinder:
+    """Job body 'promises' (hourly): the owner's sent mail -> new promise loops, fulfilled ones closed.
+    Loops block L: never a promise to the owner (mail to yourself isn't read at all); each promise
+    gets the action a PA would take: a promise to be somewhere at a time goes in the calendar with a
+    reminder (tier 2, one line to the owner), a promise to send or do something gets a ready message,
+    the rest a reminder. The mail and the other people on it are kept (Send can offer them)."""
+
+    def __init__(self, *, profile, schedule, google_read, hold=None, tell=None, owner=None):
         self.profile, self.schedule, self.google_read = profile, schedule or {}, google_read
+        self.hold = hold          # (args, reason) -> event id | None: own_calendar.hold
+        self.tell = tell          # (one line) -> None
+        self.owner = owner        # (session) -> identity.Owner; default: identity.load
+
+    def _owner(self, s):
+        from . import identity
+        return self.owner(s) if self.owner else identity.load(s, self.profile, google_read=self.google_read)
 
     def run(self, ctx: JobContext, now: dt.datetime | None = None) -> str:
         from .db import SettingKV
+        from .identity import people_in
         tz = self.profile.tz
         now = (now or dt.datetime.now(tz)).astimezone(tz)
         s = ctx.session
+        me = self._owner(s)
         row = s.get(SettingKV, SEEN_KEY) or SettingKV(key=SEEN_KEY, value="[]")
         seen = set(json.loads(row.value or "[]"))
         g = self.google_read()
+        mails, people, to_self = [], {}, set()
         try:
             listing = g.get("/gmail/v1/users/me/messages", q="in:sent newer_than:2d", maxResults=15)
-            mails = []
             for m in listing.get("messages", []) or []:
                 if m["id"] in seen:
                     continue
                 full = g.get(f"/gmail/v1/users/me/messages/{m['id']}", format="full")
                 h = _headers(full)
+                others = me.others(people_in(h.get("to"), h.get("cc")))
+                if not others:                       # mail to yourself (Kairo's recap, files): nobody to promise
+                    to_self.add(full["id"])
+                    continue
+                people[full["id"]] = others
                 body = _body_text(full.get("payload") or {})
                 body = re.split(r"\n(?:On .{5,80} wrote:|Am .{5,80} schrieb.*:|>)", body)[0]   # drop the quoted mail
                 mails.append({"message_id": full["id"], "to": h.get("to"), "cc": h.get("cc"), "subject": h.get("subject"),
@@ -840,10 +968,26 @@ class PromiseFinder:
         finally:
             g.close()
         if not mails:
+            if to_self:
+                row.value = json.dumps(sorted(seen | to_self)[-300:])
+                s.add(row)
+                s.commit()
             raise Skipped("no new sent mail")
+        counts = self.handle(ctx, mails, people, me, now)
+        row.value = json.dumps(sorted(seen | {m["message_id"] for m in mails} | to_self)[-300:])
+        s.add(row)
+        s.commit()
+        return json.dumps(counts)
+
+    def handle(self, ctx: JobContext, mails: list[dict], people: dict[str, list[dict]], me, now: dt.datetime) -> dict:
+        """The model part: sent mails ({message_id, to, cc, subject, date, text}) and the other people on each
+        -> promise loops with their action. Also run by acceptance test 36 with a made-up mail."""
+        s = ctx.session
+        tz = self.profile.tz
         tracked = [{"id": l.id, "who": l.who, "what": l.what} for l in
                    s.exec(select(OpenLoop).where(OpenLoop.status == "open").where(OpenLoop.kind == "promise")).all()]
-        prompt = PROMISE_PROMPT.format(today=now.date().isoformat(), tracked=json.dumps(tracked, ensure_ascii=False) or "[]",
+        prompt = PROMISE_PROMPT.format(today=now.date().isoformat(), owner=me.describe(),
+                                       tracked=json.dumps(tracked, ensure_ascii=False) or "[]",
                                        mails="\n\n".join(untrusted("a mail the owner sent", m) for m in mails))
         answer = ctx.ask(prompt, JOB_RULES, purpose="promises")
         if not answer.ok:
@@ -852,32 +996,55 @@ class PromiseFinder:
         if not isinstance(out, dict):
             raise ValueError("promise answer is not an object")
         valid_ids = {m["message_id"] for m in mails}
-        # The address comes from the mail's real To/Cc, never from the model alone (fix P1.6).
-        from .loop_send import _addresses
-        owner = (self.profile.gmail or "").lower()
-        real_to = {m["message_id"]: [a for a in _addresses(m.get("to"), m.get("cc")) if a != owner] for m in mails}
+        subjects = {m["message_id"]: m.get("subject") or "" for m in mails}
         times = good_times(self.schedule)
-        new = 0
+        counts = {"mails": len(mails), "new": 0, "fulfilled": 0, "calendar": 0}
         for p in out.get("new") or []:
             if not isinstance(p, dict) or p.get("message_id") not in valid_ids or not str(p.get("what") or "").strip():
                 continue
+            mid, what = p["message_id"], str(p["what"]).strip()
+            others = people[mid]
+            # The address comes from the mail's real To/Cc, never from the model alone (fix P1.6), and is never the owner.
+            claimed = str(p.get("to_email") or "")
+            who_email = None if me.is_me(email=claimed) else _real_recipient(claimed, [o["email"] for o in others])
+            named = clip(p.get("to_name"), 60) or None
+            if who_email:
+                who = next((o["name"] for o in others if o["email"] == who_email), named)
+            elif named and not me.is_me(name=named) and any(named.lower() in o["name"].lower() for o in others):
+                who = named
+            else:
+                who = others[0]["name"] if len(others) == 1 else " / ".join(o["name"] for o in others[:3])
+            kind = str(p.get("type") or "").lower()
+            action = PROMISE_ACTIONS.get(kind, "message")
+            when = None
+            if kind == "attend":
+                try:
+                    when = dt.datetime.fromisoformat(str(p.get("when") or "")).replace(tzinfo=tz)
+                except ValueError:
+                    when = None
+                if when is None or when <= now:
+                    action = "remind"
             by = None
             try:
                 by = dt.datetime.combine(dt.date.fromisoformat(p["by"]), dt.time(18), tzinfo=tz) if p.get("by") else None
             except ValueError:
                 pass
-            _, created = upsert(s, kind="promise", source="promise", ref=promise_ref(p.get("to_name"), str(p["what"])),
-                                what=str(p["what"]), who=clip(p.get("to_name"), 60) or None,
-                                who_email=_real_recipient(str(p.get("to_email") or ""), real_to[p["message_id"]]), due=by, since=now,
-                                now=now, tz=tz, times=times)
-            new += created
-        closed = 0
+            loop, created = upsert(s, kind="promise", source="promise", ref=promise_ref(who, what), what=what, who=who,
+                                   who_email=who_email, due=when or by, since=now, now=now, tz=tz, times=times,
+                                   mail_ref=mid, people=others, action=action)
+            counts["new"] += created
+            if created and action == "calendar":
+                counts["calendar"] += self._to_calendar(s, loop, when, p, subjects.get(mid, ""), now)
         open_ids = {t["id"] for t in tracked}
         for lid in out.get("fulfilled") or []:
             if isinstance(lid, int) and lid in open_ids:
                 close(s, lid, "done", now=now)
-                closed += 1
-        row.value = json.dumps(sorted(seen | valid_ids)[-300:])
-        s.add(row)
-        s.commit()
-        return json.dumps({"mails": len(mails), "new": new, "fulfilled": closed})
+                counts["fulfilled"] += 1
+        return counts
+
+    def _to_calendar(self, s: Session, loop: OpenLoop, when: dt.datetime, p: dict, subject: str, now: dt.datetime) -> int:
+        try:
+            minutes = int(p.get("minutes") or 60)
+        except (TypeError, ValueError):
+            minutes = 60
+        return put_in_calendar(s, loop, when, minutes, hold=self.hold, tell=self.tell, now=now, note=f"Mail: {subject}")

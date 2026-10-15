@@ -2,8 +2,9 @@
 
 Only to a verified address (CLAUDE.md: untrusted content never creates or approves a card):
 - a reply to a mail: that mail's real Reply-To/From header (as for any gmail.reply card);
-- a promise found in a sent mail: one of that mail's real To/Cc addresses (the model may only
-  pick which one);
+- a promise found in a sent mail: that mail's real To/Cc addresses, never the owner's. With several
+  people on it and none named for sure, the owner picks one or more (name + full address shown;
+  loops block L, 2026-10-15: no more "send it yourself");
 - anything else (birthday, people, ...): an address the owner typed in the app or confirmed
   once, after seeing it in full. An address the model wrote (people_note, promise finder) is
   never used on its own.
@@ -79,24 +80,50 @@ def _addresses(*values: str | None) -> list[str]:
     return out
 
 
-def plan(s: Session, loop: OpenLoop, *, google_read, text: str, subject: str | None, owner_email: str | None) -> dict:
-    """What a Send would do: {action, args, to, verified, how}. Raises SendRefused."""
+def promise_people(loop: OpenLoop, *, google_read, owner_email: str | None) -> list[dict]:
+    """[{name, email}]: the other people on the mail a promise came from (stored when it was found;
+    older loops: read from the mail again). Never the owner."""
+    from . import loops
+    from .identity import people_in
+    people = loops.people_of(loop)
+    if people:
+        return people
+    ref = loop.mail_ref or ((loop.source_ref or "").split(":", 1)[0] if not (loop.source_ref or "").startswith("p:") else "")
+    if not ref:
+        return []
+    h = _headers(google_read, ref, ["To", "Cc"])
+    return [p for p in people_in(h.get("to"), h.get("cc")) if p["email"] != _norm(owner_email)]
+
+
+def plan(s: Session, loop: OpenLoop, *, google_read, text: str, subject: str | None, owner_email: str | None,
+         chosen: list[str] | None = None) -> dict:
+    """What a Send would do: {action, args, to, recipients, verified, how}, or {pick: [{name, email}]} when
+    the owner has to choose who gets it. chosen: the addresses the owner picked. Raises SendRefused."""
     if loop.source == "email" and loop.kind in ("reply", "waiting") and loop.source_ref:
         h = _headers(google_read, loop.source_ref, ["From", "Reply-To"])
         to = (_addresses(h.get("reply-to")) or _addresses(h.get("from")) or [None])[0]
         if not to:
             raise SendRefused("Kairo can't tell who sent that mail. Answer it in Gmail and tap Done.")
         return {"action": "gmail.reply", "args": {"message_id": loop.source_ref, "body": text}, "to": to,
-                "verified": True, "how": "the sender of the mail you're answering"}
+                "recipients": [to], "verified": True, "how": "the sender of the mail you're answering"}
 
     subject = (subject or loop.what or "")[:200].replace("\n", " ")
-    if loop.source == "promise" and loop.source_ref:
-        h = _headers(google_read, loop.source_ref.split(":", 1)[0], ["To", "Cc"])
-        real = [a for a in _addresses(h.get("to"), h.get("cc")) if a != _norm(owner_email)]
-        to = _norm(loop.who_email) if _norm(loop.who_email) in real else (real[0] if len(real) == 1 else None)
-        if not to:
-            raise SendRefused("Kairo doesn't know which of the people on that mail this is for. Send it yourself and tap Done.")
-        how = "a recipient of the mail you made the promise in"
+    people = promise_people(loop, google_read=google_read, owner_email=owner_email) if loop.source == "promise" else []
+    if people:
+        real = [p["email"] for p in people]
+        if chosen is not None:
+            picked = [_norm(a) for a in chosen]
+            if not picked or any(a not in real for a in picked):
+                raise SendRefused("Pick people who were on that mail.")
+            to_list = list(dict.fromkeys(picked))
+        elif _norm(loop.who_email) in real:
+            to_list = [_norm(loop.who_email)]
+        elif len(real) == 1:
+            to_list = real
+        else:
+            return {"pick": people, "action": "gmail.send"}
+        return {"action": "gmail.send", "args": {"to": to_list, "subject": subject, "body": text}, "to": to_list[0],
+                "recipients": to_list, "verified": True, "how": "on the mail you made the promise in"}
     else:
         person = life.person_find(s, loop.who) if loop.who and loop.source in ("birthday", "people") else None
         to = _norm(person.email if person and person.email else loop.who_email) or None
@@ -104,7 +131,7 @@ def plan(s: Session, loop: OpenLoop, *, google_read, text: str, subject: str | N
             raise SendRefused("Kairo doesn't know where to send this. Do it yourself and tap Done.")
         if not is_verified(s, to):
             return {"action": "gmail.send", "args": {"to": [to], "subject": subject, "body": text}, "to": to,
-                    "verified": False, "how": "Kairo noted this address; check it before the first mail"}
+                    "recipients": [to], "verified": False, "how": "Kairo noted this address; check it before the first mail"}
         how = "an address you set or confirmed"
     return {"action": "gmail.send", "args": {"to": [to], "subject": subject, "body": text}, "to": to,
-            "verified": True, "how": how}
+            "recipients": [to], "verified": True, "how": how}

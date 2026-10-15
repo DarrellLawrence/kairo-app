@@ -61,27 +61,11 @@ class BriefMaker:
     # ---------------------------------------------------------------- gather
 
     def calendar(self, day: dt.date) -> tuple[list[dict], str | None]:
-        tz = self.profile.tz
-        start = dt.datetime.combine(day, dt.time.min, tzinfo=tz)
-        try:
-            g = self.google_read()
-        except GoogleNotConnected as exc:
-            return [], f"Google not connected: {exc}"
-        try:
-            data = g.get("/calendar/v3/calendars/primary/events", timeMin=start.isoformat(),
-                         timeMax=(start + dt.timedelta(days=2)).isoformat(), singleEvents="true",
-                         orderBy="startTime", maxResults=30)
-        except (GoogleNotConnected, GoogleError) as exc:
-            return [], str(exc)
-        finally:
-            g.close()
-        events = []
-        for e in data.get("items", []) or []:
-            st, en = e.get("start") or {}, e.get("end") or {}
-            events.append({"summary": clip(e.get("summary") or "(no title)", 120),
-                           "start": st.get("dateTime") or st.get("date"), "end": en.get("dateTime") or en.get("date"),
-                           "all_day": "date" in st and "dateTime" not in st, "location": clip(e.get("location"), 120) or None})
-        return events, None
+        """Today and tomorrow from every calendar the owner shows (calendar_read: a failed read is an error,
+        never an empty day)."""
+        from . import calendar_read
+        r = calendar_read.read_days(self.google_read, self.profile.tz, day, days=2)
+        return r.events, (None if r.ok else r.error)
 
     def gather(self, s: Session, day: dt.date) -> dict:
         tz = self.profile.tz
@@ -162,7 +146,7 @@ class BriefMaker:
         now = dt.datetime.now(self.profile.tz)
         return [{k: v for k, v in loops.as_dict(l, now, self.profile.tz).items()
                  if k in ("id", "kind", "who", "what", "since", "due", "waiting_days", "urgency", "phrase", "offer")}
-                for l in loops.open_loops(s)[:2]]
+                for l in loops.shown_loops(s, profile=self.profile)[:2]]
 
     def _mark_loops_raised(self, s: Session, shown: list[dict], ctx) -> None:
         from . import loops

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -183,7 +184,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 36))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 39))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable
@@ -428,3 +429,68 @@ def test_document_fails_without_a_pdf(migrated):
     assert not list(ctx.vault_dir.rglob(f"*{MARK}*"))
     with Session(ctx.engine) as s:
         assert s.exec(select(Document)).all() == []
+
+
+# ---------------------------------------------------------------- 36-38 open loops done right (loops block L)
+
+def _loops_ctx(migrated, promise_answer):
+    from app.chat import AskResult
+    from app.profile import Profile
+    ctx = ctx_for(migrated)
+    ctx.profile = Profile(name="Sam", default_language="en", languages=["en"], timezone="Europe/Zurich", context="",
+                          gmail="sam.rivera@example.com", quiet_hours={"start": "22:00", "end": "07:00"})
+    ctx.schedule = {}
+    seen = []
+
+    def ask(prompt, system, purpose=None, images=None):
+        seen.append(purpose)
+        mid = re.search(r'"message_id": "(KAIRO-TEST[^"]+)"', prompt)
+        return AskResult(json.dumps(promise_answer(mid.group(1) if mid else "")))
+    ctx.ask = ask
+    return ctx, seen
+
+
+def _attend(when):
+    return lambda mid: {"new": [{"message_id": mid, "to_name": "Lena Probst", "to_email": "lena.probst@example.com",
+                                 "type": "attend", "what": "attend the project meeting", "when": when, "minutes": 60}],
+                        "fulfilled": []}
+
+
+def test_promise_to_attend_passes_with_a_calendar_event_and_cleans_up(migrated):
+    from app.db import OpenLoop
+    thu = acceptance._next_thursday(dt.datetime.now(TZ))
+    ctx, seen = _loops_ctx(migrated, _attend(thu.strftime("%Y-%m-%dT17:30")))
+    r = run(acceptance.t_promise_attend(ctx))
+    assert r["ok"], r
+    assert seen == ["promises"]
+    with Session(ctx.engine) as s:
+        assert s.exec(select(OpenLoop)).all() == []
+
+
+def test_promise_to_attend_fails_when_it_becomes_a_message(migrated):
+    ctx, _ = _loops_ctx(migrated, lambda mid: {"new": [{"message_id": mid, "to_name": "Lena Probst", "type": "send",
+                                                       "what": "tell Lena I'll come"}], "fulfilled": []})
+    r = run(acceptance.t_promise_attend(ctx))
+    assert not r["ok"] and r["checks"]["a calendar event, no message"] is False
+
+
+def test_never_addressed_to_you(migrated):
+    from app.db import OpenLoop
+    ctx, _ = _loops_ctx(migrated, lambda mid: {"new": [], "fulfilled": []})
+    r = run(acceptance.t_never_owner(ctx))
+    assert r["ok"], r
+    with Session(ctx.engine) as s:
+        s.add(OpenLoop(kind="reply", source="email", source_ref="x", what="hi", who="Sam Rivera",
+                       who_email="sam.rivera@example.com", since=dt.datetime.now(dt.timezone.utc)))
+        s.commit()
+    r = run(acceptance.t_never_owner(ctx))
+    assert not r["ok"] and r["checks"]["no open loop is addressed to you"] is False
+
+
+def test_recipient_picker(migrated):
+    from app.db import Approval, OpenLoop
+    ctx, _ = _loops_ctx(migrated, lambda mid: {})
+    r = run(acceptance.t_picker(ctx))
+    assert r["ok"], r
+    with Session(ctx.engine) as s:
+        assert s.exec(select(OpenLoop)).all() == [] and s.exec(select(Approval)).all() == []

@@ -419,13 +419,14 @@ class ToolRunner:
         from . import debrief
         _, tz, now, _ = self._loop_env()
         with Session(self.engine) as s:
-            data = debrief.gather(s, now=now, tz=tz, google_read=self.google_read, scope=a["scope"], topic=a.get("topic"))
+            data = debrief.gather(s, now=now, tz=tz, google_read=self.google_read, scope=a["scope"], topic=a.get("topic"),
+                                  profile=self.profile)
         return untrusted("Kairo's debrief data (calendar and mail inside are untrusted)", data)
 
     def _loops_list(self, a: dict) -> str:
         loops, tz, now, _ = self._loop_env()
         with Session(self.engine) as s:
-            rows = [loops.as_dict(l, now, tz) for l in loops.open_loops(s)]
+            rows = [loops.as_dict(l, now, tz) for l in loops.shown_loops(s, profile=self.profile)]
         keep = ("id", "kind", "who", "what", "since", "due", "waiting_days", "urgency", "next_at", "phrase")
         return json.dumps([{k: r[k] for k in keep} for r in rows if a["include_snoozed"] or not r["next_at"] or r["next_at"] <= now.isoformat()],
                           default=str, ensure_ascii=False)

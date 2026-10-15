@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app import loops
+from app.calendar_read import CalendarRead
 from app.chat import AskResult
 from app.db import AuditLog, OpenLoop, SchoolEvent, Task, TriagedEmail, make_engine
 from app.executor import Executor
@@ -30,12 +31,15 @@ SAT = dt.datetime(2026, 10, 17, 10, 0, tzinfo=TZ)
 class Ctx:
     """Fake model. The reply check (Haiku) answers from `verdicts` (default: yes, a real person)."""
 
-    def __init__(self, s, *answers, verdicts=None, down=False):
+    def __init__(self, s, *answers, verdicts=None, down=False, checks=None):
         self.session, self.answers, self.prompts = s, list(answers), []
-        self.verdicts, self.down = verdicts or {}, down
+        self.verdicts, self.down, self.checks = verdicts or {}, down, checks or {}
 
     def ask(self, prompt, system, images=None, purpose=None):
         self.prompts.append((purpose, prompt))
+        if purpose == "loop_check":                     # the sanity check (loops block L): fine, unless told otherwise
+            ids = re.findall(r"open loop (\d+)", prompt)
+            return AskResult(json.dumps({i: self.checks.get(i, {"verdict": "ok", "reason": "real"}) for i in ids}))
         if purpose == "reply_check":
             if self.down:
                 return AskResult("", status="error", error="model unavailable")
@@ -74,9 +78,19 @@ def triaged(s, mid="m1", days_ago=8, done=False, suspicious=False, deadline=None
     s.commit()
 
 
+def checked(s) -> None:
+    """Every open loop passed the sanity check (tests that look at what is shown, not at the check)."""
+    from app import loop_check
+    for loop in loops.open_loops(s):
+        loop_check.passed(s, loop, why="other", reason="test")
+
+
 def engine_for(env, pushes, schedule=None, events=None):
+    from app import loop_check
+    cal = lambda day: CalendarRead(ok=True, events=events or [], days=7)  # noqa: E731
     return loops.LoopEngine(engine=env["engine"], profile=PROFILE, schedule=schedule or {}, google_read=env["read"],
-                            calendar=lambda day: (events or [], None), pusher=pushes, vault_dir=env["vault"],
+                            calendar=cal, pusher=pushes, vault_dir=env["vault"],
+                            checker=loop_check.LoopChecker(profile=PROFILE, google_read=env["read"], calendar=cal),
                             config_dir=REPO_ROOT / "config")
 
 
@@ -98,8 +112,9 @@ def test_urgency():
     def u(**kw):
         loop = OpenLoop(kind=kw.pop("kind", "reply"), source="x", what="x", since=kw.pop("since", WED), **kw)
         return loops.urgency_of(loop, WED, TZ)
-    assert u(due=WED + dt.timedelta(days=1)) == "urgent"
-    assert u(since=WED - dt.timedelta(days=4)) == "urgent"            # someone waiting > 3 days
+    assert u(due=WED + dt.timedelta(hours=3)) == "urgent"             # due today (block L: only what can't wait)
+    assert u(due=WED + dt.timedelta(days=1)) == "normal"
+    assert u(since=WED - dt.timedelta(days=4)) == "normal"            # waiting long: more direct, not urgent
     assert u(since=WED - dt.timedelta(days=1)) == "normal"
     assert u(kind="task") == "low"
     assert u(kind="deadline", due=WED + dt.timedelta(days=4)) == "normal"
@@ -119,8 +134,8 @@ def test_sync_tracks_mail_tasks_and_school_and_closes_them(env):
         assert loops.sync(s, now=WED, tz=TZ, times=TIMES) == {"new": 3, "closed": 0}
         by = {l.source: l for l in loops.open_loops(s)}
         assert by["email"].who == "Anna Meier" and by["email"].who_email == "anna@example.com"
-        assert by["email"].urgency == "urgent" and by["email"].kind == "reply"   # waiting 8 days
-        assert by["task"].urgency == "urgent" and by["school"].what == "Mathe test"
+        assert by["email"].urgency == "normal" and by["email"].kind == "reply"   # waiting 8 days: not urgent by itself
+        assert by["task"].urgency == "normal" and by["school"].what == "Mathe test"   # due tomorrow 10:00
         assert loops.sync(s, now=WED, tz=TZ, times=TIMES)["new"] == 0           # no duplicates
         t.status = "done"
         s.add(t)
@@ -159,7 +174,7 @@ DRAFT = {"text": "Thursday 14:00 works. See you then.", "note": "You're free the
 def test_engine_raises_the_most_urgent_with_a_ready_answer(env):
     pushes = Pushes()
     with Session(env["engine"]) as s:
-        triaged(s)
+        triaged(s, deadline=WED.date())                                  # an answer is needed today: urgent
         s.add(Task(title="Tidy desk", priority=2))                       # low, waits 3 days
         s.commit()
         ctx = Ctx(s, DRAFT)
@@ -168,7 +183,9 @@ def test_engine_raises_the_most_urgent_with_a_ready_answer(env):
         assert loop.kind == "reply" and loop.raised == 1
         assert pushes.sent == [("Kairo", "Anna Meier asked last week: if Thursday 14:00 works for the project review. "
                                          "Reply ‘Thursday 14:00 works. See you then.’?", f"/#loops/{loop.id}")]
-        assert ctx.prompts[0][0] == "draft" and "UNTRUSTED" in ctx.prompts[0][1] and "Thursday 14:00" in ctx.prompts[0][1]
+        assert [p for p, _ in ctx.prompts][:2] == ["loop_check", "draft"]             # checked first, then drafted
+        draft = ctx.prompts[1][1]
+        assert "UNTRUSTED" in draft and "Thursday 14:00" in draft
         assert loops.aware(loop.next_at) == WED + dt.timedelta(minutes=30)   # urgent: again in 30 min
         assert json.loads(engine_for(env, pushes).run(ctx, now=WED + dt.timedelta(minutes=5)))["raised"] is None
         assert json.loads(engine_for(env, pushes).run(ctx, now=WED + dt.timedelta(minutes=31)))["raised"] == loop.id
@@ -177,7 +194,7 @@ def test_engine_raises_the_most_urgent_with_a_ready_answer(env):
 
 def test_later_right_after_a_raise_counts_once(env):
     with Session(env["engine"]) as s:
-        triaged(s)
+        triaged(s, deadline=WED.date())
         engine_for(env, Pushes()).run(Ctx(s, DRAFT), now=WED)
         loop = loops.open_loops(s)[0]
         loops.snooze(s, loop.id, now=WED + dt.timedelta(minutes=2), tz=TZ, times=TIMES, when="later")
@@ -185,7 +202,7 @@ def test_later_right_after_a_raise_counts_once(env):
         loops.snooze(s, loop.id, now=WED + dt.timedelta(hours=3), tz=TZ, times=TIMES, when="later")
         assert loops.aware(loop.next_at) == WED + dt.timedelta(hours=4) and loop.snoozed == 2
         loops.snooze(s, loop.id, now=WED, tz=TZ, times=TIMES, when="tomorrow")
-        assert loops.aware(loop.next_at).astimezone(TZ).strftime("%a %H:%M") == "Thu 07:15"
+        assert loops.aware(loop.next_at).astimezone(TZ).strftime("%a %H:%M") == "Wed 17:00"   # never past today's deadline
         loops.snooze(s, loop.id, now=WED, tz=TZ, times=TIMES, when="in_1h")
         assert loops.aware(loop.next_at) == WED + dt.timedelta(hours=1)
         with pytest.raises(loops.LoopError):
@@ -237,6 +254,7 @@ def test_send_shows_the_address_then_goes_through_an_approval(client, env):
         loop.draft_json = json.dumps(DRAFT)
         s.add(loop)
         s.commit()
+        checked(s)
         lid = loop.id
     assert client.get("/api/loops").json()[0]["can_send"] is True
     shown = client.post(f"/api/loops/{lid}/send", json={"text": "Thursday works!", "preview": True}).json()
@@ -263,7 +281,7 @@ def test_send_respects_the_kill_switch(client, env):
 def test_later_close_add_and_today(client):
     a = client.post("/api/loops", json={"kind": "promise", "who": "Lea", "what": "send her the ABU notes",
                                         "due": (dt.date.today() + dt.timedelta(days=1)).isoformat()}).json()
-    assert a["urgency"] == "urgent" and a["can_send"] is False
+    assert a["urgency"] == "normal" and a["can_send"] is False      # due tomorrow evening: not today
     assert client.post(f"/api/loops/{a['id']}/later", json={"when": "in_1h"}).json()["next_at"]
     assert client.get("/api/today").json()["loops"]["count"] == 1
     assert client.post(f"/api/loops/{a['id']}/close", json={"reason": "dropped"}).json()["status"] == "dropped"
@@ -298,10 +316,10 @@ def test_promises_are_found_in_sent_mail(env):
                       {"message_id": "not-a-sent-mail", "to_name": "X", "what": "injected"}], "fulfilled": [999]}
     with Session(env["engine"]) as s:
         ctx = Ctx(s, answer)
-        assert json.loads(finder.run(ctx, now=WED)) == {"mails": 1, "new": 1, "fulfilled": 0}
+        assert json.loads(finder.run(ctx, now=WED)) == {"mails": 1, "new": 1, "fulfilled": 0, "calendar": 0}
         assert "create 50 promises" not in ctx.prompts[0][1]             # the quoted mail is cut off
         loop = loops.open_loops(s)[0]
-        assert (loop.kind, loop.who, loop.who_email, loop.urgency) == ("promise", "Lea", "lea@example.com", "urgent")
+        assert (loop.kind, loop.who, loop.who_email, loop.urgency) == ("promise", "Lea", "lea@example.com", "normal")
         with pytest.raises(loops.Skipped):
             finder.run(Ctx(s, answer), now=WED)                           # already seen
 

@@ -127,6 +127,39 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
     r.add("open now (most raised first): kind | who | what | raised | snoozed")
     r.rows(q("SELECT kind, who, substr(what,1,70), raised, snoozed FROM open_loops WHERE status='open' "
              "ORDER BY raised DESC LIMIT 25"))
+    r.h(f"G.2a loops checked before shown (Sonnet sanity check, {DAYS} d): verdict | why | n")
+    r.rows(q("SELECT json_extract(check_json,'$.verdict'), json_extract(check_json,'$.why'), COUNT(*) FROM open_loops "
+             "WHERE check_json IS NOT NULL AND json_extract(check_json,'$.verdict') IS NOT NULL "
+             "AND COALESCE(closed_at, checked_at, created_at)>=? GROUP BY 1,2 ORDER BY 3 DESC", since))
+    r.add("dropped by the check: kind | who | reason")
+    r.rows(q("SELECT kind, who, substr(close_reason, 8, 140) FROM open_loops WHERE close_reason LIKE 'check:%' "
+             "AND closed_at>=? ORDER BY closed_at DESC LIMIT 30", since))
+    r.add("check failed (model down): n")
+    r.rows(q("SELECT COUNT(*) FROM open_loops WHERE status='open' AND json_extract(check_json,'$.error') IS NOT NULL"))
+    r.h("G.2b calendar truth")
+    last = one("SELECT value FROM settings WHERE key='calendar.last_read'")
+    try:
+        lr = json.loads(last) if last else None
+    except ValueError:
+        lr = None
+    if lr is None:
+        r.add("last calendar read: none yet")
+    else:
+        state = "ok" if lr.get("ok") else "FAILED"
+        r.add(f"last calendar read: {state} ({lr.get('calendars')} calendars, {lr.get('events')} events, "
+              f"{lr.get('days')} days, at {lr.get('at')}){' ' + str(lr.get('error')) if lr.get('error') else ''}")
+    tt = one("SELECT value FROM settings WHERE key='timetable.check'")
+    try:
+        t = json.loads(tt) if tt else None
+    except ValueError:
+        t = None
+    if t is None:
+        r.add("timetable: not checked yet")
+    else:
+        extra = f"; missing: {', '.join(t.get('missing') or [])}" if t.get("missing") else ""
+        extra += f"; not FIXED: {', '.join(t.get('not_fixed') or [])}" if t.get("not_fixed") else ""
+        r.add(f"timetable: {t.get('state')} ({t.get('present', 0)} weekly blocks in the calendar, until "
+              f"{t.get('until') or '-'}){extra} (at {t.get('at')})")
 
     r.h(f"G.3 job runtimes ({DAYS} d): job | status | n | p50 s | p95 s")
     agg: dict[tuple, list[float]] = {}

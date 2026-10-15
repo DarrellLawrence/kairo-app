@@ -118,6 +118,8 @@ def test_the_brief_says_each_thing_once_and_problems_first(migrated):
         s.add(SettingKV(key="backup_status", value=json.dumps({"last_error": "disk full"})))
         s.commit()
         loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        from tests.test_loops import checked
+        checked(s)                                       # passed the sanity check: shown
         from app.google.client import GoogleNotConnected
 
         def not_connected():

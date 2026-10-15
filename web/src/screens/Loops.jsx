@@ -34,19 +34,24 @@ function LoopCard({ loop, focus, onChanged }) {
     try { await fn() } catch (e) { toast.show({ text: e.message, duration: 5000 }) } finally { setBusy('') }
   }
   // Send: first the full address (and whether you confirmed it before), then the mail goes (fix P1.6).
+  // Several people on the mail (loops block L): pick one or more, name + full address, then the same card.
   const [shown, setShown] = useState(null)
   const [sure, setSure] = useState(false)
+  const [picked, setPicked] = useState([])
   const preview = () => act('send', async () => {
     setSure(false)
+    setPicked([])
     setShown(await api(`/api/loops/${loop.id}/send`, { method: 'POST', body: { text, preview: true } }))
   })
+  const toggle = (email) => setPicked((p) => (p.includes(email) ? p.filter((x) => x !== email) : [...p, email]))
   const send = () => act('send', async () => {
     if (shown.confirm_twice && !sure) { setSure(true); return }
-    const body = { text, to: shown.to, confirm: shown.confirm_twice }
-    if (!shown.verified) body.confirm_address = shown.to
+    const body = shown.pick ? { text, to: picked } : { text, to: shown.to, confirm: shown.confirm_twice }
+    if (!shown.pick && !shown.verified) body.confirm_address = shown.to
     const r = await api(`/api/loops/${loop.id}/send`, { method: 'POST', body })
+    const who = shown.pick ? picked.join(', ') : shown.to
     setShown(null)
-    toast.show({ text: r.card.status === 'done' ? `Sent to ${shown.to}.` : `Not sent: ${r.card.result?.error || r.card.status}`, icon: <IconCheck style={{ color: 'var(--ok)' }} /> })
+    toast.show({ text: r.card.status === 'done' ? `Sent to ${who}.` : `Not sent: ${r.card.result?.error || r.card.status}`, icon: <IconCheck style={{ color: 'var(--ok)' }} /> })
     onChanged()
   })
   const snooze = (body) => act('later', async () => {
@@ -63,7 +68,7 @@ function LoopCard({ loop, focus, onChanged }) {
   const draft = () => act('draft', async () => { await api(`/api/loops/${loop.id}/draft`, { method: 'POST', body: {} }); onChanged() })
 
   const [tone, label] = URGENCY[loop.urgency] || URGENCY.normal
-  const wantsDraft = (['reply', 'waiting'].includes(loop.kind) && loop.source === 'email') || !!loop.who_email
+  const wantsDraft = ['reply', 'message'].includes(loop.action)   // only where a message is actually expected
   return (
     <motion.div ref={ref} layout className="k-loop" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, x: 80, transition: { duration: 0.22 } }} transition={spring.smooth}
@@ -110,7 +115,24 @@ function LoopCard({ loop, focus, onChanged }) {
       )}
 
       <Sheet open={!!shown} onClose={() => setShown(null)} title={shown?.action === 'gmail.reply' ? 'Reply' : 'Send mail'}>
-        {shown && (
+        {shown?.pick && (
+          <>
+            <p className="k-card-sub">Who gets it? (everyone on that mail)</p>
+            {shown.pick.map((p) => (
+              <label key={p.email} className="k-pick">
+                <input type="checkbox" checked={picked.includes(p.email)} onChange={() => toggle(p.email)} />
+                <span><b>{p.name}</b><span className="selectable" style={{ wordBreak: 'break-all' }}>{p.email}</span></span>
+              </label>
+            ))}
+            {shown.subject && <p className="k-card-sub">Subject: {shown.subject}</p>}
+            <p className="k-approval-preview selectable">{shown.text}</p>
+            <Button variant="primary" block loading={busy === 'send'} disabled={!!busy || !picked.length} onClick={send}>
+              {picked.length ? `Send to ${picked.length === 1 ? picked[0] : `${picked.length} people`}` : 'Pick who gets it'}
+            </Button>
+            <Button variant="secondary" block style={{ marginTop: 8 }} disabled={!!busy} onClick={() => setShown(null)}>Cancel</Button>
+          </>
+        )}
+        {shown && !shown.pick && (
           <>
             <p className="k-card-sub">To</p>
             <p className="k-loop-phrase selectable" style={{ wordBreak: 'break-all' }}>{shown.to}</p>

@@ -536,3 +536,11 @@ class OpenLoop(SQLModel, table=True):
     closed_at: datetime | None = None
     close_reason: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
+    # Loops block L (2026-10-15): the mail it came from (Gmail id), the other people on it ([{name, email}],
+    # never the owner), the action a PA would take (reply / message / calendar / remind / none), and the
+    # sanity check's verdict ({"verdict", "reason", "fixed": [...]}, app/loop_check.py).
+    mail_ref: str | None = None
+    people_json: str | None = Field(default=None, sa_column=Column(Text))
+    action: str | None = None
+    checked_at: datetime | None = None
+    check_json: str | None = Field(default=None, sa_column=Column(Text))

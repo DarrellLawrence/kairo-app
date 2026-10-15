@@ -423,6 +423,10 @@
 .k-stack .k-card { margin: 0; position: relative; z-index: 1; background: linear-gradient(165deg, #25211f, #1a1819 65%); }
 .k-stack-count { display: inline-flex; align-items: baseline; gap: 6px; }
 .k-stack-count b { font: var(--t-hero-num); font-size: 30px; color: var(--ember-3); }
+.k-pick { display: flex; gap: var(--s-3); align-items: flex-start; padding: var(--s-3) var(--s-4); margin-bottom: var(--s-2); border-radius: var(--r-md); background: rgba(0, 0, 0, 0.25); box-shadow: inset 0 0 0 0.5px var(--hairline); font: var(--t-sub); }
+.k-pick input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--accent); flex: none; }
+.k-pick span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.k-pick span span { color: var(--text-2); font: var(--t-caption); }
 .k-ideas { list-style: none; margin: 0 0 var(--s-3); padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
 .k-ideas li { padding: var(--s-3) var(--s-4); border-radius: var(--r-md); background: rgba(0, 0, 0, 0.25); box-shadow: inset 0 0 0 0.5px var(--hairline); font: var(--t-sub); }
 .k-ideas li span { display: block; color: var(--text-2); font: var(--t-caption); margin-top: 2px; }
