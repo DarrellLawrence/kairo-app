@@ -4,14 +4,16 @@ More -> System -> Voice lab -> Run (about 10-20 minutes; the voice model is off 
 the old pipeline). For every installed candidate model (voicellm.json), in llama.cpp on the RTX 3060:
   load time and VRAM; first-token time (p50/p95) on a warm call, English and German; tokens/s;
   tool calls: does it call ask_kairo when it must (recall) and not when it mustn't (false calls);
-  fidelity: does it say Claude's answer with every fact right; naturalness, rated blind by Claude.
+  fidelity: does it say Claude's answer with every fact right; naturalness, rated blind by Claude;
+  the Today card: of the questions the card answers, how many it answers on the PC with the facts right
+  (not via Claude), and how many it gets wrong (owner's request 2026-10-16).
 Speech, the same clips for every engine: Whisper (speech to text, auto and English-only), Kokoro and
 Piper (time to the first audio), Smart Turn (endpointing time; complete vs cut-off sentences), and
 Kyutai's streaming STT + TTS when its lab copy is installed.
 
 The pick: among models that call the tool reliably (recall >= 90%, false calls <= 15%), keep every
-fact (>= 90%) and sound natural (Claude: >= 3.5 English, >= 3 German), the fastest to its first spoken
-word. The result is kept (Run diagnosis shows it) and the picked model talks from then on.
+fact (>= 90%), answer the card's questions on the PC (>= 70%, wrong <= 10%) and sound natural (Claude:
+>= 3.5 English, >= 3 German), the fastest to its first spoken word. The result is kept (Run diagnosis shows it) and the picked model talks from then on.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ LAST_KEY = "voicelab.last"
 STATE_KEY = "voicelab.state"
 PAD_KEY = "voice.smart_turn_pad"
 TOOL_RECALL_MIN, FALSE_CALLS_MAX, FIDELITY_MIN = 0.9, 0.15, 0.9
+CARD_MIN, CARD_WRONG_MAX = 0.7, 0.1
 NATURAL_MIN = {"en": 3.5, "de": 3.0}
 
 
@@ -60,6 +63,7 @@ class Case:
     text: str
     answer: str | None = None              # Claude's answer when the tool must be called
     facts: tuple[tuple[str, ...], ...] = ()  # each fact: any of these must be in what is said
+    card: bool = False                     # the Today card has the answer: no Claude needed
 
 
 CASES = {
@@ -74,6 +78,10 @@ CASES = {
         Case("Add milk to my shopping list.", "Milk is on the shopping list.", (("milk",),)),
         Case("When is my next maths test?", "Your next maths test is on Tuesday at 10:15.",
              (("Tuesday",), ("10:15", "10.15", "quarter past ten"))),
+        Case("What's the weather like today?", "Bern: now 12°C, cloudy; today 8 to 15°C, rain 30%.",
+             (("12", "twelve"),), card=True),
+        Case("When's my next train to school?", "07:12, S3, platform 2.", (("7:12", "07:12", "twelve past seven"),), card=True),
+        Case("What's next on my calendar?", "Training at 18:00 at the gym.", (("18", "six"), ("training",)), card=True),
         Case("Thanks, that's all for now."),
     ],
     "de": [
@@ -88,10 +96,20 @@ CASES = {
         Case("Schreib Milch auf die Einkaufsliste.", "Milch steht auf der Einkaufsliste.", (("Milch",),)),
         Case("Wann ist meine nächste Mathe-Prüfung?", "Deine nächste Mathe-Prüfung ist am Dienstag um 10:15.",
              (("Dienstag",), ("10:15", "10.15", "viertel nach zehn"))),
+        Case("Wie ist das Wetter heute?", "Bern: jetzt 12°C, bewölkt; heute 8 bis 15°C, Regen 30%.",
+             (("12", "zwölf"),), card=True),
+        Case("Wann fährt mein nächster Zug zur Schule?", "07:12, S3, Gleis 2.", (("7:12", "07:12", "zwölf nach sieben"),), card=True),
+        Case("Was steht als nächstes an?", "Training um 18 Uhr im Gym.", (("18", "sechs"), ("training",)), card=True),
         Case("Danke, das war's."),
     ],
 }
-LAB_CONTEXT = "## Right now\nThursday 16 October, 14:05\n\n## Next events\n- Thu 18:00 Training"
+LAB_CARD = {"now": "Thursday 16 October 2026; the owner is at Home",
+            "events": "- Thu 18:00–19:30 Training (Gym)\n- Fri 08:00–15:30 School",
+            "tasks": "- buy a bike lock by 17:00",
+            "loops": "- reply: Lea asks if Friday works (Lea)",
+            "weather": "Bern: now 12°C, cloudy; today 8°C to 15°C, cloudy, rain 30%",
+            "trip": "Home to School:\n- 07:12, S3, platform 2, arrives 07:31\n- 07:42, S3, platform 2, arrives 08:01",
+            "about": "Sam, apprentice, trains Tuesdays and Thursdays."}
 LAB_ITEMS = [bringup.Item("L1", "loop", "reply: Lea asks if Friday works", "normal")]
 
 SPEECH = {
@@ -174,7 +192,8 @@ def stats(values: list) -> dict:
 
 async def _run_model(vm: VoiceModel, temperature: float) -> dict:
     out = {"ttft": [], "first_text": [], "tok_s": [], "cold_ms": {}, "need": 0, "hits": 0, "small": 0, "false": 0,
-           "facts_n": 0, "facts_ok": 0, "replies": {"en": [], "de": []}, "errors": []}
+           "facts_n": 0, "facts_ok": 0, "card_n": 0, "card_pc": 0, "card_wrong": 0, "card_claude": 0,
+           "replies": {"en": [], "de": []}, "errors": []}
     for lang, cases in CASES.items():
         answers = {c.text: c.answer for c in cases}
 
@@ -184,7 +203,8 @@ async def _run_model(vm: VoiceModel, temperature: float) -> dict:
                     return ans, False
             last = next((ln[7:] for ln in reversed(lines) if ln.startswith("Owner: ")), "")
             return _answers.get(last) or ("Done." if _lang == "en" else "Erledigt."), False
-        mouth = Mouth(vm, ask=brain, context=LAB_CONTEXT, items=LAB_ITEMS, name="Sam", temperature=temperature)
+        mouth = Mouth(vm, ask=brain, context=dict(LAB_CARD), items=LAB_ITEMS, name="Sam", temperature=temperature,
+                      clock=lambda: dt.datetime(2026, 10, 16, 6, 55))
         for i, case in enumerate(cases):
             ear = _Ear()
             try:
@@ -200,7 +220,15 @@ async def _run_model(vm: VoiceModel, temperature: float) -> dict:
             if r.timings.get("predicted_per_second"):
                 out["tok_s"].append(round(float(r.timings["predicted_per_second"]), 1))
             spoken = ear.text.strip()
-            if case.answer:
+            if case.card:                      # the card has it: on the PC, right, at once
+                out["card_n"] += 1
+                if r.asked:
+                    out["card_claude"] += 1
+                elif has_facts(spoken, case.facts):
+                    out["card_pc"] += 1
+                else:
+                    out["card_wrong"] += 1
+            elif case.answer:
                 out["need"] += 1
                 out["hits"] += 1 if r.asked else 0
                 out["facts_n"] += 1
@@ -218,6 +246,9 @@ def _summary(raw: dict) -> dict:
             "tool_recall": round(raw["hits"] / raw["need"], 2) if raw["need"] else None,
             "false_calls": round(raw["false"] / raw["small"], 2) if raw["small"] else None,
             "fidelity": round(raw["facts_ok"] / raw["facts_n"], 2) if raw["facts_n"] else None,
+            "card_on_pc": round(raw["card_pc"] / raw["card_n"], 2) if raw["card_n"] else None,
+            "card_wrong": round(raw["card_wrong"] / raw["card_n"], 2) if raw["card_n"] else None,
+            "card_via_claude": round(raw["card_claude"] / raw["card_n"], 2) if raw["card_n"] else None,
             "errors": raw["errors"][:5]}
 
 
@@ -272,6 +303,10 @@ def pick(models: dict, language_mode: str = "auto") -> tuple[str | None, str]:
             problems.append(f"false calls {m.get('false_calls')}")
         if (m.get("fidelity") or 0) < FIDELITY_MIN:
             problems.append(f"facts kept {m.get('fidelity')}")
+        if m.get("card_on_pc") is not None and m["card_on_pc"] < CARD_MIN:
+            problems.append(f"answers from the card {m['card_on_pc']}")
+        if m.get("card_wrong") is not None and m["card_wrong"] > CARD_WRONG_MAX:
+            problems.append(f"wrong from the card {m['card_wrong']}")
         for lang in langs:
             score = (m.get("natural") or {}).get(lang)
             if score is not None and score < NATURAL_MIN[lang]:

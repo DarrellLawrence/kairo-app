@@ -178,3 +178,99 @@ def test_without_the_turn_detector_the_phone_decides_as_before(local):
         utter(ws)                                                       # no hello: start, audio, end
         fr = frames_until(ws)
     assert fr[0]["type"] == "transcript"
+
+
+# ---------------------------------------------------------------- the Today card and the wait (owner's request 2026-10-16)
+
+def card(c, **sections):
+    from app import todaycard
+    reads = {"n": 0}
+
+    def tasks():
+        reads["n"] += 1
+        return f"- task read {reads['n']}"
+    srcs = {k: (lambda v=v: v) for k, v in sections.items()}
+    c.app.state.today_card = todaycard.Keeper({**srcs, "tasks": tasks})
+    c.app.state.today_card.refresh()
+    return reads
+
+
+def test_a_card_question_is_answered_on_the_pc_without_claude(local):
+    from app import voicestats
+    card(local, weather="Home: now 12°C, cloudy")
+    local.voice.text = "What's the weather like?"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"] == "From your card: Home: now 12°C, cloudy" and done["server"]["tool_ms"] is None
+    msgs = [m["role"] for m in local.get("/api/chat/messages").json()["messages"]]
+    assert msgs == ["owner", "kairo"]                                          # Claude never ran
+    with Session(make_engine(local.settings.db_url)) as s:
+        assert voicestats.summary(s)["card"] == 1
+    assert local.get("/api/voice/lab").json()["live"]["on_pc_pct"] == 100
+
+
+def test_after_claude_did_something_the_card_is_read_again(local):
+    reads = card(local, weather="Home: now 12°C")
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)                                                              # "Remind me to call the dentist tomorrow"
+        frames_until(ws, limit=400)
+    for _ in range(50):
+        if reads["n"] >= 2:
+            break
+        time.sleep(0.05)
+    assert reads["n"] >= 2                                                     # tasks read again right after Claude
+
+
+def seed_urgent(c):
+    import datetime as dt
+    from app import bringup
+    from app.db import OpenLoop
+    from tests.test_pa import PROFILE
+    now = dt.datetime.now(PROFILE.tz)
+    with Session(make_engine(c.settings.db_url)) as s:
+        lp = OpenLoop(kind="task", source="chat", what="sign the school form", urgency="urgent",
+                      check_json=json.dumps({"verdict": "keep"}), checked_at=now.astimezone(dt.timezone.utc))
+        s.add(lp)
+        s.commit()
+        item = bringup.Item(f"L{lp.id}", "loop", "task: sign the school form", "urgent", "The school form has to be signed today.",
+                            {"en": "The school form has to be signed today.", "de": "Das Formular muss heute unterschrieben sein."})
+        bringup.store(s, [item], "test", now)
+    return item
+
+
+def test_an_urgent_item_comes_in_the_wait_before_claudes_answer(local):
+    seed_urgent(local)
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws, limit=400)
+    deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+    assert deltas.startswith("Sec, checking. Before I forget, this one's urgent: The school form has to be signed today.")
+    assert deltas.index("urgent") < deltas.index("echo:")                    # first, before the answer
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert "[[" not in done["text"]
+
+
+def test_what_the_owner_says_to_it_goes_to_claude_after_the_call(local):
+    asked = []
+
+    async def ask(request, lines):
+        asked.append((request, lines))
+        return "Noted.", False
+    local.app.state.after_call_ask = ask
+    seed_urgent(local)
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        frames_until(ws, limit=400)
+        local.voice.text = "Yes I signed it this morning"
+        utter(ws, turn=2)
+        frames_until(ws, limit=400)
+        assert asked == []                                                     # never during the call
+    for _ in range(100):                                                       # after the hang-up
+        if asked:
+            break
+        time.sleep(0.05)
+    request, lines = asked[0]
+    assert '"Yes I signed it this morning"' in request and "sign the school form" in request
+    assert "Act only on the owner's words" in request and lines == ["Owner: Yes I signed it this morning"]

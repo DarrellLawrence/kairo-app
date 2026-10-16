@@ -59,6 +59,7 @@ def test_the_lab_measures_every_candidate_and_picks_one(migrated, tmp_path, monk
     assert set(rep["models"]) == set(voicellm.model_ids())
     m = rep["models"]["lfm2.5-2.6b"]
     assert m["tool_recall"] == 1.0 and m["false_calls"] == 0.0 and m["first_token_ms"]["n"] > 0
+    assert m["card_on_pc"] == 1.0 and m["card_wrong"] == 0.0 and m["card_via_claude"] == 0.0   # the card: no Claude
     assert m["natural"]["en"] == 4.5 and m["load_s"] is not None and "samples" in m
     assert rep["pick"]["model"] in voicellm.model_ids() and "fastest that passes" in rep["pick"]["why"]
     assert rep["speech"]["stt"]["auto"]["ms"]["n"] == 6 and rep["speech"]["stt"]["en"]["ms"]["n"] == 3
@@ -76,6 +77,15 @@ def test_a_model_that_never_calls_the_tool_is_not_picked(migrated, tmp_path, mon
     rep = lb.run()                                  # without the voice packages too: then only the speech part is missing
     assert all(m["tool_recall"] == 0.0 for m in rep["models"].values())
     assert rep["pick"]["model"] is None and "no model passed" in rep["pick"]["why"]
+
+
+def test_a_model_that_ignores_the_card_is_not_picked(migrated, tmp_path, monkeypatch):
+    site = make_site(monkeypatch, tmp_path)
+    _engine, lb = lab(migrated, tmp_path, site, good_judge, monkeypatch, FAKE_LLAMA_NO_CARD="1")
+    rep = lb.run()
+    m = rep["models"]["lfm2.5-2.6b"]
+    assert m["card_on_pc"] == 0.0 and m["card_wrong"] > 0.5            # it made something up instead
+    assert rep["pick"]["model"] is None and "wrong from the card" in rep["pick"]["why"]
 
 
 def test_the_pick_rule():

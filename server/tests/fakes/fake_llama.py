@@ -3,9 +3,11 @@
 server (checked against the real one built from the Oct 2026 source: content deltas, tool_calls
 deltas {index, id, type, function{name, arguments}}, a last chunk with usage and timings).
 
-The "model": a user message about the owner's data (calendar, remind, mail, list, test, Kalender,
-erinner, Liste, Prüfung, ...) with tools offered -> one ask_kairo call with the message as request.
-A tool result -> "Okay. <the result>". Anything else -> "Sure, happy to help with that." in pieces.
+The "model": a question the Today card in the system prompt answers (weather, the next train, what's
+next) -> "From your card: <that line>" (FAKE_LLAMA_NO_CARD=1: it ignores the card). A user message
+about the owner's data (calendar, remind, mail, list, test, Kalender, erinner, Liste, Prüfung, ...)
+with tools offered -> one ask_kairo call with the message as request. A tool result or a note that an
+answer is here -> "Okay. <the answer>". Anything else -> "Sure, happy to help with that." in pieces.
 
 FAKE_LLAMA_LOAD_S: seconds of 503 on /health before the model is "loaded".
 FAKE_LLAMA_TOKEN_MS: delay between pieces (default 5). FAKE_LLAMA_FIRST_MS: before the first piece.
@@ -29,7 +31,24 @@ STARTED = time.monotonic()
 LOAD_S = float(os.environ.get("FAKE_LLAMA_LOAD_S", "0"))
 TOKEN_S = float(os.environ.get("FAKE_LLAMA_TOKEN_MS", "5")) / 1000
 FIRST_S = float(os.environ.get("FAKE_LLAMA_FIRST_MS", "0")) / 1000
+CARD = [(re.compile(r"weather|wetter", re.I), "## Weather"),
+        (re.compile(r"train|bus|zug|connection|verbindung", re.I), "## Next connection"),
+        (re.compile(r"what'?s next|next on my|als nächstes|nächster termin", re.I), "## Next events")]
 DATA = re.compile(r"calendar|remind|mail|list|test|exam|note|task|send|move|kalender|erinner|liste|prüfung|notiz|aufgabe|schick", re.I)
+
+
+def from_card(system: str, text: str) -> str | None:
+    if os.environ.get("FAKE_LLAMA_NO_CARD") or "# Today card" not in system:
+        return None
+    for rx, header in CARD:
+        if rx.search(text) and header in system:
+            for ln in system.split(header, 1)[1].splitlines()[1:]:
+                ln = ln.strip()
+                if ln.startswith("## ") or ln.startswith("# "):
+                    break
+                if ln and not ln.startswith("<<<") and not ln.endswith(":"):
+                    return ln.lstrip("- ")
+    return None
 
 
 def chunk(delta=None, finish=None, extra=None):
@@ -73,7 +92,14 @@ class Handler(BaseHTTPRequestHandler):
         text = str(last.get("content") or "")
         tools = body.get("tools") and not os.environ.get("FAKE_LLAMA_NO_TOOLS")
         pieces, call = [], None
-        if last.get("role") == "tool":
+        system = str(msgs[0].get("content") or "") if msgs and msgs[0].get("role") == "system" else ""
+        card = from_card(system, text) if last.get("role") == "user" else None
+        here = re.search(r"is here: (.*?)\nSay it now", text, re.S)
+        if here:
+            pieces = ["Okay. "] + [w + " " for w in here.group(1).split()]
+        elif card:
+            pieces = ["From ", "your ", "card: "] + [w + " " for w in card.split()]
+        elif last.get("role") == "tool":
             try:
                 said = json.loads(text).get("answer", text)
             except ValueError:

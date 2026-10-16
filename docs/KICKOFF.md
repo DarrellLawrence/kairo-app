@@ -636,17 +636,36 @@ rule changes for voice only. Everything else stays on the Claude subscription.
 - **Engine:** llama.cpp (official Windows CUDA builds, every candidate supported). ExLlamaV3/TabbyAPI
   is not used: no prebuilt Windows build (it needs the CUDA toolkit and Visual Studio, i.e. admin) and
   no Gemma 4 E4B support.
-- **Speed:** a short fixed prompt with the call context and the bring-up list once at the start, then
+- **Speed:** a short fixed prompt with the Today card and the bring-up list once at the start, then
   only appended turns (llama.cpp's prompt cache reads just the new words); the prompt is read into
   the cache when the line opens; tokens stream into Kokoro/Piper sentence by sentence to the phone.
+- **Today card (owner's request 2026-10-16):** what the voice model answers from at once, without
+  Claude: right now (day, where the owner is), the next 3 events, today's tasks, the top open loops,
+  the weather at home, the next connection for the owner's routine (from the saved places: home
+  station → where they're heading), key profile facts, what Kairo remembers lately. Every part is
+  kept fresh on its own clock (Kairo's data every minute, the calendar every 3 minutes, the
+  connection every 3 on a call and 10 otherwise, never at night, the weather every 30) and read again
+  at once after Claude did something on the call. A call gets only the parts that changed, at the end
+  of the conversation (the cache holds). Only station names leave the PC. Event titles, tasks and
+  loops are marked as data. The voice lab measures how many card questions each model answers on
+  the PC with the right facts (≥ 70%, wrong ≤ 10% to be picked); Voice lab and Run diagnosis show how
+  many of the owner's call questions were answered on the PC vs via Claude.
 - **Turn-taking:** at the first ~200 ms pause the PC transcribes what it has and asks Smart Turn v3
   (ONNX on the CPU) whether the owner is done: done → answer at once; not done → wait 0.5–1 s more
   (the phone ends a turn itself only after 1.5 s). Talking over Kairo stops it at once.
 - **Brain/mouth:** the voice model's ONE tool is ask_kairo; the moment it starts a call Kairo says a
-  short filler, then the voice model says Claude's answer in its own words. Claude's proactive side
-  picks the call topics before the call (a 30-minute job; questions, reminders, pushback, with
-  priority), the voice model raises them at a good moment (at most two a call unless urgent) and
-  passes the owner's answers back through ask_kairo. Outbound actions only as approval cards.
+  short holding line, then the voice model says Claude's answer in its own words. Claude's proactive
+  side picks the call topics before the call (a 30-minute job; questions, reminders, pushback, with
+  priority, one short spoken line each in English and German), the voice model raises them at a good
+  moment (at most two a call unless urgent). Outbound actions only as approval cards.
+- **Using the wait (owner's request 2026-10-16):** while Claude works, Kairo says the holding line and
+  then ONE call topic in Claude's words ("Checking. Quick one: ..."), the one that fits best right now
+  (what they're talking about, the time, the place); never the same one twice a call, nothing worth it
+  → only the holding line. A normal topic is said only while Claude is still working (the owner never
+  waits longer for it); an urgent one always, before the answer. The answer follows right after the
+  sentence that is playing. Talked over in the wait: the answer still comes, in the next turn. What
+  the owner said to a raised topic goes to Claude after the call (done → closed, later → snoozed, new
+  information → saved), unless the voice model already passed it on.
 - **VRAM (12 GB):** Whisper large-v3-turbo ~2 GB, the voice model 2–6.5 GB, Kokoro/Piper and Smart
   Turn on the CPU, the memory embeddings on the CPU once a voice model is installed, CUDA contexts
   and the desktop ~1.5 GB. The lab reports what each candidate really uses.

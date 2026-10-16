@@ -97,12 +97,17 @@ def pcm16(pcm: bytes) -> np.ndarray:
 class SmartTurn:
     """probability(pcm) -> 0..1 that the owner finished their turn."""
 
-    def __init__(self, model_path: Path | None = None, *, session=None, pad_side: str = "right", threads: int = 1):
-        self.path, self.pad_side, self.threads = model_path, pad_side, threads
+    def __init__(self, model_path=None, *, session=None, pad_side: str = "right", threads: int = 1):
+        """model_path: the model file, or a function that finds it (it can arrive after Kairo started)."""
+        self._path, self.pad_side, self.threads = model_path, pad_side, threads
         self._session = session
         self._lock = threading.Lock()
         self.failed: str | None = None
         self.last_ms: int | None = None
+
+    @property
+    def path(self) -> Path | None:
+        return self._path() if callable(self._path) else self._path
 
     def _load(self):
         if self._session is None:

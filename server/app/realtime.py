@@ -301,20 +301,6 @@ def instructions(name: str, context: str) -> str:
     return INSTRUCTIONS.format(name=(name or "the owner").strip()[:60], context=context.strip() or "(none)")
 
 
-def context_block(*, now: str, events: str, loops: list[str], card: str, gist: str) -> str:
-    """The compact context a call starts with. Event titles and loops can come from other people: data."""
-    from .tools import untrusted
-    parts = [f"## Right now\n{now}"]
-    parts.append("## Next events\n" + untrusted("the calendar", events.strip()[:1500] or "(none)"))
-    if loops:
-        parts.append("## Open loops (top 5)\n" + untrusted("open loops", "\n".join(f"- {x[:160]}" for x in loops[:5])))
-    if card.strip():
-        parts.append("## About the owner\n" + card.strip()[:1200])
-    if gist.strip():
-        parts.append("## What Kairo remembers lately\n" + gist.strip()[:800])
-    return "\n\n".join(parts)
-
-
 def session_config(cfg: dict, instr: str) -> dict:
     model = cfg["model"]
     sess = {

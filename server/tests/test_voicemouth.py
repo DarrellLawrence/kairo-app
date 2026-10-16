@@ -69,8 +69,9 @@ ITEMS = [bringup.Item("L1", "loop", "reply: Lea asks about Friday", "normal"),
          bringup.Item("T3", "test", "test in maths in 20 hours", "urgent")]
 
 
-def mouth(model, brain=None, **kw):
-    return Mouth(model, ask=brain or Brain(), context="## Right now\nThursday 14:00", items=ITEMS, name="Sam", **kw)
+def mouth(model, brain=None, items=None, **kw):
+    return Mouth(model, ask=brain or Brain(), context="## Right now\nThursday 14:00", items=ITEMS if items is None else items,
+                 name="Sam", **kw)
 
 
 def run(coro):
@@ -110,7 +111,7 @@ def test_german_gets_a_german_filler():
 
 def test_a_slow_brain_gets_one_still_on_it():
     m, sp = Model(tool("check my mail"), text("Nothing new.")), Speaker()
-    run(mouth(m, Brain(delay=0.3), still_after_s=0.1).turn("check my mail", "en", sp))
+    run(mouth(m, Brain(delay=0.3), items=[], still_after_s=0.1).turn("check my mail", "en", sp))
     assert sp.said == [FILLERS["en"][0], STILL["en"]]
 
 
@@ -189,3 +190,142 @@ def test_unmark_handles_pieces_and_plain_brackets():
     u = Unmark()
     out = u.feed("a [") + u.feed("[rai") + u.feed("sed:t3]] b [[x]] c") + u.flush()
     assert out == "a b [[x]] c" and u.raised == ["T3"]
+
+
+# ---------------------------------------------------------------- the wait (owner's request 2026-10-16)
+
+LEA = bringup.Item("L1", "loop", "reply: Lea asks if Friday works (Lea)", "normal",
+                   says={"en": "Did you answer Lea about Friday yet?", "de": "Hast du Lea wegen Freitag geantwortet?"})
+CASE = bringup.Item("L2", "loop", "promise: order the phone case", "normal",
+                    says={"en": "Did you order the phone case yet?", "de": "Hast du die Handyhülle bestellt?"})
+FORM = bringup.Item("L3", "loop", "task: sign the school form", "urgent",
+                    says={"en": "The school form has to be signed today.", "de": "Das Schulformular muss heute unterschrieben sein."})
+
+
+def test_the_wait_is_a_holding_line_then_one_item_that_fits():
+    m = Model(tool("is Friday free?"), text("Friday is free after 4."))
+    sp = Speaker()
+    mo = mouth(m, Brain(answer="Friday: free after 16:00.", delay=0.3), items=[CASE, LEA], wait_after_s=0.05)
+    r = run(mo.turn("Is Friday free?", "en", sp))
+    assert sp.said == [FILLERS["en"][0], "Quick one: Did you answer Lea about Friday yet?"]   # fits what they asked
+    assert r.waited == ["L1"] and r.raised == ["L1"] and "Friday is free after 4." in sp.heard
+    assert "[[raised:L1]] Quick one: Did you answer Lea" in m.calls[1]["messages"][2]["content"]   # the model knows
+    assert sp.events.index(("say", sp.said[1])) < sp.events.index(("feed", "Friday is free after 4."))
+
+
+def test_a_fast_answer_never_waits_for_the_item():
+    m, sp = Model(tool("is Friday free?"), text("Free after 4.")), Speaker()
+    r = run(mouth(m, Brain(delay=0.0), items=[LEA], wait_after_s=0.3).turn("Is Friday free?", "en", sp))
+    assert sp.said == [FILLERS["en"][0]] and r.waited == []                # the answer was there: no detour
+
+
+def test_urgent_comes_first_before_the_answer_even_when_fast():
+    m, sp = Model(tool("is Friday free?"), text("Free after 4.")), Speaker()
+    r = run(mouth(m, Brain(delay=0.0), items=[LEA, FORM], wait_after_s=5).turn("Is Friday free?", "en", sp))
+    assert sp.said[1] == "Before I forget, this one's urgent: The school form has to be signed today." and r.waited == ["L3"]
+    assert sp.events.index(("say", sp.said[1])) < sp.events.index(("feed", "Free after 4."))
+
+
+def test_one_item_per_wait_never_twice_and_the_cap_holds():
+    m = Model(tool("mail?"), text("No mail."), tool("tasks?"), text("Two tasks."), tool("weather?"), text("Sunny."))
+    mo = mouth(m, Brain(delay=0.2), items=[LEA, CASE, bringup.Item("K9", "question", "q", says={"en": "When is training?"})],
+               wait_after_s=0.02)
+    said = []
+    for q in ("any mail?", "my tasks?", "the weather?"):
+        sp = Speaker()
+        run(mo.turn(q, "en", sp))
+        said.append(sp.said[1:])
+    assert len(said[0]) == 1 and len(said[1]) == 1 and said[0] != said[1]   # one each, never the same
+    assert said[2] == []                                                    # two per call: then just the holding line
+
+
+def test_nothing_worth_saying_means_only_the_holding_line():
+    m, sp = Model(tool("mail?"), text("Nothing.")), Speaker()
+    unphrased = [bringup.Item("L7", "loop", "reply: something from a mail")]   # Claude hasn't phrased it
+    run(mouth(m, Brain(delay=0.2), items=unphrased, wait_after_s=0.02).turn("any mail?", "en", sp))
+    assert sp.said == [FILLERS["en"][0]]
+
+
+def test_german_wait_lines_are_german():
+    m, sp = Model(tool("Freitag frei?"), text("Freitag ab 16 Uhr frei.")), Speaker()
+    run(mouth(m, Brain(delay=0.2), items=[LEA], wait_after_s=0.02).turn("Ist Freitag frei?", "de", sp))
+    assert sp.said == [FILLERS["de"][0], "Kurz: Hast du Lea wegen Freitag geantwortet?"]
+
+
+def test_what_the_owner_answers_goes_back_to_claude_after_the_call():
+    m = Model(tool("is Friday free?"), text("Free after 4."), text("Nice, noted."))
+    mo = mouth(m, Brain(delay=0.2), items=[LEA], wait_after_s=0.02)
+    run(mo.turn("Is Friday free?", "en", Speaker()))
+    run(mo.turn("Yeah I told her Friday works.", "en", Speaker()))
+    assert mo.reports() == [(LEA, "Quick one: Did you answer Lea about Friday yet?", "Yeah I told her Friday works.")]
+    req = bringup.report_request(*mo.reports()[0])
+    assert "Yeah I told her Friday works." in req and "done (close it), later (snooze it" in req
+    assert "UNTRUSTED DATA" in req                                       # the loop's text can come from mail
+
+
+def test_an_item_the_voice_model_passed_on_itself_is_not_reported_twice():
+    m = Model(tool("is Friday free?"), text("Free after 4."), tool("told Lea Friday works", item="L1"), text("Noted."))
+    mo = mouth(m, Brain(delay=0.2), items=[LEA], wait_after_s=0.02)
+    run(mo.turn("Is Friday free?", "en", Speaker()))
+    run(mo.turn("I told Lea Friday works.", "en", Speaker()))
+    assert mo.reports() == []
+
+
+def test_talked_over_in_the_wait_the_answer_still_comes_in_the_next_turn():
+    async def go():
+        m = Model(tool("did Tom reply?"), text("Ha, okay."), text("Tom replied: he's in."))
+        mo = mouth(m, Brain(answer="Tom replied: he's in.", delay=0.4), items=[LEA], wait_after_s=0.02)
+        t = asyncio.get_running_loop().create_task(mo.turn("did Tom reply?", "en", Speaker()))
+        await asyncio.sleep(0.1)                                   # the item was said; they answer it
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        sp = Speaker()
+        r = await mo.turn("Yes I answered Lea.", "en", sp)
+        assert sp.heard == "Ha, okay. Tom replied: he's in." and r.text.endswith("Tom replied: he's in.")
+        assert "is here: Tom replied: he's in." in m.calls[2]["messages"][-1]["content"]
+        assert mo.reports()[0][2] == "Yes I answered Lea." and mo.pending == []
+    run(go())
+
+
+# ---------------------------------------------------------------- the Today card
+
+CARD = {"now": "Friday 16 October 2026", "events": "- Fri 18:00 Training", "weather": "Home: now 12°C, cloudy",
+        "trip": "Home to School:\n- 07:12, S3, platform 2"}
+
+
+def test_the_card_is_the_context_and_only_changed_parts_follow():
+    m = Model(text("Twelve degrees."), text("Now it's sunny."))
+    mo = Mouth(m, ask=Brain(), context=dict(CARD), items=[], name="Sam")
+    run(mo.turn("what's the weather?", "en", Speaker()))
+    sysmsg = m.calls[0]["messages"][0]["content"]
+    assert "# Today card" in sysmsg and "## Weather\nHome: now 12°C, cloudy" in sysmsg and "UNTRUSTED DATA" in sysmsg
+    assert mo.update_card({**CARD, "weather": "Home: now 14°C, sunny"}) == ["weather"]
+    assert mo.update_card({**CARD, "weather": "Home: now 14°C, sunny"}) == []                 # nothing new: no note
+    run(mo.turn("and now?", "en", Speaker()))
+    last = m.calls[1]["messages"][-1]["content"]
+    assert "## Weather\nHome: now 14°C, sunny" in last and "## Next events" not in last
+    assert m.calls[1]["messages"][0] == m.calls[0]["messages"][0]                         # the cache holds
+
+
+def test_the_owners_words_carry_the_time_and_questions_are_counted():
+    import datetime as dt
+    m = Model(text("At 18:00."), tool("note it"), text("Noted."), text("Haha."))
+    mo = mouth(m, items=[], clock=lambda: dt.datetime(2026, 10, 16, 14, 5))
+    r1 = run(mo.turn("When is training?", "en", Speaker()))
+    r2 = run(mo.turn("Note that I paid", "en", Speaker()))
+    r3 = run(mo.turn("lol okay", "en", Speaker()))
+    assert m.calls[0]["messages"][-1]["content"] == "[14:05] When is training?"
+    assert (r1.route, r2.route, r3.route) == ("card", "claude", "talk")
+
+
+def test_a_long_call_starts_fresh_before_the_context_is_full():
+    m = Model(text("Sure."), text("Okay."))
+    mo = mouth(m, items=[], context_tokens=4096)
+    run(mo.turn("first thing", "en", Speaker()))
+    mo.lines = []                                                        # as after a Claude call
+    mo.prompt_tokens = 4000
+    run(mo.turn("second thing", "en", Speaker()))
+    msgs = m.calls[1]["messages"]
+    assert [x["role"] for x in msgs] == ["system", "user"] and "Earlier on this call" in msgs[1]["content"]
+    assert "Owner: first thing" in msgs[1]["content"]

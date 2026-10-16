@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-16 — build: Today card and using the wait (owner's request)
+- Today card: the voice model on the PC answers the usual questions at once, without Claude: what's next (the next 3 events), what's left today (tasks due today or overdue), open loops, the weather at home, the next train or bus for your routine (from your saved places: home station to where you're heading, or back home), key profile facts and what Kairo remembers lately.
+- Always fresh: each part on its own clock (Kairo's own data every minute, the calendar every 3 minutes, the connection every 3 minutes on a call and every 10 otherwise, not at night, the weather every 30), and read again at once after Claude changed something on the call. A call only gets the parts that changed, so the voice model stays fast. Only station names leave the PC, as before.
+- Only what the card can't answer goes to Claude. Voice lab: each model's share of card questions answered on the PC with the right facts (a model needs 70%, at most 10% wrong, to be picked). Voice lab and Run diagnosis: how many of your call questions were answered on the PC vs via Claude.
+- Using the wait: while Claude works, Kairo says a short holding line and then one thing from its list for you, in Claude's words ("Checking. Quick one: did you answer Lea about Friday?"): the one that fits what you're talking about, the time and the place. Never the same one twice in a call, at most two a call; nothing worth it: just the holding line.
+- The answer never waits for it: a normal item is only said while Claude is still working; Claude's answer comes right after the sentence that is playing. An urgent item is said first, before the answer.
+- What you answer to it goes to Claude after the call (done: closed; later: snoozed; new information: saved), unless the voice model already passed it on. Talk over Kairo in the wait and the answer still comes, right after Kairo answers what you just said.
+- Claude now writes each call topic as one short spoken sentence in English and German.
+- The owner's words carry the time on calls, so "in 10 minutes" stays right during a long call. A long call that nears the voice model's memory starts a fresh conversation with the last lines.
+- Nothing to do on the PC after an update: the voice lab runs once by itself the first time a voice model is ready and nobody is on the line. A voice model download that failed is tried again every 6 hours, and the turn detector is picked up when it arrives (no restart).
+- Acceptance tests 40 (Today card) and 41 (using the wait).
+- Removed: the call context builder of the realtime voice (the Today card replaces it for both voices) and the fixed "Sec, checking." as the only line in the wait.
+
 ## 2026-10-16 — build: local voice (owner's decision: free, on the PC)
 - Calls and the voice button talk to a small voice model on the PC's graphics card, loaded all the time. No key, no cost, nothing leaves the PC for small talk. OpenAI Realtime stays as an option (More → Settings → Voice), off by default.
 - Engine: llama.cpp with CUDA (prebuilt for Windows, runs all three candidates). ExLlamaV3/TabbyAPI was not picked: no Windows build without an admin compiler setup, and no Gemma 4 E4B support.

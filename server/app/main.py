@@ -342,8 +342,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
             app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
+            app.state.today_card.start()   # the Today card: always fresh, before any call
+            background.append(asyncio.create_task(_lab_first_run()))
         yield
         app.state.voice_llm.shutdown()
+        app.state.today_card.stop()
         app.state.jobs.stop()
         if getattr(runner.brain, "close_warm", None) is not None:
             runner.brain.close_warm()
@@ -384,7 +387,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _voice_site = tool_sites.site("voice", settings.data_dir)
     app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site)
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
-    from . import bringup, smartturn, voicellm, voicelab
+    from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
     from .voicemouth import Mouth
     _vl_site = voicellm.site(settings.data_dir)
@@ -403,7 +406,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs")
     with session_for(engine) as _s:
         _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
-    app.state.smart_turn = smartturn.SmartTurn(voicellm.smart_turn_path(_vl_site), pad_side=_pad)
+    app.state.smart_turn = smartturn.SmartTurn(lambda: voicellm.smart_turn_path(_vl_site), pad_side=_pad)   # may come later
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
@@ -997,6 +1000,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await ws.accept()
         warm_conversation_soon()
         runner.line_open()                 # jobs keep off the brain while the owner is on the line
+        _card_lines[0] += 1
+        app.state.today_card.on_call = True
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
                                      current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
@@ -1105,8 +1110,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pass
         finally:
             runner.line_closed()
+            _card_lines[0] -= 1
+            app.state.today_card.on_call = _card_lines[0] > 0
             if line.speaker is not None:   # nobody to hear it; the answer itself goes on and is saved
                 line.speaker.stop()
+            if line.mouth is not None and line.mouth.reports():
+                report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
+                _turns.add(report)
+                report.add_done_callback(_turns.discard)
 
     async def _voice_turn(line, utt: "voicelink.Utterance", path: str, call_id, number: int, after=None) -> None:
         if after is not None:
@@ -1194,15 +1205,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return True
 
     async def _new_mouth(line) -> "Mouth":
-        """The call's conversation: the compact context and the bring-up list, then the prompt is read once
+        """The call's conversation: the Today card and the bring-up list, then the prompt is read once
         into the voice model's cache so the owner's first words are the only new ones."""
-        context = await asyncio.to_thread(_rt_context)
+        card = app.state.today_card
+        if not card.ready():
+            await asyncio.to_thread(card.refresh)
         with session_for(engine) as s_:
             items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
             language = realtime.load_settings(s_).get("language", "auto")
         spec = voicellm.spec(app.state.voice_llm.model_id) or {}
-        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=context, items=items, name=profile.name,
-                      temperature=float(spec.get("temperature", 0.6)), language_mode=language)
+
+        def place() -> str | None:
+            with session_for(engine) as s2:
+                return location.current_place(s2)
+        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
+                      temperature=float(spec.get("temperature", 0.6)), language_mode=language,
+                      clock=lambda: dt.datetime.now(profile.tz), place=place,
+                      context_tokens=int(spec.get("context") or 8192))
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
@@ -1211,6 +1230,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:   # the first turn reads it then
             log.info("voice model: priming the cache failed: %s", exc)
         return mouth
+
+    _card_lines = [0]
+    LAB_FIRST_CHECK_S = 600
+
+    async def _report_answers(mouth: "Mouth") -> None:
+        """After the call: what the owner said to each item Kairo raised goes to Claude (done, later, new info),
+        unless the voice model already passed it on. Their own words only."""
+        await asyncio.gather(*list(_turns - {asyncio.current_task()}), return_exceptions=True)   # the call's answers first
+        for item, said, reply in mouth.reports():
+            try:
+                await app.state.after_call_ask(bringup.report_request(item, said, reply), [f"Owner: {reply}"])
+            except Exception:
+                log.exception("voice: reporting the owner's answer to %s", item.id)
 
     async def _mouth_ask(request: str, lines: list[str], about: str) -> tuple[str, bool]:
         """ask_kairo from the voice model: an owner turn for Claude, as on any call."""
@@ -1242,6 +1274,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return False
         mouth = line.mouth
         _refresh_items(mouth)
+        mouth.update_card(app.state.today_card.peek())   # only what changed; never waits for the network
+        app.state.today_card.warm()
         sent: list[asyncio.Task] = []
         loop_ = asyncio.get_running_loop()
 
@@ -1281,8 +1315,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if sent:
             await asyncio.gather(*sent, return_exceptions=True)
         said = result.text if result else re.sub(r"\s*…$", "", (mouth.messages[-1].get("content") or "")).strip()
+        said = re.sub(r"\[\[raised:[A-Za-z]\d{1,8}\]\]\s*", "", said)
         if said and said != "…":
             _rt_said("kairo", said)
+        if result is not None:
+            voicestats.record(engine, result.route, release_version())
+            if result.asked:                       # Claude may have changed tasks, loops, the calendar
+                app.state.today_card.refresh_soon("tasks", "loops", "events", "now")
         hang = " [[hang up]]" if mouth.hang_up else ""
         await line.send({"type": "done", "text": said + hang, "model": app.state.voice_llm.model_id or "voice",
                          "interrupted": interrupted, "turn": number,
@@ -1308,6 +1347,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rep = lab.run(language)
         p_ = rep.get("pick") or {}
         return (f"picked {p_.get('model')}: {p_.get('why')}" if not rep.get("error") else f"failed: {rep['error']}")[:500]
+
+    async def _lab_first_run() -> None:
+        """The voice lab runs once by itself: the first time a voice model is ready and nobody is on the line
+        or talking to Kairo (owner's request 2026-10-16: nothing to do on the PC). Then only on Run."""
+        for _ in range(3):                             # at most 3 tries, 10 minutes apart at the earliest
+            while True:
+                await asyncio.sleep(LAB_FIRST_CHECK_S)
+                with session_for(engine) as s:
+                    if voicelab.last(s) or voicelab.state(s).get("running"):
+                        return
+                if (app.state.voice_llm.ready() and runner._lines == 0 and runner.current_origin is None
+                        and time.time() >= app.state.maintenance_until):
+                    break
+            await asyncio.to_thread(app.state.jobs.run_job, "voice_lab", forced=True)
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -2706,7 +2759,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.realtime_client = lambda key, region: realtime.OpenAIRealtime(key, region)
     app.state.realtime_down_until = 0.0
-    _rt_cache: dict = {"at": 0.0, "text": None, "busy": False}
 
     def _rt_status() -> dict:
         now = dt.datetime.now(profile.tz)
@@ -2721,46 +2773,98 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "models": list(realtime.PRICES), "short": realtime.SHORT, "voices": list(realtime.VOICES),
                 "regions": list(realtime.HOSTS), "reasoning": list(realtime.REASONING)}
 
-    def _rt_context_now() -> str:
-        """Today, the next events, the top open loops, the profile card and the memory gist."""
-        now = dt.datetime.now(profile.tz)
-        try:
-            with session_for(engine) as s:
-                events = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s).text(profile.tz)
-        except Exception as exc:   # never lose a call over the calendar: the model is told it can't know
-            events = calendar_read.UNREADABLE.format(why=type(exc).__name__)
-        try:
-            with session_for(engine) as s:
-                shown = [f"{l.kind}: {l.what}" + (f" ({l.who})" if l.who else "")
-                         + (f", due {loops.aware(l.due).astimezone(profile.tz):%a %d %b %H:%M}" if l.due else "")
-                         for l in loops.shown_loops(s, profile=profile)[:5]]
-                gist = memory.get(s)["text"] or ""
-        except Exception:
-            log.exception("realtime: loops or memory for the call context")
-            shown, gist = [], ""
-        card = vault.context(settings.vault_dir, limit=1200)
-        return realtime.context_block(now=f"{now:%A %d %B %Y, %H:%M} ({profile.timezone})", events=events,
-                                      loops=shown, card=card, gist=gist[-800:])
+    # ---------------------------------------------------------------- the Today card (owner's request 2026-10-16)
+    # What the voice model answers from at once (app/todaycard.py); also the realtime model's context.
 
-    def _rt_context(max_age_s: float = 300) -> str:
-        if _rt_cache["text"] is None or time.time() - _rt_cache["at"] > max_age_s:
-            _rt_cache.update(text=_rt_context_now(), at=time.time())
-        return _rt_cache["text"]
+    _card_raw: dict = {"events": [], "stations": {}}
+
+    def _card_now() -> str:
+        now = dt.datetime.now(profile.tz)
+        with session_for(engine) as s:
+            return todaycard.now_line(now, location.current_place(s))
+
+    def _card_events() -> str:
+        now = dt.datetime.now(profile.tz)
+        with session_for(engine) as s:
+            r = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s)
+        _card_raw["events"] = r.events if r.ok else []
+        return todaycard.events_lines(r.events, now, unreadable=None if r.ok else r.text(profile.tz))
+
+    def _card_tasks() -> str:
+        with session_for(engine) as s:
+            rows = s.exec(select(Task).where(Task.status.in_(["open", "doing"])).where(Task.due.is_not(None))).all()
+        return todaycard.tasks_lines(rows, dt.datetime.now(profile.tz))
+
+    def _card_loops() -> str:
+        with session_for(engine) as s:
+            return todaycard.loops_lines(loops.shown_loops(s, profile=profile)[:3], profile.tz)
+
+    def _card_station(name: str) -> dict | None:
+        if name not in _card_raw["stations"]:           # a station's place never moves: asked once
+            _card_raw["stations"][name] = app.state.lookup.station(name)
+        return _card_raw["stations"][name]
+
+    def _card_home():
+        now = dt.datetime.now(profile.tz)
+        with session_for(engine) as s:
+            places = prefs_mod.places(s)
+            here = location.current_place(s)
+        home = next((p for p in places if p.kind == "home" and p.active(now.date()) and p.station), None)
+        at = next((p for p in places if here and p.name.lower() == here.lower() and p.station), None)
+        return now, places, home, at
+
+    def _card_weather():
+        _now, _places, home, _at = _card_home()
+        if home is None:
+            return todaycard.weather_line(None, None)
+        st = _card_station(home.station)
+        return todaycard.weather_line(app.state.lookup.weather(st["lat"], st["lon"]) if st else None, home.name)
+
+    def _card_trip():
+        """The owner's routine: from where they are (else home) to where they're heading next (else home)."""
+        now, places, home, at = _card_home()
+        frm = at or home
+        if frm is None:
+            return todaycard.trip_lines(None, None, None, profile.tz)
+        if not app.state.today_card.on_call and _quiet_now(now):
+            return None                                 # the timetable rests at night (keep what's there)
+        dest = pa_mod.destination(places, _card_raw["events"], now)[0] if frm.kind == "home" else home
+        if dest is None or not dest.station or dest.station == frm.station:
+            return todaycard.trip_lines(None, frm.name, None, profile.tz)
+        return todaycard.trip_lines(app.state.lookup.connections(frm.station, dest.station), frm.name, dest.name, profile.tz)
+
+    def _quiet_now(now: dt.datetime) -> bool:
+        q = getattr(profile, "quiet_hours", None)
+        try:
+            start, end = dt.time.fromisoformat(q.start), dt.time.fromisoformat(q.end)
+        except Exception:
+            return False
+        t_ = now.time()
+        return (start <= t_ or t_ < end) if start > end else (start <= t_ < end)
+
+    def _card_about() -> str:
+        return vault.context(settings.vault_dir, limit=1000)
+
+    def _card_lately() -> str:
+        with session_for(engine) as s:
+            return (memory.get(s)["text"] or "")[-500:]
+
+    app.state.today_card = todaycard.Keeper({"now": _card_now, "events": _card_events, "tasks": _card_tasks,
+                                             "loops": _card_loops, "weather": _card_weather, "trip": _card_trip,
+                                             "about": _card_about, "lately": _card_lately})
+
+    def _rt_context() -> str:
+        """The card for a call: the last one at once if there is one (a refresh runs beside it), else read now."""
+        card = app.state.today_card
+        if not card.ready():
+            card.refresh()
+        else:
+            card.warm()
+        return todaycard.render({k: v for k, v in card.peek().items() if k in todaycard.REALTIME})
 
     def _rt_prefetch() -> None:
-        """Opening Call or the voice button reads the context ahead, so the call starts fast."""
-        if _rt_cache["busy"] or time.time() - _rt_cache["at"] < 60:
-            return
-        _rt_cache["busy"] = True
-
-        def run():
-            try:
-                _rt_context(max_age_s=60)
-            except Exception:
-                log.exception("realtime: context")
-            finally:
-                _rt_cache["busy"] = False
-        threading.Thread(target=run, name="realtime-context", daemon=True).start()
+        """Opening Call or the voice button reads ahead what's due, so the call starts with a fresh card."""
+        app.state.today_card.warm()
 
     def _rt_said(role: str, text_: str) -> None:
         """A line of the live call, into the one conversation (the owner's words as said on a call)."""
@@ -2784,6 +2888,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pusher.notify("Realtime voice", f"This month's {state['cap_chf']:g} CHF voice budget is used up. Calls use "
                           "the local voice until next month (or raise the cap in Settings).", "/#more", source="realtime")
         return state
+
+    async def _after_call_ask(request: str, lines: list[str]) -> tuple[str, bool]:
+        return await _rt_ask(request, lines)
+    app.state.after_call_ask = _after_call_ask       # an owner turn for Claude, like ask_kairo (tests listen here)
 
     async def _rt_ask(request: str, lines: list[str]) -> tuple[str, bool]:
         """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call."""
@@ -2867,6 +2975,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             st, last_, choice_, active_ = voicelab.state(s), voicelab.last(s), voicellm.choice(s), voicellm.active(s, _vl_site)
             cfg = realtime.load_settings(s)
+            live = voicestats.summary(s)
         if voicellm.kyutai_ready(_tools_dir) and _kyutai_flag.is_file():
             _kyutai_flag.unlink(missing_ok=True)     # installed: the request is done
         return {"state": st, "last": last_, "choice": choice_, "active": active_,
@@ -2876,7 +2985,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "voice_model": app.state.voice_llm.status(), "smart_turn": app.state.smart_turn.available(),
                 "engine": cfg.get("engine"), "language": cfg.get("language"),
                 "kyutai": {"ready": voicellm.kyutai_ready(_tools_dir), "requested": _kyutai_flag.is_file()},
-                "gpu": voicelab.nvidia_smi()}
+                "gpu": voicelab.nvidia_smi(), "live": live,
+                "card": {"sections": app.state.today_card.peek(), "titles": todaycard.SECTIONS}}
 
     @app.post("/api/voice/lab/run")
     def voice_lab_run(body: dict | None = None):
@@ -2961,9 +3071,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:                           # a slow Google read must not hold up the call
                 context = await asyncio.wait_for(asyncio.to_thread(_rt_context), 3)
             except asyncio.TimeoutError:
-                context = _rt_cache["text"] or realtime.context_block(
-                    now=f"{dt.datetime.now(profile.tz):%A %d %B %Y, %H:%M}", loops=[], card="", gist="",
-                    events=calendar_read.UNREADABLE.format(why="not read in time"))
+                context = todaycard.render({**app.state.today_card.peek(), "now": todaycard.now_line(dt.datetime.now(profile.tz)),
+                                            "events": calendar_read.UNREADABLE.format(why="not read in time")})
             answer, call_id = await client.create_call(
                 sdp, realtime.session_config(cfg, realtime.instructions(profile.name, context)))
         except realtime.RealtimeError as exc:

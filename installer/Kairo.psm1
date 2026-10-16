@@ -713,6 +713,21 @@ function Install-VoiceLLM($P, [string]$ReleaseDir) {
     }
 }
 
+# A voice model download that failed during an update (network, disk) is tried again from the auto-update,
+# at most every 6 hours, not only with the next release. Partial files are kept and checked, so it continues.
+# Kairo picks the voice model up by itself once it is complete (no restart).
+function Repair-VoiceLLM($P, [string]$ReleaseDir) {
+    if ($env:KAIRO_SKIP_VOICELLM -eq '1') { return }
+    $siteFile = Join-Path $ReleaseDir 'voicellm-site.txt'
+    if (-not (Test-Path $siteFile)) { return }
+    $site = ([string](Get-Content -Raw $siteFile)).Trim()
+    if (-not $site -or (Test-Path (Join-Path $site '.complete'))) { return }
+    $tried = Join-Path $P.Updater 'voicellm-tried.txt'
+    if ((Test-Path $tried) -and ((Get-Date) - (Get-Item $tried).LastWriteTime).TotalHours -lt 6) { return }
+    Set-Content -Path $tried -Value (Get-Date -Format o) -Encoding ASCII
+    [void](Install-VoiceLLM $P $ReleaseDir)
+}
+
 # The voice lab's Kyutai comparison (owner's request 2026-10-16), only once the owner asked for it in the
 # app (data\voicelab\kyutai.request; only its existence is read, never its content): its own Python with
 # torch + moshi and Kyutai's English models, about 10 GB, in tools\kyutai-<hash> (admins only). Kairo never

@@ -787,6 +787,8 @@ function VoiceLabPage() {
   const vm = d.voice_model || {}
   const sp = r.speech || {}
   const k = r.kyutai || {}
+  const live = d.live || {}
+  const card = d.card || { sections: {}, titles: {} }
   return (
     <Page title="Voice lab" onRefresh={load}>
       <p className="k-hello">The voice candidates, measured on your PC’s graphics card: how fast they answer, whether they hand real work to Claude every time, and how natural they sound. Kairo picks the fastest one that passes.</p>
@@ -802,6 +804,13 @@ function VoiceLabPage() {
           <ListRow icon={<IconBolt />} title="Run it English-only" subtitle="If you only talk English on calls" onClick={() => run('en')} />
         )}
       </List>
+      <SectionTitle>Your calls, last 7 days</SectionTitle>
+      <List>
+        <ListRow title="Answered on the PC (Today card)" subtitle={live.questions ? `${live.card} of ${live.questions} questions · ${live.talk} small talk` : 'No call questions yet'}
+          value={<Badge tone="ok" pop={false}>{live.on_pc_pct ?? '–'}%</Badge>} />
+        <ListRow title="Went to Claude" subtitle="Everything the card can’t answer" value={<span className="k-small">{live.via_claude_pct ?? '–'}%</span>} />
+      </List>
+      <p className="k-muted k-small k-pad">“Question” is read from what you said, so this split is an estimate; each model’s exact numbers on fixed questions are below.</p>
       {r.pick && (
         <p className="k-small k-pad selectable"><b>{r.pick.model ? `Picked: ${r.pick.model}` : 'Nothing picked'}</b> — {r.pick.why}{r.at ? ` (${parseTs(r.at).toLocaleString()}, ${r.seconds}s)` : ''}</p>
       )}
@@ -817,6 +826,8 @@ function VoiceLabPage() {
               <ListRow title="Calls ask_kairo when needed" value={<Badge tone={(m.tool_recall ?? 0) >= 0.9 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.tool_recall)}</Badge>} />
               <ListRow title="Calls it when not needed" value={<Badge tone={(m.false_calls ?? 1) <= 0.15 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.false_calls)}</Badge>} />
               <ListRow title="Keeps Claude’s facts" value={<Badge tone={(m.fidelity ?? 0) >= 0.9 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.fidelity)}</Badge>} />
+              {m.card_on_pc != null && <ListRow title="Answers from the Today card" subtitle={`wrong ${pctTxt(m.card_wrong)} · via Claude ${pctTxt(m.card_via_claude)}`}
+                value={<Badge tone={m.card_on_pc >= 0.7 && (m.card_wrong ?? 1) <= 0.1 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.card_on_pc)}</Badge>} />}
               <ListRow title="Natural (Claude, blind)" subtitle={m.natural?.note || ''} value={<span className="k-small">EN {m.natural?.en ?? '–'} · DE {m.natural?.de ?? '–'}</span>} />
               {(m.samples?.en || []).slice(0, 1).map((x, i) => <ListRow key={`en${i}`} wrap title={`“${x.owner}”`} subtitle={x.kairo} />)}
               {(m.samples?.de || []).slice(0, 1).map((x, i) => <ListRow key={`de${i}`} wrap title={`„${x.owner}“`} subtitle={x.kairo} />)}
@@ -849,6 +860,13 @@ function VoiceLabPage() {
           : d.kyutai.ready ? <ListRow title="Installed" subtitle="Run the lab to measure it" />
             : d.kyutai.requested ? <ListRow title="Install requested" subtitle="The PC installs it within minutes (about 10 GB)" />
               : <ListRow title="Install the Kyutai test" subtitle="About 10 GB, only for this comparison" onClick={kyutai} chevron />}
+      </List>
+      <SectionTitle>Today card (what the voice model knows right now)</SectionTitle>
+      <List>
+        {Object.entries(card.titles).filter(([key]) => card.sections[key]).map(([key, title]) => (
+          <ListRow key={key} wrap title={title} subtitle={<span className="selectable" style={{ whiteSpace: 'pre-line' }}>{card.sections[key]}</span>} />
+        ))}
+        {!Object.keys(card.sections).length && <ListRow title="Not read yet" subtitle="Kairo reads it within a minute of starting" />}
       </List>
       {r.estimate_ms && (
         <p className="k-muted k-small k-pad">On the PC, before the phone: quiet {r.estimate_ms.endpoint} + speech to text {r.estimate_ms.stt ?? '–'} + first word {r.estimate_ms.voice_model_first_word ?? '–'} + first audio {r.estimate_ms.first_audio ?? '–'} = {r.estimate_ms.total ?? '–'} ms{r.estimate_ms.kyutai_total ? ` (Kyutai: ${r.estimate_ms.kyutai_total} ms)` : ''}. The phone adds the network and playback: see Voice speed.</p>

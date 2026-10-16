@@ -89,6 +89,7 @@ try {
     if (-not $installed) { exit 0 }
     if (-not $TestRelease) {   # the voice lab's Kyutai test, once the owner asked for it in the app
         try { Install-KyutaiIfRequested $P (Join-Path $P.Releases $installed) } catch { Write-Log "Kyutai test: $($_.Exception.Message)" }
+        try { Repair-VoiceLLM $P (Join-Path $P.Releases $installed) } catch { Write-Log "Voice model: $($_.Exception.Message)" }
     }
     $s = Read-UpdaterState $P
 

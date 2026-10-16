@@ -311,12 +311,14 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
         gpu = lab.get("gpu") or {}
         if gpu:
             r.add(f"  gpu: {gpu.get('name')} {gpu.get('used_mb')}/{gpu.get('total_mb')} MB, driver {gpu.get('driver')}")
-        r.add("  model | first word p50/p95 | tok/s | tool recall | false calls | facts | natural en/de | vram | error")
+        r.add("  model | first word p50/p95 | tok/s | tool recall | false calls | facts | card on PC/wrong/via Claude | "
+              "natural en/de | vram | error")
         for mid, m in (lab.get("models") or {}).items():
             fw = m.get("first_word_ms") or {}
             nat = m.get("natural") or {}
             r.add(f"  {mid} | {fw.get('p50')}/{fw.get('p95')} | {m.get('tokens_per_s')} | {m.get('tool_recall')} | "
-                  f"{m.get('false_calls')} | {m.get('fidelity')} | {nat.get('en')}/{nat.get('de')} | {m.get('vram_mb')} | "
+                  f"{m.get('false_calls')} | {m.get('fidelity')} | {m.get('card_on_pc')}/{m.get('card_wrong')}/"
+                  f"{m.get('card_via_claude')} | {nat.get('en')}/{nat.get('de')} | {m.get('vram_mb')} | "
                   f"{(m.get('error') or '')[:120]}")
         sp = lab.get("speech") or {}
         st = (sp.get("smart_turn") or {})
@@ -333,6 +335,16 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
     except (TypeError, ValueError):
         ag = None
     r.add(f"  call topics: {len((ag or {}).get('items') or [])} picked by Claude at {(ag or {}).get('at')}" if ag else "  call topics: none yet")
+    routes = one("SELECT value FROM settings WHERE key='voice.routes'")
+    try:
+        rows = [x for x in json.loads(routes) if isinstance(x, list) and len(x) == 3] if routes and not str(routes).startswith("ERROR") else []
+    except (TypeError, ValueError):
+        rows = []
+    since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat(timespec="seconds")
+    recent = [x[1] for x in rows if str(x[0]) >= since]
+    card_n, claude_n = recent.count("card"), recent.count("claude")
+    r.add(f"  calls, last 7 days: {card_n + claude_n} questions, {card_n} answered on the PC (Today card), {claude_n} via Claude, "
+          f"{recent.count('talk')} small talk" + (f" = {round(100 * card_n / (card_n + claude_n))}% on the PC" if card_n + claude_n else ""))
 
     r.h("Last self-test")
     value = one("SELECT value FROM settings WHERE key='selftest.tools'")
