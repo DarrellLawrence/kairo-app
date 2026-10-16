@@ -71,7 +71,7 @@ def test_reports_are_stored_and_summarised_per_version(migrated, monkeypatch):
     assert call_now["failures"] == {"blocked: NotAllowedError": 1}
     last = rep["recent"][0]
     assert last["model"] == "haiku" and last["outcome"] == "blocked" and last["path"] == "call"
-    assert rep["targets"]["call"] == {"p50": 1500, "p95": 3000}
+    assert rep["targets"]["call"] == {"p50": 800, "p95": 1500}           # owner's request 2026-10-16
 
 
 def test_the_pc_stamps_the_version_when_the_phone_leaves_it_out(migrated):
@@ -99,3 +99,9 @@ def test_every_reply_says_which_model_and_how_long_the_pc_took(migrated):
     assert f["type"] == "done"
     assert f["model"] in ("haiku", "sonnet", "opus")
     assert set(f["server"]) >= {"queue_ms", "first_words_ms"} and all(isinstance(v, int) for v in f["server"].values())
+
+
+def test_the_local_voice_models_own_times_are_steps():
+    st = turns.steps({"endpoint": 300, "sent": 420, "first_words": 600, "playing": 750},
+                     {"stt_ms": 100, "queue_ms": 0, "llm_ms": 60, "tool_ms": 2100}, "call")
+    assert st["llm_ms"] == 60 and st["tool_ms"] == 2100 and st["total_ms"] == 750

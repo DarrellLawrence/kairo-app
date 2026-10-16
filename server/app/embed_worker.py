@@ -32,7 +32,7 @@ BATCH = 16
 
 
 class Model:
-    def __init__(self, models_dir: Path) -> None:
+    def __init__(self, models_dir: Path, cpu_only: bool = False) -> None:
         import onnxruntime as ort
         from tokenizers import Tokenizer
         tok = models_dir / "tokenizer.json"
@@ -44,7 +44,7 @@ class Model:
             except Exception as exc:        # no CUDA: the CPU does it
                 print(f"no CUDA libraries: {exc}", file=sys.stderr)
         tries = []
-        if "CUDAExecutionProvider" in ort.get_available_providers():
+        if "CUDAExecutionProvider" in ort.get_available_providers() and not cpu_only:   # --cpu: the GPU is the voice's
             tries += [(p, ["CUDAExecutionProvider", "CPUExecutionProvider"]) for p in GPU_PREFS]
         tries += [(p, ["CPUExecutionProvider"]) for p in CPU_PREFS]
         errors = []
@@ -139,6 +139,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", required=True)
     ap.add_argument("--site", default="")
+    ap.add_argument("--cpu", action="store_true")
     a = ap.parse_args()
     out = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
     os.dup2(2, 1)                           # stray prints (onnxruntime's included) go to stderr
@@ -151,7 +152,7 @@ def main() -> int:
         out.flush()
 
     try:
-        model = Model(Path(a.models))
+        model = Model(Path(a.models), cpu_only=a.cpu)
     except Exception as exc:
         say({"ready": False, "error": f"{type(exc).__name__}: {exc}"[:400]})
         return 1

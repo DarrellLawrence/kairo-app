@@ -30,13 +30,16 @@ DEFAULTS = {
     "learn_call": "haiku",               # fix plan 29: a getting-to-know-you call answers fast
     "proactive": "sonnet", "judgment": "sonnet", "judgment_high": "opus",
     "loop_check": "sonnet",              # loops block L: the sanity check before a loop is shown
+    "voice_agenda": "sonnet",            # local voice (2026-10-16): what the voice model brings up on a call
+    "voice_lab": "sonnet",               # the voice lab's blind rating of the candidates
     "money": "opus", "money_review": "opus",
     "plan": "opus", "review_big": "opus",
 }
 JOB_PURPOSE = {"email_triage": "triage", "capture_process": "capture", "morning_brief": "brief",
-               "open_loops": "draft", "promises": "promises", "pa": "judgment", "coach": "coach", "document": "document"}
+               "open_loops": "draft", "promises": "promises", "pa": "judgment", "coach": "coach", "document": "document",
+               "voice_agenda": "voice_agenda"}
 NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review", "coach", "plan", "review_big",
-               "chat_heavy", "loop_check"}
+               "chat_heavy", "loop_check", "voice_agenda"}
 OPUS_ONLY = {"judgment_high", "money", "money_review"}
 RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 

@@ -10,6 +10,9 @@ input, mail, web page, file or setting can point them anywhere else.
 - Weather and stations: lookup.ALLOWED_HOSTS.
 - Model downloads (installer/first start): fixed URLs in semantic.py and voice/__init__.py.
 - Realtime voice (owner's decision 2026-10-15, voice only): only OpenAI's API (realtime.HOSTS).
+- Local voice (owner's decision 2026-10-16): the voice model's server on 127.0.0.1 only
+  (brain/voice_local.py); its files from GitHub (llama.cpp, checked against GitHub's sha256) and
+  Hugging Face (checked against Hugging Face's sha256), downloaded by the installer (voicellm.py).
 
 MODULES lists every module that may talk to the network; a test fails when another one does.
 """
@@ -23,6 +26,7 @@ PUSH_HOST_SUFFIXES = (".notify.windows.com",)        # Edge (WNS): wns2-<region>
 TAILNET_SUFFIX = ".ts.net"
 
 MODULES = {
+    "brain/voice_local.py": "the local voice model's server on 127.0.0.1 (nothing else)",
     "executor.py": "Google writes (after the gate)",
     "google/client.py": "Google reads",
     "google/oauth.py": "Google sign-in",
@@ -33,6 +37,7 @@ MODULES = {
     "realtime.py": "realtime voice: OpenAI's API only (realtime.HOSTS)",
     "semantic.py": "the memory model download (fixed host)",
     "voice/__init__.py": "the voice model download (fixed URLs)",
+    "voicellm.py": "the installer's voice-model download (GitHub llama.cpp release, Hugging Face)",
 }
 
 

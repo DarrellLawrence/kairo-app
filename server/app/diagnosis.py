@@ -296,6 +296,44 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
     r.add("  last calls: when | model, length, how it ended")
     r.rows(q("SELECT ts, outcome FROM audit_log WHERE action='realtime.call' ORDER BY id DESC LIMIT 10"))
 
+    r.h("Local voice (voice model on the PC; owner's decision 2026-10-16)")
+    r.add(f"  talking: {one("SELECT value FROM settings WHERE key='voicellm.choice'") or 'no pick yet (first installed one)'}")
+    lab = one("SELECT value FROM settings WHERE key='voicelab.last'")
+    try:
+        lab = json.loads(lab) if lab and not str(lab).startswith("ERROR") else None
+    except (TypeError, ValueError):
+        lab = None
+    if not lab:
+        r.add("  voice lab: not run yet")
+    else:
+        r.add(f"  voice lab {lab.get('at')} ({lab.get('seconds')}s): pick {((lab.get('pick') or {}).get('model'))} - "
+              f"{((lab.get('pick') or {}).get('why') or '')[:200]}{' ERROR ' + lab['error'] if lab.get('error') else ''}")
+        gpu = lab.get("gpu") or {}
+        if gpu:
+            r.add(f"  gpu: {gpu.get('name')} {gpu.get('used_mb')}/{gpu.get('total_mb')} MB, driver {gpu.get('driver')}")
+        r.add("  model | first word p50/p95 | tok/s | tool recall | false calls | facts | natural en/de | vram | error")
+        for mid, m in (lab.get("models") or {}).items():
+            fw = m.get("first_word_ms") or {}
+            nat = m.get("natural") or {}
+            r.add(f"  {mid} | {fw.get('p50')}/{fw.get('p95')} | {m.get('tokens_per_s')} | {m.get('tool_recall')} | "
+                  f"{m.get('false_calls')} | {m.get('fidelity')} | {nat.get('en')}/{nat.get('de')} | {m.get('vram_mb')} | "
+                  f"{(m.get('error') or '')[:120]}")
+        sp = lab.get("speech") or {}
+        st = (sp.get("smart_turn") or {})
+        r.add(f"  speech: stt auto {((sp.get('stt') or {}).get('auto') or {}).get('ms')}, en {((sp.get('stt') or {}).get('en') or {}).get('ms')}; "
+              f"tts en first {((sp.get('tts') or {}).get('en') or {}).get('first_clause_ms')}; smart turn {st.get('pad_side')} "
+              f"{(st.get(st.get('pad_side')) or {}) if st.get('pad_side') else st.get('error')}")
+        k = lab.get("kyutai") or {}
+        r.add(f"  kyutai: {k.get('state')} {(k.get('error') or '')[:160]} stt {(k.get('stt') or {}).get('after_end_ms')} "
+              f"tts {(k.get('tts') or {}).get('first_audio_ms')}")
+        r.add(f"  estimate on the PC (ms): {lab.get('estimate_ms')}")
+    agenda = one("SELECT value FROM settings WHERE key='voice.bringup'")
+    try:
+        ag = json.loads(agenda) if agenda and not str(agenda).startswith("ERROR") else None
+    except (TypeError, ValueError):
+        ag = None
+    r.add(f"  call topics: {len((ag or {}).get('items') or [])} picked by Claude at {(ag or {}).get('at')}" if ag else "  call topics: none yet")
+
     r.h("Last self-test")
     value = one("SELECT value FROM settings WHERE key='selftest.tools'")
     try:

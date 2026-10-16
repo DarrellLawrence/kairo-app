@@ -28,13 +28,16 @@ STEPS = {   # step -> title, in the order they happen
     "upload_ms": "Upload",
     "stt_ms": "Speech to text (PC)",
     "queue_ms": "Waiting for the brain",
+    "llm_ms": "Voice model: first word (PC)",
     "first_words_ms": "Model: first words",
+    "tool_ms": "Claude working (ask_kairo)",
     "first_sentence_ms": "First sentence written",
     "tts_ms": "Its voice made and fetched",
     "play_start_ms": "Playback starts",
     "total_ms": "Total: you stop -> Kairo speaks (typed: first words)",
 }
-TARGETS = {"call": {"p50": 1500, "p95": 3000}, "chat_voice": {"p50": 1500, "p95": 3000}, "chat_text": {"p50": 1500, "p95": None},
+# owner's request 2026-10-16: spoken turns like talking to a person (acceptance 3, 4, 39)
+TARGETS = {"call": {"p50": 800, "p95": 1500}, "chat_voice": {"p50": 800, "p95": 1500}, "chat_text": {"p50": 1500, "p95": None},
            # realtime (owner's request 2026-10-15): end of speech -> first audio on the iPhone
            "call_live": {"p50": 800, "p95": 1500}, "chat_live": {"p50": 800, "p95": 1500}}
 
@@ -53,7 +56,7 @@ def steps(marks: dict, server: dict, path: str = "chat_text") -> dict[str, int]:
     """Step durations from the phone's cumulative marks and the PC's own numbers. A spoken turn's
     total is to its first audio: one that never played has none (it counts as a failure)."""
     m = {k: _ms(v) for k, v in (marks or {}).items() if k in MARKS and v is not None}
-    srv = {k: _ms(v) for k, v in (server or {}).items() if k in ("stt_ms", "queue_ms") and v is not None}
+    srv = {k: _ms(v) for k, v in (server or {}).items() if k in ("stt_ms", "queue_ms", "llm_ms", "tool_ms") and v is not None}
     out: dict[str, int] = {}
 
     def gap(a, b):
@@ -69,6 +72,9 @@ def steps(marks: dict, server: dict, path: str = "chat_text") -> dict[str, int]:
         start = m.get("sent", m.get("transcribed", 0))
         out["queue_ms"] = queue
         out["first_words_ms"] = max(0, m["first_words"] - start - queue)
+    for key in ("llm_ms", "tool_ms"):      # the local voice model's own numbers (PC side)
+        if key in srv:
+            out[key] = srv[key]
     for key, a, b in (("first_sentence_ms", "first_words", "first_sentence"), ("tts_ms", "first_sentence", "audio_ready"),
                       ("play_start_ms", "audio_ready", "playing")):
         if (g := gap(a, b)) is not None:

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-10-16 — build: local voice (owner's decision: free, on the PC)
+- Calls and the voice button talk to a small voice model on the PC's graphics card, loaded all the time. No key, no cost, nothing leaves the PC for small talk. OpenAI Realtime stays as an option (More → Settings → Voice), off by default.
+- Engine: llama.cpp with CUDA (prebuilt for Windows, runs all three candidates). ExLlamaV3/TabbyAPI was not picked: no Windows build without an admin compiler setup, and no Gemma 4 E4B support.
+- The voice lab (More → System → Voice lab) measures Gemma 4 E4B, Qwen3.5-9B and LFM2.5-2.6B (Q4) on the PC, thinking off: load time, graphics memory, first word, tokens per second, tool-call reliability, facts kept, English and German naturalness (Claude judges blind). It picks the fastest that reliably calls the tool and sounds natural, and shows the numbers. It also times Whisper (auto and English-only), Kokoro and Piper, and the turn detector. Run diagnosis lists all of it.
+- Kyutai's streaming speech to text and text to speech can be installed for the lab with one tap (about 10 GB, English and French only) and compared with Whisper + Kokoro. It goes into calls only if it wins. Moshi is not used as the voice: it can't take Claude's answers mid-call.
+- The voice model only talks. Its one tool is ask_kairo: Claude does the real work. It says a short filler ("Sec, checking."), "still on it" after 6 s, then says Claude's answer in its own words. Anything for another person is still an approval card.
+- Speed: one short fixed prompt read once when the call opens and kept in the model's cache; the conversation is only added to; everything on the graphics card; the answer streams to the voice sentence by sentence.
+- Turn-taking: Kairo transcribes at the first short pause (0.2 s) while a turn detector (Smart Turn v3, on the processor) checks if you're done. Done: it answers at once. Not sure: it waits a bit longer. The phone still ends a turn after 1.5 s of quiet. Talking over it stops it at once.
+- Bring-up items: Kairo picks what to ask or remind you about from your open loops, questions it has for you and tests in the next 48 h; Claude picks and words them every 30 minutes before calls. The voice model brings up at most two per call (urgent ones always), at a good moment, and your answers go back to Claude.
+- Graphics memory: the voice model, Whisper and the voice fit in 12 GB; when a voice model is installed, the memory search runs on the processor. Voice always wins.
+- The old voice answers when the voice model isn't there (not installed, starting, crashed, paused for the lab).
+- Voice speed targets for every voice path: p50 < 0.8 s, p95 < 1.5 s, with two new steps: "Voice model: first word (PC)" and "Claude working (ask_kairo)".
+- The update downloads llama.cpp, the three models and the turn detector once (about 14 GB, checked against their published checksums). It skips a model when the disk is short.
+- Acceptance test 39 is now "Voice like a person".
+- Removed: OpenAI Realtime is no longer the default voice (kept as an option). Nothing deleted.
+
 ## 2026-10-15 — build: realtime voice (owner's decision: an API for voice only)
 - Calls and the voice button talk to OpenAI's realtime model (gpt-realtime-2.1-mini). Your voice goes from the iPhone straight to OpenAI and its voice comes straight back, so a reply can start about half a second after you stop, and you can talk over it like on a phone call.
 - The real work still goes to Claude: the voice model has one tool, ask_kairo. It says something short ("Sec, checking") while Claude works, then says Claude's answer. It can't do anything itself; anything for another person is still an approval card.

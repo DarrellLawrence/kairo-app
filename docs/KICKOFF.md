@@ -163,9 +163,9 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 | Host | Home PC **`kairo-home`**, RTX 3060, always on, Ethernet, **Windows (existing install, nothing wiped)**. Kairo runs natively: no Docker, no WSL | LOCKED (v4) |
 | Spare | Second PC (RTX 2070), off by default, wake-on-LAN for heavy one-off jobs | LOCKED |
 | Network | **Tailscale** mesh; no public ports; app via `tailscale serve` (HTTPS) | LOCKED |
-| Brain (phases 1–3) | **Claude only**, via the official **Claude Code CLI** logged in with the owner's subscription. **No Agent SDK, no API key, no subscription-proxy tools.** Voice only: OpenAI's Realtime model talks, Claude still does the work (owner's decision 2026-10-15, section 13e) | LOCKED |
+| Brain (phases 1–3) | **Claude only**, via the official **Claude Code CLI** logged in with the owner's subscription. **No Agent SDK, no API key, no subscription-proxy tools.** Voice only: a voice model talks (local by default, OpenAI Realtime if chosen), Claude still does the work (owner's decisions 2026-10-15/16, section 13e) | LOCKED |
 | Brain interface | All model calls go through `server/app/brain/` (adapters, section 7b) | LOCKED |
-| Local LLM | Added **last (phase 4)**. Candidates: Qwen3.5 9B, Gemma 4 12B, or a 30–35B MoE with llama.cpp expert offload if RAM ≥ 32 GB | LOCKED (timing) / OPEN (model) |
+| Local LLM | Added **last (phase 4)**. Candidates: Qwen3.5 9B, Gemma 4 12B, or a 30–35B MoE with llama.cpp expert offload if RAM ≥ 32 GB. **Voice only, pulled forward (owner's decision 2026-10-16):** a small LLM on the 3060 talks on calls (llama.cpp; LFM2.5 2.6B, Gemma 4 E4B, Qwen3.5 9B measured by the voice lab, section 13e); Claude still does the work | LOCKED (timing) / OPEN (model) |
 | Memory | Obsidian vault (Markdown) + SQLite | LOCKED |
 | Backend | Python 3.12, FastAPI, SQLModel + SQLite, Alembic, APScheduler, pytest | LOCKED |
 | Frontend | React + Vite + vite-plugin-pwa | LOCKED |
@@ -621,11 +621,41 @@ everything important is an open loop until done or dropped. Statements, not ques
 12. **Big vague tasks**: small = just do it and deliver. Big, costly or important = 2-3 key
     questions first (budget, dates, style), then a full version.
 
-## 13e. Realtime voice (owner's decision 2026-10-15)
+## 13e. Realtime voice (owner's decisions 2026-10-15 and 2026-10-16)
 
 Calls and the voice button must feel like talking to a person (about 0.5 s replies, natural
-interruptions). The local pipeline (speech to text, Claude, text to speech) can't get there, so the
+interruptions). The old pipeline (speech to text, Claude, text to speech) can't get there, so the
 rule changes for voice only. Everything else stays on the Claude subscription.
+
+**Local voice (2026-10-16, the default, free).** A small LLM on the RTX 3060, loaded day and night
+(llama.cpp's server on 127.0.0.1, no thinking mode), does the talking; Claude does the work.
+- **Candidates**, measured on kairo-home by the voice lab (More → System → Voice lab): LFM2.5 2.6B,
+  Gemma 4 E4B, Qwen3.5 9B (Q4_K_M). The lab measures first word and first token (p50/p95), tokens/s,
+  ask_kairo reliability (recall ≥ 90%, false calls ≤ 15%), keeping Claude's facts (≥ 90%) and
+  naturalness in English and German (rated blind by Claude); it picks the fastest that passes.
+- **Engine:** llama.cpp (official Windows CUDA builds, every candidate supported). ExLlamaV3/TabbyAPI
+  is not used: no prebuilt Windows build (it needs the CUDA toolkit and Visual Studio, i.e. admin) and
+  no Gemma 4 E4B support.
+- **Speed:** a short fixed prompt with the call context and the bring-up list once at the start, then
+  only appended turns (llama.cpp's prompt cache reads just the new words); the prompt is read into
+  the cache when the line opens; tokens stream into Kokoro/Piper sentence by sentence to the phone.
+- **Turn-taking:** at the first ~200 ms pause the PC transcribes what it has and asks Smart Turn v3
+  (ONNX on the CPU) whether the owner is done: done → answer at once; not done → wait 0.5–1 s more
+  (the phone ends a turn itself only after 1.5 s). Talking over Kairo stops it at once.
+- **Brain/mouth:** the voice model's ONE tool is ask_kairo; the moment it starts a call Kairo says a
+  short filler, then the voice model says Claude's answer in its own words. Claude's proactive side
+  picks the call topics before the call (a 30-minute job; questions, reminders, pushback, with
+  priority), the voice model raises them at a good moment (at most two a call unless urgent) and
+  passes the owner's answers back through ask_kairo. Outbound actions only as approval cards.
+- **VRAM (12 GB):** Whisper large-v3-turbo ~2 GB, the voice model 2–6.5 GB, Kokoro/Piper and Smart
+  Turn on the CPU, the memory embeddings on the CPU once a voice model is installed, CUDA contexts
+  and the desktop ~1.5 GB. The lab reports what each candidate really uses.
+- **Kyutai** (streaming STT + TTS, English/French only) is measured by the lab against Whisper +
+  Kokoro when the owner asks for it (its own Python, ~10 GB); Moshi is never the mouth (it can't take
+  Claude's results mid-conversation).
+- **Fallback:** the voice model not ready (installing, the lab running, crashed) → the old pipeline.
+
+**OpenAI Realtime (2026-10-15, optional, needs a key):**
 
 - **Provider:** OpenAI Realtime, `gpt-realtime-2.1-mini` by default (Settings can pick
   `gpt-realtime-mini`; Voice speed shows each turn's model). Gemini Live is out: the Gemini API
@@ -687,7 +717,8 @@ start the next until its checks pass and the owner says go.
   watch, the heartbeat, the offsite backup) carry nothing the model chose and
   don't go through the gate. Their destinations are fixed in code
   (server/app/outbound.py: the browsers' push services, Kairo's own *.ts.net
-  address, the heartbeat and backup hosts, OpenAI's API for realtime voice). No
+  address, the heartbeat and backup hosts, OpenAI's API for realtime voice, the
+  local voice model's server on 127.0.0.1). No
   model input, mail, web page, file or setting can change them; only the
   modules listed there may use the network (owner's decision 2026-10-15).
 - The model never gets an external write tool. Its tools: read tools, internal
@@ -711,13 +742,15 @@ start the next until its checks pass and the owner says go.
   re-generated by the model.
 - The model is only reached through server/app/brain/ (adapters).
 - No Anthropic API key, no Agent SDK, no subscription-proxy tools.
-- Only exception to the two rules above (owner's decision 2026-10-15): calls
-  and the voice button talk to OpenAI's Realtime model through
-  server/app/realtime.py, with an OpenAI API key kept encrypted on kairo-home
-  only. Its one tool is ask_kairo, which hands the request to the Claude brain
-  as an owner turn; it gets no other tool and never acts. Hard monthly cap
-  (default 10 CHF), the local voice as fallback. Everything else stays on the
-  Claude subscription (KICKOFF 13e).
+- Only exception to the two rules above (owner's decisions 2026-10-15 and
+  2026-10-16): calls and the voice button talk through a voice model. By
+  default a small local LLM on kairo-home (server/app/brain/voice_local.py:
+  llama.cpp on 127.0.0.1, picked by the voice lab); OpenAI's Realtime model
+  (server/app/realtime.py) only if the owner chooses it and adds a key (kept
+  encrypted on kairo-home only; hard monthly cap, default 10 CHF). Either way
+  its one tool is ask_kairo, which hands the request to the Claude brain as an
+  owner turn; it gets no other tool and never acts. The old voice pipeline is
+  the fallback. Everything else stays on the Claude subscription (KICKOFF 13e).
 - Nothing personal hardcoded: use config/profile.yaml and .env.
 - Secrets only in .env (never committed), the data folder's secrets\, or the
   OS keyring.

@@ -287,3 +287,31 @@ test('hanging up mid-sentence still sends what you said', async () => {
   v.close()
   assert.equal(ws.types().at(-1), 'end')
 })
+
+test('smart endpointing: the PC ends the turn at a short pause; the phone sends no end of its own', async () => {
+  const { v, ws, say, hush } = await talk('call')
+  ws.onmessage({ data: JSON.stringify({ type: 'hello', endpoint: 'smart', pause_ms: 200, end_ms: 1500 }) })
+  hush(20)
+  say(10)
+  hush(11)                    // 220 ms: a pause already (smart: 200 ms), not yet an end
+  const types = ws.types()
+  assert.ok(types.includes('pause') && !types.includes('end'))
+  assert.deepEqual(ws.sent.find((m) => m.type === 'start'), { type: 'start', rate: 16000, path: 'call', call_id: 7 })
+  ws.onmessage({ data: JSON.stringify({ type: 'endpoint', turn: 1, p: 0.9, ms: 25 }) })
+  assert.equal(v.state, 'thinking')
+  hush(80)                    // 1.6 s more quiet: the phone doesn't end it again
+  assert.equal(ws.types().filter((t) => t === 'end').length, 0)
+  ws.json({ type: 'transcript', text: 'hello', language: 'en', stt_ms: 90, turn: 1 })
+  ws.json({ type: 'delta', text: 'Hi.', turn: 1 })
+  ws.json({ type: 'done', text: 'Hi.', model: 'lfm2.5-2.6b', server: { llm_ms: 60, stt_ms: 90 }, turn: 1 })
+  ws.audio(24000, 0, 2400, 1)
+  ws.json({ type: 'spoken', n: 1, turn: 1 })
+  await tick(80)
+  output().sources.forEach((s) => s.end())
+  await tick()
+  const t = sentTurns.at(-1)
+  assert.equal(t.model, 'lfm2.5-2.6b')
+  assert.ok(t.marks.endpoint >= 200 && t.marks.endpoint < 600)        // t0 = when you went quiet
+  assert.equal(t.server.endpoint_ms, 25)
+  v.close()
+})

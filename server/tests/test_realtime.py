@@ -93,9 +93,20 @@ def test_the_key_is_kept_encrypted_and_only_its_last_four_are_ever_shown(migrate
     assert realtime.remove_key(sec) and realtime.load_key(sec) is None
 
 
+def test_the_local_voice_is_the_default_and_openai_only_when_chosen(migrated):
+    with Session(engine_for(migrated)) as s:
+        assert realtime.load_settings(s)["engine"] == "local"
+        realtime.save_key(migrated.secrets_dir, KEY)
+        assert realtime.unavailable(s, migrated.secrets_dir, NOW, TZ) == "local"   # a key alone doesn't switch
+        realtime.save_settings(s, {"engine": "openai"})
+        assert realtime.unavailable(s, migrated.secrets_dir, NOW, TZ) is None
+        with pytest.raises(realtime.RealtimeError):
+            realtime.save_settings(s, {"engine": "gemini"})
+
+
 def test_80_percent_warns_once_and_100_percent_stops(migrated):
     with Session(engine_for(migrated)) as s:
-        realtime.save_settings(s, {"cap_chf": 10, "usd_chf": 1.0})
+        realtime.save_settings(s, {"cap_chf": 10, "usd_chf": 1.0, "engine": "openai"})
         a = realtime.add_spend(s, 7.0, NOW, TZ)
         assert not a["warn_now"] and not a["over"]
         b = realtime.add_spend(s, 1.5, NOW, TZ)
@@ -115,6 +126,7 @@ def test_80_percent_warns_once_and_100_percent_stops(migrated):
 
 def test_why_a_call_goes_local(migrated):
     with Session(engine_for(migrated)) as s:
+        realtime.save_settings(s, {"engine": "openai"})
         assert realtime.unavailable(s, migrated.secrets_dir, NOW, TZ) == "no_key"
         realtime.save_key(migrated.secrets_dir, KEY)
         assert realtime.unavailable(s, migrated.secrets_dir, NOW, TZ) is None
@@ -438,6 +450,8 @@ def phone(migrated):
     app = create_app(migrated)
     with TestClient(app) as c:
         c.app_, c.settings, c.fake = app, migrated, None
+        with Session(make_engine(migrated.db_url)) as s:
+            realtime.save_settings(s, {"engine": "openai"})          # these tests are about the OpenAI engine
 
         def use(fake):
             c.fake = fake

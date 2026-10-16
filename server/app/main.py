@@ -341,7 +341,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
                 asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
+            app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
         yield
+        app.state.voice_llm.shutdown()
         app.state.jobs.stop()
         if getattr(runner.brain, "close_warm", None) is not None:
             runner.brain.close_warm()
@@ -381,11 +383,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
     _voice_site = tool_sites.site("voice", settings.data_dir)
     app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site)
+    # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
+    from . import bringup, smartturn, voicellm, voicelab
+    from .brain.voice_local import VoiceModel
+    from .voicemouth import Mouth
+    _vl_site = voicellm.site(settings.data_dir)
+
+    def _voice_llm_resolve():
+        binary = voicellm.server_binary(_vl_site)
+        if binary is None:
+            return None
+        with session_for(engine) as s_:
+            mid = voicellm.active(s_, _vl_site)
+        path = voicellm.model_path(_vl_site, mid) if mid else None
+        if path is None:
+            return None
+        return [str(binary)], path, mid, int((voicellm.spec(mid) or {}).get("context", 8192))
+
+    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs")
+    with session_for(engine) as _s:
+        _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
+    app.state.smart_turn = smartturn.SmartTurn(voicellm.smart_turn_path(_vl_site), pad_side=_pad)
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
         settings.data_dir / "memory" / "index.sqlite", vault_dir=settings.vault_dir, engine=engine,
-        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site) if tool_sites.configured("memory") else None)
+        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site,
+                                   cpu_only=lambda: bool(voicellm.available(_vl_site)))   # voice wins the VRAM
+        if tool_sites.configured("memory") else None)
     tools.memory = app.state.memory
 
     def _transcribe_for_capture(data: bytes) -> str:
@@ -478,7 +503,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "chat_memory": lambda ctx: _memory_job(ctx),
                 "knowledge_call": lambda ctx: json.dumps(app.state.knowledge.run()),
                 "evening_recap": lambda ctx: json.dumps(app.state.recap.run()),
-                "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id)})
+                "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id),
+                "voice_agenda": lambda ctx: bringup.agenda_job(ctx, profile, dt.datetime.now(profile.tz)),
+                "voice_lab": lambda ctx, language="auto": _voice_lab_job(ctx, language)})
     from . import calendar_read, own_calendar
 
     def _calendar_week(start: dt.date):
@@ -972,14 +999,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.line_open()                 # jobs keep off the brain while the owner is on the line
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
-                                     current=0, stopped=0, carry="", interrupt=None)
+                                     current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
+                                     mouth_ready=None)
 
         def interrupt() -> None:
             """The answer of a talked-over turn stops being written (what was said so far is kept)."""
+            if line.mouth_task is not None and line.mouth_task[0] <= line.stopped:
+                line.mouth_task[1].cancel()          # the voice model stops writing at once
+                return
             if (line.writing is not None and line.writing <= line.stopped and runner.current_origin == "owner_chat"
                     and hasattr(runner.brain, "interrupt") and runner.brain.interrupt()):
                 line.writing = None
         line.interrupt = interrupt
+        if _mouth_ok(None):                          # the call's conversation is set up while the owner starts talking
+            line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
+        with session_for(engine) as s_:              # English only: Whisper skips finding the language
+            line.stt_language = "en" if realtime.load_settings(s_).get("language") == "en" else None
+        line.smart, line.endpointed = app.state.smart_turn.available(), False
+        if line.smart:
+            await line.send({"type": "hello", "endpoint": "smart", "pause_ms": 200, "end_ms": 1500})
+
+        def end_utterance(utt: "voicelink.Utterance", path: str, call_id, number: int) -> None:
+            before = line.last
+            line.current = number
+            turn = asyncio.get_running_loop().create_task(_voice_turn(line, utt, path, call_id, number, after=before))
+            line.last = turn
+            _turns.add(turn)               # hanging up doesn't cancel it: the answer is saved (v7)
+            turn.add_done_callback(_turns.discard)
+
+        async def smart_end(utt: "voicelink.Utterance") -> None:
+            """At the first short pause: done -> answer now; not done -> wait (0.5 s, or 1 s when clearly not);
+            more words in the meantime -> nothing (the next pause asks again)."""
+            seen, t0 = utt.version, time.monotonic()
+            p = await asyncio.to_thread(app.state.smart_turn.probability, bytes(utt.pcm))
+            wait = 0.3 if p is None else 0.0 if p >= smartturn.COMPLETE_AT else 0.5 if p >= 0.2 else 1.0
+            if wait:
+                await asyncio.sleep(wait)
+            if line.utt is not utt or utt.version != seen:
+                return
+            line.utt, line.endpointed = None, True
+            number = line.current + 1
+            await line.send({"type": "endpoint", "turn": number, "p": None if p is None else round(p, 2),
+                             "ms": int((time.monotonic() - t0) * 1000)})
+            end_utterance(utt, utt.path, utt.call_id, number)
 
         def stop(number: int) -> None:
             """Talked over: the voice stops now, and so does the answer."""
@@ -1005,28 +1067,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     data = None
                 kind = data.get("type") if isinstance(data, dict) else None
                 if kind == "start":
-                    line.utt = voicelink.Utterance()
+                    line.utt = voicelink.Utterance("chat_voice" if data.get("path") == "chat_voice" else "call",
+                                                   data.get("call_id"))
+                    line.endpointed = False
                 elif kind == "cancel":
                     line.utt = None
                 elif kind == "pause" and line.utt is not None and line.utt.pcm:
                     if line.utt.early is None or line.utt.early[0] != len(line.utt.pcm):
                         pcm = bytes(line.utt.pcm)
                         line.utt.early = (len(pcm), asyncio.get_running_loop().create_task(
-                            asyncio.to_thread(app.state.voice.transcribe_pcm, pcm)))
+                            asyncio.to_thread(app.state.voice.transcribe_pcm, pcm, line.stt_language)))
+                    if line.smart:
+                        asyncio.get_running_loop().create_task(smart_end(line.utt))
                 elif kind == "end":
                     if line.utt is None:
-                        await line.send({"type": "error", "status": "no_audio", "message": "Nothing was recorded."})
+                        if not line.endpointed:    # the PC already ended this one (smart endpointing): fine
+                            await line.send({"type": "error", "status": "no_audio", "message": "Nothing was recorded."})
                         continue
                     utt, line.utt = line.utt, None
-                    before = line.last
                     path = "chat_voice" if data.get("path") == "chat_voice" else "call"
-                    number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
-                    line.current = number
-                    turn = asyncio.get_running_loop().create_task(
-                        _voice_turn(line, utt, path, data.get("call_id"), number, after=before))
-                    line.last = turn
-                    _turns.add(turn)               # hanging up doesn't cancel it: the answer is saved (v7)
-                    turn.add_done_callback(_turns.discard)
+                    end_utterance(utt, path, data.get("call_id"),
+                                  data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1)
                 elif kind == "stop":
                     stop(data.get("turn") if isinstance(data.get("turn"), int) else line.current)
                 elif kind == "say":
@@ -1056,7 +1117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if utt.early is not None and utt.early[0] == len(utt.pcm):
                 tr = await utt.early[1]            # transcribed at the pause, nothing came after
             else:
-                tr = await asyncio.to_thread(app.state.voice.transcribe_pcm, bytes(utt.pcm))
+                tr = await asyncio.to_thread(app.state.voice.transcribe_pcm, bytes(utt.pcm), line.stt_language)
         except NotInstalled as exc:
             failure = {"type": "error", "status": "voice_missing", "message": str(exc)}
         except VoiceError:
@@ -1083,6 +1144,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if line.speaker is not None:
             line.speaker.stop()
         line.speaker = speaker
+        if _mouth_ok(call_id) and await _mouth_turn(line, speaker, text, language, number, stt_ms):
+            await speaker.done()
+            return
 
         async def sink(frame) -> None:
             kind = frame.get("type") if isinstance(frame, dict) else None
@@ -1112,6 +1176,138 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 line.writing = None
             speaker.finish()                       # a no-op after done/error; else (cancelled) it closes
         await speaker.done()
+
+    # ---------------------------------------------------------------- local voice: the voice model talks (2026-10-16)
+
+    def _mouth_ok(call_id) -> bool:
+        """The voice model answers this turn: it's loaded, the owner chose local voice, Kairo isn't paused or
+        updating, and it isn't a getting-to-know-you call (Claude runs those with its agenda)."""
+        if not app.state.voice_llm.ready() or time.time() < app.state.maintenance_until:
+            return False
+        with session_for(engine) as s_:
+            if killswitch.is_paused(s_) or realtime.load_settings(s_).get("engine") != "local":
+                return False
+            if isinstance(call_id, int):
+                c = s_.get(Call, call_id)
+                if c is not None and c.purpose == "learn":
+                    return False
+        return True
+
+    async def _new_mouth(line) -> "Mouth":
+        """The call's conversation: the compact context and the bring-up list, then the prompt is read once
+        into the voice model's cache so the owner's first words are the only new ones."""
+        context = await asyncio.to_thread(_rt_context)
+        with session_for(engine) as s_:
+            items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
+            language = realtime.load_settings(s_).get("language", "auto")
+        spec = voicellm.spec(app.state.voice_llm.model_id) or {}
+        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=context, items=items, name=profile.name,
+                      temperature=float(spec.get("temperature", 0.6)), language_mode=language)
+        line.mouth = mouth
+        try:
+            gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
+            async for _ in gen:
+                pass
+        except Exception as exc:   # the first turn reads it then
+            log.info("voice model: priming the cache failed: %s", exc)
+        return mouth
+
+    async def _mouth_ask(request: str, lines: list[str], about: str) -> tuple[str, bool]:
+        """ask_kairo from the voice model: an owner turn for Claude, as on any call."""
+        if about:
+            request = (f"{request}\n[This is the owner's answer to Kairo's {about}. Record it as you would in chat: "
+                       "close or update the loop, save the answer.]")
+        return await _rt_ask(request, lines)
+
+    def _refresh_items(mouth: "Mouth") -> None:
+        """Something on the list got done during the call (a loop closed): it comes off."""
+        try:
+            with session_for(engine) as s_:
+                live = {i.id for i in bringup.candidates(s_, profile, dt.datetime.now(profile.tz))}
+        except Exception:
+            return
+        if any(i.id not in live for i in mouth.items):
+            mouth.update_items([i for i in mouth.items if i.id in live])
+
+    async def _mouth_turn(line, speaker, text: str, language, number: int, stt_ms: int) -> bool:
+        """The voice model answers the owner's words; Claude only through ask_kairo. False: it couldn't
+        start (nothing said yet), so the old pipeline answers this turn instead."""
+        if line.mouth is None:
+            try:
+                if line.mouth_ready is None:
+                    line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
+                await line.mouth_ready
+            except Exception:
+                log.exception("voice model: setting up the call")
+                return False
+        mouth = line.mouth
+        _refresh_items(mouth)
+        sent: list[asyncio.Task] = []
+        loop_ = asyncio.get_running_loop()
+
+        class Tap:
+            spoke = False
+
+            def feed(self, piece: str) -> None:
+                Tap.spoke = True
+                speaker.feed(piece)
+                sent.append(loop_.create_task(line.send({"type": "delta", "text": piece, "turn": number})))
+
+            def say(self, said: str) -> None:
+                Tap.spoke = True
+                speaker.say(said)
+                sent.append(loop_.create_task(line.send({"type": "delta", "text": said + " ", "turn": number})))
+
+        _rt_said("owner", text)
+        line.writing = number
+        task = loop_.create_task(mouth.turn(text, language, Tap()))
+        line.mouth_task = (number, task)
+        result, interrupted = None, False
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+            interrupted = True                       # talked over: what was said so far is kept
+        except Exception as exc:
+            log.warning("voice model turn failed: %s: %s", type(exc).__name__, exc)
+            if not Tap.spoke:
+                line.writing, line.mouth_task = None, None
+                return False
+        finally:
+            if line.writing == number:
+                line.writing = None
+            line.mouth_task = None
+        if sent:
+            await asyncio.gather(*sent, return_exceptions=True)
+        said = result.text if result else re.sub(r"\s*…$", "", (mouth.messages[-1].get("content") or "")).strip()
+        if said and said != "…":
+            _rt_said("kairo", said)
+        hang = " [[hang up]]" if mouth.hang_up else ""
+        await line.send({"type": "done", "text": said + hang, "model": app.state.voice_llm.model_id or "voice",
+                         "interrupted": interrupted, "turn": number,
+                         "server": {"stt_ms": stt_ms, "queue_ms": 0,
+                                    "llm_ms": result.first_token_ms if result else None,
+                                    "first_words_ms": result.first_text_ms if result else None,
+                                    "tool_ms": result.tool_ms if result else None}})
+        if interrupted:
+            speaker.stop()
+        else:
+            speaker.finish()
+        fold_memory_soon()
+        return True
+
+    def _voice_lab_job(ctx, language: str = "auto") -> str:
+        from .scheduler import Skipped
+        if runner._lines > 0:
+            raise Skipped("a call is on: the voice lab runs when the line is free")
+        lab = voicelab.Lab(engine=engine, data_dir=settings.data_dir, site_dir=_vl_site, voice_model=app.state.voice_llm,
+                           voice=app.state.voice, smart_turn=app.state.smart_turn,
+                           judge=lambda prompt: ctx.ask(prompt, "", purpose="voice_lab").text,
+                           tools_dir=settings.data_dir.parent / "tools")
+        rep = lab.run(language)
+        p_ = rep.get("pick") or {}
+        return (f"picked {p_.get('model')}: {p_.get('why')}" if not rep.get("error") else f"failed: {rep['error']}")[:500]
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -2660,6 +2856,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             audit(s, actor="owner", action="realtime.key", outcome="removed" if removed else "none")
         return _rt_status()
+
+    # ---------------------------------------------------------------- the voice lab (local voice, 2026-10-16)
+
+    _tools_dir = settings.data_dir.parent / "tools"
+    _kyutai_flag = settings.data_dir / "voicelab" / "kyutai.request"
+
+    @app.get("/api/voice/lab")
+    def voice_lab_get():
+        with session_for(engine) as s:
+            st, last_, choice_, active_ = voicelab.state(s), voicelab.last(s), voicellm.choice(s), voicellm.active(s, _vl_site)
+            cfg = realtime.load_settings(s)
+        if voicellm.kyutai_ready(_tools_dir) and _kyutai_flag.is_file():
+            _kyutai_flag.unlink(missing_ok=True)     # installed: the request is done
+        return {"state": st, "last": last_, "choice": choice_, "active": active_,
+                "installed": voicellm.available(_vl_site),
+                "candidates": [{"id": m["id"], "title": m["title"]} for m in voicellm.manifest()["models"]],
+                "skipped": voicellm.installed(_vl_site).get("skipped") or [],
+                "voice_model": app.state.voice_llm.status(), "smart_turn": app.state.smart_turn.available(),
+                "engine": cfg.get("engine"), "language": cfg.get("language"),
+                "kyutai": {"ready": voicellm.kyutai_ready(_tools_dir), "requested": _kyutai_flag.is_file()},
+                "gpu": voicelab.nvidia_smi()}
+
+    @app.post("/api/voice/lab/run")
+    def voice_lab_run(body: dict | None = None):
+        with session_for(engine) as s:
+            if voicelab.state(s).get("running"):
+                raise HTTPException(409, "the voice lab is already running")
+        if runner._lines > 0:
+            raise HTTPException(409, "a call is on: run the lab when the line is free")
+        if not voicellm.available(_vl_site):
+            raise HTTPException(409, "no voice model is installed yet (the next update installs them)")
+        language = "en" if (body or {}).get("language") == "en" else "auto"
+        threading.Thread(target=lambda: app.state.jobs.run_job("voice_lab", forced=True, language=language),
+                         name="voice-lab", daemon=True).start()
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="voicelab.run", outcome=f"started ({language})")
+        return {"ok": True}
+
+    @app.post("/api/voice/lab/kyutai")
+    def voice_lab_kyutai():
+        """The Kyutai comparison needs its own Python and ~10 GB: installed by the next update (as admin)."""
+        _kyutai_flag.parent.mkdir(parents=True, exist_ok=True)
+        _kyutai_flag.write_text(dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), encoding="ascii")
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="voicelab.kyutai", outcome="install requested")
+        return {"ok": True, "requested": True}
+
+    @app.post("/api/voice/lab/choose")
+    def voice_lab_choose(body: dict):
+        model_id = str((body or {}).get("model") or "")
+        if model_id not in voicellm.available(_vl_site):
+            raise HTTPException(400, "that model isn't installed")
+        with session_for(engine) as s:
+            voicellm.set_choice(s, model_id, "owner")
+            audit(s, actor="owner", action="voicelab.choose", outcome=model_id)
+        threading.Thread(target=app.state.voice_llm.ensure, daemon=True).start()
+        return voice_lab_get()
 
     @app.websocket("/ws/realtime")
     async def realtime_ws(ws: WebSocket):

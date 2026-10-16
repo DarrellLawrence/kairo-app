@@ -9,7 +9,8 @@ the phone plays sentence 1.
 Client -> server
   {"type": "start", "rate": 16000}        a new utterance (throws away an unfinished one)
   binary                                  PCM16 LE mono at that rate, added to the utterance
-  {"type": "pause"}                       short quiet: transcribe what there is (kept if nothing follows)
+  {"type": "pause"}                       short quiet: transcribe what there is (kept if nothing follows);
+                                          with smart endpointing the PC also decides whether the turn is over
   {"type": "end", "path": "call"|"chat_voice", "call_id": 3|null, "turn": n}
                                           end of speech: transcribe, answer, speak
   {"type": "cancel"}                      throw the utterance away
@@ -17,6 +18,10 @@ Client -> server
   {"type": "say", "text": "...", "turn": n}   speak this (a greeting); no model involved
 Server -> client (every frame of a turn carries its "turn" number: the phone drops a talked-over
 turn's late frames)
+  {"type": "hello", "endpoint": "smart", "pause_ms": 200, "end_ms": 1500}
+                                          smart endpointing (2026-10-16): the phone sends "pause" after 200 ms
+                                          of quiet and only ends a turn itself after 1.5 s; the PC decides
+  {"type": "endpoint", "turn": n, "p": 0.9, "ms": 25}   the PC ended the turn (n is its number): answer
   {"type": "transcript", "text", "language", "stt_ms"}    ("" = nothing understood)
   {"type": "thread" | "delta" | "model" | "done" | "error", ...}   as /ws/chat
   {"type": "sentence", "i": n}            sentence n is written; its audio is being made
@@ -123,15 +128,18 @@ def filler(language: str) -> str:
 class Utterance:
     """What the owner is saying now, and a transcript made at a pause (used if nothing came after)."""
 
-    def __init__(self) -> None:
+    def __init__(self, path: str = "call", call_id=None) -> None:
         self.pcm = bytearray()
         self.early: tuple[int, asyncio.Task] | None = None
         self.started = time.monotonic()
+        self.path, self.call_id = path, call_id
+        self.version = 0          # +1 with every piece of audio: a pause that was followed by more words is stale
 
     def add(self, data: bytes) -> bool:
         if len(self.pcm) + len(data) > MAX_BYTES:
             return False
         self.pcm.extend(data)
+        self.version += 1
         return True
 
     @property

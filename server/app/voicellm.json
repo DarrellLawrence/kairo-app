@@ -1,0 +1,28 @@
+{
+  "_note": "Local voice (owner's decision 2026-10-16). The installer downloads this into tools\\voicellm-<hash of this file> (admins only). Change anything here = a new folder on the next update. Hugging Face files are taken at the repo's current revision and recorded with their sha256 in <site>\\installed.json; GitHub assets are checked against the digest GitHub publishes.",
+  "llama_cpp": {
+    "repo": "ggml-org/llama.cpp",
+    "tag": "b11292",
+    "windows": ["^llama-{tag}-bin-win-cuda-12\\.\\d+-x64\\.zip$", "^cudart-llama-bin-win-cuda-12\\.\\d+-x64\\.zip$"],
+    "linux": ["^llama-{tag}-bin-ubuntu-x64\\.(zip|tar\\.gz)$"]
+  },
+  "models": [
+    {"id": "lfm2.5-2.6b", "title": "LFM2.5 2.6B", "repo": "LiquidAI/LFM2.5-2.6B-GGUF", "quants": ["Q4_K_M", "Q5_K_M", "Q6_K"],
+     "temperature": 0.3, "context": 8192},
+    {"id": "gemma-4-e4b", "title": "Gemma 4 E4B", "repo": "unsloth/gemma-4-E4B-it-GGUF", "quants": ["Q4_K_M", "Q4_K_XL", "Q5_K_M"],
+     "temperature": 0.7, "context": 8192},
+    {"id": "qwen3.5-9b", "title": "Qwen3.5 9B", "repo": "unsloth/Qwen3.5-9B-GGUF", "quants": ["Q4_K_M", "Q4_K_XL", "Q5_K_M"],
+     "temperature": 0.7, "context": 8192}
+  ],
+  "smart_turn": {"repo": "pipecat-ai/smart-turn-v3", "pattern": "(?i)cpu.*\\.onnx$|^smart-turn-v3\\.\\d+\\.onnx$"},
+  "kyutai": {
+    "_note": "Only for the voice lab's comparison, and only once the owner asks for it (More -> System -> Voice lab). Its own Python, never Kairo's.",
+    "torch": "2.9.1",
+    "torch_index": "https://download.pytorch.org/whl/cu126",
+    "moshi": "0.2.13",
+    "stt_repo": "kyutai/stt-1b-en_fr",
+    "tts_repo": "kyutai/tts-1.6b-en_fr",
+    "voice_repo": "kyutai/tts-voices",
+    "voice": "expresso/ex03-ex01_happy_001_channel1_334s.wav"
+  }
+}

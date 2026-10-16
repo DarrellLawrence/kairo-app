@@ -90,6 +90,13 @@ export function makeVad({ pauseMs = 300, endMs = 500, startMs = 60, bargeMs = 20
   return {
     get speaking() { return speaking },
     get floor() { return floor },
+    get pauseMs() { return pauseMs },
+    /* Smart endpointing (2026-10-16): the PC decides at the first short pause; the phone only ends a
+       turn itself after a long quiet. */
+    configure(opts = {}) {
+      if (Number.isFinite(opts.pauseMs)) pauseMs = opts.pauseMs
+      if (Number.isFinite(opts.endMs)) endMs = opts.endMs
+    },
     reset() { speaking = false; paused = false; voiced = 0; quiet = 0; length = 0 },
     feed(rms, { barge = false } = {}) {
       const d = db(rms)
@@ -270,6 +277,7 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
   let closed = false
   let listening = true
   let turnNo = 0          // every frame of a turn carries it: a talked-over turn's late frames are dropped
+  let pausedAt = null     // when the last short pause began (smart endpointing: the turn's t0)
 
   const set = (s) => { if (state !== s) { state = s; on.state?.(s) } }
   const send = (obj) => { if (ws?.readyState === 1) ws.send(JSON.stringify(obj)) }
@@ -310,7 +318,7 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
     }
     if (ev === 'start') {
       if (kairoTalking || answering) interrupt('talked over')
-      send({ type: 'start', rate: RATE })
+      send({ type: 'start', rate: RATE, path, call_id: callId })
       for (const p of preroll) sendPcm(p)
       preroll.length = 0
       sendPcm(pcm)
@@ -319,20 +327,25 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
       on.hearing?.(true)
       return
     }
-    if (ev === 'pause') { send({ type: 'pause' }); pending.push(pcm); return }
+    if (ev === 'pause') { pausedAt = performance.now() - vad.pauseMs; send({ type: 'pause' }); pending.push(pcm); return }
     if (ev === 'resume') { for (const p of pending) sendPcm(p); pending.length = 0; sendPcm(pcm); return }
     if (ev === 'end') { endSpeech(performance.now() - 500); return }
     if (pending.length) pending.push(pcm); else sendPcm(pcm)
   }
 
   // endedAt: when you stopped talking (the quiet before the end counts as Kairo's time).
-  const endSpeech = (endedAt) => {
+  const endSpeech = (endedAt, byPc = null) => {
     pending.length = 0
     turn = startTurn(path, endedAt)
     turn.mark('endpoint')
-    turnNo += 1
-    send({ type: 'end', path, call_id: callId, turn: turnNo })
-    clientLog('voice.speech_end', { path })
+    if (byPc) {                                  // the PC ended the turn (smart endpointing): its number
+      turnNo = byPc.turn
+      turn.server({ endpoint_ms: byPc.ms })
+    } else {
+      turnNo += 1
+      send({ type: 'end', path, call_id: callId, turn: turnNo })
+    }
+    clientLog('voice.speech_end', { path, by: byPc ? 'pc' : 'phone' })
     on.hearing?.(false)
     answering = true
     spokenDone = false
@@ -381,6 +394,15 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
   const onMessage = (ev) => {
     if (typeof ev.data !== 'string') { onAudio(ev.data); return }
     const f = JSON.parse(ev.data)
+    if (f.type === 'hello') {                    // the PC has smart endpointing: it decides when a turn is over
+      if (f.endpoint === 'smart') vad.configure({ pauseMs: f.pause_ms, endMs: f.end_ms })
+      return
+    }
+    if (f.type === 'endpoint') {
+      if (vad.speaking) vad.reset()
+      endSpeech(pausedAt ?? performance.now() - vad.pauseMs, f)
+      return
+    }
     if (f.turn !== undefined && (f.turn !== turnNo || !answering) && f.type !== 'done') return   // a turn you talked over
     if (f.type === 'done' && f.turn !== undefined && f.turn !== turnNo) { on.done?.(f); return }   // its text is still kept
     switch (f.type) {

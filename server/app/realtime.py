@@ -58,9 +58,14 @@ MAX_OUTPUT_TOKENS = 2000                        # ~1.5 min of speech: one answer
 SETTINGS_KEY = "realtime.settings"
 MONTH_PREFIX = "realtime.month."
 DEFAULTS = {"enabled": True, "cap_chf": 10.0, "model": "gpt-realtime-2.1-mini", "voice": "marin", "region": "global",
-            "usd_chf": 0.82, "reasoning": "minimal", "silence_ms": 400}
+            "usd_chf": 0.82, "reasoning": "minimal", "silence_ms": 400,
+            # owner's decision 2026-10-16: the local voice model talks by default; OpenAI only if chosen (and a key added)
+            "engine": "local", "language": "auto"}
+ENGINES = ("local", "openai")
+LANGUAGES = ("auto", "en")
 WARN_AT = 0.8
 REASONS = {
+    "local": "Local voice: the voice model on the PC talks (More → Settings → Voice).",
     "off": "Realtime voice is off (More → Settings).",
     "no_key": "No OpenAI key on the PC yet (More → Settings → Realtime voice).",
     "cap": "This month's realtime budget is used up. Local voice until next month (or raise the cap).",
@@ -106,7 +111,8 @@ def _check(key: str, value):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not lo <= value <= hi:
             raise RealtimeError(f"{key} is a number from {lo} to {hi}")
         return int(value) if key == "silence_ms" else round(float(value), 2)
-    allowed = {"model": tuple(PRICES), "voice": VOICES, "region": tuple(HOSTS), "reasoning": REASONING}[key]
+    allowed = {"model": tuple(PRICES), "voice": VOICES, "region": tuple(HOSTS), "reasoning": REASONING,
+               "engine": ENGINES, "language": LANGUAGES}[key]
     if value not in allowed:
         raise RealtimeError(f"{key} is one of: {', '.join(allowed)}")
     return value
@@ -243,6 +249,8 @@ def add_spend(s: Session, usd: float, now: dt.datetime, tz, *, seconds: float = 
 def unavailable(s: Session, secrets_dir: Path, now: dt.datetime, tz) -> str | None:
     """Why a realtime call can't start now (a REASONS key), or None."""
     cfg = load_settings(s)
+    if cfg["engine"] != "openai":
+        return "local"
     if not cfg["enabled"]:
         return "off"
     if not load_key(secrets_dir):

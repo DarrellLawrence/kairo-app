@@ -762,6 +762,101 @@ function VoiceSpeedPage() {
   )
 }
 
+// The voice lab (owner's request 2026-10-16): the voice candidates measured on the PC, and the pick.
+const pctTxt = (v) => (v == null ? '–' : `${Math.round(v * 100)}%`)
+const msTxt = (s) => (s?.p50 == null ? '–' : `${s.p50} / ${s.p95 ?? '–'} ms`)
+
+function VoiceLabPage() {
+  const toast = useToast()
+  const [d, setD] = useState(null)
+  const load = useCallback(() => api('/api/voice/lab').then(setD).catch(() => setD(null)), [])
+  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    if (!d?.state?.running) return undefined
+    const t = setInterval(load, 3000)
+    return () => clearInterval(t)
+  }, [d?.state?.running, load])
+  const run = async (language) => {
+    try { await api('/api/voice/lab/run', { method: 'POST', body: { language } }); toast.show({ text: 'Voice lab started: 10–20 minutes. Calls use the old voice meanwhile.', duration: 5000 }); setTimeout(load, 1000) } catch (e) { toast.show({ text: e.message, duration: 6000 }) }
+  }
+  const choose = async (model) => { try { setD(await api('/api/voice/lab/choose', { method: 'POST', body: { model } })); toast.show({ text: 'Switched. It loads in a few seconds.' }) } catch (e) { toast.show({ text: e.message }) } }
+  const kyutai = async () => { await api('/api/voice/lab/kyutai', { method: 'POST', body: {} }); toast.show({ text: 'Installed by the PC within the next minutes (about 10 GB). Then run the lab again.', duration: 6000 }); load() }
+  if (!d) return <Page title="Voice lab"><SkeletonCard lines={6} /></Page>
+  const r = d.last || {}
+  const models = Object.entries(r.models || {})
+  const vm = d.voice_model || {}
+  const sp = r.speech || {}
+  const k = r.kyutai || {}
+  return (
+    <Page title="Voice lab" onRefresh={load}>
+      <p className="k-hello">The voice candidates, measured on your PC’s graphics card: how fast they answer, whether they hand real work to Claude every time, and how natural they sound. Kairo picks the fastest one that passes.</p>
+      <List>
+        <ListRow icon={<IconMic />} title={vm.state === 'ready' ? `Talking: ${vm.model}` : `Voice model: ${vm.state || '?'}`}
+          subtitle={vm.error || (d.installed.length ? `Installed: ${d.installed.join(', ')}` : 'Not installed yet: the next update downloads them')}
+          value={<Badge tone={vm.state === 'ready' ? 'ok' : 'warn'} pop={false}>{d.engine === 'local' ? 'Local' : 'OpenAI'}</Badge>} />
+        {d.gpu && <ListRow icon={<IconPulse />} title={d.gpu.name} subtitle={`${d.gpu.used_mb} of ${d.gpu.total_mb} MB in use · driver ${d.gpu.driver}`} />}
+        <ListRow icon={<IconBolt />} title={d.state?.running ? `Running: ${d.state.step}` : 'Run the voice lab'}
+          subtitle={d.state?.running ? 'Calls use the old voice until it is done' : 'English and German, about 10–20 minutes'}
+          onClick={d.state?.running || !d.installed.length ? undefined : () => run('auto')} />
+        {!d.state?.running && d.installed.length > 0 && (
+          <ListRow icon={<IconBolt />} title="Run it English-only" subtitle="If you only talk English on calls" onClick={() => run('en')} />
+        )}
+      </List>
+      {r.pick && (
+        <p className="k-small k-pad selectable"><b>{r.pick.model ? `Picked: ${r.pick.model}` : 'Nothing picked'}</b> — {r.pick.why}{r.at ? ` (${parseTs(r.at).toLocaleString()}, ${r.seconds}s)` : ''}</p>
+      )}
+      {r.error && <p className="k-small k-pad" style={{ color: 'var(--warn)' }}>{r.error}</p>}
+      {models.map(([id, m]) => (
+        <div key={id}>
+          <SectionTitle>{m.title || id}{m.quant ? ` · ${m.quant}` : ''}{d.active === id ? ' · talking' : ''}</SectionTitle>
+          {m.error ? <p className="k-small k-pad" style={{ color: 'var(--warn)' }}>{m.error}</p> : (
+            <List>
+              <ListRow title="First word (p50 / p95)" value={<span className="k-small">{msTxt(m.first_word_ms)}</span>} />
+              <ListRow title="First token (p50 / p95)" subtitle={`cold start: ${Object.entries(m.cold_first_token_ms || {}).map(([l, v]) => `${l} ${v} ms`).join(', ')}`} value={<span className="k-small">{msTxt(m.first_token_ms)}</span>} />
+              <ListRow title="Speed" subtitle={`load ${m.load_s ?? '–'} s · VRAM ${m.vram_mb ?? '–'} MB`} value={<span className="k-small">{m.tokens_per_s ?? '–'} tok/s</span>} />
+              <ListRow title="Calls ask_kairo when needed" value={<Badge tone={(m.tool_recall ?? 0) >= 0.9 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.tool_recall)}</Badge>} />
+              <ListRow title="Calls it when not needed" value={<Badge tone={(m.false_calls ?? 1) <= 0.15 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.false_calls)}</Badge>} />
+              <ListRow title="Keeps Claude’s facts" value={<Badge tone={(m.fidelity ?? 0) >= 0.9 ? 'ok' : 'warn'} pop={false}>{pctTxt(m.fidelity)}</Badge>} />
+              <ListRow title="Natural (Claude, blind)" subtitle={m.natural?.note || ''} value={<span className="k-small">EN {m.natural?.en ?? '–'} · DE {m.natural?.de ?? '–'}</span>} />
+              {(m.samples?.en || []).slice(0, 1).map((x, i) => <ListRow key={`en${i}`} wrap title={`“${x.owner}”`} subtitle={x.kairo} />)}
+              {(m.samples?.de || []).slice(0, 1).map((x, i) => <ListRow key={`de${i}`} wrap title={`„${x.owner}“`} subtitle={x.kairo} />)}
+              {d.installed.includes(id) && d.active !== id && <ListRow title="Use this one" onClick={() => choose(id)} chevron />}
+            </List>
+          )}
+        </div>
+      ))}
+      {(sp.stt || sp.tts) && (
+        <>
+          <SectionTitle>Speech on the PC</SectionTitle>
+          <List>
+            <ListRow title="Whisper (English + German)" subtitle={`word errors ${pctTxt(sp.stt?.auto?.wer)}`} value={<span className="k-small">{msTxt(sp.stt?.auto?.ms)}</span>} />
+            <ListRow title="Whisper (English only)" subtitle={`word errors ${pctTxt(sp.stt?.en?.wer)}`} value={<span className="k-small">{msTxt(sp.stt?.en?.ms)}</span>} />
+            <ListRow title="Kokoro: first words (EN)" value={<span className="k-small">{msTxt(sp.tts?.en?.first_clause_ms)}</span>} />
+            <ListRow title="Piper: first words (DE)" value={<span className="k-small">{msTxt(sp.tts?.de?.first_clause_ms)}</span>} />
+            {sp.smart_turn?.pad_side && <ListRow title="Smart Turn (is the owner done?)" subtitle={`complete ${sp.smart_turn[sp.smart_turn.pad_side].complete} · cut off ${sp.smart_turn[sp.smart_turn.pad_side].cut}`}
+              value={<span className="k-small">{pctTxt(sp.smart_turn[sp.smart_turn.pad_side].accuracy)} · {msTxt(sp.smart_turn[sp.smart_turn.pad_side].ms)}</span>} />}
+          </List>
+        </>
+      )}
+      <SectionTitle>Kyutai (streaming speech, English only)</SectionTitle>
+      <List>
+        {k.state === 'measured' ? (
+          <>
+            <ListRow title="Kyutai STT: words after you stop" subtitle={`${k.stt?.ms_per_frame?.p50 ?? '–'} ms per 80 ms frame · word errors ${pctTxt(k.stt?.wer)}`} value={<span className="k-small">{msTxt(k.stt?.after_end_ms)}</span>} />
+            <ListRow title="Kyutai TTS: first audio" subtitle={`real-time factor ${k.tts?.rtf ?? '–'} · VRAM ${k.vram_mb ?? '–'} MB`} value={<span className="k-small">{msTxt(k.tts?.first_audio_ms)}</span>} />
+          </>
+        ) : k.state === 'failed' ? <ListRow wrap title="Kyutai failed on this PC" subtitle={k.error} />
+          : d.kyutai.ready ? <ListRow title="Installed" subtitle="Run the lab to measure it" />
+            : d.kyutai.requested ? <ListRow title="Install requested" subtitle="The PC installs it within minutes (about 10 GB)" />
+              : <ListRow title="Install the Kyutai test" subtitle="About 10 GB, only for this comparison" onClick={kyutai} chevron />}
+      </List>
+      {r.estimate_ms && (
+        <p className="k-muted k-small k-pad">On the PC, before the phone: quiet {r.estimate_ms.endpoint} + speech to text {r.estimate_ms.stt ?? '–'} + first word {r.estimate_ms.voice_model_first_word ?? '–'} + first audio {r.estimate_ms.first_audio ?? '–'} = {r.estimate_ms.total ?? '–'} ms{r.estimate_ms.kyutai_total ? ` (Kyutai: ${r.estimate_ms.kyutai_total} ms)` : ''}. The phone adds the network and playback: see Voice speed.</p>
+      )}
+    </Page>
+  )
+}
+
 function SystemPage() {
   const stack = useStack()
   const toast = useToast()
@@ -833,6 +928,8 @@ function SystemPage() {
           <List>
             <ListRow icon={<IconBolt />} title="Voice speed" subtitle="Every turn, step by step: before and after, model, played or not" chevron
               onClick={() => stack.push('Voice speed', () => <VoiceSpeedPage />)} />
+            <ListRow icon={<IconMic />} title="Voice lab" subtitle="The local voice models measured on this PC, and the pick" chevron
+              onClick={() => stack.push('Voice lab', () => <VoiceLabPage />)} />
             {speed.map((r) => (
               <ListRow key={r.kind} icon={<IconBolt />} title={r.title} subtitle={`Typical ${secs(r.p50_ms)} · slow ones ${secs(r.p95_ms)} · ${r.n}×`} />
             ))}
@@ -1029,6 +1126,7 @@ function RealtimeSpend({ b }) {
 }
 
 const REALTIME_REASON = {
+  local: 'The voice model on your PC talks (System → Voice lab shows which one and how fast).',
   off: 'Off: calls use the local voice.', no_key: 'No OpenAI key yet: calls use the local voice.',
   cap: 'This month’s cap is reached: local voice until next month.', down: 'OpenAI didn’t answer a moment ago: local voice for now.',
 }
@@ -1048,15 +1146,33 @@ function RealtimePage() {
     try { setSt(await api('/api/voice/realtime/key', { method: 'PUT', body: { key: key.trim() } })); setKey(''); toast.show({ text: 'Saved, encrypted on your PC.' }) } catch (e) { toast.show({ text: e.message }) } finally { setBusy(false) }
   }
   const removeKey = async () => { setSt(await api('/api/voice/realtime/key', { method: 'DELETE' })); toast.show({ text: 'Key removed from the PC.' }) }
-  if (!st) return <Page title="Realtime voice"><SkeletonCard lines={4} /></Page>
+  if (!st) return <Page title="Voice"><SkeletonCard lines={4} /></Page>
   const s = st.settings
   return (
-    <Page title="Realtime voice" onRefresh={load}>
-      <p className="k-hello">Calls and the voice button talk to OpenAI’s realtime model, so Kairo answers in about half a second. The real work still goes to Claude. Your voice and the words of the call go to OpenAI; everything else stays on your PC.</p>
+    <Page title="Voice" onRefresh={load}>
+      <p className="k-hello">On calls and with the voice button a fast voice model talks and Claude does the real work. Local: everything stays on your PC. OpenAI: your voice and the call’s words go to OpenAI.</p>
+      <SectionTitle>Who talks on calls</SectionTitle>
+      <div className="k-pad">
+        <Segmented id="voiceengine" value={s.engine || 'local'} onChange={(v) => save({ engine: v })}
+          options={[{ value: 'local', label: 'Local (free)' }, { value: 'openai', label: 'OpenAI Realtime' }]} />
+        <p className="k-muted k-small" style={{ marginTop: 8 }}>
+          {s.engine === 'openai'
+            ? 'OpenAI’s realtime model talks; Claude still does the work. Costs money, capped below.'
+            : 'The voice model on your PC talks (free, nothing leaves the PC); Claude does the work. If it isn’t ready, the old voice answers.'}
+        </p>
+        <label className="k-field">Language on calls
+          <select value={s.language || 'auto'} onChange={(e) => save({ language: e.target.value })}>
+            <option value="auto">English and German</option>
+            <option value="en">English only (a little faster)</option>
+          </select>
+        </label>
+      </div>
       <List>
-        <ListRow icon={<IconMic />} title={st.available ? 'On' : 'Local voice'} subtitle={st.available ? `${s.model} · voice ${s.voice}` : (REALTIME_REASON[st.reason] || st.message)}
-          value={<Badge tone={st.available ? 'ok' : 'warn'} pop={false}>{st.available ? 'Realtime' : 'Local'}</Badge>} />
+        <ListRow icon={<IconMic />} title={st.available ? 'OpenAI Realtime on' : s.engine === 'openai' ? 'OpenAI Realtime not ready' : 'Local voice'}
+          subtitle={st.available ? `${s.model} · voice ${s.voice}` : (REALTIME_REASON[st.reason] || st.message)}
+          value={<Badge tone={st.available || st.reason === 'local' ? 'ok' : 'warn'} pop={false}>{st.available ? 'OpenAI' : 'Local'}</Badge>} />
       </List>
+      <SectionTitle>OpenAI Realtime (optional)</SectionTitle>
       <RealtimeSpend b={st.budget} />
       <SectionTitle>OpenAI key</SectionTitle>
       <div className="k-pad">
@@ -1127,8 +1243,8 @@ function SettingsPage() {
           onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
         <ListRow icon={<IconKey />} title="Logins" subtitle="School portal (OLAT), read-only" chevron
           onClick={() => stack.push('Logins', () => <LoginsPage />)} />
-        <ListRow icon={<IconMic />} title="Realtime voice" subtitle="OpenAI key, monthly cap, model" chevron
-          onClick={() => stack.push('Realtime voice', () => <RealtimePage />)} />
+        <ListRow icon={<IconMic />} title="Voice" subtitle="Local voice model or OpenAI Realtime, language" chevron
+          onClick={() => stack.push('Voice', () => <RealtimePage />)} />
       </List>
       <SectionTitle>Developer</SectionTitle>
       <List>

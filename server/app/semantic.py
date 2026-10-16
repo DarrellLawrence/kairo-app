@@ -70,8 +70,10 @@ class NotReady(RuntimeError):
 class Embedder:
     """Client for app/embed_worker.py. The model runs in a separate python (see there why)."""
 
-    def __init__(self, models_dir: Path, site_dir: Path | None = None, python: str | None = None) -> None:
+    def __init__(self, models_dir: Path, site_dir: Path | None = None, python: str | None = None,
+                 cpu_only=None) -> None:
         self.models_dir = Path(models_dir)
+        self.cpu_only = cpu_only or (lambda: False)   # local voice (2026-10-16): the GPU is the voice's first
         self.site_dir = Path(site_dir) if site_dir else None
         self.python = python or sys.executable
         self.device: str | None = None
@@ -118,6 +120,8 @@ class Embedder:
         cmd = [self.python, "-I", "-X", "utf8", str(WORKER), "--models", str(self.models_dir)]
         if self.site_dir is not None:
             cmd += ["--site", str(self.site_dir)]
+        if self.cpu_only():
+            cmd += ["--cpu"]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                       text=True, encoding="utf-8", bufsize=1, creationflags=flags)

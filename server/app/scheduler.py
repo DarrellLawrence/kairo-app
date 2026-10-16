@@ -78,6 +78,8 @@ JOB_TITLES = {
     "olat": "School portal (OLAT, read-only)",
     "chat_memory": "Conversation memory",
     "knowledge_call": "Getting-to-know-you call (max 1 a day)",
+    "voice_agenda": "Call topics (what Kairo brings up on a call)",
+    "voice_lab": "Voice lab (measure the local voice models, pick one)",
     "evening_recap": "Evening recap mail (to your own Gmail)",
     "document": "Document gauntlet (write, render, check, fix)",
 }
@@ -433,6 +435,9 @@ class Jobs:
             every = ((self.schedule.get("jobs") or {}).get("pa") or {}).get("every_minutes") or PA_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["pa"], id="pa",
                           misfire_grace_time=900)
+        if "voice_agenda" in self.bodies:   # local voice: Claude's call topics, ready before a call starts
+            sched.add_job(self.run_job, IntervalTrigger(minutes=30, timezone=tz), args=["voice_agenda"],
+                          id="voice_agenda", misfire_grace_time=900)
         if "coach" in self.bodies:
             every = ((self.schedule.get("jobs") or {}).get("coach") or {}).get("every_minutes") or COACH_EVERY_MIN
             sched.add_job(self.run_job, IntervalTrigger(minutes=int(every), timezone=tz), args=["coach"], id="coach",

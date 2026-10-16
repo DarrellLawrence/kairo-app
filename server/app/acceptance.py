@@ -121,11 +121,11 @@ SPECS = [
          "L"),
     Spec(38, "Recipient picker", "auto", "Send on a promise with two people on the mail: you pick one or both (name + full "
                                          "address), then the normal card; nobody who wasn't on the mail can be picked.", "L"),
-    Spec(39, "Realtime voice", "manual", "On the iPhone, English and German: 10+ turns on a call and 5 with the voice button "
-                                       "(More → System → Voice speed, realtime): end of speech → first audio p50 < 0.8 s, p95 < "
-                                       "1.5 s; talking over stops it at once; a question about your data gets a short filler, then "
-                                       "Claude's answer; \"email someone\" gives a card, nothing sent; cap 0 or no internet → the "
-                                       "local voice, with the reason.", "R"),
+    Spec(39, "Voice like a person", "manual", "Voice lab run first; then on the iPhone, English and German: 10+ call turns "
+                                           "and 5 with the voice button: end of speech → first audio p50 < 0.8 s, p95 < 1.5 s; "
+                                           "never cut off; talking over stops it; a data question gets a filler, then Claude's "
+                                           "answer; \"email someone\" gives a card; at most two topics brought up; with the voice "
+                                           "model off the old voice answers.", "LV"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "

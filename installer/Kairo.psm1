@@ -615,7 +615,7 @@ function Repair-LegacyToolSites($P) {
 function Remove-UnusedToolSites($P) {
     $used = @{}
     $releases = @(Get-ChildItem $P.Releases -Directory -ErrorAction SilentlyContinue)
-    foreach ($kind in @('voice', 'browser', 'memory')) {
+    foreach ($kind in @('voice', 'browser', 'memory', 'voicellm')) {
         $legacyUsed = $false
         foreach ($r in $releases) {
             $f = Join-Path $r.FullName "$kind-site.txt"
@@ -624,7 +624,7 @@ function Remove-UnusedToolSites($P) {
         if ($legacyUsed) { $used[(Join-Path $P.Tools $kind).ToLower()] = $true }
     }
     foreach ($d in @(Get-ChildItem $P.Tools -Directory -ErrorAction SilentlyContinue)) {
-        if ($d.Name -notmatch '^(voice|browser|memory)(-[0-9a-f]{12}(\.new)?)?$') { continue }
+        if ($d.Name -notmatch '^(voice|browser|memory|voicellm)(-[0-9a-f]{12}(\.new)?)?$') { continue }
         if ($used.ContainsKey($d.FullName.ToLower())) { continue }
         try { Remove-Item -Recurse -Force $d.FullName; Write-Note "removed unused $($d.Name)" }
         catch { Write-Warn "Could not remove $($d.FullName) ($($_.Exception.Message.Trim()))" }
@@ -678,6 +678,74 @@ function Install-Memory($P, [string]$ReleaseDir) {
     } catch {
         Write-Warn "Semantic memory not set up: $($_.Exception.Message.Trim()). The self-test decides (rollback if the release needs it)."
         return $false
+    }
+}
+
+# Local voice (owner's decision 2026-10-16): llama.cpp's server, the candidate voice models and the turn
+# detector (server\app\voicellm.json) in tools\voicellm-<hash> (admins only; Kairo's account only reads it).
+# Up to about 14 GB, once per voicellm.json; a model that doesn't fit on the disk is skipped (the voice lab
+# says so). Partial downloads are kept and checked, so a second try continues. Never a reason to roll back:
+# without it the old voice pipeline answers.
+function Install-VoiceLLM($P, [string]$ReleaseDir) {
+    if ($env:KAIRO_SKIP_VOICELLM -eq '1') { Write-Note 'Local voice model skipped (KAIRO_SKIP_VOICELLM=1).'; return $true }
+    $manifest = Join-Path $ReleaseDir 'server\app\voicellm.json'
+    if (-not (Test-Path $manifest)) { return $true }
+    try {
+        $hash = (Get-FileHash -Algorithm SHA256 $manifest).Hash.Substring(0, 12).ToLower()
+        $site = Join-Path $P.Tools "voicellm-$hash"
+        Set-Content -Path (Join-Path $ReleaseDir 'voicellm-site.txt') -Value $site -Encoding ASCII
+        if (Test-Path (Join-Path $site '.complete')) { Write-Ok "Local voice model ready ($site)"; return $true }
+        if (Test-Path $site) { Remove-Item -Recurse -Force $site }
+        $new = "$site.new"
+        Use-KairoEnv $P
+        $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+        Write-Note 'Downloading the local voice model (llama.cpp and the voice models, up to 14 GB, once)...'
+        Push-Location (Join-Path $ReleaseDir 'server')
+        try { Invoke-Checked $py @('-m', 'app.voicellm', 'download', '--to', $new) 'Downloading the local voice model' }
+        finally { Pop-Location }
+        Repair-ToolAcl $new
+        Move-Item $new $site
+        Write-Ok "Local voice model ready ($site)"
+        return $true
+    } catch {
+        Write-Warn "Local voice model not set up: $($_.Exception.Message.Trim()). Calls use the old voice pipeline."
+        return $false
+    }
+}
+
+# The voice lab's Kyutai comparison (owner's request 2026-10-16), only once the owner asked for it in the
+# app (data\voicelab\kyutai.request; only its existence is read, never its content): its own Python with
+# torch + moshi and Kyutai's English models, about 10 GB, in tools\kyutai-<hash> (admins only). Kairo never
+# imports it; the lab starts it as a separate program. Tried at most every 6 hours.
+function Install-KyutaiIfRequested($P, [string]$ReleaseDir) {
+    $flag = Join-Path $P.Data 'voicelab\kyutai.request'
+    if (-not (Test-Path -LiteralPath $flag -PathType Leaf)) { return }
+    $tried = Join-Path $P.Updater 'kyutai-tried.txt'
+    if ((Test-Path $tried) -and ((Get-Date) - (Get-Item $tried).LastWriteTime).TotalHours -lt 6) { return }
+    $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
+    $server = Join-Path $ReleaseDir 'server'
+    $manifest = Join-Path $server 'app\voicellm.json'
+    if (-not (Test-Path $py) -or -not (Test-Path $manifest)) { return }
+    Push-Location $server
+    try { $site = ([string](& $py -m app.voicellm kyutai-dir --tools $P.Tools | Select-Object -Last 1)).Trim() } finally { Pop-Location }
+    if (-not $site -or (Test-Path (Join-Path $site '.complete'))) { return }
+    Set-Content -Path $tried -Value (Get-Date -Format o) -Encoding ASCII
+    $k = (Get-Content -Raw $manifest | ConvertFrom-Json).kyutai
+    $new = "$site.new"
+    try {
+        Write-Note 'Installing the Kyutai test for the voice lab (about 10 GB, once)...'
+        $kpy = Join-Path $new 'venv\Scripts\python.exe'
+        if (-not (Test-Path $kpy)) { Invoke-Checked $py @('-m', 'venv', (Join-Path $new 'venv')) 'Making the Kyutai Python' }
+        Invoke-Checked $kpy @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', "torch==$($k.torch)",
+                              '--index-url', [string]$k.torch_index) 'Installing torch for Kyutai'
+        Invoke-Checked $kpy @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', "moshi==$($k.moshi)") 'Installing moshi'
+        Invoke-Checked $kpy @('-I', (Join-Path $server 'tools\kyutai_bench.py'), 'download', $new, $manifest) 'Downloading Kyutai''s models'
+        Repair-ToolAcl $new
+        Set-Content -Path (Join-Path $new '.complete') -Value (Get-Date -Format o) -Encoding ASCII
+        Move-Item $new $site
+        Write-Ok "Kyutai test ready ($site)"
+    } catch {
+        Write-Warn "Kyutai test not installed: $($_.Exception.Message.Trim()). Tried again in 6 hours."
     }
 }
 
@@ -937,6 +1005,8 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
     if (-not (Install-Voice $P $newDir)) { $warnings += 'voice' }
     if (-not (Install-Browser $P $newDir)) { $warnings += 'browser' }
     if (-not (Install-Memory $P $newDir)) { $warnings += 'memory' }
+    if (-not (Install-VoiceLLM $P $newDir)) { $warnings += 'voicellm' }
+    Install-KyutaiIfRequested $P $newDir
 
     Write-Step 'Switching to the new version'
     Write-DeployResult $P $version 'switched' $null '' '' $warnings

@@ -62,7 +62,7 @@ jobs:
           path: voice-models
           key: voice-models-v1
       - run: pip install -r server/requirements-dev.txt -r server/requirements-voice.txt
-      - run: python -m pytest -o addopts="" tests/test_voice.py -s
+      - run: python -m pytest -o addopts="" tests/test_voice.py tests/test_voicelab.py -s
         working-directory: server
 
   # v8 C6: the real embedding model (Qwen3-Embedding, CPU int8) in its own process, its packages in a
@@ -161,6 +161,7 @@ jobs:
       KAIRO_SKIP_VOICE: "1"
       # 3 GB (GPU runtime + model); the memory job tests the same folder layout on Windows and Linux.
       KAIRO_SKIP_MEMORY: "1"
+      KAIRO_SKIP_VOICELLM: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
