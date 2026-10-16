@@ -397,6 +397,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if binary is None:
             return None
         with session_for(engine) as s_:
+            if voicellm.lab_rejected(voicellm.choice(s_)):
+                return "no model passed the voice lab: the old voice answers until you pick one in Voice lab"
             mid = voicellm.active(s_, _vl_site)
         path = voicellm.model_path(_vl_site, mid) if mid else None
         if path is None:
@@ -1221,7 +1223,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
-                      context_tokens=int(spec.get("context") or 8192))
+                      context_tokens=int(spec.get("context") or 8192), report=_report_live)
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
@@ -1234,13 +1236,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _card_lines = [0]
     LAB_FIRST_CHECK_S = 600
 
+    def _report_live(item, said: str, reply: str) -> None:
+        """On the call: what the owner said to an item Kairo raised goes to Claude now (done, later, new info),
+        so the next questions on this call get the new state. Their own words only. Never spoken."""
+        async def go():
+            try:
+                await app.state.report_ask(bringup.report_request(item, said, reply, live=True), [f"Owner: {reply}"])
+            except Exception:
+                log.exception("voice: reporting the owner's answer to %s", item.id)
+            app.state.today_card.refresh_soon("tasks", "loops", "events")
+        task = asyncio.get_running_loop().create_task(go())
+        _turns.add(task)
+        task.add_done_callback(_turns.discard)
+
     async def _report_answers(mouth: "Mouth") -> None:
-        """After the call: what the owner said to each item Kairo raised goes to Claude (done, later, new info),
-        unless the voice model already passed it on. Their own words only."""
+        """After the call: anything the owner said to a raised item that hasn't reached Claude yet (a cut-off
+        turn). Their own words only."""
         await asyncio.gather(*list(_turns - {asyncio.current_task()}), return_exceptions=True)   # the call's answers first
         for item, said, reply in mouth.reports():
             try:
-                await app.state.after_call_ask(bringup.report_request(item, said, reply), [f"Owner: {reply}"])
+                await app.state.report_ask(bringup.report_request(item, said, reply), [f"Owner: {reply}"])
             except Exception:
                 log.exception("voice: reporting the owner's answer to %s", item.id)
 
@@ -2831,7 +2846,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dest = pa_mod.destination(places, _card_raw["events"], now)[0] if frm.kind == "home" else home
         if dest is None or not dest.station or dest.station == frm.station:
             return todaycard.trip_lines(None, frm.name, None, profile.tz)
-        return todaycard.trip_lines(app.state.lookup.connections(frm.station, dest.station), frm.name, dest.name, profile.tz)
+        via = dest.via if frm.kind == "home" else frm.via        # the usual route, both ways
+        return todaycard.trip_lines(app.state.lookup.connections(frm.station, dest.station, via=via),
+                                    frm.name, dest.name, profile.tz)
 
     def _quiet_now(now: dt.datetime) -> bool:
         q = getattr(profile, "quiet_hours", None)
@@ -2889,9 +2906,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                           "the local voice until next month (or raise the cap in Settings).", "/#more", source="realtime")
         return state
 
-    async def _after_call_ask(request: str, lines: list[str]) -> tuple[str, bool]:
+    async def _report_ask(request: str, lines: list[str]) -> tuple[str, bool]:
         return await _rt_ask(request, lines)
-    app.state.after_call_ask = _after_call_ask       # an owner turn for Claude, like ask_kairo (tests listen here)
+    app.state.report_ask = _report_ask               # an owner turn for Claude, like ask_kairo (tests listen here)
 
     async def _rt_ask(request: str, lines: list[str]) -> tuple[str, bool]:
         """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call."""

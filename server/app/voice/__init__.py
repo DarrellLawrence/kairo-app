@@ -25,8 +25,12 @@ log = logging.getLogger("kairo.voice")
 
 WHISPER_GPU = os.environ.get("KAIRO_WHISPER_MODEL", "large-v3-turbo")
 WHISPER_CPU = os.environ.get("KAIRO_WHISPER_CPU_MODEL", "small")
+# fp16, not int8 (2026-10-16): the int8 model gave NaN (= silence) or audio far too loud (= noise) on
+# ordinary sentences ("Sure, I will remind you.") and was 5x slower on the CPU. Named in
+# requirements-voice.txt too: a new model = a new tools folder, downloaded clean.
+KOKORO_MODEL = "kokoro-v1.0.fp16.onnx"
 KOKORO_FILES = {
-    "kokoro-v1.0.int8.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+    KOKORO_MODEL: f"https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/{KOKORO_MODEL}",
     "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
 }
 KOKORO_VOICE = os.environ.get("KAIRO_KOKORO_VOICE", "af_heart")
@@ -55,6 +59,17 @@ def language_of(text: str) -> str:
         return "en"
     de = sum(1 for w in words if w in _DE_WORDS) + 2 * len(re.findall(r"[äöüß]", text.lower()))
     return "de" if de / max(1, len(words)) > 0.12 else "en"
+
+
+def sound(samples):
+    """Never silence or noise from a model that went numerically wrong: no samples or not-a-number is an
+    error (said, not sent); audio over full scale is brought back to it, not clipped into noise."""
+    import numpy as np
+    a = np.asarray(samples, dtype=np.float32)
+    if a.size == 0 or not np.isfinite(a).all():
+        raise VoiceError("the voice model made no usable audio for this sentence")
+    peak = float(np.abs(a).max())
+    return a / peak * 0.95 if peak > 1.0 else a
 
 
 def to_wav(samples, rate: int) -> bytes:
@@ -302,7 +317,7 @@ class Voice:
             if not all((d / f).is_file() for f in KOKORO_FILES):
                 raise NotInstalled("The English voice model is missing (run Update Kairo).")
             from kokoro_onnx import Kokoro
-            self._kokoro = Kokoro(str(d / "kokoro-v1.0.int8.onnx"), str(d / "voices-v1.0.bin"))
+            self._kokoro = Kokoro(str(d / KOKORO_MODEL), str(d / "voices-v1.0.bin"))
         return self._kokoro
 
     def _load_piper(self):
@@ -336,7 +351,7 @@ class Voice:
                 voice.synthesize_wav(text, w)
             return buf.getvalue(), "de"
         samples, rate = kokoro.create(text, voice=KOKORO_VOICE, lang="en-us")
-        return to_wav(samples, rate), "en"
+        return to_wav(sound(samples), rate), "en"
 
     # ---------------------------------------------------------------- downloads (installer)
 

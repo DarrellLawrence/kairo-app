@@ -667,9 +667,10 @@ def late_night_hint(s: Session, *, now: dt.datetime, first_tomorrow: dt.datetime
 
 def destination(places: list, events: list[dict], now: dt.datetime):
     """Where the owner is probably heading: the place named in the next calendar event today,
-    else the school/work place that applies today. Matching uses the private address too, on this PC."""
+    else the school/work place that applies today (its weekdays, if it has any: school Mon/Tue, work
+    Wed-Fri). Matching uses the private address too, on this PC."""
     day = now.date()
-    active = [p for p in places if p.kind != "home" and p.active(day)]
+    active = [p for p in places if p.kind != "home" and (p.on(day) if hasattr(p, "on") else p.active(day))]
     for e in events:
         try:
             st = dt.datetime.fromisoformat(e["start"])

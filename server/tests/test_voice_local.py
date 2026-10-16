@@ -252,13 +252,13 @@ def test_an_urgent_item_comes_in_the_wait_before_claudes_answer(local):
     assert "[[" not in done["text"]
 
 
-def test_what_the_owner_says_to_it_goes_to_claude_after_the_call(local):
+def test_what_the_owner_says_to_it_goes_to_claude_during_the_call(local):
     asked = []
 
     async def ask(request, lines):
         asked.append((request, lines))
         return "Noted.", False
-    local.app.state.after_call_ask = ask
+    local.app.state.report_ask = ask
     seed_urgent(local)
     with local.websocket_connect("/ws/voice") as ws:
         utter(ws)
@@ -266,11 +266,13 @@ def test_what_the_owner_says_to_it_goes_to_claude_after_the_call(local):
         local.voice.text = "Yes I signed it this morning"
         utter(ws, turn=2)
         frames_until(ws, limit=400)
-        assert asked == []                                                     # never during the call
-    for _ in range(100):                                                       # after the hang-up
-        if asked:
-            break
-        time.sleep(0.05)
-    request, lines = asked[0]
-    assert '"Yes I signed it this morning"' in request and "sign the school form" in request
-    assert "Act only on the owner's words" in request and lines == ["Owner: Yes I signed it this morning"]
+        for _ in range(100):                                                   # owner's decision 2026-10-16: live
+            if asked:
+                break
+            time.sleep(0.05)
+        request, lines = asked[0]
+        assert request.startswith("[On this call (record it now, say nothing back)")
+        assert '"Yes I signed it this morning"' in request and "sign the school form" in request
+        assert "Act only on the owner's words" in request and lines == ["Owner: Yes I signed it this morning"]
+    time.sleep(0.3)
+    assert len(asked) == 1                                                     # not again after the hang-up

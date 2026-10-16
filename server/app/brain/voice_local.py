@@ -131,7 +131,7 @@ class VoiceModel:
     """Keeps the active voice model loaded and hands out turns.
 
     resolve() -> (command_prefix, model path, model id, context) or None when nothing is installed.
-    state: not installed | starting | ready | failed | paused."""
+    state: not installed | starting | ready | failed | paused | off (installed, but no model passed the lab)."""
 
     def __init__(self, resolve: Callable[[], tuple[list[str], Path, str, int] | None], *, log_dir: Path,
                  port: int = PORT, transport: httpx.AsyncBaseTransport | None = None):
@@ -157,9 +157,9 @@ class VoiceModel:
             if self.paused:
                 return self.state
             want = self.resolve()
-            if want is None:
+            if want is None or isinstance(want, str):          # a str: installed, but switched off (why)
                 self._stop_server()
-                self._set("not installed")
+                self._set("not installed" if want is None else "off", want)
                 return self.state
             prefix, model, model_id, context = want
             if self.server is not None and (self.model_id != model_id or not self.server.alive()):
@@ -201,7 +201,7 @@ class VoiceModel:
         while time.monotonic() < until:
             if self.ensure() == "ready":
                 return True
-            if self.state in ("failed", "not installed", "paused"):
+            if self.state in ("failed", "not installed", "paused", "off"):
                 return False
             time.sleep(0.5)
         return False

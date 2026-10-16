@@ -5,7 +5,9 @@ shares the file with + (or pastes it) and says "save this to my profile".
                      now on, and hands its text back to the chat model (as untrusted data).
   2. profile_apply   the chat model's reading of it, schema-checked by the gate: people (relation,
                      birthday, notes), loops, calendar rules (a word in event titles -> FIXED / FLEXIBLE /
-                     SOCIAL; applied to the next 4 weeks now and every day after), coach facts, exams.
+                     SOCIAL; applied to the next 4 weeks now and every day after), coach facts, exams,
+                     places (home / school / work / training with their stations, weekdays and the route's
+                     via station: the Today card's next connection; owner's request 2026-10-16).
 
 Two steps because the chat turn already holds the model: the tool can't ask it again. Nothing here can
 send, approve or reach another person; only Kairo's own tables, its settings and the vault. The same
@@ -131,7 +133,8 @@ def apply(s: Session, a: dict, *, today: dt.date, tz, google_read=None, now: dt.
         raise ProfileError(f"no profile import #{a['import_id']}: call profile_import first")
     now = now or dt.datetime.now(tz)
     created: dict[str, list] = {"people": [], "loops": [], "exams": [], "questions": []}
-    updated: dict = {"people": [], "rules_before": rules(s), "coach_before": prefs.load(s).get("coach")}
+    updated: dict = {"people": [], "rules_before": rules(s), "coach_before": prefs.load(s).get("coach"),
+                     "places_before": prefs.load(s).get("places")}
     said = []
     for p in a.get("people") or []:
         old = life.person_find(s, p["name"])
@@ -181,6 +184,14 @@ def apply(s: Session, a: dict, *, today: dt.date, tz, google_read=None, now: dt.
             created["exams"].append(row.id)
     if a.get("exams"):
         said.append(f"{len(a['exams'])} exam{'s' if len(a['exams']) != 1 else ''}")
+    saved_places = []
+    for p in a.get("places") or []:
+        try:
+            saved_places.append(prefs.place_set(s, {k: v for k, v in p.items() if v not in (None, [])}).name)
+        except prefs.PrefsError as exc:
+            said.append(f"place {p.get('name')} not saved ({exc})")
+    if saved_places:
+        said.append("places: " + ", ".join(saved_places))
     asked = {c.question for c in s.exec(select(Capture).where(Capture.source == "profile")).all()}
     for q in a.get("questions") or []:                  # unclear: a quick question for the next time they talk
         if q not in asked:
@@ -198,7 +209,7 @@ def apply(s: Session, a: dict, *, today: dt.date, tz, google_read=None, now: dt.
         created[k] = list(dict.fromkeys((prev_c.get(k) or []) + created[k]))
     seen = {x["id"] for x in prev_u.get("people", [])}
     updated["people"] = (prev_u.get("people") or []) + [x for x in updated["people"] if x["id"] not in seen]
-    for k in ("rules_before", "coach_before"):          # ... and the state before the first run (for undo)
+    for k in ("rules_before", "coach_before", "places_before"):   # ... and the state before the first run (for undo)
         if k in prev_u:
             updated[k] = prev_u[k]
     record.update(created=created, updated=updated, applied=True)
@@ -273,6 +284,13 @@ def undo(s: Session, vault_dir: Path | None, record: dict | None, *, capture_id:
                 data.pop("coach", None)
             else:
                 data["coach"] = updated["coach_before"]
+            prefs._save(s, data)
+        if "places_before" in updated:
+            data = prefs.load(s)
+            if updated["places_before"] is None:
+                data.pop("places", None)
+            else:
+                data["places"] = updated["places_before"]
             prefs._save(s, data)
         if vault_dir is not None and record.get("fresh_file") and record.get("path"):
             (Path(vault_dir) / record["path"]).unlink(missing_ok=True)

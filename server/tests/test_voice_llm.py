@@ -142,6 +142,12 @@ def test_a_pid_file_from_before_a_reboot_never_kills_another_program(tmp_path):
         other.wait(5)
 
 
+def test_switched_off_when_no_model_passed_the_lab(tmp_path):
+    v = VoiceModel(lambda: "no model passed the voice lab", log_dir=tmp_path / "logs", port=free_port())
+    assert v.ensure() == "off" and v.status()["error"] == "no model passed the voice lab" and v.server is None
+    assert not v.wait_ready(1)
+
+
 def test_a_server_that_never_comes_up_is_reported(vm, monkeypatch):
     monkeypatch.setattr(voice_local, "START_TIMEOUT_S", 1)
     v = vm(FAKE_LLAMA_LOAD_S="30")

@@ -211,6 +211,7 @@ class ProfileApply(Strict):
     calendar_rules: list[CalendarRule] = Field(default_factory=list, max_length=20)
     coach: dict = Field(default_factory=dict)
     exams: list[ProfileExam] = Field(default_factory=list, max_length=10)
+    places: list["PlaceSet"] = Field(default_factory=list, max_length=8)  # home/school/work/training + stations
     questions: list[str] = Field(default_factory=list, max_length=10)   # unclear: asked next time, with a best guess
 
     @field_validator("questions")
@@ -270,10 +271,15 @@ class PlaceSet(Strict):
     address: str | None = Field(default=None, max_length=160)
     valid_from: date | None = None
     valid_until: date | None = None
+    days: list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = Field(default_factory=list, max_length=7)   # school Mon/Tue, work Wed-Fri
+    via: str | None = Field(default=None, max_length=80)              # the usual route goes through it
 
 
 class PlaceRemove(Strict):
     name: str = Field(min_length=1, max_length=40)
+
+
+ProfileApply.model_rebuild()                     # its places are PlaceSets (defined above)
 
 
 class LoopsList(Strict):

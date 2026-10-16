@@ -12,7 +12,8 @@ Claude is still working, so the owner never waits longer for it (bringup.pick_fo
 answer comes back as the tool result and the voice model says it in its own words, right after the
 sentence that is playing. Talked over: the writing stops at once; an answer Claude is still working on
 is kept and said in the next turn, after the owner's new words are answered. What the owner said after
-a raised item goes back to Claude after the call (reports()).
+a raised item goes to Claude during the call (owner's decision 2026-10-16): with the turn's own ask_kairo
+if there is one (no extra wait), else right after the turn (report). reports(): what is still unsaid.
 """
 
 from __future__ import annotations
@@ -161,11 +162,11 @@ class Mouth:
                  temperature: float = 0.6, language_mode: str = "auto", max_tool_rounds: int = 2,
                  still_after_s: float = 6.0, filler_index: int = 0, wait_after_s: float = 0.8,
                  clock: Callable | None = None, place: Callable[[], str | None] | None = None,
-                 context_tokens: int = 8192):
+                 context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None):
         self.model, self.ask = model, ask
         self.temperature, self.language_mode = temperature, language_mode
         self.max_tool_rounds, self.still_after_s, self.wait_after_s = max_tool_rounds, still_after_s, wait_after_s
-        self.clock, self.place, self.context_tokens = clock, place, context_tokens
+        self.clock, self.place, self.context_tokens, self.report = clock, place, context_tokens, report
         self.name = (name or "the owner")[:60]
         self.card: dict[str, str] | None = dict(context) if isinstance(context, dict) else None
         self._context = context if isinstance(context, str) else None
@@ -181,6 +182,7 @@ class Mouth:
         self.replies: dict[str, str] = {}   # item id -> what the owner said next
         self.reported: set[str] = set()     # items the voice model already passed to Claude itself
         self._just_raised: list[str] = []
+        self._unsent: list = []
         self.pending: list[_Pending] = []
         self.hang_up = False
         self.prompt_tokens = 0
@@ -244,6 +246,7 @@ class Mouth:
         for item_id in self._just_raised:                    # what they said right after it was raised
             self.replies.setdefault(item_id, owner_text)
         self._just_raised = []
+        self._unsent = [r for r in self.reports()]           # goes to Claude in this turn
         self._compact()
         stamp = f"[{self.clock():%H:%M}] " if self.clock else ""
         content = stamp + owner_text
@@ -295,6 +298,11 @@ class Mouth:
                 if found is not None:
                     self.raised_items.setdefault(item_id, found)
             self._cap()
+            if self.report is not None:                       # nothing went to Claude this turn: send it now
+                for item, said_line, reply in self._unsent:
+                    self.reported.add(item.id)
+                    self.report(item, said_line, reply)
+            self._unsent = []
             if result.text:
                 self.lines.append(f"Kairo (voice): {result.text}")
                 self.transcript = (self.transcript + [f"Kairo (voice): {result.text}"])[-40:]
@@ -348,6 +356,11 @@ class Mouth:
         about = bringup.describe(item, self.items)
         if about:
             self.reported.add(item)
+        for it, said_line, reply in self._unsent:             # the owner's answer rides along: no extra wait
+            if it.id not in self.reported:
+                request = f"{request}\n\n{bringup.report_request(it, said_line, reply, live=True)}"
+                self.reported.add(it.id)
+        self._unsent = []
         loop = asyncio.get_running_loop()
         task = loop.create_task(self.ask(request, lines, about))
         t0 = time.monotonic()

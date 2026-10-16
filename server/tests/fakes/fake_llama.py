@@ -31,23 +31,29 @@ STARTED = time.monotonic()
 LOAD_S = float(os.environ.get("FAKE_LLAMA_LOAD_S", "0"))
 TOKEN_S = float(os.environ.get("FAKE_LLAMA_TOKEN_MS", "5")) / 1000
 FIRST_S = float(os.environ.get("FAKE_LLAMA_FIRST_MS", "0")) / 1000
-CARD = [(re.compile(r"weather|wetter", re.I), "## Weather"),
-        (re.compile(r"train|bus|zug|connection|verbindung", re.I), "## Next connection"),
-        (re.compile(r"what'?s next|next on my|als nächstes|nächster termin", re.I), "## Next events")]
+CARD = [(re.compile(r"weather|wetter|\bwarm|\brain\b|regn|temperat|\bcold|kalt", re.I), "## Weather"),
+        (re.compile(r"\btrain\b|\bbus\b|\bzug\b|connection|verbindung|platform|gleis|\bmiss\b|verpass", re.I), "## Next connection"),
+        (re.compile(r"buy|kauf|overdue|überfällig|lock|schloss|bill|rechnung", re.I), "## Today's tasks"),
+        (re.compile(r"lea\b|promise|versproch|wollte", re.I), "## Open loops"),
+        (re.compile(r"next|nächst|training|school|schule|friday|freitag|cinema|kino|tomorrow|morgen", re.I), "## Next events")]
 DATA = re.compile(r"calendar|remind|mail|list|test|exam|note|task|send|move|kalender|erinner|liste|prüfung|notiz|aufgabe|schick", re.I)
 
 
 def from_card(system: str, text: str) -> str | None:
+    """The whole card section the question is about (the facts are somewhere in it)."""
     if os.environ.get("FAKE_LLAMA_NO_CARD") or "# Today card" not in system:
         return None
+    text = re.sub(r"^\s*\[\d{1,2}:\d{2}\]\s*", "", text.rsplit("</kairo-note>", 1)[-1])
     for rx, header in CARD:
         if rx.search(text) and header in system:
+            lines = []
             for ln in system.split(header, 1)[1].splitlines()[1:]:
                 ln = ln.strip()
                 if ln.startswith("## ") or ln.startswith("# "):
                     break
                 if ln and not ln.startswith("<<<") and not ln.endswith(":"):
-                    return ln.lstrip("- ")
+                    lines.append(ln.lstrip("- "))
+            return "; ".join(lines) or None
     return None
 
 
@@ -97,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         here = re.search(r"is here: (.*?)\nSay it now", text, re.S)
         if here:
             pieces = ["Okay. "] + [w + " " for w in here.group(1).split()]
-        elif card:
+        elif card and not (tools and DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
             pieces = ["From ", "your ", "card: "] + [w + " " for w in card.split()]
         elif last.get("role") == "tool":
             try:

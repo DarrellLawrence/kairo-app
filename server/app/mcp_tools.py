@@ -37,14 +37,15 @@ DESCRIPTIONS = {
     "profile_apply": "After profile_import: what the profile says, for Kairo's own tables. people (name, relation, "
                      "birthday YYYY-MM-DD or --MM-DD, notes), loops (things still to do, due), calendar_rules (a word in "
                      "event titles -> FIXED never moves / FLEXIBLE Kairo may move / SOCIAL with others), coach (training_days, "
-                     "equipment, water_l, faith_habit, budgets, savings ... only what it says), exams (subject, date). "
+                     "equipment, water_l, faith_habit, budgets, savings ... only what it says), exams (subject, date), places (name, "
+                     "kind home/school/work/training, station, days mon..sun, via station). "
                      "Leave out what it doesn't say. Then tell the owner in a few lines what was added.",
     "memory_search": "Search everything Kairo knows about the owner (vault notes, file summaries, people, open loops, "
                      "conversation memory) by meaning and keywords, any language. Use it before answering about the "
                      "owner's life when the notes in your prompt don't cover it; name the note you used.",
     "settings_list": "The owner's settings (quiet hours, brief times, ping limit, ...) and places.",
     "settings_set": "Change a setting the owner asked for ('quiet hours from 23:00', 'brief at 7').",
-    "place_set": "Save a place: home, school, work, training (+ nearest station; address stays private on the PC; valid_from/until for a job that changes).",
+    "place_set": "Save a place: home, school, work, training (+ nearest station; address stays private on the PC; valid_from/until for a job that changes; days mon..sun when it's only some weekdays; via: the station the usual route goes through).",
     "place_remove": "Remove a saved place.",
     "debrief": "Owner asks 'debrief me' / 'what's going on': the right scope for the time of day (or scope=everything when bored, a topic like school). Follow its 'how'.",
     "loops_list": "Open loops: mails and questions waiting for the owner, promises, deadlines. With id, who, what, since, urgency.",

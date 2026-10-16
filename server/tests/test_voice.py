@@ -284,3 +284,23 @@ def test_unexpected_voice_error_is_never_a_bare_500(client):
     client.app_.state.voice = Boom()
     r = client.post("/api/voice/transcribe", content=b"m4a", headers={"Content-Type": "audio/mp4"})
     assert r.status_code == 503 and "something odd" in r.json()["detail"]
+
+
+def test_broken_model_audio_is_never_sent_as_silence_or_noise():
+    np = pytest.importorskip("numpy")
+    from app import voice
+    with pytest.raises(voice.VoiceError):
+        voice.sound(np.array([0.1, float("nan"), 0.2], dtype=np.float32))       # the int8 model's NaN
+    with pytest.raises(voice.VoiceError):
+        voice.sound(np.array([], dtype=np.float32))
+    loud = voice.sound(np.array([0.5, -1132262.25, 3.0], dtype=np.float32))     # ... and its overflow
+    assert float(np.abs(loud).max()) <= 0.95 and loud[1] < 0
+    ok = np.array([0.1, -0.4], dtype=np.float32)
+    assert (voice.sound(ok) == ok).all()
+
+
+def test_the_voice_model_is_named_in_the_requirements_so_a_new_one_gets_a_new_folder():
+    from pathlib import Path
+    from app import voice
+    req = (Path(voice.__file__).resolve().parents[2] / "requirements-voice.txt").read_text(encoding="utf-8")
+    assert voice.KOKORO_MODEL in req and "int8" not in voice.KOKORO_MODEL

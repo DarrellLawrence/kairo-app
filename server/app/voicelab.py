@@ -78,10 +78,6 @@ CASES = {
         Case("Add milk to my shopping list.", "Milk is on the shopping list.", (("milk",),)),
         Case("When is my next maths test?", "Your next maths test is on Tuesday at 10:15.",
              (("Tuesday",), ("10:15", "10.15", "quarter past ten"))),
-        Case("What's the weather like today?", "Bern: now 12°C, cloudy; today 8 to 15°C, rain 30%.",
-             (("12", "twelve"),), card=True),
-        Case("When's my next train to school?", "07:12, S3, platform 2.", (("7:12", "07:12", "twelve past seven"),), card=True),
-        Case("What's next on my calendar?", "Training at 18:00 at the gym.", (("18", "six"), ("training",)), card=True),
         Case("Thanks, that's all for now."),
     ],
     "de": [
@@ -96,17 +92,13 @@ CASES = {
         Case("Schreib Milch auf die Einkaufsliste.", "Milch steht auf der Einkaufsliste.", (("Milch",),)),
         Case("Wann ist meine nächste Mathe-Prüfung?", "Deine nächste Mathe-Prüfung ist am Dienstag um 10:15.",
              (("Dienstag",), ("10:15", "10.15", "viertel nach zehn"))),
-        Case("Wie ist das Wetter heute?", "Bern: jetzt 12°C, bewölkt; heute 8 bis 15°C, Regen 30%.",
-             (("12", "zwölf"),), card=True),
-        Case("Wann fährt mein nächster Zug zur Schule?", "07:12, S3, Gleis 2.", (("7:12", "07:12", "zwölf nach sieben"),), card=True),
-        Case("Was steht als nächstes an?", "Training um 18 Uhr im Gym.", (("18", "sechs"), ("training",)), card=True),
         Case("Danke, das war's."),
     ],
 }
 LAB_CARD = {"now": "Thursday 16 October 2026; the owner is at Home",
-            "events": "- Thu 18:00–19:30 Training (Gym)\n- Fri 08:00–15:30 School",
-            "tasks": "- buy a bike lock by 17:00",
-            "loops": "- reply: Lea asks if Friday works (Lea)",
+            "events": "- Thu 18:00–19:30 Training (Gym)\n- Fri 08:00–15:30 School\n- Fri 19:00 Cinema with Noah (Kino Rex)",
+            "tasks": "- buy a bike lock by 17:00\n- pay the phone bill (overdue)",
+            "loops": "- reply: Lea asks if Friday works (Lea)\n- promise: send Noah the photos (Noah)",
             "weather": "Bern: now 12°C, cloudy; today 8°C to 15°C, cloudy, rain 30%",
             "trip": "Home to School:\n- 07:12, S3, platform 2, arrives 07:31\n- 07:42, S3, platform 2, arrives 08:01",
             "about": "Sam, apprentice, trains Tuesdays and Thursdays."}
@@ -119,6 +111,42 @@ SPEECH = {
            "Ich glaube, ich gehe heute nach der Schule joggen."],
 }
 FIRST_CLAUSE = {"en": "Sure, one sec.", "de": "Klar, Moment."}
+# The Today card's questions (owner's request 2026-10-16: 20 per language): (question, the facts that must be said)
+CARD_CASES = {
+    "en": [("What's the weather like today?", (("12", "twelve"),)), ("How warm does it get today?", (("15", "fifteen"),)),
+           ("Is it going to rain?", (("30",),)), ("What's the lowest temperature today?", (("8", "eight"),)),
+           ("When's my next train to school?", (("7:12", "07:12", "twelve past seven"),)),
+           ("Which platform is my train to school on?", (("2", "two"),)),
+           ("When do I get to school on the first train?", (("7:31", "07:31"),)),
+           ("If I miss the 7:12, when's the next one?", (("7:42", "07:42"),)),
+           ("What's next today?", (("18", "six"), ("training",))), ("Where is training tonight?", (("gym",),)),
+           ("When does training end?", (("19:30", "half past seven", "7:30"),)),
+           ("When does school start tomorrow?", (("8", "eight"),)),
+           ("When does school finish tomorrow?", (("15:30", "half past three", "3:30"),)),
+           ("What am I doing Friday evening?", (("cinema", "movie", "film"), ("Noah",))),
+           ("Where's the cinema?", (("Rex",),)), ("What do I still have to buy today?", (("lock",),)),
+           ("By when do I need the bike lock?", (("17", "five"),)), ("Is anything overdue?", (("phone bill", "bill"),)),
+           ("What did Lea want?", (("Friday",),)), ("What did I promise Noah?", (("photos", "pictures"),))],
+    "de": [("Wie ist das Wetter heute?", (("12", "zwölf"),)), ("Wie warm wird es heute?", (("15", "fünfzehn"),)),
+           ("Regnet es heute?", (("30",),)), ("Was ist heute die tiefste Temperatur?", (("8", "acht"),)),
+           ("Wann fährt mein nächster Zug zur Schule?", (("7:12", "07:12", "zwölf nach sieben"),)),
+           ("Auf welchem Gleis fährt mein Zug zur Schule?", (("2", "zwei"),)),
+           ("Wann bin ich mit dem ersten Zug in der Schule?", (("7:31", "07:31"),)),
+           ("Wenn ich den Zug um 7:12 verpasse, wann fährt der nächste?", (("7:42", "07:42"),)),
+           ("Was steht heute als nächstes an?", (("18", "sechs"), ("training",))),
+           ("Wo ist das Training heute Abend?", (("gym",),)),
+           ("Wann ist das Training fertig?", (("19:30", "halb acht"),)),
+           ("Wann beginnt morgen die Schule?", (("8", "acht"),)),
+           ("Wann ist morgen Schulschluss?", (("15:30", "halb vier"),)),
+           ("Was mache ich am Freitagabend?", (("kino", "cinema", "film"), ("Noah",))),
+           ("Wo ist das Kino?", (("Rex",),)), ("Was muss ich heute noch kaufen?", (("lock", "schloss"),)),
+           ("Bis wann brauche ich das Velo-Schloss?", (("17", "fünf"),)),
+           ("Ist etwas überfällig?", (("phone bill", "bill", "rechnung"),)),
+           ("Was wollte Lea?", (("Friday", "Freitag"),)), ("Was habe ich Noah versprochen?", (("photos", "fotos", "bilder"),))],
+}
+for _lang, _rows in CARD_CASES.items():          # after the first small talk, before the goodbye
+    CASES[_lang][1:1] = [Case(q, "; ".join(f[0] for f in facts), facts, card=True) for q, facts in _rows]
+
 ANSWER = {"en": "Tomorrow you've got school from eight, then training at six.",
           "de": "Morgen hast du ab acht Schule und danach um sechs Training."}
 
@@ -359,8 +387,7 @@ class Lab:
             choice, why = pick(report["models"], language_mode)
             report["pick"] = {"model": choice, "why": why}
             with Session(self.engine) as s:
-                if choice:
-                    voicellm.set_choice(s, choice, "lab")
+                voicellm.set_choice(s, choice, "lab")      # none passed: the old voice until the owner picks
                 pad = (report["speech"].get("smart_turn") or {}).get("pad_side")
                 if pad:
                     row = s.get(SettingKV, PAD_KEY) or SettingKV(key=PAD_KEY)

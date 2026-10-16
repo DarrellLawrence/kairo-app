@@ -41,6 +41,9 @@ def _hhmm(v: str) -> str:
     return v
 
 
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
 class Place(_Strict):
     name: str = Field(min_length=1, max_length=40)
     kind: Literal["home", "school", "work", "training", "other"]
@@ -48,9 +51,15 @@ class Place(_Strict):
     address: str | None = Field(default=None, max_length=160)    # private: stays on the PC
     valid_from: dt.date | None = None
     valid_until: dt.date | None = None
+    days: list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = Field(default_factory=list, max_length=7)   # the weekdays it's on (empty: every day)
+    via: str | None = Field(default=None, max_length=80)              # the route goes through this station
 
     def active(self, day: dt.date) -> bool:
         return (self.valid_from is None or self.valid_from <= day) and (self.valid_until is None or day <= self.valid_until)
+
+    def on(self, day: dt.date) -> bool:
+        """Active, and one of its weekdays (school Mon/Tue, work Wed-Fri)."""
+        return self.active(day) and (not self.days or WEEKDAYS[day.weekday()] in self.days)
 
 
 class QuietHours(_Strict):

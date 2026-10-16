@@ -93,10 +93,14 @@ class Lookup:
                     return {"name": st.get("name"), "lat": coord["x"], "lon": coord["y"]}
         return None
 
-    def connections(self, frm: str, to: str, *, limit: int = 3) -> list[dict]:
-        """Next connections between two stations: departure, arrival, delay (min), cancelled."""
+    def connections(self, frm: str, to: str, *, limit: int = 3, via: str | None = None) -> list[dict]:
+        """Next connections between two stations (through `via` when the usual route goes there):
+        departure, arrival, delay (min), cancelled."""
+        params = {"from": frm, "to": to, "limit": limit}
+        if via:
+            params["via[]"] = via
         with self._client() as c:
-            r = c.get(f"{TRANSPORT}/connections", params={"from": frm, "to": to, "limit": limit})
+            r = c.get(f"{TRANSPORT}/connections", params=params)
             r.raise_for_status()
             out = []
             for cn in r.json().get("connections") or []:

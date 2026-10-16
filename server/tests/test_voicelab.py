@@ -77,6 +77,10 @@ def test_a_model_that_never_calls_the_tool_is_not_picked(migrated, tmp_path, mon
     rep = lb.run()                                  # without the voice packages too: then only the speech part is missing
     assert all(m["tool_recall"] == 0.0 for m in rep["models"].values())
     assert rep["pick"]["model"] is None and "no model passed" in rep["pick"]["why"]
+    with Session(_engine) as s:                       # owner's decision 2026-10-16: then the old voice
+        assert voicellm.active(s, site) is None and voicellm.lab_rejected(voicellm.choice(s))
+        voicellm.set_choice(s, "gemma-4-e4b", "owner")   # until they pick one themselves
+        assert voicellm.active(s, site) == "gemma-4-e4b"
 
 
 def test_a_model_that_ignores_the_card_is_not_picked(migrated, tmp_path, monkeypatch):

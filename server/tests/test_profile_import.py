@@ -216,3 +216,30 @@ def test_no_real_profile_in_the_repo():
     vault_like = [p for p in REPO_ROOT.rglob("*.md") if "10 Profile" in p.as_posix() and "node_modules" not in p.parts]
     assert vault_like == []
     assert "Nothing here is real" in acceptance.FAKE_PROFILE
+
+
+def test_places_with_stations_weekdays_and_route_reach_the_today_card(s, migrated):
+    from app import pa, prefs
+    rec = profile_import.store(s, migrated.data_dir / "vault", text=PROFILE_MD, today=TODAY)["record"]
+    places = [{"name": "Home", "kind": "home", "station": "Hometown"},
+              {"name": "School", "kind": "school", "station": "Schooltown", "days": ["mon", "tue"]},
+              {"name": "Work", "kind": "work", "station": "Worktown", "days": ["wed", "thu", "fri"], "via": "Midtown"}]
+    out = profile_import.apply(s, {"import_id": rec["id"], "places": places}, today=TODAY, tz=TZ)
+    assert "places: Home, School, Work" in out["added"]
+    saved = prefs.places(s)
+    monday = dt.datetime(2026, 10, 19, 6, 50, tzinfo=TZ)                      # school days
+    wednesday = dt.datetime(2026, 10, 21, 6, 50, tzinfo=TZ)                   # work days, via Midtown
+    assert pa.destination(saved, [], monday)[0].name == "School"
+    dest = pa.destination(saved, [], wednesday)[0]
+    assert dest.name == "Work" and dest.via == "Midtown"
+    profile_import.undo(s, None, profile_import.last(s) or rec)
+    assert prefs.places(s) == []                                              # undo puts the old places back
+
+
+def test_the_gate_checks_places():
+    from app import actions
+    actions.PlaceSet.model_validate({"name": "Work", "kind": "work", "days": ["wed"], "via": "Midtown"})
+    for bad in ({"name": "Work", "kind": "work", "days": ["someday"]}, {"name": "W", "kind": "work", "via": "x" * 81}):
+        with pytest.raises(Exception):
+            actions.PlaceSet.model_validate(bad)
+    actions.ProfileApply.model_validate({"import_id": 1, "places": [{"name": "Home", "kind": "home", "station": "A"}]})

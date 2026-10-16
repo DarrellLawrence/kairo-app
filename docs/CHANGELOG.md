@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-16 — build: voice answers (owner's decisions)
+- If no voice model passes the voice lab, calls use the old voice until you pick a model yourself (Voice lab → Use this one). Before the lab has run, the smallest one still talks.
+- The voice lab asks 20 Today-card questions per language (weather, trains, what's next, school, tasks, loops) instead of 3, so one wrong answer no longer decides it.
+- Your answer to something Kairo brings up goes to Claude during the call, not after it: together with your next question when that goes to Claude anyway (no extra wait), else right after Kairo's reply. A later question on the same call gets the new state.
+- Your places come from your profile: share it in chat with "save this to my profile" and Kairo saves home, school, work and training with their stations, the weekdays each applies (school Mon/Tue, work Wed-Fri) and the station your usual route goes via. The Today card's next connection uses them: the right destination for the weekday, through your usual route. Undo puts the old places back. You can still set them by voice ("my school is on Mondays and Tuesdays").
+- Fixed: the English voice sometimes said nothing or made noise. The small (int8) Kokoro model Kairo used went wrong on ordinary sentences ("Sure, I will remind you.": no sound; others far too loud). Kairo now uses the fp16 model (177 MB, downloaded once with the update) — no broken sentences in the tests and about 5x faster on the processor. A sentence the voice model still gets wrong is reported as an error, never sent as silence or noise.
+- Removed: the int8 Kokoro model; "your answer is recorded after the call" (it's live now; after the call only what a cut-off turn left).
+
 ## 2026-10-16 — build: Today card and using the wait (owner's request)
 - Today card: the voice model on the PC answers the usual questions at once, without Claude: what's next (the next 3 events), what's left today (tasks due today or overdue), open loops, the weather at home, the next train or bus for your routine (from your saved places: home station to where you're heading, or back home), key profile facts and what Kairo remembers lately.
 - Always fresh: each part on its own clock (Kairo's own data every minute, the calendar every 3 minutes, the connection every 3 minutes on a call and every 10 otherwise, not at night, the weather every 30), and read again at once after Claude changed something on the call. A call only gets the parts that changed, so the voice model stays fast. Only station names leave the PC, as before.

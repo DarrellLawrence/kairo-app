@@ -263,6 +263,29 @@ def test_what_the_owner_answers_goes_back_to_claude_after_the_call():
     assert "UNTRUSTED DATA" in req                                       # the loop's text can come from mail
 
 
+def test_the_owners_answer_goes_to_claude_during_the_call():
+    sent = []
+    m = Model(tool("is Friday free?"), text("Free after 4."), text("Nice, noted."), text("Sure."))
+    mo = mouth(m, Brain(delay=0.2), items=[LEA], wait_after_s=0.02, report=lambda *r: sent.append(r))
+    run(mo.turn("Is Friday free?", "en", Speaker()))
+    assert sent == []
+    run(mo.turn("Yeah I told her Friday works.", "en", Speaker()))
+    assert sent == [(LEA, "Quick one: Did you answer Lea about Friday yet?", "Yeah I told her Friday works.")]
+    run(mo.turn("ok", "en", Speaker()))
+    assert len(sent) == 1 and mo.reports() == []                          # once, and nothing left for later
+
+
+def test_the_answer_rides_along_when_the_next_words_go_to_claude_anyway():
+    sent, brain = [], Brain(delay=0.2)
+    m = Model(tool("is Friday free?"), text("Free after 4."), tool("and Saturday?"), text("Saturday too."))
+    mo = mouth(m, brain, items=[LEA], wait_after_s=0.02, report=lambda *r: sent.append(r))
+    run(mo.turn("Is Friday free?", "en", Speaker()))
+    run(mo.turn("Yes I answered her. And Saturday?", "en", Speaker()))
+    request = brain.asked[1][0]
+    assert request.startswith("and Saturday?") and "On this call (record it now" in request
+    assert '"Yes I answered her. And Saturday?"' in request and sent == []   # one Claude turn, no extra wait
+
+
 def test_an_item_the_voice_model_passed_on_itself_is_not_reported_twice():
     m = Model(tool("is Friday free?"), text("Free after 4."), tool("told Lea Friday works", item="L1"), text("Noted."))
     mo = mouth(m, Brain(delay=0.2), items=[LEA], wait_after_s=0.02)

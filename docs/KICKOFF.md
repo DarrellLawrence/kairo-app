@@ -647,8 +647,11 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   connection every 3 on a call and 10 otherwise, never at night, the weather every 30) and read again
   at once after Claude did something on the call. A call gets only the parts that changed, at the end
   of the conversation (the cache holds). Only station names leave the PC. Event titles, tasks and
-  loops are marked as data. The voice lab measures how many card questions each model answers on
-  the PC with the right facts (≥ 70%, wrong ≤ 10% to be picked); Voice lab and Run diagnosis show how
+  loops are marked as data. The places come from the owner's profile (profile_apply: home / school /
+  work / training with station, weekdays and the station the route goes via) or by voice. The voice
+  lab measures 20 card questions per language: how many each model answers on the PC with the right
+  facts (≥ 70%, wrong ≤ 10% to be picked; no model passes → the old voice until the owner picks one,
+  owner's decision 2026-10-16); Voice lab and Run diagnosis show how
   many of the owner's call questions were answered on the PC vs via Claude.
 - **Turn-taking:** at the first ~200 ms pause the PC transcribes what it has and asks Smart Turn v3
   (ONNX on the CPU) whether the owner is done: done → answer at once; not done → wait 0.5–1 s more
@@ -664,8 +667,9 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   → only the holding line. A normal topic is said only while Claude is still working (the owner never
   waits longer for it); an urgent one always, before the answer. The answer follows right after the
   sentence that is playing. Talked over in the wait: the answer still comes, in the next turn. What
-  the owner said to a raised topic goes to Claude after the call (done → closed, later → snoozed, new
-  information → saved), unless the voice model already passed it on.
+  the owner said to a raised topic goes to Claude during the call (owner's decision 2026-10-16): with
+  the turn's own ask_kairo when there is one (no extra wait), else right after that turn (done →
+  closed, later → snoozed, new information → saved), so later questions on the call get the new state.
 - **VRAM (12 GB):** Whisper large-v3-turbo ~2 GB, the voice model 2–6.5 GB, Kokoro/Piper and Smart
   Turn on the CPU, the memory embeddings on the CPU once a voice model is installed, CUDA contexts
   and the desktop ~1.5 GB. The lab reports what each candidate really uses.

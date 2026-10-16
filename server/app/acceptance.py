@@ -133,8 +133,8 @@ SPECS = [
     Spec(41, "Using the wait", "manual", "A question Claude must look up: a holding line, then one bring-up item that fits, "
                                          "then the answer right after the current sentence; a fast answer comes without it; "
                                          "an urgent item comes before the answer; never the same item twice, two a call at "
-                                         "most; nothing worth it: only the holding line; your answer to it is recorded after "
-                                         "the call.", "TC"),
+                                         "most; nothing worth it: only the holding line; your answer to it is recorded during "
+                                         "the call (a later question on the same call gets the new state).", "TC"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "

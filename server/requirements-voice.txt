@@ -2,7 +2,7 @@
 # app runs without them (voice then shows "not installed").
 faster-whisper==1.2.1          # speech to text (CTranslate2, CUDA on the RTX 3060, CPU fallback)
 av==18.1.0                     # audio decoding; av 19 dropped an argument faster-whisper 1.2.1 still passes
-kokoro-onnx==0.6.1             # English voice (ONNX, CPU)
+kokoro-onnx==0.6.1             # English voice (ONNX, CPU); model kokoro-v1.0.fp16.onnx (app/voice KOKORO_MODEL)
 piper-tts==1.8.0               # German voice (ONNX, CPU)
 # CUDA 12 + cuDNN 9 runtime for CTranslate2 on Windows (Linux uses the system CUDA if present)
 nvidia-cublas-cu12==12.9.2.10; sys_platform == "win32"

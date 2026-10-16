@@ -106,8 +106,9 @@ def choice(s: Session) -> dict:
         return {}
 
 
-def set_choice(s: Session, model_id: str, by: str) -> dict:
-    if model_id not in model_ids():
+def set_choice(s: Session, model_id: str | None, by: str) -> dict:
+    """model_id None (only the lab): no candidate passed, so the old voice answers until the owner picks one."""
+    if model_id is None and by != "lab" or model_id is not None and model_id not in model_ids():
         raise ValueError(f"unknown voice model {model_id!r}")
     value = {"model": model_id, "by": by, "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     row = s.get(SettingKV, CHOICE_KEY) or SettingKV(key=CHOICE_KEY)
@@ -119,12 +120,20 @@ def set_choice(s: Session, model_id: str, by: str) -> dict:
 
 def active(s: Session, site_dir: Path) -> str | None:
     """The model that talks: the lab's or the owner's pick if it's installed, else the first installed
-    candidate (the smallest, fastest one is first in voicellm.json) until the lab has run."""
+    candidate (the smallest, fastest one is first in voicellm.json) until the lab has run. None when the
+    lab ran and nothing passed (owner's decision 2026-10-16: then the old voice, until they pick one)."""
     have = available(site_dir)
-    picked = choice(s).get("model")
+    c = choice(s)
+    if lab_rejected(c):
+        return None
+    picked = c.get("model")
     if picked in have:
         return picked
     return have[0] if have else None
+
+
+def lab_rejected(c: dict) -> bool:
+    return "model" in c and c["model"] is None and c.get("by") == "lab"
 
 
 def kyutai_dir(tools_dir: Path) -> Path:
