@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-16 — build: Voice V3, speed (owner's request)
+- Calls and the voice button now go over WebRTC, built on Pipecat: your iPhone sends its mic straight to the PC over Tailscale (Opus, the iPhone's echo cancellation) and plays Kairo's voice from the same connection. Talking over Kairo stops it at once, and it doesn't hear itself.
+- The PC decides when you're done: a 0.2 s pause, then Smart Turn v3 (a turn model) checks whether the thought is complete; if not, it waits up to 0.5 s more. Whisper writes your words down at that first pause, so the text is ready when the turn ends.
+- The voice model starts answering at the pause, before the turn is confirmed; if you go on talking, that start is thrown away. It never calls Claude early.
+- Kairo's voice starts after the first clause (about 5 words), not the whole sentence; short openers and holding lines ("Sure,", "One sec.") are made once and play at once.
+- Voice speed: each turn's steps over WebRTC (turn decided, first word, first audio, network + playout), target p50 0.65 s / p95 1.0 s, every turn over 1 s with its slowest step, and whether your phone reaches the PC directly or through Tailscale's relay, with the round trip. Run diagnosis has the same.
+- On the PC: the installer lets the call's audio in to Kairo's Python from Tailscale addresses only; the auto-update notes every 5 minutes which devices reach the PC directly or relayed (no public addresses kept).
+- Acceptance 3, 4, 15 and 39 now require p50 ≤ 0.65 s and p95 ≤ 1.0 s on the iPhone, on Wi-Fi and on mobile data.
+- If WebRTC can't connect (or the voice packages aren't there), the phone uses the old line by itself.
+- Removed: the 0.8 s / 1.5 s voice targets; on the WebRTC line, the phone deciding when a turn ends (the PC decides); the 1.0 s wait after "not done" (now 0.5 s); av 18.1 (17.1: WebRTC needs it).
+
 ## 2026-10-16 — build: voice answers (owner's decisions)
 - If no voice model passes the voice lab, calls use the old voice until you pick a model yourself (Voice lab → Use this one). Before the lab has run, the smallest one still talks.
 - The voice lab asks 20 Today-card questions per language (weather, trains, what's next, school, tasks, loops) instead of 3, so one wrong answer no longer decides it.

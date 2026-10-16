@@ -5,7 +5,7 @@
 // Kairo's brain (ask_kairo), both sides' words go in the chat, every answer counts against the cap.
 //
 // startLine() is what the screens use: the realtime voice when the PC says it's available, else the
-// local one (voicelink.js). If realtime fails during a call (cap reached, no internet, OpenAI down),
+// local one: over WebRTC (rtclink.js, Voice V3) when it can, else the old line (voicelink.js). If realtime fails during a call (cap reached, no internet, OpenAI down),
 // the call goes on with the local voice by itself. Same interface either way.
 //
 // Measured like every turn (turns.js, paths call_live / chat_live): t0 is your last loud mic frame
@@ -14,6 +14,7 @@
 import { clientLog, device } from './clientlog.js'
 import { startTurn } from './turns.js'
 import { closeMic, micStream, outputContext, unlockAudio } from './voice.js'
+import { rtcStatus, rtcSupported, startRtc } from './rtclink.js'
 import { makeVad, startVoice } from './voicelink.js'
 
 const FRAME_MS = 20
@@ -345,11 +346,26 @@ export function startLine({ path = 'call', callId = null, on = {}, status = null
   let cur = null
   let closed = false
   unlockAudio()                 // still inside the tap: iOS lets Kairo's voice play later
+  const oldLine = () => {
+    if (closed) return null
+    cur = startVoice({ path, callId, on })
+    return cur.ready
+  }
+  // Kairo's own voice: over WebRTC when the PC and this phone can (Voice V3), else the old line
   const local = (why) => {
     if (closed) return null
     on.engine?.('local', why)
-    cur = startVoice({ path, callId, on })
-    return cur.ready
+    if (!rtcSupported()) return oldLine()
+    return (async () => {
+      const st = await rtcStatus()
+      if (closed) return false
+      if (!st?.available) return oldLine()
+      let fallen = null
+      const rtc = startRtc({ path, callId, on: { ...on, fallback: (w) => { clientLog('rtc.old_line', { reason: w?.reason }); fallen = oldLine() } } })
+      cur = rtc
+      const ok = await rtc.ready
+      return ok ? true : (fallen ?? oldLine())
+    })()
   }
   const ready = (async () => {
     const st = status ?? await realtimeStatus()

@@ -677,6 +677,27 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   Kokoro when the owner asks for it (its own Python, ~10 GB); Moshi is never the mouth (it can't take
   Claude's results mid-conversation).
 - **Fallback:** the voice model not ready (installing, the lab running, crashed) → the old pipeline.
+- **Voice V3, speed (owner's request 2026-10-16):** end of speech → first audio on the iPhone
+  ≤ 1.0 s p95, 0.65 s p50, over Wi-Fi and mobile data, measured per turn and step in Voice speed.
+  Built on **Pipecat** (BSD, runs inside Kairo's own Python on Windows, no extra server) rather than
+  LiveKit Agents (needs its own media server; its local turn model is licence-limited and not better
+  than Smart Turn). The phone sends its mic over **WebRTC** (Opus, the iPhone's echo cancellation;
+  Kairo's voice plays in an audio element, so talking over it works and Kairo never hears itself).
+  On the PC: Silero VAD (0.2 s pause) → Whisper at that pause → Smart Turn v3 decides whether the
+  thought is complete (if not, the turn still ends after 0.5 s of quiet) → the voice model (started
+  speculatively on the words at the pause; used only if the turn is exactly those words, never
+  Claude) → Kokoro/Piper from the first clause (~5 words), short openers and holding lines from a
+  cache. Talk-over stops the audio at once. The old line (/ws/voice) stays as the fallback (no
+  voice packages, WebRTC can't connect).
+- **WebRTC on the tailnet only (owner's decision 2026-10-16):** the call's audio goes as UDP
+  directly between the phone's and the PC's Tailscale addresses, not through tailscale serve. The
+  PC offers only its tailnet addresses, takes only the phone's tailnet candidates, asks no
+  STUN/TURN server, and Windows lets UDP in to Kairo's Python only from 100.64.0.0/10 and
+  fd7a:115c:a1e0::/48. The page, the API and the call setup stay behind tailscale serve (owner
+  check as always). Direct or relayed (Tailscale's DERP; no Swiss region, nearest Frankfurt) is read
+  from `tailscale status` and shown with the round trip in Voice speed. A router port forward for
+  Tailscale (UDP 41641) would make mobile data direct but opens a public port: only if the owner
+  decides it.
 
 **OpenAI Realtime (2026-10-15, optional, needs a key):**
 
@@ -777,7 +798,9 @@ start the next until its checks pass and the owner says go.
 - Nothing personal hardcoded: use config/profile.yaml and .env.
 - Secrets only in .env (never committed), the data folder's secrets\, or the
   OS keyring.
-- No public ports. The app is served only via tailscale serve.
+- No public ports. The app is served only via tailscale serve. Only exception (owner's decision
+  2026-10-16): a call's WebRTC audio goes straight between the phone and the PC on tailnet
+  addresses (UDP; the firewall lets it in from Tailscale's ranges only; no STUN/TURN; section 13e).
 
 ## Plan updates
 - New plan versions arrive in OneDrive\Kairo\inbox\ or as a GitHub pull

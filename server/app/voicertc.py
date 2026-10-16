@@ -1,0 +1,602 @@
+"""Voice V3 (owner's request 2026-10-16): calls and the voice button over WebRTC, on Pipecat.
+
+The phone sends its microphone as WebRTC audio (Opus, the iPhone's own echo cancellation) straight to
+this PC over the tailnet and plays Kairo's voice from the same connection; a data channel carries the
+events (transcripts, what Kairo says, per-turn times). One call is one Pipecat pipeline:
+
+  WebRTC in -> Silero VAD (0.2 s pause) -> Whisper (at that pause) -> user turn (Smart Turn v3.2 decides
+  if the owner is done) -> the voice model's conversation (voicemouth.Mouth: Today card, ask_kairo,
+  holding line + bring-up, reports) -> Kokoro / Piper (first clause first, openers from a cache) -> out
+
+Talking over Kairo is an interruption: Pipecat stops the audio at once and the voice model's turn is
+cancelled (what was said is kept, a pending Claude answer comes later, as before).
+
+Everything runs in Kairo's own process: the models Kairo already loaded (Whisper, Kokoro, Piper, the
+llama.cpp voice model) are used as they are. Pipecat and aiortc come with the voice packages
+(requirements-voice.txt); without them `available()` is False and the old line (/ws/voice) answers.
+
+Per turn the PC times its own steps from the end of speech the VAD saw (vad -> stt -> turn -> first
+word -> first audio out) and sends them on the data channel; the phone adds when the audio started
+playing and the network (WebRTC round trip, direct or relayed): app/turns.py records them all.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+log = logging.getLogger("kairo.voicertc")
+
+VAD_STOP_S = 0.2              # the first short pause: Whisper starts, Smart Turn decides
+# Smart Turn says "not done" but the owner stays quiet: the turn ends anyway after this. 0.5 s keeps such a
+# turn inside the 1.0 s target (0.2 + 0.5 + the answer's first audio); the price is that a long pause
+# mid-thought gets an answer started, which stops the moment the owner talks on (and the voice model
+# started early on those words, so little is lost).
+TURN_MAX_SILENCE_S = 0.5
+TRAILING_SILENCE_S = 0.2      # Whisper gets this much silence after the words (it ends the last word)
+OUT_RATE = 24000              # Kokoro's rate; Piper (22.05 kHz) is resampled to it
+OPENERS = {
+    "en": ("Sure,", "Sure.", "Okay,", "Okay.", "Yeah,", "Yeah.", "Got it.", "Hey!", "Hm,", "Right,", "Nice.", "Done."),
+    "de": ("Klar,", "Klar.", "Okay,", "Okay.", "Ja,", "Ja.", "Alles klar.", "Hey!", "Hm,", "Gut.", "Erledigt."),
+}
+
+
+def available() -> bool:
+    """Pipecat + aiortc are installed (they come with the voice packages)."""
+    try:
+        import aiortc  # noqa: F401
+        import pipecat  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------- the tailnet only (no public ports)
+
+TAILNET = ("100.64.0.0/10", "fd7a:115c:a1e0::/48")      # Tailscale's address ranges
+ALLOW_LOOPBACK = False                                   # tests only (the fake phone on 127.0.0.1): never set in Kairo
+_allow_loopback = False
+
+
+def on_tailnet(ip: str) -> bool:
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    if _allow_loopback and addr.is_loopback:
+        return True
+    return any(addr in ipaddress.ip_network(n) for n in TAILNET)
+
+
+def tailnet_only(allow_loopback: bool = False) -> None:
+    """WebRTC audio uses the tailnet and nothing else: this PC offers only its Tailscale addresses (aiortc
+    would offer every network card, the home LAN included) and no STUN/TURN server is ever asked."""
+    global _allow_loopback
+    import aioice.ice
+    _allow_loopback = allow_loopback
+    original = getattr(aioice.ice.get_host_addresses, "_kairo_original", aioice.ice.get_host_addresses)
+
+    def tailnet_addresses(use_ipv4: bool, use_ipv6: bool) -> list[str]:
+        found = [a for a in original(use_ipv4, use_ipv6) if on_tailnet(a)]
+        if allow_loopback and use_ipv4:
+            found.append("127.0.0.1")
+        return found
+    tailnet_addresses._kairo_original = original
+    aioice.ice.get_host_addresses = tailnet_addresses
+
+
+def tailnet_addresses() -> list[str]:
+    """This PC's Tailscale addresses (none: Tailscale is down, a call can't go over WebRTC now)."""
+    import aioice.ice
+    get = getattr(aioice.ice.get_host_addresses, "_kairo_original", aioice.ice.get_host_addresses)
+    return [a for a in get(True, True) if on_tailnet(a) and not ipaddress_is_loopback(a)]
+
+
+def ipaddress_is_loopback(ip: str) -> bool:
+    import ipaddress
+    try:
+        return ipaddress.ip_address(ip.split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def offer_on_tailnet(sdp: str) -> str:
+    """The phone's offer with only its tailnet candidates (a candidate for its Wi-Fi or mobile address,
+    or an mDNS name, is dropped: this PC never sends to them). Its tailnet address may also show up only
+    when its first check arrives (peer reflexive): that works too."""
+    out = []
+    for line in sdp.splitlines():
+        if line.startswith("a=candidate:"):
+            bits = line.split()
+            if len(bits) < 6 or not on_tailnet(bits[4]) or bits[2].lower() != "udp":
+                continue
+        out.append(line)
+    return "\r\n".join(out) + "\r\n"
+
+
+async def connect(sdp: str, kind: str = "offer", *, allow_loopback: bool = False):
+    """The phone's offer in, this PC's answer out: a SmallWebRTCConnection on the tailnet only (no STUN, no
+    TURN: the phone and this PC reach each other over Tailscale, direct or through its relay)."""
+    from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+    tailnet_only(allow_loopback=allow_loopback or ALLOW_LOOPBACK)
+    conn = SmallWebRTCConnection(ice_servers=[])
+    await conn.initialize(sdp=offer_on_tailnet(sdp), type=kind)
+    return conn
+
+
+# ---------------------------------------------------------------- one turn's times
+
+@dataclass
+class Timeline:
+    """One turn, in monotonic seconds; ms() turns it into steps from the end of speech."""
+    vad_stop: float | None = None        # the VAD noticed the pause (VAD_STOP_S after the last word)
+    stt_start: float | None = None
+    stt_done: float | None = None
+    turn_end: float | None = None        # Smart Turn (or the long pause) ended the turn
+    first_token: float | None = None     # the voice model's first word or tool call
+    tts_start: float | None = None
+    first_audio: float | None = None     # the first audio of the answer went to the phone
+    cached: bool = False                 # the first audio came from the opener cache
+    text: str = ""
+    language: str | None = None
+    asked: bool = False                  # it went to Claude (ask_kairo)
+    route: str | None = None
+    marks: dict = field(default_factory=dict)
+
+    def ms(self) -> dict:
+        """Server steps (ms). The end of speech is VAD_STOP_S before the VAD noticed it."""
+        if self.vad_stop is None:
+            return {}
+        end = self.vad_stop - VAD_STOP_S
+
+        def at(t):
+            return None if t is None else max(0, round((t - end) * 1000))
+        out = {"vad_ms": int(VAD_STOP_S * 1000)}
+        if self.stt_start is not None and self.stt_done is not None:
+            out["stt_ms"] = round((self.stt_done - self.stt_start) * 1000)
+        for key, t in (("turn_at_ms", self.turn_end), ("first_token_at_ms", self.first_token),
+                       ("tts_at_ms", self.tts_start), ("first_audio_at_ms", self.first_audio)):
+            v = at(t)
+            if v is not None:
+                out[key] = v
+        if self.first_audio is not None and self.tts_start is not None:
+            out["tts_ms"] = round((self.first_audio - self.tts_start) * 1000)
+        if self.first_token is not None and self.turn_end is not None:
+            out["llm_ms"] = round((self.first_token - self.turn_end) * 1000)
+        out["cached_opener"] = self.cached
+        return out
+
+
+# ---------------------------------------------------------------- text into speech, first clause first
+
+def first_clause(text: str, words: int = 5) -> int | None:
+    """Where the first piece of a reply may go to the voice: at its first comma / colon / semicolon /
+    sentence end, or after `words` words. The index just after it, or None (keep collecting)."""
+    for m in re.finditer(r"[,;:.!?](?=\s|$)|\s", text):
+        piece = text[:m.end()].strip()
+        if not piece:
+            continue
+        if m.group(0) in ",;:.!?":
+            return m.end()
+        if len(piece.split()) >= words:
+            return m.end()
+    return None
+
+
+class OpenerCache:
+    """Short lines Kairo says often, made once, played at once (the holding lines, 'Sure,' ...)."""
+
+    def __init__(self, speak: Callable[[str, str], tuple[bytes, int]], *, limit: int = 200):
+        self.speak, self.limit = speak, limit
+        self.audio: dict[tuple[str, str], tuple[bytes, int]] = {}
+
+    @staticmethod
+    def key(text: str) -> str:
+        return re.sub(r"\s+", " ", text.strip().lower())
+
+    def get(self, text: str, lang: str) -> tuple[bytes, int] | None:
+        return self.audio.get((lang, self.key(text)))
+
+    def put(self, text: str, lang: str, pcm: bytes, rate: int) -> None:
+        if len(text.split()) <= 4 and len(self.audio) < self.limit:
+            self.audio[(lang, self.key(text))] = (pcm, rate)
+
+    def warm(self, lines: dict[str, tuple[str, ...]]) -> int:
+        n = 0
+        for lang, texts in lines.items():
+            for text in texts:
+                if self.get(text, lang) is None:
+                    try:
+                        pcm, rate = self.speak(text, lang)
+                    except Exception as exc:   # a voice that isn't installed: no cache for it
+                        log.info("opener cache: %s (%s): %s", text, lang, exc)
+                        break
+                    self.put(text, lang, pcm, rate)
+                    n += 1
+        return n
+
+
+def resample(pcm: bytes, rate: int, to: int) -> bytes:
+    if rate == to:
+        return pcm
+    import numpy as np
+    x = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+    n = int(len(x) * to / rate)
+    return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype("<i2").tobytes()
+
+
+# ---------------------------------------------------------------- what Kairo says, piece by piece
+
+class RtcSpeaker:
+    """The speaker an answer talks through on a WebRTC call (the same feed/say/finish/stop/done as
+    voicelink.Speaker): the first piece goes to the voice at its first clause, the rest by sentence,
+    Kairo's own lines (holding line, bring-up) as they are, all in order. stop(): talked over, the rest
+    is dropped."""
+
+    def __init__(self, turn: int = 0) -> None:
+        from .voicelink import Sentences
+        self.turn = turn
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self.first = ""                      # the first piece, until it's cut
+        self.cut = False
+        self.rest = Sentences()
+        self.closed = False
+        self.stopped = False
+        self.sent = 0
+        self.server: dict = {}                # the PC's steps so far (speech to text ...), for the record
+        self._done = asyncio.Event()
+
+    def _put(self, piece: str) -> None:
+        from .voicelink import speakable
+        piece = speakable(piece)
+        if piece and not self.stopped:
+            self.sent += 1
+            self.queue.put_nowait(piece)
+
+    def feed(self, delta: str) -> None:
+        if self.closed or self.stopped or not delta:
+            return
+        if not self.cut:
+            self.first += delta
+            at = first_clause(self.first)
+            if at is None:
+                return
+            piece, more = self.first[:at], self.first[at:]
+            self.first, self.cut = "", True
+            self._put(piece)
+            delta = more
+        for piece in self.rest.feed(delta):
+            self._put(piece)
+
+    def _flush(self) -> None:
+        if not self.cut and self.first.strip():
+            self._put(self.first)
+            self.first = ""
+        rest = self.rest.flush()
+        if rest:
+            self._put(rest)
+        self.cut, self.first = False, ""        # after one of Kairo's own lines, the next words start fresh
+        from .voicelink import Sentences
+        self.rest = Sentences()
+
+    def say(self, text: str) -> None:
+        if self.closed or self.stopped:
+            return
+        self._flush()
+        self._put(text)
+
+    def finish(self, final_text: str | None = None) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if not self.stopped:
+            if final_text and self.sent == 0 and not self.first.strip() and not self.rest.buf.strip():
+                self._put(final_text)
+            else:
+                self._flush()
+        self.queue.put_nowait(None)
+
+    def stop(self) -> None:
+        if not self.stopped:
+            self.stopped = True
+            self.queue.put_nowait(None)
+
+    def ended(self) -> None:
+        self._done.set()
+
+    async def done(self) -> None:
+        await self._done.wait()
+
+
+# ---------------------------------------------------------------- the pipeline (needs pipecat)
+
+class Call:
+    """One call over WebRTC: the pipeline and its per-turn times. Built by build_call()."""
+
+    def __init__(self, conn, task, runner, state):
+        self.conn, self.task, self.runner, self.state = conn, task, runner, state
+
+    async def run(self) -> None:
+        await self.runner.run(self.task)
+
+    async def stop(self) -> None:
+        await self.task.cancel()
+
+
+class _State:
+    """What the pieces of one call share."""
+
+    def __init__(self, *, answer, interrupt, events, language_mode: str, speculate=None, discard=None):
+        self.answer, self.interrupt, self.events, self.language_mode = answer, interrupt, events, language_mode
+        self.speculate, self.discard = speculate, discard
+        self.heard = ""                        # this turn's words so far (each pause adds what came before it)
+        self.turn = Timeline()
+        self.language: str | None = None
+        self.number = 0
+        self.speaker: RtcSpeaker | None = None
+        self.speaking: Timeline | None = None   # the turn whose answer is being spoken
+
+    def send(self, msg: dict) -> None:
+        try:
+            self.events(msg)
+        except Exception as exc:   # the data channel is gone: the call goes on without captions
+            log.info("rtc: event not sent: %s", exc)
+
+    def ahead(self, how: str, *args) -> None:
+        """Speculation (start the voice model at a pause; drop it when the owner talks on): never a crash."""
+        fn = self.speculate if how == "start" else self.discard
+        if fn is None:
+            return
+        try:
+            fn(*args)
+        except Exception:
+            log.exception("rtc: speculation")
+
+
+def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = None,
+               events: Callable[[dict], Any] | None = None, language_mode: str = "auto",
+               openers: OpenerCache | None = None, smart_turn_model: str | None = None,
+               speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None):
+    """The pipeline for one call on an initialized SmallWebRTCConnection.
+
+    voice: transcribe_pcm(pcm16k, language) -> Transcript; speak(text, language) -> (wav, lang).
+    answer: async (text, language, turn number, speaker) -> dict | None: answers the owner's turn through
+      speaker (feed/say/finish), as /ws/voice does (the voice model, or Claude). Returns what to record.
+    interrupt: (turn number) -> None: the owner talked over that turn's answer.
+    events: (dict) -> None: to the phone on the data channel (default: the connection's).
+    speculate: (words so far, language) -> None: the owner paused; start the answer early (not said).
+    discard: () -> None: the owner talked on; what was started early is thrown away.
+    """
+    from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
+    from pipecat.frames.frames import (
+        AggregatedTextFrame, BotStoppedSpeakingFrame, Frame, InterruptionFrame, LLMContextFrame,
+        LLMFullResponseEndFrame, LLMFullResponseStartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame,
+        UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
+    )
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.runner import PipelineRunner
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+    from pipecat.processors.aggregators.llm_context import LLMContext
+    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair, LLMUserAggregatorParams
+    from pipecat.processors.audio.vad_processor import VADProcessor
+    from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+    from pipecat.services.llm_service import LLMService
+    from pipecat.services.settings import LLMSettings, STTSettings, TTSSettings
+    from pipecat.services.stt_service import SegmentedSTTService
+    from pipecat.services.tts_service import TTSService
+    from pipecat.transports.base_transport import TransportParams
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+    from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
+    from pipecat.utils.text.base_text_aggregator import AggregationType
+
+    from .voicelink import heard, wav_pcm
+
+    state = _State(answer=answer, interrupt=interrupt or (lambda n: None), events=events or conn.send_app_message,
+                   language_mode=language_mode, speculate=speculate, discard=discard)
+    cache = openers or OpenerCache(lambda text, lang: wav_pcm(voice.speak(text, lang)[0]))
+
+    class Watch(FrameProcessor):
+        """The end of speech the VAD saw starts a turn's clock."""
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, VADUserStoppedSpeakingFrame):
+                state.turn.vad_stop = time.monotonic()
+            elif isinstance(frame, VADUserStartedSpeakingFrame):
+                state.turn = Timeline()          # talked on: the clock starts again at the next pause
+                state.ahead("drop")
+            await self.push_frame(frame, direction)
+
+    class WhisperSTT(SegmentedSTTService):
+        def __init__(self):
+            super().__init__(trailing_silence_secs=TRAILING_SILENCE_S, settings=STTSettings(model=None, language=None))
+
+        @property
+        def wants_wav_segments(self) -> bool:
+            return False
+
+        async def run_stt(self, audio: bytes):
+            t = state.turn
+            t.stt_start = time.monotonic()
+            lang = "en" if state.language_mode == "en" else None
+            try:
+                tr = await asyncio.to_thread(voice.transcribe_pcm, resample(audio, self.sample_rate, 16000), lang)
+            except Exception as exc:   # nothing that sounds like words (or Whisper failed): no turn
+                log.info("rtc: speech to text: %s: %s", type(exc).__name__, exc)
+                t.stt_done = time.monotonic()
+                return
+            t.stt_done = time.monotonic()
+            text = heard(tr.text or "")
+            if not text:
+                return
+            t.text = f"{t.text} {text}".strip()
+            if tr.language in ("en", "de"):
+                t.language = state.language = tr.language
+            state.heard = f"{state.heard} {text}".strip()
+            state.ahead("start", state.heard, t.language or state.language)   # before Smart Turn has decided
+            state.send({"type": "heard", "text": text, "language": tr.language,
+                        "stt_ms": int((t.stt_done - t.stt_start) * 1000)})
+            yield TranscriptionFrame(text, "owner", time.strftime("%Y-%m-%dT%H:%M:%S"), finalized=True)
+
+    class EndOfTurn(FrameProcessor):
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, UserStoppedSpeakingFrame):
+                state.turn.turn_end = time.monotonic()
+            await self.push_frame(frame, direction)
+
+    class Answer(LLMService):
+        """Pipecat's LLM slot: the owner's turn goes to answer() (the voice model or Claude); what it says
+        comes back through an RtcSpeaker as pieces for the voice, in order."""
+
+        def __init__(self):
+            super().__init__(settings=LLMSettings(**{k: None for k in (
+                "model", "system_instruction", "temperature", "max_tokens", "top_p", "top_k", "frequency_penalty",
+                "presence_penalty", "seed", "filter_incomplete_user_turns", "user_turn_completion_config")}))
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, LLMContextFrame):
+                text = _last_user_text(frame.context)
+                state.heard = ""
+                if text:
+                    state.number += 1
+                    speaker = RtcSpeaker(state.number)
+                    if state.speaker is not None:
+                        state.speaker.stop()
+                    state.speaker, state.speaking = speaker, state.turn
+                    self.create_task(self._answer(text, state.turn, speaker))
+            elif isinstance(frame, InterruptionFrame):
+                if state.speaker is not None and not state.speaker.stopped:
+                    state.speaker.stop()
+                    try:
+                        state.interrupt(state.speaker.turn)
+                    except Exception:
+                        log.exception("rtc: interrupting")
+                await self.push_frame(frame, direction)
+            else:
+                await self.push_frame(frame, direction)
+
+        async def _answer(self, text: str, turn: Timeline, speaker: RtcSpeaker):
+            state.send({"type": "transcript", "text": text, "language": turn.language, "turn": speaker.turn,
+                        "server": turn.ms()})
+            speaker.server = turn.ms()
+            work = asyncio.get_running_loop().create_task(answer(text, turn.language or state.language, speaker.turn, speaker))
+            work.add_done_callback(_quiet)
+            await self.push_frame(LLMFullResponseStartFrame())
+            try:
+                while (piece := await speaker.queue.get()) is not None:
+                    if turn.first_token is None:
+                        turn.first_token = time.monotonic()
+                    await self.push_frame(AggregatedTextFrame(piece, AggregationType.SENTENCE))
+            finally:
+                await self.push_frame(LLMFullResponseEndFrame())
+                speaker.ended()
+            try:
+                record = await work if not speaker.stopped else None
+            except Exception:
+                log.exception("rtc: answering")
+                record = None
+            if isinstance(record, dict):
+                turn.route, turn.asked = record.get("route"), bool(record.get("asked"))
+
+    class KairoTTS(TTSService):
+        """Kairo's own voices (Kokoro, Piper); short lines it says often come from the opener cache."""
+
+        def __init__(self):
+            super().__init__(push_start_frame=True, push_stop_frames=True, sample_rate=OUT_RATE, stop_frame_timeout_s=10,
+                             settings=TTSSettings(model=None, voice=None, language=None))
+
+        async def run_tts(self, text: str, context_id: str):
+            turn, number = state.speaking or state.turn, state.number
+            if turn.tts_start is None:
+                turn.tts_start = time.monotonic()
+            lang = state.language if state.language in ("en", "de") else None
+            got = cache.get(text, lang or "en")
+            if got is None:
+                try:
+                    wav, used = await asyncio.to_thread(voice.speak, text, lang)
+                except Exception as exc:   # said in the captions; never a crash mid-call
+                    log.warning("rtc: voice: %s", exc)
+                    state.send({"type": "error", "status": "voice", "message": f"Kairo's voice failed: {exc}"[:300]})
+                    return
+                pcm, rate = wav_pcm(wav)
+                pcm = resample(pcm, rate, self.sample_rate)
+                cache.put(text, used, pcm, self.sample_rate)
+            else:
+                pcm = resample(got[0], got[1], self.sample_rate)
+                if turn.first_audio is None:
+                    turn.cached = True
+            state.send({"type": "say", "text": text, "turn": number})
+            if turn.first_audio is None:
+                turn.first_audio = time.monotonic()
+                state.send({"type": "timing", "turn": number, "server": turn.ms(), "route": turn.route})
+            step = self.sample_rate // 50 * 2                    # 20 ms frames
+            for i in range(0, len(pcm), step):
+                yield TTSAudioRawFrame(pcm[i:i + step], self.sample_rate, 1, context_id=context_id)
+
+    class Spoken(FrameProcessor):
+        """Kairo's voice went quiet at the phone's end of the pipe: the phone may show the answer as over."""
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, BotStoppedSpeakingFrame):
+                state.send({"type": "spoken", "turn": state.number})
+            await self.push_frame(frame, direction)
+
+    transport = SmallWebRTCTransport(webrtc_connection=conn,
+                                     params=TransportParams(audio_in_enabled=True, audio_out_enabled=True,
+                                                            audio_out_10ms_chunks=2))
+    stop = TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3(
+        smart_turn_model_path=smart_turn_model, params=SmartTurnParams(stop_secs=TURN_MAX_SILENCE_S)))
+    pair = LLMContextAggregatorPair(LLMContext(), user_params=LLMUserAggregatorParams(
+        user_turn_strategies=UserTurnStrategies(stop=[stop])))
+    pipeline = Pipeline([transport.input(), VADProcessor(vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_S))),
+                         Watch(), WhisperSTT(), pair.user(), EndOfTurn(), Answer(), KairoTTS(), transport.output(),
+                         Spoken(), pair.assistant()])
+    task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True, audio_out_sample_rate=OUT_RATE))
+
+    @transport.event_handler("on_client_disconnected")
+    async def _hung_up(_transport, _client):
+        await task.cancel()
+
+    @transport.event_handler("on_app_message")
+    async def _from_phone(_transport, message, _sender=None):
+        """The phone asks Kairo to say a fixed line (a call's greeting): no model involved."""
+        if isinstance(message, dict) and message.get("type") == "say":
+            from .voicelink import MAX_SAY
+            text = str(message.get("text") or "").strip()[:MAX_SAY]
+            if text:
+                await task.queue_frames([TTSSpeakFrame(text)])
+    call = Call(conn, task, PipelineRunner(handle_sigint=False), state)
+    call.openers = cache
+    return call
+
+
+def _quiet(task: asyncio.Task) -> None:
+    """An answer that went on after the owner talked over it: its error is logged, never lost."""
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("rtc: answer: %s: %s", type(task.exception()).__name__, task.exception())
+
+
+def _last_user_text(context) -> str:
+    for m in reversed(getattr(context, "messages", None) or getattr(context, "get_messages", lambda: [])()):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        if role != "user":
+            continue
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        if isinstance(content, list):
+            content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        return str(content or "").strip()
+    return ""
+
+

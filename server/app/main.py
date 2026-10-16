@@ -345,6 +345,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.today_card.start()   # the Today card: always fresh, before any call
             background.append(asyncio.create_task(_lab_first_run()))
         yield
+        for call in list(getattr(app.state, "rtc_calls", {}).values()):   # calls over WebRTC end with Kairo
+            try:
+                await asyncio.wait_for(call.stop(), 5)
+            except Exception:
+                log.warning("rtc: a call didn't stop at shutdown")
         app.state.voice_llm.shutdown()
         app.state.today_card.stop()
         app.state.jobs.stop()
@@ -1121,6 +1126,156 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _turns.add(report)
                 report.add_done_callback(_turns.discard)
 
+    # ---------------------------------------------------------------- Voice V3: calls over WebRTC (2026-10-16)
+
+    from . import tailnet, voicemouth, voicertc
+    _rtc_calls: dict[int, "voicertc.Call"] = {}
+    _rtc_tasks: set[asyncio.Task] = set()
+    app.state.rtc_calls = _rtc_calls
+
+    def _openers() -> "voicertc.OpenerCache":
+        """Short lines Kairo says often (openers, holding lines), made once and played at once."""
+        cache = getattr(app.state, "openers", None)
+        if cache is None:
+            cache = app.state.openers = voicertc.OpenerCache(
+                lambda text, lang: voicelink.wav_pcm(app.state.voice.speak(text, lang)[0]))
+        return cache
+
+    def _warm_openers() -> None:
+        lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.STILL[lang], voicelink.filler(lang))
+                 for lang in ("en", "de")}
+        threading.Thread(target=lambda: _openers().warm(lines), name="voice-openers", daemon=True).start()
+
+    def _rtc_ready() -> str | None:
+        """Why a call can't go over WebRTC right now (the phone then uses /ws/voice), or None."""
+        if not voicertc.available():
+            return "not_installed"
+        inst = app.state.voice.status().get("installed") or {}
+        if not inst.get("stt"):
+            return "voice_missing"
+        if not voicertc.ALLOW_LOOPBACK and not voicertc.tailnet_addresses():
+            return "no_tailnet"                      # Tailscale is down on the PC: the old line, at once
+        return None
+
+    @app.get("/api/rtc")
+    async def rtc_status(request: Request, network: bool = False):
+        why = _rtc_ready()
+        out = {"available": why is None, "reason": why}
+        if network:                                  # Voice speed: how this phone reaches the PC right now
+            st = await asyncio.to_thread(tailnet.status, settings.data_dir)
+            out["network"] = tailnet.path_to(st, request.headers.get("x-forwarded-for"))
+        return out
+
+    @app.post("/api/rtc/offer")
+    async def rtc_offer(body: dict, request: Request):
+        """Voice V3: the phone's WebRTC offer for a call or the voice button; this PC's answer. The audio then
+        goes straight between the phone and this PC on the tailnet (voicertc.py); one line at a time."""
+        sdp = body.get("sdp") if isinstance(body, dict) else None
+        if not isinstance(sdp, str) or body.get("type", "offer") != "offer" or not 0 < len(sdp) <= 20000:
+            raise HTTPException(400, "a WebRTC offer (sdp, type: offer)")
+        why = _rtc_ready()
+        if why is not None:
+            raise HTTPException(409, why)
+        path = "chat_voice" if body.get("path") == "chat_voice" else "call"
+        call_id = body.get("call_id") if isinstance(body.get("call_id"), int) else None
+        for old in list(_rtc_calls.values()):        # a new call (or a reconnect) replaces the old one
+            await old.stop()
+        conn = await voicertc.connect(sdp, "offer")
+
+        async def send(frame) -> None:
+            if isinstance(frame, (bytes, bytearray)):
+                return                                   # the audio goes as WebRTC audio, not on the data channel
+            try:
+                conn.send_app_message(frame)
+            except Exception:   # the phone hung up: the answer goes on and is saved (v7)
+                pass
+        line = types.SimpleNamespace(send=send, utt=None, speaker=None, writing=None, last=None, current=0, stopped=0,
+                                     carry="", interrupt=None, mouth=None, mouth_task=None, mouth_ready=None)
+
+        def interrupt() -> None:
+            if line.mouth_task is not None and line.mouth_task[0] <= line.stopped:
+                line.mouth_task[1].cancel()
+                return
+            if (line.writing is not None and line.writing <= line.stopped and runner.current_origin == "owner_chat"
+                    and hasattr(runner.brain, "interrupt") and runner.brain.interrupt()):
+                line.writing = None
+        line.interrupt = interrupt
+
+        def talked_over(number: int) -> None:
+            line.stopped = max(line.stopped, number)
+            if line.speaker is not None:
+                line.speaker.stop()
+            interrupt()
+
+        async def answer(text: str, language, number: int, speaker) -> dict:
+            line.current = number
+            if line.speaker is not None and line.speaker is not speaker:
+                line.speaker.stop()
+            line.speaker = speaker
+            stt_ms = int((speaker.server or {}).get("stt_ms") or 0)
+            await _answer_turn(line, speaker, text, language, number, stt_ms, path, call_id)
+            return {"route": getattr(line, "route", None)}
+
+        with session_for(engine) as s_:
+            language_mode = realtime.load_settings(s_).get("language", "auto")
+        if _mouth_ok(call_id):
+            line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
+        _warm_openers()
+        def speculate(words: str, _language) -> None:
+            """The owner paused: the voice model starts on these words before the turn is confirmed."""
+            if line.mouth is not None and line.mouth_task is None and _mouth_ok(call_id):
+                line.mouth.speculate(words)
+
+        def discard() -> None:
+            if line.mouth is not None:
+                line.mouth.drop_speculation()
+
+        call = voicertc.build_call(conn, voice=app.state.voice, answer=answer, interrupt=talked_over, events=None,
+                                   language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
+                                   speculate=speculate, discard=discard)
+        key = id(call)
+        _rtc_calls[key] = call
+
+        phone_ip = request.headers.get("x-forwarded-for")    # tailscale serve: the phone's tailnet address
+
+        async def network() -> None:
+            """Direct or through Tailscale's relay: told at the start and again once the path has settled."""
+            for wait in (0, 8):
+                await asyncio.sleep(wait)
+                if key not in _rtc_calls:
+                    return
+                info = tailnet.path_to(await asyncio.to_thread(tailnet.status, settings.data_dir), phone_ip)
+                line.network = info
+                await send({"type": "hello", **info})
+
+        async def run() -> None:
+            warm_conversation_soon()
+            net = asyncio.get_running_loop().create_task(network())
+            runner.line_open()
+            _card_lines[0] += 1
+            app.state.today_card.on_call = True
+            try:
+                await call.run()
+            except Exception:
+                log.exception("rtc: the call")
+            finally:
+                net.cancel()
+                _rtc_calls.pop(key, None)
+                runner.line_closed()
+                _card_lines[0] -= 1
+                app.state.today_card.on_call = _card_lines[0] > 0
+                if line.speaker is not None:
+                    line.speaker.stop()
+                if line.mouth is not None and line.mouth.reports():
+                    report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
+                    _turns.add(report)
+                    report.add_done_callback(_turns.discard)
+        task = asyncio.get_running_loop().create_task(run())
+        _rtc_tasks.add(task)
+        task.add_done_callback(_rtc_tasks.discard)
+        answer_sdp = conn.get_answer()
+        return {"sdp": answer_sdp["sdp"], "type": answer_sdp["type"], "path": path}
+
     async def _voice_turn(line, utt: "voicelink.Utterance", path: str, call_id, number: int, after=None) -> None:
         if after is not None:
             await asyncio.gather(after, return_exceptions=True)
@@ -1157,6 +1312,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if line.speaker is not None:
             line.speaker.stop()
         line.speaker = speaker
+        await _answer_turn(line, speaker, text, language, number, stt_ms, path, call_id)
+
+    async def _answer_turn(line, speaker, text: str, language, number: int, stt_ms: int, path: str, call_id) -> None:
+        """The owner's words on a call or the voice button, on either line (/ws/voice or WebRTC): the voice
+        model answers (Claude through ask_kairo), or Claude itself when it can't."""
         if _mouth_ok(call_id) and await _mouth_turn(line, speaker, text, language, number, stt_ms):
             await speaker.done()
             return
@@ -1334,6 +1494,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if said and said != "…":
             _rt_said("kairo", said)
         if result is not None:
+            line.route = result.route
             voicestats.record(engine, result.route, release_version())
             if result.asked:                       # Claude may have changed tasks, loops, the calendar
                 app.state.today_card.refresh_soon("tasks", "loops", "events", "now")
@@ -1343,7 +1504,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          "server": {"stt_ms": stt_ms, "queue_ms": 0,
                                     "llm_ms": result.first_token_ms if result else None,
                                     "first_words_ms": result.first_text_ms if result else None,
-                                    "tool_ms": result.tool_ms if result else None}})
+                                    "tool_ms": result.tool_ms if result else None},
+                         "early": bool(result and result.early)})
         if interrupted:
             speaker.stop()
         else:

@@ -87,6 +87,7 @@ try {
     Clear-StaleDataLock $P   # fix F24: an interrupted update must not leave Kairo's account off
     $installed = (Read-State $P).current
     if (-not $installed) { exit 0 }
+    try { Write-TailnetStatus $P } catch { Write-Log "Tailnet status: $($_.Exception.Message)" }   # calls: direct or relayed
     if (-not $TestRelease) {   # the voice lab's Kyutai test, once the owner asked for it in the app
         try { Install-KyutaiIfRequested $P (Join-Path $P.Releases $installed) } catch { Write-Log "Kyutai test: $($_.Exception.Message)" }
         try { Repair-VoiceLLM $P (Join-Path $P.Releases $installed) } catch { Write-Log "Voice model: $($_.Exception.Message)" }

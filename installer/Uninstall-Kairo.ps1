@@ -29,6 +29,7 @@ try {
     Stop-Kairo $P
     Unregister-KairoTask
     Unregister-Sync
+    Remove-CallFirewall
     Remove-ServiceAccount $P
     Remove-StartMenu
     if (Test-Path $P.Updater) { & cmd.exe /c rmdir /s /q "$($P.Updater)" | Out-Null }

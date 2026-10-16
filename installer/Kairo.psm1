@@ -11,6 +11,8 @@ $script:StartMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Pro
 $script:TaskPath = '\Kairo\'
 $script:Port = 8000
 $script:ServiceUser = 'kairo-svc'   # Kairo's own limited Windows account
+$script:CallFirewallRule = 'Kairo calls (WebRTC, Tailscale only)'
+$script:TailnetRanges = @('100.64.0.0/10', 'fd7a:115c:a1e0::/48')
 
 # ---------------------------------------------------------------- output
 
@@ -944,6 +946,67 @@ function Register-AutoUpdateTask($P) {
         -Description 'Installs new tested Kairo versions from GitHub when Kairo is idle. Rolls back by itself.')
 }
 
+# Voice V3 (2026-10-16): a call's audio comes straight from the phone over WebRTC (UDP). Windows lets it
+# in to Kairo's Python only from tailnet addresses (Kairo itself also offers only its tailnet address).
+# The venv's python.exe starts this machine-wide Python, which is the one that listens. Never fails an
+# install: without the rule a call falls back to the old line.
+function Set-CallFirewall([string]$Python) {
+    if (-not $Python -or -not (Test-Path $Python)) { return }
+    try {
+        Get-NetFirewallRule -DisplayName $script:CallFirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        [void](New-NetFirewallRule -DisplayName $script:CallFirewallRule -Direction Inbound -Action Allow -Program $Python `
+            -Protocol UDP -RemoteAddress $script:TailnetRanges `
+            -Description 'Kairo calls: the phone''s audio over WebRTC, only from Tailscale addresses.')
+        Write-Ok 'Calls over WebRTC allowed from your tailnet only'
+    } catch { Write-Warn "Firewall rule for calls not set ($($_.Exception.Message.Trim())); calls use the old line." }
+}
+
+function Remove-CallFirewall {
+    Get-NetFirewallRule -DisplayName $script:CallFirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}
+
+function Get-Prop($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($prop) { return $prop.Value } else { return $null }
+}
+
+# Voice V3 (2026-10-16): how each device on the tailnet reaches this PC, direct or through Tailscale's
+# relay (C:\Kairo\status\tailnet.json, read by app\tailnet.py). Kairo's own account may not ask
+# Tailscale; SYSTEM does it on every auto-update tick. Only what a call needs: no public addresses.
+function Write-TailnetStatus($P, [string]$Json = '') {
+    if (-not $Json) {
+        $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+        if (-not (Test-Path $ts)) { return }
+        $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { $Json = [string](& $ts status --json 2>$null | Out-String) } finally { $ErrorActionPreference = $old }
+        if (-not $Json.Trim()) { return }
+    }
+    $st = $Json | ConvertFrom-Json
+    $peers = @()
+    $all = Get-Prop $st 'Peer'
+    if ($all) {
+        foreach ($entry in $all.PSObject.Properties) {
+            $peer = $entry.Value
+            $cur = [string](Get-Prop $peer 'CurAddr')
+            $lan = $null
+            if ($cur) {
+                $h = ($cur -replace ':\d+$', '').Trim('[', ']')
+                $lan = [bool]($h -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|fe80:|fd)')
+            }
+            $peers += [ordered]@{ ips = @(Get-Prop $peer 'TailscaleIPs' | Select-Object -First 4); os = [string](Get-Prop $peer 'OS')
+                                  online = [bool](Get-Prop $peer 'Online'); direct = [bool]$cur; lan = $lan
+                                  relay = [string](Get-Prop $peer 'Relay'); peer_relay = [bool](Get-Prop $peer 'PeerRelay') }
+        }
+    }
+    $out = [ordered]@{ at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); self_relay = [string](Get-Prop (Get-Prop $st 'Self') 'Relay')
+                       peers = @($peers) }
+    if (-not (Test-Path $P.Status)) { [void](New-Item -ItemType Directory -Path $P.Status) }
+    $file = Join-Path $P.Status 'tailnet.json'
+    ConvertTo-Json -InputObject $out -Depth 5 | Set-Content -Path "$file.new" -Encoding ASCII
+    Move-Item -Force "$file.new" $file
+}
+
 # Start menu -> Kairo: the everyday double-click files.
 function Install-StartMenu($P) {
     if (-not (Test-Path $script:StartMenu)) { [void](New-Item -ItemType Directory -Path $script:StartMenu) }
@@ -993,6 +1056,7 @@ function Show-StartProblem($P) {
 # $InLock: the installer's own writes into data\ (rights, kairo.env, sync settings), run inside the
 # data lock with the backup and the migration (fix F24), so Kairo stops only once.
 function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$Force, [scriptblock]$InLock) {
+    Set-CallFirewall $Python
     $info = Read-ReleaseInfo $SourceApp
     $version = [string]$info.version
     $state = Read-State $P

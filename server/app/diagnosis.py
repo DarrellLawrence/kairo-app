@@ -239,6 +239,28 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
             for k, steps in sorted(turn_steps.items()) for step, v in steps.items()])
     if fails:
         r.add("  not played: " + "; ".join(f"{k} x{n}" for k, n in sorted(fails.items(), key=lambda x: -x[1])))
+    # Voice V3 (owner's request 2026-10-16): spoken turns over 1.0 s and their slowest step; the line and network
+    slow: dict[str, int] = {}
+    lines: dict[str, list] = {}
+    drows = q("SELECT path, total_ms, steps_json, device_json FROM voice_turns WHERE ts>=? AND path IN ('call','chat_voice')",
+              since)
+    from .turns import SLOW_MS, slowest
+    for path, total, steps_json, device_json in [] if failed(drows) else drows:
+        try:
+            st, dev = json.loads(steps_json or "{}"), json.loads(device_json or "{}")
+        except ValueError:
+            continue
+        key = f"{dev.get('line') or 'ws'}/{dev.get('net') or '?'}"
+        lines.setdefault(key, []).append(total)
+        if total is not None and total > SLOW_MS:
+            worst = slowest(st) or "?"
+            slow[worst] = slow.get(worst, 0) + 1
+    if lines:
+        r.add("  spoken turns by line/network: " + "; ".join(
+            f"{k} n={len(v)} p50={_pct([x for x in v if x is not None], .5)} p95={_pct([x for x in v if x is not None], .95)}"
+            for k, v in sorted(lines.items())))
+    if slow:
+        r.add(f"  over {SLOW_MS} ms, slowest step: " + "; ".join(f"{k} x{n}" for k, n in sorted(slow.items(), key=lambda x: -x[1])))
 
     r.h(f"G.5d waiting ({DAYS} d), ms: kind | n | p50 | p95")
     rows = q("SELECT kind, ms FROM latency WHERE ts>=?", since)

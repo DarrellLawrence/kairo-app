@@ -120,6 +120,7 @@ class Turn:
     timings: dict = field(default_factory=dict)
     failed: str | None = None
     route: str = "talk"                 # card (a question answered on the PC) / claude / talk
+    early: bool = False                 # its first round was started at the owner's pause (speculation)
 
 
 class _Said:
@@ -143,6 +144,30 @@ class _Said:
     def text(self, markers: bool = True) -> str:
         out = re.sub(r"\s+", " ", " ".join(p.strip() for p in self.parts if p.strip())).strip()
         return out if markers else MARK.sub("", out).strip()
+
+
+class _Spec:
+    """Voice V3 (owner's request 2026-10-16): the voice model's first round, started on the words heard at
+    the first pause, before the turn is confirmed. Used only if the turn is exactly what it was started on."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.task: asyncio.Task | None = None
+
+    async def events(self):
+        while (ev := await self.queue.get()) is not None:
+            if ev.get("kind") == "error":
+                raise RuntimeError(ev["error"])
+            yield ev
+
+    def drop(self) -> None:
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+
+
+def _key(messages: list[dict]) -> str:
+    return json.dumps(messages, sort_keys=True, ensure_ascii=False)
 
 
 @dataclass
@@ -187,6 +212,9 @@ class Mouth:
         self.hang_up = False
         self.prompt_tokens = 0
         self._filler = filler_index
+        self._spec: _Spec | None = None
+        self.speculated = 0                 # first rounds started early / used
+        self.speculation_used = 0
 
     def _system(self) -> dict:
         context = todaycard.render(self.card) if self.card is not None else (self._context or "").strip()
@@ -235,6 +263,59 @@ class Mouth:
         return [(self.raised_items[i], self.said_for.get(i, ""), self.replies[i]) for i in self.replies
                 if i in self.raised_items and i not in self.reported]
 
+    # ---------------------------------------------------------------- speculation (Voice V3)
+
+    def _content(self, owner_text: str) -> str:
+        stamp = f"[{self.clock():%H:%M}] " if self.clock else ""
+        content = stamp + owner_text
+        if self.notes:
+            content = "<kairo-note>\n" + "\n\n".join(self.notes) + "\n</kairo-note>\n\n" + content
+        return content
+
+    def speculate(self, owner_text: str) -> bool:
+        """The owner paused: start the voice model's first round on what they said so far. Nothing is said
+        and nothing reaches Claude: it only runs ahead. turn() uses it when the turn is exactly these words
+        on this same conversation; otherwise (or drop_speculation(), they talked on) it is thrown away."""
+        self.drop_speculation()
+        owner_text = (owner_text or "").strip()
+        if not owner_text or self.prompt_tokens + MAX_ANSWER_TOKENS * 3 >= int(self.context_tokens * 0.8):
+            return False                                   # nothing to say, or the turn compacts first
+        msgs = self.messages + [{"role": "user", "content": self._content(owner_text)}]
+        spec = _Spec(_key(msgs))
+        tools = [ASK_KAIRO] if self.max_tool_rounds > 0 else None
+
+        async def run() -> None:
+            try:
+                gen = self.model.stream(msgs, tools=tools, temperature=self.temperature, max_tokens=MAX_REPLY_TOKENS)
+                async with contextlib.aclosing(gen):
+                    async for ev in gen:
+                        spec.queue.put_nowait(ev)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:   # the real turn sees it as its own stream failing
+                spec.queue.put_nowait({"kind": "error", "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                spec.queue.put_nowait(None)
+        spec.task = asyncio.get_running_loop().create_task(run())
+        self._spec = spec
+        self.speculated += 1
+        return True
+
+    def drop_speculation(self) -> None:
+        spec, self._spec = self._spec, None
+        if spec is not None:
+            spec.drop()
+
+    def _take_speculation(self) -> _Spec | None:
+        spec, self._spec = self._spec, None
+        if spec is None:
+            return None
+        if spec.key != _key(self.messages):
+            spec.drop()
+            return None
+        self.speculation_used += 1
+        return spec
+
     # ---------------------------------------------------------------- one turn
 
     async def turn(self, owner_text: str, language: str | None, speaker) -> Turn:
@@ -248,16 +329,15 @@ class Mouth:
         self._just_raised = []
         self._unsent = [r for r in self.reports()]           # goes to Claude in this turn
         self._compact()
-        stamp = f"[{self.clock():%H:%M}] " if self.clock else ""
-        content = stamp + owner_text
-        if self.notes:
-            content = "<kairo-note>\n" + "\n\n".join(self.notes) + "\n</kairo-note>\n\n" + content
-            self.notes = []
+        content = self._content(owner_text)
+        self.notes = []
         self.messages.append({"role": "user", "content": content})
+        early = self._take_speculation()                   # started at the pause on exactly these words
+        result_early = early is not None
         self.lines.append(f"Owner: {owner_text}")
         self.transcript = (self.transcript + [f"Owner: {owner_text}"])[-40:]
         self.talk = (self.talk + [owner_text])[-4:]
-        result = Turn()
+        result = Turn(early=result_early)
         started = time.monotonic()
         said = _Said()
         try:
@@ -265,7 +345,7 @@ class Mouth:
             while True:
                 tools = [ASK_KAIRO] if rounds < self.max_tool_rounds else None
                 raw, call = await self._round(tools, MAX_ANSWER_TOKENS if rounds else MAX_REPLY_TOKENS, speaker,
-                                              result, said, started, lang)
+                                              result, said, started, lang, source=early if not rounds else None)
                 if not isinstance(call, dict) or call.get("name") != "ask_kairo":
                     self.messages.append({"role": "assistant", "content": raw.strip()})
                     break
@@ -289,6 +369,8 @@ class Mouth:
                 self.messages.append({"role": "assistant", "content": (spoken + " …") if spoken else "…"})
             raise
         finally:
+            if early is not None:
+                early.drop()                               # talked over while it ran: the server stops writing
             result.text = said.text(markers=False)
             self.raised.update(result.raised)
             self._just_raised = list(dict.fromkeys(result.raised))
@@ -309,12 +391,15 @@ class Mouth:
             result.route = "claude" if result.asked else ("card" if QUESTION.search(owner_text or "") else "talk")
         return result
 
-    async def _round(self, tools, max_tokens: int, speaker, result: Turn, said: _Said, started: float, lang: str):
+    async def _round(self, tools, max_tokens: int, speaker, result: Turn, said: _Said, started: float, lang: str,
+                     source: _Spec | None = None):
         """One generation: the words go to the voice as they come; a tool call gets the holding line.
-        Returns (what the model wrote, markers and all; its tool call or None)."""
+        Returns (what the model wrote, markers and all; its tool call or None). source: the same
+        generation, started early at the owner's pause (speculation)."""
         unmark = Unmark()
         raw, call, done = "", None, {}
-        gen = self.model.stream(self.messages, tools=tools, temperature=self.temperature, max_tokens=max_tokens)
+        gen = source.events() if source is not None else self.model.stream(
+            self.messages, tools=tools, temperature=self.temperature, max_tokens=max_tokens)
         async with contextlib.aclosing(gen):
             async for ev in gen:
                 if ev["kind"] in ("text", "tool_start") and result.first_token_ms is None:

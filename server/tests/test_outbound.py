@@ -6,6 +6,7 @@ where they go. Written before app/outbound.py."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -86,9 +87,29 @@ def test_only_known_modules_talk_to_the_network():
     for f in app.rglob("*.py"):
         text = f.read_text(encoding="utf-8")
         if any(k in text for k in ("import httpx", "urllib.request", "import requests", "pywebpush", "http.client",
-                                   "import websockets", "from websockets")):
+                                   "import websockets", "from websockets", "aiortc", "aioice", "smallwebrtc")):
             found.add(f.relative_to(app).as_posix())
     assert found == set(outbound.MODULES), sorted(found ^ set(outbound.MODULES))
+
+
+def test_webrtc_calls_use_the_tailnet_only():
+    """Calls over WebRTC: this PC offers only its tailnet addresses and asks no STUN/TURN server."""
+    pytest.importorskip("aioice")
+    import aioice.ice
+
+    from app import voicertc
+    before = aioice.ice.get_host_addresses
+    try:
+        aioice.ice.get_host_addresses = lambda use_ipv4, use_ipv6: ["192.168.1.20", "100.70.1.2", "85.1.2.3",
+                                                                    "fd7a:115c:a1e0::5", "2a02:1210::1"]
+        voicertc.tailnet_only()
+        assert aioice.ice.get_host_addresses(True, True) == ["100.70.1.2", "fd7a:115c:a1e0::5"]
+    finally:
+        aioice.ice.get_host_addresses = before
+    src = (REPO_ROOT / "server" / "app" / "voicertc.py").read_text(encoding="utf-8")
+    assert voicertc.ALLOW_LOOPBACK is False and not any(
+        "ALLOW_LOOPBACK = True" in f.read_text(encoding="utf-8") for f in (REPO_ROOT / "server" / "app").rglob("*.py"))
+    assert "ice_servers=[]" in src and not re.search(r"[\'\"](stun|turns?):", src)
 
 
 def test_realtime_voice_only_talks_to_openai():

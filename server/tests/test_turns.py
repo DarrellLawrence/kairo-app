@@ -71,7 +71,7 @@ def test_reports_are_stored_and_summarised_per_version(migrated, monkeypatch):
     assert call_now["failures"] == {"blocked: NotAllowedError": 1}
     last = rep["recent"][0]
     assert last["model"] == "haiku" and last["outcome"] == "blocked" and last["path"] == "call"
-    assert rep["targets"]["call"] == {"p50": 800, "p95": 1500}           # owner's request 2026-10-16
+    assert rep["targets"]["call"] == {"p50": 650, "p95": 1000}           # owner's request 2026-10-16 (Voice V3)
 
 
 def test_the_pc_stamps_the_version_when_the_phone_leaves_it_out(migrated):
@@ -105,3 +105,34 @@ def test_the_local_voice_models_own_times_are_steps():
     st = turns.steps({"endpoint": 300, "sent": 420, "first_words": 600, "playing": 750},
                      {"stt_ms": 100, "queue_ms": 0, "llm_ms": 60, "tool_ms": 2100}, "call")
     assert st["llm_ms"] == 60 and st["tool_ms"] == 2100 and st["total_ms"] == 750
+
+
+# Voice V3 (owner's request 2026-10-16): over WebRTC, the PC's clock then the network to the phone
+
+RTC_SERVER = {"vad_ms": 200, "stt_ms": 140, "turn_at_ms": 270, "first_token_at_ms": 420, "first_audio_at_ms": 430,
+              "rtt_ms": 24}
+
+
+def test_a_webrtc_turn_has_the_pcs_steps_and_the_network():
+    steps = turns.steps({"endpoint": 270, "transcribed": 300, "sent": 300, "first_words": 460, "audio_ready": 470,
+                         "playing": 560}, RTC_SERVER, "call")
+    assert steps == {"endpoint_ms": 270, "stt_ms": 140, "llm_ms": 150, "tts_ms": 10, "net_ms": 130, "total_ms": 560,
+                     "rtt_ms": 24}
+    assert turns.slowest(steps) == "endpoint_ms"
+    assert turns.slowest({**steps, "stt_ms": 400}) == "endpoint_ms"   # speech to text runs inside the pause: not counted
+
+
+def test_slow_turns_are_logged_with_their_slowest_step(migrated, caplog):
+    with TestClient(create_app(migrated)) as c:
+        server = {**RTC_SERVER, "turn_at_ms": 1050, "first_token_at_ms": 1100, "first_audio_at_ms": 1110}
+        assert post(c, turn_id="r1", marks={"playing": 1200}, server=server, model="lfm2.5-2.6b",
+                    device={"line": "webrtc", "net": "relay", "via": "fra"}).status_code == 200
+        assert post(c, turn_id="r2", marks={"playing": 560}, server=RTC_SERVER,
+                    device={"line": "webrtc", "net": "direct"}).status_code == 200
+        rep = c.get("/api/voice/turns?days=7").json()
+    assert any("slow turn: 1200 ms" in r.getMessage() and "endpoint_ms" in r.getMessage() for r in caplog.records)
+    assert [x["total_ms"] for x in rep["slow"]] == [1200]
+    assert rep["slow"][0]["slowest"] == "endpoint_ms" and rep["slow"][0]["net"] == "relay"
+    assert rep["slow_causes"] == {"endpoint_ms": 1}
+    assert rep["network"]["relay"]["turns"] == 1 and rep["network"]["direct"]["rtt_p50"] == 24
+    assert rep["recent"][0]["line"] == "webrtc"

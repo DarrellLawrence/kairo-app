@@ -34,7 +34,7 @@ export default function Call({ callId: initialId, onClose }) {
   const [log, setLog] = useState([])
   const [err, setErr] = useState('')
   const [needTap, setNeedTap] = useState(false)   // iOS didn't play Kairo's voice: "Tap to play"
-  const [engine, setEngine] = useState(null)      // 'realtime' (OpenAI) or 'local' (the PC's own voice)
+  const [engine, setEngine] = useState(null)      // 'realtime' (OpenAI), 'webrtc' (the PC's own voice over WebRTC) or 'local' (the old line)
   const rtStatus = useRef(null)
   const [secs, setSecs] = useState(0)
   const [captions, setCaptions] = useState(() => { try { return localStorage.getItem('call.captions') !== '0' } catch { return true } })
@@ -195,7 +195,7 @@ export default function Call({ callId: initialId, onClose }) {
           </motion.p>
         </AnimatePresence>
         <p className="k-call-sub">{phase === 'error' ? err : ringing && call ? call.reason : HINT[phase] || ''}</p>
-        {engine && !over && <p className="k-call-sub" style={{ opacity: 0.55 }}>{engine === 'realtime' ? 'Realtime voice' : 'Local voice'}</p>}
+        {engine && !over && <p className="k-call-sub" style={{ opacity: 0.55 }}>{engine === 'realtime' ? 'Realtime voice' : engine === 'webrtc' ? 'Local voice · WebRTC' : 'Local voice'}</p>}
         {err && phase !== 'error' && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{err}</p>}
         {(needTap || phase === 'speaking') && (
           <button type="button" className={needTap ? 'k-btn primary sm' : 'k-btn ghost sm'} style={{ marginTop: 10 }} onClick={tapToPlay}>

@@ -352,3 +352,52 @@ def test_a_long_call_starts_fresh_before_the_context_is_full():
     msgs = m.calls[1]["messages"]
     assert [x["role"] for x in msgs] == ["system", "user"] and "Earlier on this call" in msgs[1]["content"]
     assert "Owner: first thing" in msgs[1]["content"]
+
+
+# ---------------------------------------------------------------- Voice V3: speculation
+
+def test_the_first_round_started_at_the_pause_is_used_when_the_turn_is_the_same():
+    m, sp = Model(text("Sure, ", "I'll remind you."), delay=0.01), Speaker()
+    mo = mouth(m)
+
+    async def go():
+        assert mo.speculate("remind me to call the dentist")
+        await asyncio.sleep(0.05)                              # the turn is confirmed a little later
+        return await mo.turn("remind me to call the dentist", "en", sp)
+    r = run(go())
+    assert len(m.calls) == 1 and mo.speculation_used == 1      # one generation: the early one
+    assert sp.heard == "Sure, I'll remind you." and r.text == "Sure, I'll remind you."
+    assert [x["role"] for x in mo.messages] == ["system", "user", "assistant"]
+
+
+def test_a_speculation_on_other_words_is_thrown_away_and_never_reaches_claude():
+    m = Model(tool("call the dentist"), text("Okay, tomorrow at nine."))
+    sp, brain = Speaker(), Brain()
+    mo = mouth(m, brain)
+
+    async def go():
+        mo.speculate("remind me to call")                      # they paused mid-thought...
+        await asyncio.sleep(0.01)
+        assert brain.asked == []                               # speculation only runs ahead: no Claude
+        return await mo.turn("remind me to call the dentist tomorrow at nine", "en", sp)   # ...and went on
+    r = run(go())
+    assert len(m.calls) == 2 and mo.speculation_used == 0 and mo.speculated == 1
+    assert m.calls[1]["messages"][-1]["content"].endswith("remind me to call the dentist tomorrow at nine")
+    assert r.text == "Okay, tomorrow at nine." and brain.asked == []
+
+
+def test_talking_on_drops_the_speculation_and_a_changed_card_does_too():
+    m = Model(text("A"), text("B"), text("C"))
+    mo = Mouth(m, ask=Brain(), context={"now": "Thursday", "weather": "sunny"}, items=[], name="Sam")
+
+    async def go():
+        mo.speculate("what's the weather")
+        await asyncio.sleep(0.01)
+        mo.drop_speculation()                                  # the owner talked on
+        mo.speculate("what's the weather")
+        await asyncio.sleep(0.01)
+        mo.update_card({"now": "Thursday", "weather": "rain at 15:00"})   # the card changed in between
+        return await mo.turn("what's the weather", "en", Speaker())
+    r = run(go())
+    assert mo.speculation_used == 0 and len(m.calls) == 3 and r.text == "C"
+    assert "rain at 15:00" in m.calls[2]["messages"][-1]["content"]

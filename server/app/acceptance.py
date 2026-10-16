@@ -50,11 +50,12 @@ SPECS = [
          "confirmation, no question back.", "P0"),
     Spec(2, "Memory", "auto", f"Chat \"remember: my {MARK} kite lesson is on Thursdays at 07:40\"; then, in a new "
          "conversation, \"when is my kite lesson?\": right answer, and the fact is in the vault.", "C6"),
-    Spec(3, "Voice", "manual", "Chat: tap the mic, say a sentence, stop (10+ turns, English and German). More -> System -> Voice "
-                               "speed: you stop -> Kairo speaks p50 under 1.5 s, p95 under 3 s; typed: first words under 1.5 s; "
-                               "every reply heard.", "A1"),
-    Spec(4, "Call", "manual", "\"Call Kairo\": 10+ turns; you stop -> Kairo speaks p50 under 1.5 s, p95 under 3 s (Voice speed); "
-         "talk over it: it stops at once and listens; hang up mid-sentence and check Chat that it was handled.", "F23"),
+    Spec(3, "Voice", "manual", "Chat: tap the mic, say a sentence, stop (10+ turns, English and German, on Wi-Fi and on "
+                               "mobile data). More -> System -> Voice speed: 'Local voice · WebRTC'; end of speech -> first "
+                               "audio p50 <= 0.65 s, p95 <= 1.0 s; typed: first words under 1.5 s; every reply heard.", "V3"),
+    Spec(4, "Call", "manual", "\"Call Kairo\": 10+ turns on Wi-Fi and 10+ on mobile data; end of speech -> first audio "
+         "p50 <= 0.65 s, p95 <= 1.0 s (Voice speed, with direct/relay and round trip); talk over it: it stops at once and "
+         "listens; hang up mid-sentence and check Chat that it was handled.", "V3"),
     Spec(5, "Voice note", "manual", "Lock screen / Back Tap Shortcut: \"remind me to call mom Friday\". No app opens; the "
          "reminder is in Board within 30 s.", "B"),
     Spec(6, "Approvals", "manual", "From another address, send yourself a mail that needs a reply. Within 15 min: a push and "
@@ -71,8 +72,8 @@ SPECS = [
     Spec(13, "Proactive", "manual", "Real life: the bus to training is delayed or cancelled: one push with the backup "
          "route; on a normal day no push.", "D"),
     Spec(14, "Calendar", "later", "\"training is fixed, study blocks are flexible\", then \"I have a test Friday\".", "D"),
-    Spec(15, "Sound", "manual", "Chat and a call, silent switch on and off, with and without AirPods: heard every time; "
-                                "Voice speed shows every turn played.", "A1"),
+    Spec(15, "Sound", "manual", "Chat and a call over WebRTC, silent switch on and off, with and without AirPods: heard "
+                                "every time, Kairo never hears itself; Voice speed shows every turn played.", "V3"),
     Spec(16, "Capture", "manual", "+ → hold the mic → \"buy protein powder\" → let go: filed, one line back, no reply needed.", "A2"),
     Spec(17, "Share", "manual", "Share a WhatsApp message, a photo and a PDF with \"Share to Kairo\": no app opens, each "
          "notification says where it went (Files/<category>/ on the PC), a gift idea lands on the wishlist or comes back "
@@ -122,7 +123,7 @@ SPECS = [
     Spec(38, "Recipient picker", "auto", "Send on a promise with two people on the mail: you pick one or both (name + full "
                                          "address), then the normal card; nobody who wasn't on the mail can be picked.", "L"),
     Spec(39, "Voice like a person", "manual", "Voice lab run first; then on the iPhone, English and German: 10+ call turns "
-                                           "and 5 with the voice button: end of speech → first audio p50 < 0.8 s, p95 < 1.5 s; "
+                                           "and 5 with the voice button: end of speech → first audio p50 <= 0.65 s, p95 <= 1.0 s; "
                                            "never cut off; talking over stops it; a data question gets a filler, then Claude's "
                                            "answer; \"email someone\" gives a card; at most two topics brought up; with the voice "
                                            "model off the old voice answers.", "LV"),

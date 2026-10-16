@@ -712,9 +712,15 @@ const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 100
 
 // Every voice and chat turn, step by step (owner's request 2026-10-15; server/app/turns.py):
 // p50 / p95 per step for this version and the one before, the targets, and the last turns.
+const NET = { direct: 'Direct', relay: 'Through Tailscale’s relay', unknown: 'Not known' }
+
 function VoiceSpeedPage() {
   const [rep, setRep] = useState(null)
-  const load = useCallback(() => api('/api/voice/turns?days=7').then(setRep).catch(() => setRep({ versions: [], recent: [] })), [])
+  const [net, setNet] = useState(null)
+  const load = useCallback(() => {
+    api('/api/voice/turns?days=7').then(setRep).catch(() => setRep({ versions: [], recent: [] }))
+    api('/api/rtc?network=1').then(setNet).catch(() => setNet(null))
+  }, [])
   useEffect(() => { load() }, [load])
   if (!rep) return <Page title="Voice speed"><SkeletonCard lines={6} /></Page>
   const [now, before] = rep.versions
@@ -746,13 +752,39 @@ function VoiceSpeedPage() {
         )
       })}
       {before && now && <p className="k-muted k-small k-pad">Now = version {now.version}. Before = version {before.version}.</p>}
+      {/* Voice V3: how this phone reaches the PC, and the network over the last calls */}
+      <SectionTitle>Network</SectionTitle>
+      <List>
+        <ListRow icon={<IconPulse />} title={`This phone: ${NET[net?.network?.net] || NET.unknown}${net?.network?.via ? ` (${net.network.via})` : ''}${net?.network?.lan ? ' · same Wi-Fi' : ''}`}
+          subtitle={net?.available ? `Calls over WebRTC${net?.network?.age_s != null ? ` · checked ${net.network.age_s} s ago` : ''}` : `Calls on the old line${net?.reason ? ` (${net.reason})` : ''}`}
+          value={net?.network?.net === 'relay' ? <Badge tone="warn" pop={false}>Relayed</Badge> : net?.network?.net === 'direct' ? <Badge tone="ok" pop={false}>Direct</Badge> : undefined} />
+        {Object.entries(rep.network || {}).map(([k, v]) => (
+          <ListRow key={k} title={`Calls ${NET[k] ? NET[k].toLowerCase() : k}: ${v.turns} turns`} subtitle={`Round trip p50 ${v.rtt_p50 != null ? `${v.rtt_p50} ms` : '–'}`} />
+        ))}
+      </List>
+      {rep.slow?.length > 0 && (
+        <>
+          <SectionTitle>Over 1 s · slowest step</SectionTitle>
+          <List>
+            {Object.entries(rep.slow_causes || {}).map(([k, n]) => (
+              <ListRow key={k} icon={<IconWarn />} title={rep.titles?.[k] || k} value={<Badge tone="warn" pop={false}>{n}</Badge>} />
+            ))}
+            {rep.slow.slice(0, 8).map((x, i) => (
+              <ListRow key={`s${i}`} title={`${new Date(parseTs(x.ts)).toLocaleTimeString()} · ${secs(x.total_ms)}`}
+                subtitle={`${x.slowest_title || '?'} ${secs(x.slowest_ms)} · ${x.line === 'webrtc' ? 'WebRTC' : 'old line'}${x.net ? ` · ${NET[x.net] || x.net}` : ''}`} />
+            ))}
+          </List>
+        </>
+      )}
       {rep.recent.length > 0 && (
         <>
           <SectionTitle>Last turns</SectionTitle>
           <List>
             {rep.recent.map((r, i) => (
               <ListRow key={i} title={`${new Date(parseTs(r.ts)).toLocaleTimeString()} · ${r.path.replace('_', ' ')} · ${r.model || '?'}`}
-                subtitle={`${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''} · STT ${secs(r.steps.stt_ms)} · first words ${secs(r.steps.first_words_ms)} · voice ${secs(r.steps.tts_ms)}`}
+                subtitle={r.line === 'webrtc'
+                  ? `${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''} · turn ${secs(r.steps.endpoint_ms)} · first word ${secs(r.steps.llm_ms)} · voice ${secs(r.steps.tts_ms)} · network ${secs(r.steps.net_ms)}${r.net ? ` (${r.net})` : ''}`
+                  : `${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''} · STT ${secs(r.steps.stt_ms)} · first words ${secs(r.steps.first_words_ms)} · voice ${secs(r.steps.tts_ms)}`}
                 value={<Badge tone={['played', 'text'].includes(r.outcome) ? 'ok' : 'warn'} pop={false}>{r.outcome}</Badge>} />
             ))}
           </List>

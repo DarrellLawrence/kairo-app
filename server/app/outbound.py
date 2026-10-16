@@ -13,6 +13,9 @@ input, mail, web page, file or setting can point them anywhere else.
 - Local voice (owner's decision 2026-10-16): the voice model's server on 127.0.0.1 only
   (brain/voice_local.py); its files from GitHub (llama.cpp, checked against GitHub's sha256) and
   Hugging Face (checked against Hugging Face's sha256), downloaded by the installer (voicellm.py).
+- Calls over WebRTC (owner's request 2026-10-16, voice only): the call's audio to the owner's phone on
+  the tailnet only. This PC offers only its Tailscale addresses, takes only the phone's tailnet
+  candidates and asks no STUN/TURN server (voicertc.tailnet_only, offer_on_tailnet).
 
 MODULES lists every module that may talk to the network; a test fails when another one does.
 """
@@ -38,6 +41,7 @@ MODULES = {
     "semantic.py": "the memory model download (fixed host)",
     "voice/__init__.py": "the voice model download (fixed URLs)",
     "voicellm.py": "the installer's voice-model download (GitHub llama.cpp release, Hugging Face)",
+    "voicertc.py": "the call's audio to the owner's phone, tailnet addresses only (no STUN/TURN)",
 }
 
 

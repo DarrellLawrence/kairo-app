@@ -71,7 +71,11 @@ start the next until its checks pass and the owner says go.
 - Nothing personal hardcoded: use config/profile.yaml and .env.
 - Secrets only in .env (never committed), the data folder's secrets\, or the
   OS keyring.
-- No public ports. The app is served only via tailscale serve.
+- No public ports. The app is served only via tailscale serve. Only exception
+  (owner's decision 2026-10-16): a call's WebRTC audio (server/app/voicertc.py)
+  goes straight between the phone and the PC on tailnet addresses only (UDP,
+  firewall limited to Tailscale's ranges, no STUN/TURN). Call setup stays
+  behind tailscale serve.
 
 ## Plan updates
 - New plan versions arrive in OneDrive\Kairo\inbox\ or as a GitHub pull

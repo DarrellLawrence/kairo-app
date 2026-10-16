@@ -152,6 +152,18 @@ Check $badId 'a wrong device ID is refused'
 $fw = @(Get-NetFirewallRule -DisplayName 'Kairo Sync (Tailscale only)' | Get-NetFirewallAddressFilter)
 Check ($fw.Count -eq 2 -and @($fw | Where-Object { $_.RemoteAddress -ne '100.64.0.0/10' -and $_.RemoteAddress -ne '100.64.0.0/255.192.0.0' }).Count -eq 0) 'firewall: sync port open only to Tailscale addresses'
 Check (Test-Path (Join-Path $Root 'data\vault\10 Profile')) 'vault folders created'
+$cf = @(Get-NetFirewallRule -DisplayName 'Kairo calls (WebRTC, Tailscale only)' | Get-NetFirewallAddressFilter)
+$cfOk = $cf.Count -eq 1 -and @($cf[0].RemoteAddress | Where-Object { $_ -notmatch '^(100\.64\.0\.0/(10|255\.192\.0\.0)|fd7a:115c:a1e0::/48)$' }).Count -eq 0
+Check $cfOk 'firewall: calls (WebRTC) only from Tailscale addresses'
+$cfPort = @(Get-NetFirewallRule -DisplayName 'Kairo calls (WebRTC, Tailscale only)' | Get-NetFirewallPortFilter)
+Check ($cfPort.Count -eq 1 -and $cfPort[0].Protocol -eq 'UDP') 'firewall: calls rule is UDP only'
+$sample = '{"Self":{"Relay":"fra"},"Peer":{"k1":{"TailscaleIPs":["100.90.1.2"],"OS":"iOS","Online":true,"CurAddr":"192.168.1.30:41641","Relay":"fra"},"k2":{"TailscaleIPs":["100.90.1.3"],"OS":"iOS","Online":true,"CurAddr":"","Relay":"nue"}}}'
+Write-TailnetStatus $KPs $sample
+$tn = Get-Content -Raw (Join-Path $KPs.Status 'tailnet.json') | ConvertFrom-Json
+$p1 = @($tn.peers | Where-Object { $_.ips -contains '100.90.1.2' })
+$p2 = @($tn.peers | Where-Object { $_.ips -contains '100.90.1.3' })
+Check ($tn.self_relay -eq 'fra' -and $p1.Count -eq 1 -and $p1[0].direct -and $p1[0].lan -and $p2.Count -eq 1 -and -not $p2[0].direct -and $p2[0].relay -eq 'nue') 'tailnet status: direct and relayed peers'
+Check (-not ((Get-Content -Raw (Join-Path $KPs.Status 'tailnet.json')) -match '192\.168\.1\.30')) 'tailnet status keeps no addresses but the tailnet ones'
 
 # ---- the .bat never closes on an error: it says why, logs it, waits for a key
 $broken = Join-Path $env:USERPROFILE 'Downloads\Kairo Setup broken (2)'
@@ -499,6 +511,7 @@ Check (-not (Get-ScheduledTask -TaskName 'Kairo Boot Check' -TaskPath '\Kairo\' 
 Check (-not (Get-LocalUser -Name 'kairo-svc' -ErrorAction SilentlyContinue)) 'kairo-svc account removed'
 Check (-not (Get-ScheduledTask -TaskName 'Kairo Sync' -TaskPath '\Kairo\' -ErrorAction SilentlyContinue)) 'sync task removed'
 Check (-not (Get-NetFirewallRule -DisplayName 'Kairo Sync (Tailscale only)' -ErrorAction SilentlyContinue)) 'sync firewall rule removed'
+Check (-not (Get-NetFirewallRule -DisplayName 'Kairo calls (WebRTC, Tailscale only)' -ErrorAction SilentlyContinue)) 'calls firewall rule removed'
 Check (-not (Test-Path (Join-Path $Root 'app'))) 'program files removed'
 Check (Test-Path (Join-Path $Root 'data\db\kairo.sqlite')) 'data kept'
 Check ($null -eq (Get-HealthObj)) 'nothing listening any more'

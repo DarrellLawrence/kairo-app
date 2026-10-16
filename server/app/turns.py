@@ -5,19 +5,28 @@ endpoint (recording stopped), transcribed, sent, first_words, first_sentence, au
 The PC adds what only it knows (speech to text, waiting for the brain). turns.steps() turns both
 into step durations. More -> System -> Voice speed shows p50/p95 per step for this version and the
 one before (before/after) and the last turns with their model and whether the audio played.
+
+Voice V3 (owner's request 2026-10-16): a turn over WebRTC has the PC's own clock from the end of speech
+it heard (turn decided, first word, first audio sent) and the phone's (Kairo heard); what's left between
+the PC sending audio and the phone playing it is the network and the phone's playout. Every spoken turn
+over 1.0 s is logged with its slowest step and listed in Voice speed.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 
 from sqlmodel import Session, delete, select
 
 from .db import VoiceTurn, utcnow
 from .latency import pct
 
+log = logging.getLogger("kairo.turns")
+
 KEEP_DAYS = 30
+SLOW_MS = 1000             # owner's request 2026-10-16: every spoken turn over this is logged with its slowest step
 MAX_MS = 10 * 60 * 1000
 PATHS = {"call": "Call", "chat_voice": "Chat, spoken", "chat_text": "Chat, typed",
          "call_live": "Call, realtime", "chat_live": "Voice button, realtime"}
@@ -34,10 +43,16 @@ STEPS = {   # step -> title, in the order they happen
     "first_sentence_ms": "First sentence written",
     "tts_ms": "Its voice made and fetched",
     "play_start_ms": "Playback starts",
+    "net_ms": "Network + playout on the phone (WebRTC)",
+    "rtt_ms": "Network round trip (WebRTC, not added up)",
     "total_ms": "Total: you stop -> Kairo speaks (typed: first words)",
 }
-# owner's request 2026-10-16: spoken turns like talking to a person (acceptance 3, 4, 39)
-TARGETS = {"call": {"p50": 800, "p95": 1500}, "chat_voice": {"p50": 800, "p95": 1500}, "chat_text": {"p50": 1500, "p95": None},
+RTC_TITLES = {"endpoint_ms": "Turn decided on the PC (pause + Smart Turn)", "stt_ms": "Speech to text (PC, inside the pause)",
+              "llm_ms": "First word (voice model or Claude)", "tts_ms": "First audio made (or from the cache)"}
+NOT_A_STEP = ("total_ms", "rtt_ms")
+SERVER_KEYS = ("stt_ms", "queue_ms", "llm_ms", "tool_ms", "turn_at_ms", "first_token_at_ms", "first_audio_at_ms", "rtt_ms")
+# owner's request 2026-10-16 (Voice V3): end of speech -> first audio, p95 1.0 s, p50 0.65 s (acceptance 3, 4, 15, 39)
+TARGETS = {"call": {"p50": 650, "p95": 1000}, "chat_voice": {"p50": 650, "p95": 1000}, "chat_text": {"p50": 1500, "p95": None},
            # realtime (owner's request 2026-10-15): end of speech -> first audio on the iPhone
            "call_live": {"p50": 800, "p95": 1500}, "chat_live": {"p50": 800, "p95": 1500}}
 
@@ -56,8 +71,10 @@ def steps(marks: dict, server: dict, path: str = "chat_text") -> dict[str, int]:
     """Step durations from the phone's cumulative marks and the PC's own numbers. A spoken turn's
     total is to its first audio: one that never played has none (it counts as a failure)."""
     m = {k: _ms(v) for k, v in (marks or {}).items() if k in MARKS and v is not None}
-    srv = {k: _ms(v) for k, v in (server or {}).items() if k in ("stt_ms", "queue_ms", "llm_ms", "tool_ms") and v is not None}
+    srv = {k: _ms(v) for k, v in (server or {}).items() if k in SERVER_KEYS and v is not None}
     out: dict[str, int] = {}
+    if "first_audio_at_ms" in srv:             # over WebRTC: the PC's clock, then the network to the phone
+        return _rtc_steps(m, srv, path)
 
     def gap(a, b):
         return max(0, m[b] - m[a]) if a in m and b in m else None
@@ -85,6 +102,34 @@ def steps(marks: dict, server: dict, path: str = "chat_text") -> dict[str, int]:
     return out
 
 
+def _rtc_steps(m: dict, srv: dict, path: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    turn, token, audio = srv.get("turn_at_ms"), srv.get("first_token_at_ms"), srv["first_audio_at_ms"]
+    if turn is not None:
+        out["endpoint_ms"] = turn
+    if "stt_ms" in srv:
+        out["stt_ms"] = srv["stt_ms"]
+    if "tool_ms" in srv:
+        out["tool_ms"] = srv["tool_ms"]
+    if token is not None and turn is not None:
+        out["llm_ms"] = max(0, token - turn)
+    if token is not None:
+        out["tts_ms"] = max(0, audio - token)
+    if "playing" in m:
+        out["net_ms"] = max(0, m["playing"] - audio)
+        out["total_ms"] = m["playing"]
+    if "rtt_ms" in srv:
+        out["rtt_ms"] = srv["rtt_ms"]
+    return out
+
+
+def slowest(steps_: dict[str, int]) -> str | None:
+    parts = {k: v for k, v in steps_.items() if k not in NOT_A_STEP and k in STEPS}
+    if "net_ms" in parts:                       # over WebRTC speech to text runs inside the pause
+        parts.pop("stt_ms", None)
+    return max(parts, key=parts.get) if parts else None
+
+
 def record(s: Session, data: dict, *, version: str) -> VoiceTurn:
     if not isinstance(data, dict):
         raise TurnError("not a turn")
@@ -104,6 +149,11 @@ def record(s: Session, data: dict, *, version: str) -> VoiceTurn:
                     device_json=json.dumps(device))
     s.add(row)
     s.commit()
+    total = st.get("total_ms")
+    if path in ("call", "chat_voice") and total is not None and total > SLOW_MS:
+        worst = slowest(st)
+        log.warning("slow turn: %d ms (%s), slowest step %s %s ms, line %s, network %s", total, path, worst,
+                    st.get(worst) if worst else "?", device.get("line", "ws"), device.get("net", "?"))
     return row
 
 
@@ -150,7 +200,38 @@ def summary(s: Session, days: int = 7, now: dt.datetime | None = None, versions:
                         "failures": failures}
         out_versions.append({"version": v, "since": _aware(min(r.ts for r in rows if r.version == v)).isoformat(),
                              "paths": paths})
+    def line_of(r) -> dict:
+        try:
+            d = json.loads(r.device_json or "{}")
+        except ValueError:
+            d = {}
+        return {"line": d.get("line") or "ws", "net": d.get("net"), "via": d.get("via")}
     recent = [{"ts": _aware(r.ts).isoformat(), "version": r.version, "path": r.path, "model": r.model,
-               "total_ms": r.total_ms, "outcome": r.outcome, "reason": r.reason, "steps": json.loads(r.steps_json or "{}")}
+               "total_ms": r.total_ms, "outcome": r.outcome, "reason": r.reason, "steps": json.loads(r.steps_json or "{}"),
+               **line_of(r)}
               for r in rows[:20]]
-    return {"days": days, "versions": out_versions, "recent": recent, "targets": TARGETS, "titles": STEPS}
+    slow = []
+    for r in rows:
+        if r.path in ("call", "chat_voice") and r.total_ms is not None and r.total_ms > SLOW_MS:
+            st = json.loads(r.steps_json or "{}")
+            worst = slowest(st)
+            slow.append({"ts": _aware(r.ts).isoformat(), "total_ms": r.total_ms, "slowest": worst,
+                         "slowest_title": STEPS.get(worst) if worst else None, "slowest_ms": st.get(worst) if worst else None,
+                         **line_of(r)})
+        if len(slow) >= 20:
+            break
+    causes: dict[str, int] = {}
+    for x in slow:
+        if x["slowest"]:
+            causes[x["slowest"]] = causes.get(x["slowest"], 0) + 1
+    net = {}
+    for r in rows:
+        li = line_of(r)
+        if li["line"] == "webrtc":
+            st = json.loads(r.steps_json or "{}")
+            k = li["net"] or "unknown"
+            net.setdefault(k, []).append(st.get("rtt_ms"))
+    network = {k: {"turns": len(v), "rtt_p50": pct([x for x in v if x is not None], .5)} for k, v in net.items()}
+    return {"days": days, "versions": out_versions, "recent": recent, "targets": TARGETS, "titles": STEPS,
+            "rtc_titles": RTC_TITLES, "slow": slow, "slow_causes": dict(sorted(causes.items(), key=lambda kv: -kv[1])),
+            "network": network}

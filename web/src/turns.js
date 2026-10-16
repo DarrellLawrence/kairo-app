@@ -7,7 +7,8 @@ import { device } from './clientlog.js'
 
 let seq = 0
 
-export function startTurn(path, t0 = performance.now()) {
+// info: about the line (webrtc: line, net direct/relay), kept with the device.
+export function startTurn(path, t0 = performance.now(), info = {}) {
   const marks = {}
   const server = {}
   let model = null
@@ -24,7 +25,7 @@ export function startTurn(path, t0 = performance.now()) {
     finish(outcome, reason) {
       if (finished) return
       finished = true
-      const body = { turn_id: id, path, marks, server, model, outcome, reason: reason ? String(reason).slice(0, 200) : null, device: device() }
+      const body = { turn_id: id, path, marks, server, model, outcome, reason: reason ? String(reason).slice(0, 200) : null, device: { ...device(), ...info } }
       try {
         fetch('/api/voice/turns', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), keepalive: true })
           .catch(() => {})
