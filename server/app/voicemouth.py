@@ -55,9 +55,17 @@ SMALL_TALK = re.compile(
 _NAME = re.compile(r"\bkairo\b", re.I)
 
 
-def small_talk(text: str) -> bool:
+# A plain yes/no/ok is small talk, except as the answer to a question Kairo just asked ("Should I add
+# that?" "Yes."): then the voice model keeps its tool, or nothing would happen.
+_CONFIRM = re.compile(r"(?:(?:yes|yeah|yep|sure|ok(?:ay)?|no|nope|ja|nein|klar|gerne|please|bitte|do it|go ahead|"
+                      r"mach das|mach)(?:[\s,.!?]+|$))+", re.I)
+
+
+def small_talk(text: str, after_question: bool = False) -> bool:
     t = _NAME.sub(" ", STAMP.sub("", text or "")).strip(" ,.!?").lower()
-    return bool(t) and len(t.split()) <= 8 and SMALL_TALK.fullmatch(t + " ") is not None
+    if not t or len(t.split()) > 8 or SMALL_TALK.fullmatch(t + " ") is None:
+        return False
+    return not (after_question and _CONFIRM.fullmatch(t + " ") is not None)
 
 
 QUESTION = re.compile(r"\?\s*$|^\s*(what|when|where|who|which|how|is|are|do|does|did|can|will|was|wann|wo|was|wer|"
@@ -294,6 +302,15 @@ class Mouth:
         return [(self.raised_items[i], self.said_for.get(i, ""), self.replies[i]) for i in self.replies
                 if i in self.raised_items and i not in self.reported]
 
+    def _asked_last(self) -> bool:
+        """Kairo's last words on this call ended with a question (so "yes" may be an answer to act on)."""
+        for m in reversed(self.messages):
+            if m.get("role") == "assistant" and (m.get("content") or "").strip():
+                return (m.get("content") or "").strip().endswith("?")
+            if m.get("role") == "user" and m is not self.messages[-1]:
+                return False
+        return False
+
     # ---------------------------------------------------------------- speculation (Voice V3)
 
     def _content(self, owner_text: str) -> str:
@@ -312,7 +329,7 @@ class Mouth:
         if not owner_text or self.prompt_tokens + MAX_ANSWER_TOKENS * 3 >= int(self.context_tokens * 0.8):
             return False                                   # nothing to say, or the turn compacts first
         msgs = self.messages + [{"role": "user", "content": self._content(owner_text)}]
-        tools = [ASK_KAIRO] if self.max_tool_rounds > 0 and not small_talk(owner_text) else None
+        tools = [ASK_KAIRO] if self.max_tool_rounds > 0 and not small_talk(owner_text, self._asked_last()) else None
         spec = _Spec(_key(msgs) + ("|tools" if tools else "|talk"))
 
         async def run() -> None:
@@ -363,7 +380,7 @@ class Mouth:
         content = self._content(owner_text)
         self.notes = []
         self.messages.append({"role": "user", "content": content})
-        chat_only = small_talk(owner_text)                 # hello, thanks, bye: never Claude
+        chat_only = small_talk(owner_text, self._asked_last())   # hello, thanks, bye: never Claude
         early = self._take_speculation(self.max_tool_rounds > 0 and not chat_only)   # started at the pause
         result_early = early is not None
         self.lines.append(f"Owner: {owner_text}")

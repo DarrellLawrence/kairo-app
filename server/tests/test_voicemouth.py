@@ -436,3 +436,18 @@ def test_talking_on_drops_the_speculation_and_a_changed_card_does_too():
     r = run(go())
     assert mo.speculation_used == 0 and len(m.calls) == 3 and r.text == "C"
     assert "rain at 15:00" in m.calls[2]["messages"][-1]["content"]
+
+
+def test_yes_to_a_question_kairo_asked_keeps_the_tool():
+    """ "Should I add that?" "Yes." must still be able to reach Claude; a plain "yes" otherwise is just chat."""
+    assert small_talk("yes") and not small_talk("yes", after_question=True)
+    assert small_talk("thanks", after_question=True)
+    m = Model(text("Should I add milk to your list?"), tool("add milk to the list"), text("Done, it's on the list."))
+    brain = Brain(answer="Added milk to the shopping list.")
+    mo = mouth(m, brain, items=[])
+
+    async def go():
+        await mo.turn("I'm out of milk", "en", Speaker())
+        return await mo.turn("yes", "en", Speaker())
+    r = run(go())
+    assert m.calls[1]["tools"] is not None and brain.asked and r.route == "claude"
