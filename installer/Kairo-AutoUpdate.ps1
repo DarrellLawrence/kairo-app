@@ -194,5 +194,15 @@ try {
     $exitCode = 1
 } finally {
     if ($held) { try { [void](Request-Kairo '/api/update/release' $null) } catch { } }
+    # Owner's report 2026-10-17: an update that never sticks must be visible on the phone (Run diagnosis):
+    # what this tick saw, without the GitHub token or anything else from the release body.
+    try {
+        $st = Read-UpdaterState $P                 # a hashtable: etag, release, failed, waiting, hold, retry
+        $tag = if ($st.release) { [string](Get-Prop $st.release 'tag_name') } else { '' }
+        [ordered]@{ at = (Get-Date).ToString('o'); installed = [string](Read-State $P).current; latest = $tag
+                    waiting = [string]$st.waiting; failed = @($st.failed); retry = $st.retry; hold = [string]$st.hold
+                    exit = $exitCode } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $P.Status 'updater.json') -Encoding ASCII
+    } catch { }
 }
 exit $exitCode

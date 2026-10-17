@@ -597,6 +597,14 @@ function Get-ToolSiteFiles([string]$ReleaseDir, [string]$Kind) {
     return @((Join-Path $server "requirements-$Kind.txt")) + $extra
 }
 
+# The pip command for a tool folder (also run by CI's voice-install-windows job, so CI installs exactly
+# like the PC does). -NoDeps -Upgrade: an add-on that replaces a package already in the folder.
+function Invoke-ToolPip([string]$Py, [string]$Target, [string]$Requirements, [string]$What, [switch]$NoDeps) {
+    $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location')
+    if ($NoDeps) { $pipArgs += @('--no-deps', '--upgrade') }
+    Invoke-Checked $Py ($pipArgs + @('--target', $Target, '-r', $Requirements)) $What
+}
+
 function Install-ToolSite($P, [string]$ReleaseDir, [string]$Kind, [string]$What, [scriptblock]$AfterPip) {
     $req = Join-Path $ReleaseDir "server\requirements-$Kind.txt"
     $hash = (Get-FilesHash (Get-ToolSiteFiles $ReleaseDir $Kind)).Substring(0, 12).ToLower()
@@ -607,8 +615,7 @@ function Install-ToolSite($P, [string]$ReleaseDir, [string]$Kind, [string]$What,
     $new = "$site.new"
     $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
     Write-Note "Installing $What (once per package list)..."
-    Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
-                         '--target', $new, '-r', $req) "Installing $What"
+    Invoke-ToolPip $py $new $req "Installing $What"
     if ($AfterPip) { & $AfterPip $new $py | Out-Host }
     Repair-ToolAcl $new
     Set-Content -Path (Join-Path $new '.complete') -Value (Get-Date -Format o) -Encoding ASCII
@@ -661,10 +668,7 @@ function Install-Voice($P, [string]$ReleaseDir) {
     $gpu = {
         param($new, $py)
         $gpuReq = Join-Path $ReleaseDir 'server\requirements-voice-gpu.txt'
-        if (Test-Path $gpuReq) {
-            Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
-                                 '--no-deps', '--upgrade', '--target', $new, '-r', $gpuReq) 'Installing the voice GPU runtime'
-        }
+        if (Test-Path $gpuReq) { Invoke-ToolPip $py $new $gpuReq 'Installing the voice GPU runtime' -NoDeps }
     }
     try {
         $site = Install-ToolSite $P $ReleaseDir 'voice' 'voice (speech recognition and voices on the GPU, about 3 GB)' $gpu
