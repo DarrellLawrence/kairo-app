@@ -192,6 +192,7 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 
 **Flow:** code → tests pass (CI runs on Linux **and Windows**) → `scripts/build-release.sh` → `dist/Kairo-Setup-<version>.zip` → copy to kairo-home (USB stick or Tailscale "Send file") → unzip → double-click `Install-Kairo.bat` → it backs up the DB, installs the new release next to the old one, migrates, health-checks, and switches over → verify on iPhone.
 **Rollback:** automatic if the health check fails; manual: double-click `C:\Kairo\Rollback-Kairo.bat` (previous release + schema downgrade).
+**Failed updates are never silent (owner's rule 2026-10-17):** every try that fails or is undone is a push with the reason; so is a release still waiting after 3 hours outside the quiet hours, an error in the auto-update that lasts 30 minutes (then every 6 hours), a missing GitHub token, and an auto-update that stopped running (Kairo checks its status file).
 **Config:** machine differences in `C:\Kairo\data\kairo.env` (written by the installer) or `.env` on the laptop; owner config in the data folder's `config\`.
 
 ### 2c. Client-ready rule (LOCKED)
@@ -693,7 +694,9 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   Claude gets 8 s, then Kairo says "I'll get back to you" once and the answer comes as a push (and in
   the next turn); the holding line at most once a turn; a call the owner places opens with "Hey <first
   name>." from the cache; Voice speed shows where each part runs (GPU or CPU, never a silent fallback)
-  and which line the call used.
+  and which line the call used. A part off the GPU warns, never blocks (owner's decision 2026-10-17):
+  the call goes ahead, Kairo says once at its start that the voice is slow (a GPU problem) and pushes
+  the reason.
 - **WebRTC on the tailnet only (owner's decision 2026-10-16):** the call's audio goes as UDP
   directly between the phone's and the PC's Tailscale addresses, not through tailscale serve. The
   PC offers only its tailnet addresses, takes only the phone's tailnet candidates, asks no
