@@ -191,7 +191,7 @@ def _phone_track(times: list[float]):
 
 
 async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_after, timeout=25.0, interrupt=None,
-                voice=None, openers=None):
+                voice=None, openers=None, greeting=None, first_message=None):
     """A fake phone calls Kairo over WebRTC on this machine. Returns what the phone saw."""
     import numpy as np
     from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -212,10 +212,14 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
             pass
 
     async def pings():
+        sent = False
         while True:
             await asyncio.sleep(0.5)
             if channel.readyState == "open":
                 channel.send("ping")
+                if first_message is not None and not sent:
+                    channel.send(json.dumps(first_message))
+                    sent = True
 
     @pc.on("track")
     def on_track(track):
@@ -236,7 +240,7 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
 
     await pc.setLocalDescription(await pc.createOffer())
     conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
-    call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers)
+    call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers, greeting=greeting)
     run = asyncio.get_running_loop().create_task(call.run())
     ans = conn.get_answer()
     await pc.setRemoteDescription(RTCSessionDescription(sdp=ans["sdp"], type=ans["type"]))
@@ -423,3 +427,21 @@ def test_without_the_voice_packages_the_phone_is_told_to_use_the_old_line(local,
     r = local.post("/api/rtc/offer", json={"sdp": "v=0\r\n", "type": "offer"})
     assert r.status_code == 409 and r.json()["detail"] == "not_installed"
     assert local.post("/api/rtc/offer", json={"type": "offer"}).status_code == 400
+
+
+def test_a_call_the_owner_places_opens_with_the_greeting_from_the_cache():
+    """Owner's request 2026-10-17: "Hey <first name>." at once: no voice made for it, no model."""
+    _needs_pipecat()
+
+    async def answer(text, language, number, speaker):
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    voice = FakeVoice()
+    openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 4800, 24000))
+    openers.warm({"en": ("Hey Sam.",)})
+    phone = asyncio.run(_call(answer, times=(30.0,), voice=voice, openers=openers, greeting="Hey Sam.",
+                              first_message={"type": "greet"},
+                              wait_for=lambda p: any(e.get("type") == "say" for e in p.events), timeout=15))
+    said = [e["text"] for e in phone.events if e.get("type") == "say"]
+    assert said == ["Hey Sam."] and voice.spoken == []          # from the cache: nothing synthesized
