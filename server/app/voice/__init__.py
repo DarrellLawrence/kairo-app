@@ -3,9 +3,10 @@ Kokoro (English) and Piper (German). Everything runs on kairo-home; no audio
 leaves the PC. The libraries are optional (requirements-voice.txt): without
 them the app still runs and voice reports "not installed".
 
-Models live in <data>/models and are downloaded once by the installer
-(python -m app.voice download). The PC's RTX 3060 runs Whisper; if CUDA can't
-be loaded, Whisper runs on the CPU with a smaller model.
+Models live in tools\\voice-<hash>\\models and are downloaded once by the installer
+(python -m app.voice download). The PC's RTX 3060 runs Whisper (CTranslate2) and Kokoro (ONNX
+Runtime, CUDA); if CUDA can't be loaded they run on the CPU, and devices() says so and why
+(owner's request 2026-10-17: never a silent CPU fallback).
 """
 
 from __future__ import annotations
@@ -115,24 +116,57 @@ def wav_problems(wav: bytes) -> list[str]:
 
 
 def use_site(site_dir: Path | None) -> None:
-    """The installer puts the voice packages in C:\\Kairo\\tools\\voice (shared by all releases)."""
+    """The installer puts the voice packages in C:\\Kairo\\tools\\voice-<hash> (one per package list)."""
     if site_dir and Path(site_dir).is_dir() and str(site_dir) not in sys.path:
         sys.path.append(str(site_dir))
 
 
-def _add_cuda_dlls() -> None:
-    """Windows: CTranslate2 needs cuBLAS/cuDNN DLLs from the nvidia-* wheels on the DLL path."""
-    if sys.platform != "win32":
-        return
+def cuda_dll_dirs(site_dir: Path | None) -> list[Path]:
+    """Where the nvidia-* wheels put their DLLs: the voice packages' own folder first (since 2026-10-14 it
+    is tools\\voice-<hash>, so a name test like endswith("voice") never found it: Whisper fell back to the
+    CPU on every start, 2026-10-17), then the Python's own site-packages."""
     import site
-    for base in list(site.getsitepackages()) + [p for p in sys.path if p.endswith("voice")]:
-        root = Path(base) / "nvidia"
-        for bin_dir in root.glob("*/bin"):
-            try:
-                os.add_dll_directory(str(bin_dir))
-                os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
-            except OSError:
-                pass
+    bases = ([Path(site_dir)] if site_dir else []) + [Path(b) for b in site.getsitepackages()]
+    return [d for base in bases for d in sorted((base / "nvidia").glob("*/bin")) if d.is_dir()]
+
+
+_dlls_added: set[str] = set()
+
+
+def _add_cuda_dlls(site_dir: Path | None = None) -> list[str]:
+    """Windows: CTranslate2 (Whisper) and ONNX Runtime (Kokoro) need cuBLAS/cuDNN/CUDA runtime DLLs from
+    the nvidia-* wheels on the DLL path. Returns the folders added."""
+    if sys.platform != "win32":
+        return []
+    added = []
+    for bin_dir in cuda_dll_dirs(site_dir):
+        if str(bin_dir) in _dlls_added:
+            continue
+        try:
+            os.add_dll_directory(str(bin_dir))
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+            _dlls_added.add(str(bin_dir))
+            added.append(str(bin_dir))
+        except OSError:
+            pass
+    return added
+
+
+def _ort_cuda(site_dir: Path | None) -> tuple[list, str | None]:
+    """ONNX Runtime's CUDA provider for Kokoro, or why not. (providers, reason)."""
+    if os.environ.get("KAIRO_TTS_CPU") == "1":
+        return ["CPUExecutionProvider"], "set to the CPU (KAIRO_TTS_CPU=1)"
+    import onnxruntime as ort
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        return ["CPUExecutionProvider"], "ONNX Runtime is the CPU build (onnxruntime-gpu is not installed)"
+    _add_cuda_dlls(site_dir)
+    if hasattr(ort, "preload_dlls"):
+        try:
+            ort.preload_dlls()          # CUDA/cuDNN from the nvidia-* packages next to onnxruntime
+        except Exception as exc:   # the session below says whether CUDA really works
+            log.info("onnxruntime.preload_dlls: %s", exc)
+    # "DEFAULT": no exhaustive cuDNN search per new sentence length (that costs seconds on the first of each)
+    return [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "DEFAULT"}), "CPUExecutionProvider"], None
 
 
 @dataclass
@@ -146,10 +180,17 @@ class Transcript:
 class Voice:
     def __init__(self, models_dir: Path, site_dir: Path | None = None):
         self.models_dir = Path(models_dir)
-        use_site(Path(os.environ["KAIRO_VOICE_SITE"]) if os.environ.get("KAIRO_VOICE_SITE") else site_dir)
+        self.site_dir = Path(os.environ["KAIRO_VOICE_SITE"]) if os.environ.get("KAIRO_VOICE_SITE") else site_dir
+        use_site(self.site_dir)
         self._stt = None
         self._stt_device = None
+        self._stt_model = None
+        self._stt_why: str | None = None     # why Whisper is not on the GPU (None: it is, or not loaded yet)
         self._stt_failed = 0.0
+        self._tts_device = None
+        self._tts_why: str | None = None
+        self.load_ms: dict[str, int] = {}
+        self.warm_ms: dict[str, int] = {}
         self._kokoro = None
         self._piper = None
         self._lock = threading.Lock()   # one model load at a time
@@ -178,6 +219,7 @@ class Voice:
     def status(self) -> dict:
         inst = self.installed()
         return {"installed": inst, "stt_device": self._stt_device, "stt_loaded": self._stt is not None,
+                "tts_device": self._tts_device,
                 "en_ready": inst["en"] and all((self.models_dir / "kokoro" / f).is_file() for f in KOKORO_FILES),
                 "de_ready": inst["de"] and (self.models_dir / "piper" / f"{PIPER_DE}.onnx").is_file(),
                 "broken": self.broken(), "last_error": self.last_error}
@@ -231,8 +273,10 @@ class Voice:
         from faster_whisper import WhisperModel
         root = str(self.models_dir / "whisper")
         if device == "cuda":
-            _add_cuda_dlls()
+            _add_cuda_dlls(self.site_dir)
+            self._stt_model = WHISPER_GPU
             return WhisperModel(self._local_model(WHISPER_GPU), device="cuda", compute_type="float16", download_root=root)
+        self._stt_model = WHISPER_CPU
         return WhisperModel(self._local_model(WHISPER_CPU), device="cpu", compute_type="int8", download_root=root)
 
     def _load_stt(self):
@@ -242,10 +286,13 @@ class Voice:
             raise NotInstalled("Speech recognition is not installed on the PC (run Update Kairo).")
         if self._stt_failed and time.monotonic() - self._stt_failed < RETRY_LOAD_AFTER:
             raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}")
+        t0 = time.monotonic()
         try:
             self._stt, self._stt_device = self._make_stt("cuda"), "cuda"
-        except Exception as exc:   # no GPU / CUDA DLLs missing: CPU, smaller model
-            log.warning("Whisper on GPU failed (%s); using the CPU", exc)
+            self._stt_why = None
+        except Exception as exc:   # no GPU / CUDA DLLs missing: CPU, smaller model, and it says why
+            self._stt_why = f"{type(exc).__name__}: {exc}"[:300]
+            log.error("Whisper on the GPU failed (%s); using the CPU (slow)", self._stt_why)
             try:
                 self._stt, self._stt_device = self._make_stt("cpu"), "cpu"
             except Exception as exc2:   # never a bare crash: say why, and don't retry slowly on every sentence
@@ -254,16 +301,59 @@ class Voice:
                 log.error("Whisper could not load: %s", self.last_error)
                 raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
         self._stt_failed = 0.0
+        self.load_ms["whisper"] = int((time.monotonic() - t0) * 1000)
         return self._stt
 
     def warm(self) -> None:
-        """Load the models ahead of the first word (called at start, in the background)."""
-        for load in (self._load_stt, self._load_kokoro):
+        """Load the models once, at start, and run each once (CUDA kernels, cuDNN plans), so no turn
+        ever waits for a model load. Called in the background when Kairo starts."""
+        for name, load in (("whisper", self._load_stt), ("kokoro", self._load_kokoro)):
             try:
                 with self._lock:
                     load()
             except Exception as exc:   # reported by status(); the request itself will say why
                 log.info("voice warm-up: %s", exc)
+                continue
+            t0 = time.monotonic()
+            try:
+                if name == "whisper":
+                    import numpy as np
+                    noise = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32)
+                    segs, _ = self._stt.transcribe(noise, language="en", beam_size=1, vad_filter=False,
+                                                   without_timestamps=True, condition_on_previous_text=False)
+                    list(segs)
+                else:
+                    self.speak("Hi.", "en")
+                self.warm_ms[name] = int((time.monotonic() - t0) * 1000)
+            except Exception as exc:
+                log.warning("voice warm-up run (%s): %s", name, exc)
+
+    def devices(self) -> dict:
+        """Owner's request 2026-10-17: where each part of the voice runs, never a silent CPU fallback.
+        {component: {device, model, loaded, ok, reason, load_ms, warm_ms}}; ok False = red in Voice speed."""
+        inst = self.installed()
+        stt_loaded = self._stt is not None
+        whisper = {"device": self._stt_device, "model": self._stt_model, "loaded": stt_loaded,
+                   "load_ms": self.load_ms.get("whisper"), "warm_ms": self.warm_ms.get("whisper")}
+        if not inst["stt"]:
+            whisper.update(ok=False, reason="not installed")
+        elif not stt_loaded:
+            whisper.update(ok=False, reason=self.last_error or "not loaded yet (it loads when Kairo starts)")
+        else:
+            whisper.update(ok=self._stt_device == "cuda",
+                           reason=None if self._stt_device == "cuda" else f"on the CPU: {self._stt_why or 'no GPU'}")
+        kokoro = {"device": self._tts_device, "model": KOKORO_MODEL, "loaded": self._kokoro is not None,
+                  "load_ms": self.load_ms.get("kokoro"), "warm_ms": self.warm_ms.get("kokoro")}
+        if not inst["en"]:
+            kokoro.update(ok=False, reason="not installed")
+        elif self._kokoro is None:
+            kokoro.update(ok=False, reason="not loaded yet (it loads when Kairo starts)")
+        else:
+            kokoro.update(ok=self._tts_device == "cuda",
+                          reason=None if self._tts_device == "cuda" else f"on the CPU: {self._tts_why or 'no GPU'}")
+        piper = {"device": "cpu", "model": PIPER_DE, "loaded": self._piper is not None, "ok": bool(inst["de"]),
+                 "reason": None if inst["de"] else "not installed", "note": "German voice: small, on the CPU by design"}
+        return {"whisper": whisper, "kokoro": kokoro, "piper": piper}
 
     def transcribe(self, audio: bytes, language: str | None = None) -> Transcript:
         if not audio:
@@ -316,8 +406,23 @@ class Voice:
             d = self.models_dir / "kokoro"
             if not all((d / f).is_file() for f in KOKORO_FILES):
                 raise NotInstalled("The English voice model is missing (run Update Kairo).")
+            import onnxruntime as ort
             from kokoro_onnx import Kokoro
-            self._kokoro = Kokoro(str(d / KOKORO_MODEL), str(d / "voices-v1.0.bin"))
+            t0 = time.monotonic()
+            providers, why = _ort_cuda(self.site_dir)
+            try:
+                session = ort.InferenceSession(str(d / KOKORO_MODEL), providers=providers)
+            except Exception as exc:   # CUDA there but broken: the CPU, and it says why
+                why = f"{type(exc).__name__}: {exc}"[:300]
+                session = ort.InferenceSession(str(d / KOKORO_MODEL), providers=["CPUExecutionProvider"])
+            on_gpu = session.get_providers()[0] == "CUDAExecutionProvider"
+            if not on_gpu and why is None:
+                why = "ONNX Runtime could not start CUDA (CUDA/cuDNN DLLs not found)"
+            self._tts_device, self._tts_why = ("cuda" if on_gpu else "cpu"), (None if on_gpu else why)
+            if not on_gpu:
+                log.error("Kokoro on the CPU (slow): %s", why)
+            self._kokoro = Kokoro.from_session(session, str(d / "voices-v1.0.bin"))
+            self.load_ms["kokoro"] = int((time.monotonic() - t0) * 1000)
         return self._kokoro
 
     def _load_piper(self):

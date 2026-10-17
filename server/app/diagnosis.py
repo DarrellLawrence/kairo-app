@@ -504,7 +504,32 @@ def _logs(r: _Report, log_dir: Path) -> None:
         r.add("    " + line)
 
 
-def run(*, db_url: str, data_dir: Path, app_root: Path, now: dt.datetime | None = None) -> dict:
+def _devices(r: _Report, devices: dict | None) -> None:
+    """Owner's request 2026-10-17: where each part of the voice runs, and why not the GPU."""
+    r.h("G.5f voice devices (GPU or CPU, why)")
+    if not devices:
+        r.add("  (not available)")
+        return
+    for name, c in (devices.get("components") or {}).items():
+        mark = "ok" if c.get("ok") else "RED"
+        bits = [f"device={c.get('device')}", f"model={c.get('model')}", f"loaded={c.get('loaded')}"]
+        for k in ("layers", "gpu", "load_ms", "warm_ms", "state"):
+            if c.get(k) is not None:
+                bits.append(f"{k}={c.get(k)}")
+        r.add(f"  {mark} {name}: {' '.join(bits)}" + (f" | {c['reason']}" if c.get("reason") else ""))
+    g = devices.get("gpu")
+    if g:
+        r.add(f"  gpu: {g.get('name')} driver {g.get('driver')}: {g.get('used_mb')}/{g.get('total_mb')} MB used")
+        for p in g.get("processes") or []:
+            r.add(f"    pid {p.get('pid')} {p.get('name')}: {p.get('used_mb')} MB {('(' + p['kairo'] + ')') if p.get('kairo') else ''}")
+    else:
+        r.add("  gpu: nvidia-smi didn't answer (no NVIDIA driver for Kairo's account?)")
+    line = devices.get("line") or {}
+    r.add(f"  calls: webrtc_ready={line.get('webrtc_ready')} reason={line.get('reason')} last_turn_line={line.get('last_turn')}")
+
+
+def run(*, db_url: str, data_dir: Path, app_root: Path, now: dt.datetime | None = None,
+        devices: dict | None = None) -> dict:
     """The whole report, redacted. Never raises for missing tables, files or logs: it says so instead."""
     started = time.monotonic()
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -525,6 +550,7 @@ def run(*, db_url: str, data_dir: Path, app_root: Path, now: dt.datetime | None 
             _database(r, c, since)
         finally:
             c.close()
+    _devices(r, devices)
     _release(r, app_root, data_dir)
     _memory(r, data_dir / "memory" / "index.sqlite")
     _logs(r, data_dir / "logs")
