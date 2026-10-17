@@ -11,6 +11,10 @@
 #    rollback) and leaves a one-line note that Kairo pushes to the iPhone. A
 #    hiccup before the switch (download, network) is retried later (10 min,
 #    30 min, 2 h, then every 6 h), never blacklisted.
+# 4. Owner's rule 2026-10-17: every update that fails, is undone or is stuck
+#    is a push with the reason: each failed try, a release still waiting after
+#    3 hours outside the quiet hours, an error in this script that lasts 30
+#    minutes (then every 6 hours), no GitHub token.
 #
 #   -TestRelease <json>  CI only: {"tag_name": "...", "body": "...", "zip": "<path>"}
 #   -CI                  CI only: passed on to Update Kairo (no downloads, fake Claude)
@@ -75,13 +79,51 @@ function Read-SelfTest([string]$Version, [datetime]$Since) {
 }
 
 function Format-Reason([string]$Text) {
-    $t = ($Text -replace '\s+', ' ').Trim()
+    $t = ($Text -replace '\s+', ' ').Trim().TrimEnd('.')
     if ($t.Length -gt 90) { $t = $t.Substring(0, 87) + '...' }
     return $t
 }
 
+function Format-Wait([double]$Minutes) {
+    if ($Minutes -ge 120) { return "$([int][Math]::Floor($Minutes / 60)) hours" }
+    return "$([int]$Minutes) minutes"
+}
+
+$StuckMinutes = 180   # outside the quiet hours: a release waiting this long is news
+$WaitWhy = @{ 'busy' = 'a chat was running'; 'job running' = 'a background job was running'
+              'call live' = 'a call was live'; 'browser open' = 'the school portal browser was open' }
+
+# A try that changed nothing: again later (10 min, 30 min, 2 h, then every 6 h), never blacklisted; each
+# try is noted for the push.
+function Set-Retry($S, [string]$Version, [string]$Why, [string]$From, [string]$On) {
+    $attempts = if ($S.retry -and [string]$S.retry.version -eq $Version) { [int]$S.retry.attempts + 1 } else { 1 }
+    $wait = @(10, 30, 120, 360)[[Math]::Min($attempts, 4) - 1]
+    $S.retry = @{ version = $Version; attempts = $attempts; next = (Get-Date).AddMinutes($wait).ToString('o') }
+    Write-Log "Not installed (attempt $attempts, nothing changed, still on $On): $(Format-Reason $Why). Next try in $wait minutes."
+    Write-UpdateNote "Kairo $Version didn't install (try $attempts): $(Format-Reason $Why). Still on $On; next try in $(Format-Wait $wait)." $false $From $Version
+}
+
+# An error in this script itself (GitHub not answering, a broken file, ...): a push once it has lasted
+# 30 minutes (one bad network minute is not news), then every 6 hours while it lasts.
+function Write-ErrorNote([string]$Text) {
+    $s = Read-UpdaterState $P
+    $at = Get-Date
+    $e = $s.error
+    $since = if ($e -and $e.since) { [datetime]$e.since } else { $at }
+    $noted = if ($e -and $e.noted) { [datetime]$e.noted } else { $null }
+    if ((-not $noted -and ($at - $since).TotalMinutes -ge 30) -or ($noted -and ($at - $noted).TotalHours -ge 6)) {
+        $on = [string](Read-State $P).current
+        Write-UpdateNote "Kairo's auto-update has hit an error for $(Format-Wait ($at - $since).TotalMinutes): $(Format-Reason $Text). Still on $on." $false $on ''
+        $noted = $at
+    }
+    $s.error = @{ text = (Format-Reason $Text); since = $since.ToString('o'); noted = $(if ($noted) { $noted.ToString('o') } else { '' }) }
+    Save-UpdaterState $P $s
+}
+
 $exitCode = 0
 $held = $false
+$installing = $false
+$errored = $false
 try {
     Protect-UpdaterFolder $P
     Clear-StaleDataLock $P   # fix F24: an interrupted update must not leave Kairo's account off
@@ -103,7 +145,11 @@ try {
         $repo = [string](Read-ReleaseInfo $P.Current).update_repo
         $token = Get-GitHubToken $P
         if (-not $token) {
-            if ($s.waiting -ne 'no-token') { Write-Log 'No GitHub token: run Kairo Logins once. Auto-update is off until then.'; $s.waiting = 'no-token'; Save-UpdaterState $P $s }
+            if ($s.waiting -ne 'no-token') {
+                Write-Log 'No GitHub token: run Kairo Logins once. Auto-update is off until then.'
+                Write-UpdateNote "Auto-update is off: there is no GitHub token on the PC. On the PC: Start menu -> Kairo -> Kairo Logins, once." $false $installed ''
+                $s.waiting = 'no-token'; Save-UpdaterState $P $s
+            }
             exit 0
         }
         $r = Get-LatestRelease $repo $token ([string]$s.etag)
@@ -135,10 +181,23 @@ try {
         Write-Log 'Kairo has not answered for 30 minutes; installing without asking.'
     } else { $s.down_since = '' }
     if ($ready -and -not $ready.ready) {
-        if ($s.waiting -ne $ready.reason) {
-            Write-Log "Kairo $latest is ready; waiting ($($ready.reason))."
-            $s.waiting = [string]$ready.reason; Save-UpdaterState $P $s
+        if ($s.waiting -ne $ready.reason) { Write-Log "Kairo $latest is ready; waiting ($($ready.reason))." }
+        $s.waiting = [string]$ready.reason
+        if ($ready.reason -ne 'quiet') {     # the quiet hours are a normal wait; anything else adds up
+            $pv = $s.pending
+            $same = $pv -and [string]$pv.version -eq $latest
+            $mins = if ($same) { [double]$pv.minutes } else { 0 }
+            if ($same -and $pv.last) { $mins += [Math]::Min(((Get-Date) - [datetime]$pv.last).TotalMinutes, 10) }
+            $noted = $same -and [bool]$pv.noted
+            if (-not $noted -and $mins -ge $StuckMinutes) {
+                $why = if ($WaitWhy.ContainsKey([string]$ready.reason)) { $WaitWhy[[string]$ready.reason] } else { [string]$ready.reason }
+                Write-UpdateNote "Kairo $latest has been waiting $(Format-Wait $mins) to install; at the last check $why. Still on $installed." $false $installed $latest
+                Write-Log "Still waiting after $(Format-Wait $mins) ($($ready.reason)): noted for the iPhone."
+                $noted = $true
+            }
+            $s.pending = @{ version = $latest; minutes = [Math]::Round($mins, 1); last = (Get-Date).ToString('o'); noted = $noted }
         }
+        Save-UpdaterState $P $s
         exit 0
     }
     $held = [bool]$ready   # Kairo now holds new chats off; released below if we stop early
@@ -153,6 +212,8 @@ try {
     if ($CI) { $argLine += ' -CI' }
     $out = Join-Path $P.Updater 'last-run.out.txt'
     $err = Join-Path $P.Updater 'last-run.err.txt'
+    $installing = $true
+    $s.pending = $null
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput $out -RedirectStandardError $err
     $code = $proc.ExitCode
@@ -173,27 +234,33 @@ try {
         # install hit a hiccup is retried instead.)
         $s.failed = @(@($s.failed) + $latest | Select-Object -Unique)
         $s.retry = $null
-        $why = if ($st -and -not $st.ok) { " (self-test: $(Format-Reason $st.reason))" } elseif ($dr.reason) { " ($(Format-Reason $dr.reason))" } else { '' }
+        $why = if ($st -and -not $st.ok) { " (self-test: $(Format-Reason $st.reason))" } elseif ($dr.reason) { " ($(Format-Reason $dr.reason))" }
+               elseif ($dr.category) { " (the $($dr.category) check failed)" } else { " (exit code $code; the PC's updater\auto-update.log has the details)" }
         Write-UpdateNote "Kairo update to $latest failed and was undone$why. Still on $now." $false $installed $latest
         Write-Log "Failed: still on $now. $latest will not be tried again automatically."
         $exitCode = 1
     } else {
-        $attempts = if ($s.retry -and [string]$s.retry.version -eq $latest) { [int]$s.retry.attempts + 1 } else { 1 }
-        $wait = @(10, 30, 120, 360)[[Math]::Min($attempts, 4) - 1]
-        $s.retry = @{ version = $latest; attempts = $attempts; next = (Get-Date).AddMinutes($wait).ToString('o') }
-        $why = if ($dr -and $dr.reason) { $dr.reason } elseif (Test-Path $err) { ((Get-Content $err | Select-Object -Last 3) -join ' ') } else { "exit code $code" }
-        Write-Log "Not installed (attempt $attempts, nothing changed, still on $now): $(Format-Reason $why). Next try in $wait minutes."
-        if ($attempts -eq 3) {
-            Write-UpdateNote "Kairo $latest could not be installed yet ($(Format-Reason $why)). Still on $now; it keeps trying." $false $installed $latest
-        }
+        $tail = if (Test-Path $err) { ((Get-Content $err | Select-Object -Last 3) -join ' ').Trim() } else { '' }
+        $why = if ($dr -and $dr.reason) { $dr.reason } elseif ($tail) { $tail } else { "exit code $code" }
+        Set-Retry $s $latest $why $installed $now
         $exitCode = 1
     }
+    $installing = $false
     Save-UpdaterState $P $s
 } catch {
-    try { Write-Log "Error: $($_.Exception.Message)" } catch { }
+    $errored = $true
+    $text = $_.Exception.Message
+    try { Write-Log "Error: $text" } catch { }
+    try {
+        if ($installing) { Set-Retry $s $latest $text $installed ([string](Read-State $P).current); Save-UpdaterState $P $s }
+        else { Write-ErrorNote $text }
+    } catch { try { Write-Log "Could not note the error: $($_.Exception.Message)" } catch { } }
     $exitCode = 1
 } finally {
     if ($held) { try { [void](Request-Kairo '/api/update/release' $null) } catch { } }
+    if (-not $errored) {   # a tick without an error: an earlier error is over
+        try { $es = Read-UpdaterState $P; if ($es.error) { $es.error = $null; Save-UpdaterState $P $es } } catch { }
+    }
     # Owner's report 2026-10-17: an update that never sticks must be visible on the phone (Run diagnosis):
     # what this tick saw, without the GitHub token or anything else from the release body.
     try {
