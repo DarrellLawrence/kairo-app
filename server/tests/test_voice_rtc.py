@@ -21,7 +21,8 @@ from types import SimpleNamespace
 import pytest
 
 from app import voicertc
-from app.voicertc import OpenerCache, RtcSpeaker, Timeline, first_clause, offer_on_tailnet, on_tailnet
+from app.voicelink import first_clause
+from app.voicertc import OpenerCache, RtcSpeaker, Timeline, offer_on_tailnet, on_tailnet
 
 SPEECH = Path(__file__).parent / "fixtures" / "speech_en.wav"    # "Remind me to call the dentist tomorrow morning."
 
@@ -30,10 +31,12 @@ SPEECH = Path(__file__).parent / "fixtures" / "speech_en.wav"    # "Remind me to
 
 def test_the_first_piece_goes_at_the_first_clause_or_five_words():
     assert first_clause("Sure, I'll") == len("Sure,")
-    assert first_clause("Okay.") == len("Okay.")
+    assert first_clause("Okay. ") == len("Okay.")
+    assert first_clause("Okay.") is None                                 # maybe "Okay.5": wait for the space
     assert first_clause("Your next train leaves at") is None           # 5 words, but no space after the 5th yet
     assert first_clause("Your next train leaves at ") == len("Your next train leaves at ")
     assert first_clause("The 7.42") is None                              # a dot inside a number is no end
+    assert first_clause("Dr. Weber says ") is None
     assert first_clause("") is None
 
 
@@ -107,8 +110,8 @@ def test_the_opener_cache_keeps_short_lines_only():
     c = OpenerCache(speak)
     assert c.warm({"en": ("Sure,", "Okay."), "de": ("Klar,",)}) == 3
     assert c.get("  sure, ", "en") == (b"\x01\x00" * 10, 24000) and c.get("Sure,", "de") is None
-    c.put("This is a much longer sentence.", "en", b"", 24000)
-    assert c.get("This is a much longer sentence.", "en") is None
+    c.put("This is a much longer sentence, too long.", "en", b"", 24000)
+    assert c.get("This is a much longer sentence, too long.", "en") is None
     assert c.warm({"en": ("Sure,",)}) == 0 and len(made) == 3
 
 

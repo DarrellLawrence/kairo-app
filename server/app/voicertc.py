@@ -29,6 +29,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .voicelink import first_clause
+
 log = logging.getLogger("kairo.voicertc")
 
 VAD_STOP_S = 0.2              # the first short pause: Whisper starts, Smart Turn decides
@@ -174,20 +176,6 @@ class Timeline:
 
 # ---------------------------------------------------------------- text into speech, first clause first
 
-def first_clause(text: str, words: int = 5) -> int | None:
-    """Where the first piece of a reply may go to the voice: at its first comma / colon / semicolon /
-    sentence end, or after `words` words. The index just after it, or None (keep collecting)."""
-    for m in re.finditer(r"[,;:.!?](?=\s|$)|\s", text):
-        piece = text[:m.end()].strip()
-        if not piece:
-            continue
-        if m.group(0) in ",;:.!?":
-            return m.end()
-        if len(piece.split()) >= words:
-            return m.end()
-    return None
-
-
 class OpenerCache:
     """Short lines Kairo says often, made once, played at once (the holding lines, 'Sure,' ...)."""
 
@@ -203,7 +191,7 @@ class OpenerCache:
         return self.audio.get((lang, self.key(text)))
 
     def put(self, text: str, lang: str, pcm: bytes, rate: int) -> None:
-        if len(text.split()) <= 4 and len(self.audio) < self.limit:
+        if len(text.split()) <= 6 and len(self.audio) < self.limit:
             self.audio[(lang, self.key(text))] = (pcm, rate)
 
     def warm(self, lines: dict[str, tuple[str, ...]]) -> int:
@@ -361,7 +349,8 @@ class _State:
 def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = None,
                events: Callable[[dict], Any] | None = None, language_mode: str = "auto",
                openers: OpenerCache | None = None, smart_turn_model: str | None = None,
-               speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None):
+               speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None,
+               greeting: str | None = None):
     """The pipeline for one call on an initialized SmallWebRTCConnection.
 
     voice: transcribe_pcm(pcm16k, language) -> Transcript; speak(text, language) -> (wav, lang).
@@ -371,6 +360,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     events: (dict) -> None: to the phone on the data channel (default: the connection's).
     speculate: (words so far, language) -> None: the owner paused; start the answer early (not said).
     discard: () -> None: the owner talked on; what was started early is thrown away.
+    greeting: what Kairo says when the phone asks for it ({"type": "greet"}: a call the owner placed).
     """
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -571,12 +561,18 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
 
     @transport.event_handler("on_app_message")
     async def _from_phone(_transport, message, _sender=None):
-        """The phone asks Kairo to say a fixed line (a call's greeting): no model involved."""
-        if isinstance(message, dict) and message.get("type") == "say":
+        """The phone asks Kairo to say a fixed line (a call's opening, or the greeting from the cache): no
+        model involved."""
+        if not isinstance(message, dict):
+            return
+        text = ""
+        if message.get("type") == "say":
             from .voicelink import MAX_SAY
             text = str(message.get("text") or "").strip()[:MAX_SAY]
-            if text:
-                await task.queue_frames([TTSSpeakFrame(text)])
+        elif message.get("type") == "greet" and greeting:
+            text = greeting
+        if text:
+            await task.queue_frames([TTSSpeakFrame(text)])
     call = Call(conn, task, PipelineRunner(handle_sigint=False), state)
     call.openers = cache
     return call

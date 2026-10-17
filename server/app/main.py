@@ -64,7 +64,7 @@ from .tools import ToolRunner
 from .brain.claude_cli import ClaudeCLIBrain
 from .workspace import write_workspace
 from .brain import BrainEvent, BrainStatus, EventKind, make_brain
-from .db import Approval, AuditLog, Call, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, make_engine, session_for
+from .db import Approval, AuditLog, Call, CalendarTag, ChatMessage, ChatThread, Review, SettingKV, Task, VoiceTurn, make_engine, session_for
 from .profile import load_profile, render_personality
 from .settings import REPO_ROOT, Settings, get_settings
 
@@ -339,7 +339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             background.append(asyncio.create_task(acceptance_after_release(app)))
             background.append(asyncio.create_task(memory_loop(app)))
             if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
-                asyncio.get_running_loop().run_in_executor(None, app.state.voice.warm)
+                asyncio.get_running_loop().run_in_executor(None, _warm_voice)
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
             app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
             app.state.today_card.start()   # the Today card: always fresh, before any call
@@ -1102,8 +1102,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                   data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1)
                 elif kind == "stop":
                     stop(data.get("turn") if isinstance(data.get("turn"), int) else line.current)
-                elif kind == "say":
-                    text = str(data.get("text") or "")[:voicelink.MAX_SAY]
+                elif kind in ("say", "greet"):
+                    text = _greeting() if kind == "greet" else str(data.get("text") or "")[:voicelink.MAX_SAY]
                     if line.speaker is not None:
                         line.speaker.stop()
                     number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
@@ -1142,9 +1142,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return cache
 
     def _warm_openers() -> None:
-        lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.STILL[lang], voicelink.filler(lang))
+        lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.LATER[lang], voicelink.filler(lang),
+                        _greeting())
                  for lang in ("en", "de")}
         threading.Thread(target=lambda: _openers().warm(lines), name="voice-openers", daemon=True).start()
+
+    def _greeting() -> str:
+        """Owner's request 2026-10-17: the call opens at once with "Hey <first name>." (from the profile on
+        the PC; made once, played from the cache)."""
+        first = (profile.name or "").split()[0] if (profile.name or "").split() else ""
+        return f"Hey {first}." if first else "Hey."
 
     def _rtc_ready() -> str | None:
         """Why a call can't go over WebRTC right now (the phone then uses /ws/voice), or None."""
@@ -1156,6 +1163,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not voicertc.ALLOW_LOOPBACK and not voicertc.tailnet_addresses():
             return "no_tailnet"                      # Tailscale is down on the PC: the old line, at once
         return None
+
+    @app.get("/api/voice/devices")
+    async def voice_devices(request: Request):
+        """Owner's request 2026-10-17: where each part of the voice runs (GPU or CPU, with the reason when
+        it isn't the GPU), the graphics card's memory, and which line calls use. Voice speed shows it on
+        top; a part on the CPU is red there, never a silent fallback."""
+        from . import gpu as gpu_mod
+        voice = app.state.voice
+        comps = voice.devices() if hasattr(voice, "devices") else {}
+        vm = app.state.voice_llm.status()
+        llm = await asyncio.to_thread(gpu_mod.llama_device, app.state.voice_llm.log_dir / "voice-llm.log")
+        if vm["state"] != "ready":
+            llm.update(ok=False, reason=vm.get("error") or f"the voice model is {vm['state']}")
+        comps["voice_model"] = {**llm, "model": vm.get("model"), "state": vm["state"],
+                                "loaded": vm["state"] == "ready"}
+        card = await asyncio.to_thread(gpu_mod.summary)
+        if card is not None:                        # this process (Whisper, Kokoro) and llama.cpp's
+            mine = {os.getpid(): "whisper+kokoro"}
+            server = getattr(app.state.voice_llm, "server", None)
+            if server is not None and getattr(server, "proc", None) is not None:
+                mine[server.proc.pid] = "voice_model"
+            for p_ in card["processes"]:
+                p_["kairo"] = mine.get(p_["pid"])
+        why = _rtc_ready()
+        with session_for(engine) as s_:
+            last = s_.exec(select(VoiceTurn).where(VoiceTurn.path.in_(("call", "chat_voice")))
+                           .order_by(VoiceTurn.ts.desc())).first()
+        last_line = None
+        if last is not None:
+            try:
+                last_line = (json.loads(last.device_json or "{}").get("line")) or "old"
+            except ValueError:
+                last_line = "old"
+        return {"components": comps, "gpu": card, "all_on_gpu": all(c.get("ok") for k, c in comps.items() if k != "piper"),
+                "line": {"webrtc_ready": why is None, "reason": why, "last_turn": last_line,
+                         "last_turn_at": last.ts.isoformat() if last is not None else None}}
 
     @app.get("/api/rtc")
     async def rtc_status(request: Request, network: bool = False):
@@ -1232,7 +1275,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         call = voicertc.build_call(conn, voice=app.state.voice, answer=answer, interrupt=talked_over, events=None,
                                    language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
-                                   speculate=speculate, discard=discard)
+                                   speculate=speculate, discard=discard, greeting=_greeting())
         key = id(call)
         _rtc_calls[key] = call
 
@@ -1383,7 +1426,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
-                      context_tokens=int(spec.get("context") or 8192), report=_report_live)
+                      context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer)
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
@@ -1395,6 +1438,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     _card_lines = [0]
     LAB_FIRST_CHECK_S = 600
+
+    def _warm_voice() -> None:
+        """At start: Whisper and Kokoro loaded once and run once (never per turn), the short lines Kairo says
+        often made once (openers, holding lines, the greeting). Owner's request 2026-10-17: a part that
+        ends up on the CPU although the PC has an NVIDIA card is never silent: one push, with the reason."""
+        voice = app.state.voice
+        voice.warm()
+        if voicertc.available():
+            _warm_openers()
+        if not hasattr(voice, "devices"):
+            return
+        from . import gpu as gpu_mod
+        if gpu_mod.summary() is None:              # no NVIDIA driver visible: nothing to compare against
+            return
+        off = [f"{name}: {c.get('reason')}" for name, c in voice.devices().items()
+               if name in ("whisper", "kokoro") and c.get("loaded") and not c.get("ok")]
+        if off:
+            log.error("voice on the CPU: %s", "; ".join(off))
+            app.state.pusher.notify("Kairo's voice is on the CPU (slow)", "; ".join(off)[:400] + " (More → System → Voice speed)",
+                                    "/#more", source="voice")
+
+    def _late_answer(request: str, answer: str) -> None:
+        """Owner's request 2026-10-17: Claude took longer than a call waits and Kairo said "I'll get back to
+        you": the answer goes into the conversation and to the phone as a push the moment it comes."""
+        try:
+            _rt_said("kairo", answer)
+        except Exception:
+            log.exception("voice: saving a late answer")
+        app.state.pusher.notify("Kairo", answer[:300], "/#chat", source="voice")
 
     def _report_live(item, said: str, reply: str) -> None:
         """On the call: what the owner said to an item Kairo raised goes to Claude now (done, later, new info),
@@ -3586,10 +3658,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"brain": runner.brain.health().value, "boot_check": boot, "selftest": selftest_last}
 
     @app.post("/api/diagnosis")
-    def run_diagnosis():
+    async def run_diagnosis(request: Request):
         """Run diagnosis (More -> System): DIAGNOSIS section G from the phone. Read-only, secrets
-        redacted (app/diagnosis.py); owner only like every route. A plain def: off the event loop."""
-        return diagnosis_mod.run(db_url=settings.db_url, data_dir=settings.data_dir, app_root=REPO_ROOT)
+        redacted (app/diagnosis.py); owner only like every route. The report runs off the event loop."""
+        try:
+            devices = await voice_devices(request)
+        except Exception as exc:   # the rest of the report still comes
+            devices = {"components": {}, "gpu": None, "line": {"reason": f"{type(exc).__name__}: {exc}"}}
+        return await asyncio.to_thread(diagnosis_mod.run, db_url=settings.db_url, data_dir=settings.data_dir,
+                                       app_root=REPO_ROOT, devices=devices)
 
     _mount_web(app, settings.web_dist_dir)
     if settings.owner_check:

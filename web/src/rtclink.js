@@ -344,6 +344,13 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     level() { return state === 'speaking' ? outLevel : state === 'listening' ? micLevel : 0 },
     /* The PC decides when you're done; a tap can't end a turn sooner on this line. */
     finish() { return false },
+    /* "Hey <name>." when a call you placed connects: from the PC's cache, no model involved. */
+    greet() {
+      written = true
+      spoken = false
+      set('speaking')
+      send({ type: 'greet' })
+    },
     /* Kairo says this (a greeting), word for word, no model involved. */
     say(text) {
       written = true

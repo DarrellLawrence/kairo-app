@@ -33,12 +33,33 @@ from .brain.voice_local import ASK_KAIRO
 log = logging.getLogger("kairo.mouth")
 
 FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
-STILL = {"en": "Still on it.", "de": "Bin noch dran."}
+# Owner's request 2026-10-17: Claude gets ASK_CALL_TIMEOUT_S on a call; then Kairo says this once and the
+# call moves on. The answer is said later in the call when it comes, and sent as a push.
+ASK_CALL_TIMEOUT_S = 8.0
+LATER = {"en": "I'll get back to you.", "de": "Ich melde mich gleich."}
 FAILED = {"en": "I couldn't reach Kairo's brain just now.", "de": "Ich komme gerade nicht an Kairos Gehirn."}
 MARK = re.compile(r"\[\[raised:([A-Za-z]\d{1,8})\]\]\s*")
 STAMP = re.compile(r"^\s*\[\d{1,2}:\d{2}\]\s*")
 MAX_REPLY_TOKENS = 160
 MAX_ANSWER_TOKENS = 240
+# Owner's request 2026-10-17: small talk never goes to Claude. The whole utterance (name left out) is a
+# greeting, thanks, a goodbye or a plain acknowledgement: the voice model answers without its tool.
+SMALL_TALK = re.compile(
+    r"(?:(?:(?:hi|hey|hello|hallo|hoi|servus|yo|moin)(?: there| you| du)?|good (?:morning|afternoon|evening|night)|"
+    r"guten (?:morgen|tag|abend)|"
+    r"gute nacht|how are you(?: doing)?|how's it going|what's up|wie geht'?s(?: dir)?|wie geht es dir|alles gut|"
+    r"thanks?(?: a lot| so much)?|thank you(?: so much)?|danke(?: schön| dir)?|merci|"
+    r"ok(?:ay)?|cool|nice|great|perfect|super|alles klar|sounds good|got it|sure|yes|yeah|no|nope|nein|ja|"
+    r"bye|goodbye|see you|ciao|tschüss|bis später|bis dann|that's all|das war's|nothing|nichts)"
+    r"(?:[\s,.!?]+|$))+", re.I)
+_NAME = re.compile(r"\bkairo\b", re.I)
+
+
+def small_talk(text: str) -> bool:
+    t = _NAME.sub(" ", STAMP.sub("", text or "")).strip(" ,.!?").lower()
+    return bool(t) and len(t.split()) <= 8 and SMALL_TALK.fullmatch(t + " ") is not None
+
+
 QUESTION = re.compile(r"\?\s*$|^\s*(what|when|where|who|which|how|is|are|do|does|did|can|will|was|wann|wo|was|wer|"
                       r"welche|wie|ist|sind|hab|hat|gibt)\b", re.I)
 
@@ -121,6 +142,8 @@ class Turn:
     failed: str | None = None
     route: str = "talk"                 # card (a question answered on the PC) / claude / talk
     early: bool = False                 # its first round was started at the owner's pause (speculation)
+    filled: bool = False                # the holding line was said this turn
+    deferred: bool = False              # Claude took longer than a call waits: "I'll get back to you"
 
 
 class _Said:
@@ -166,6 +189,10 @@ class _Spec:
             self.task.cancel()
 
 
+class _Later(Exception):
+    """Claude needs longer than a call waits (ASK_CALL_TIMEOUT_S)."""
+
+
 def _key(messages: list[dict]) -> str:
     return json.dumps(messages, sort_keys=True, ensure_ascii=False)
 
@@ -175,6 +202,8 @@ class _Pending:
     request: str
     task: asyncio.Task
     taken: bool = False                 # being said in a turn right now
+    started: float = 0.0                # when Claude got it (the call's wait counts from here)
+    push: bool = False                  # the owner was told "I'll get back to you": it goes as a push too
 
 
 Ask = Callable[[str, list[str], str], Awaitable[tuple[str, bool]]]
@@ -185,13 +214,15 @@ class Mouth:
 
     def __init__(self, model, *, ask: Ask, context: str | dict, items: list[bringup.Item], name: str = "the owner",
                  temperature: float = 0.6, language_mode: str = "auto", max_tool_rounds: int = 2,
-                 still_after_s: float = 6.0, filler_index: int = 0, wait_after_s: float = 0.8,
+                 ask_timeout_s: float = ASK_CALL_TIMEOUT_S, filler_index: int = 0, wait_after_s: float = 0.8,
                  clock: Callable | None = None, place: Callable[[], str | None] | None = None,
-                 context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None):
+                 context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None,
+                 late: Callable[[str, str], None] | None = None):
         self.model, self.ask = model, ask
         self.temperature, self.language_mode = temperature, language_mode
-        self.max_tool_rounds, self.still_after_s, self.wait_after_s = max_tool_rounds, still_after_s, wait_after_s
+        self.max_tool_rounds, self.ask_timeout_s, self.wait_after_s = max_tool_rounds, ask_timeout_s, wait_after_s
         self.clock, self.place, self.context_tokens, self.report = clock, place, context_tokens, report
+        self.late = late                    # (request, answer): an answer that came after the call moved on (a push)
         self.name = (name or "the owner")[:60]
         self.card: dict[str, str] | None = dict(context) if isinstance(context, dict) else None
         self._context = context if isinstance(context, str) else None
@@ -281,8 +312,8 @@ class Mouth:
         if not owner_text or self.prompt_tokens + MAX_ANSWER_TOKENS * 3 >= int(self.context_tokens * 0.8):
             return False                                   # nothing to say, or the turn compacts first
         msgs = self.messages + [{"role": "user", "content": self._content(owner_text)}]
-        spec = _Spec(_key(msgs))
-        tools = [ASK_KAIRO] if self.max_tool_rounds > 0 else None
+        tools = [ASK_KAIRO] if self.max_tool_rounds > 0 and not small_talk(owner_text) else None
+        spec = _Spec(_key(msgs) + ("|tools" if tools else "|talk"))
 
         async def run() -> None:
             try:
@@ -306,11 +337,11 @@ class Mouth:
         if spec is not None:
             spec.drop()
 
-    def _take_speculation(self) -> _Spec | None:
+    def _take_speculation(self, with_tools: bool) -> _Spec | None:
         spec, self._spec = self._spec, None
         if spec is None:
             return None
-        if spec.key != _key(self.messages):
+        if spec.key != _key(self.messages) + ("|tools" if with_tools else "|talk"):
             spec.drop()
             return None
         self.speculation_used += 1
@@ -332,7 +363,8 @@ class Mouth:
         content = self._content(owner_text)
         self.notes = []
         self.messages.append({"role": "user", "content": content})
-        early = self._take_speculation()                   # started at the pause on exactly these words
+        chat_only = small_talk(owner_text)                 # hello, thanks, bye: never Claude
+        early = self._take_speculation(self.max_tool_rounds > 0 and not chat_only)   # started at the pause
         result_early = early is not None
         self.lines.append(f"Owner: {owner_text}")
         self.transcript = (self.transcript + [f"Owner: {owner_text}"])[-40:]
@@ -343,7 +375,7 @@ class Mouth:
         try:
             rounds = 0
             while True:
-                tools = [ASK_KAIRO] if rounds < self.max_tool_rounds else None
+                tools = [ASK_KAIRO] if rounds < self.max_tool_rounds and not chat_only else None
                 raw, call = await self._round(tools, MAX_ANSWER_TOKENS if rounds else MAX_REPLY_TOKENS, speaker,
                                               result, said, started, lang, source=early if not rounds else None)
                 if not isinstance(call, dict) or call.get("name") != "ask_kairo":
@@ -354,7 +386,14 @@ class Mouth:
                 result.asked.append(request)
                 self.messages.append({"role": "assistant", "content": said.text(), "tool_calls": [
                     {"id": call["id"], "type": "function", "function": {"name": "ask_kairo", "arguments": call.get("arguments") or "{}"}}]})
-                answer = await self._ask(request, item, lang, speaker, result, said)
+                try:
+                    answer = await self._ask(request, item, lang, speaker, result, said)
+                except _Later:                             # Claude needs longer: the call moves on
+                    self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
+                                          "content": json.dumps({"answer": "(still working on it: Kairo told the owner "
+                                                                 "it will get back to them)"})})
+                    self.messages.append({"role": "assistant", "content": said.text() or LATER[lang]})
+                    break
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
                                       "content": json.dumps({"answer": answer}, ensure_ascii=False)})
             await self._deliver_pending(speaker, result, said, started, lang)
@@ -414,10 +453,12 @@ class Mouth:
                             result.first_text_ms = int((time.monotonic() - started) * 1000)
                 elif ev["kind"] == "tool_start" and call is None:
                     call = True
-                    filler = FILLERS[lang][self._filler % len(FILLERS[lang])]
-                    self._filler += 1
-                    speaker.say(filler)
-                    said.line(filler)
+                    if not result.filled:                  # the holding line at most once a turn
+                        result.filled = True
+                        filler = FILLERS[lang][self._filler % len(FILLERS[lang])]
+                        self._filler += 1
+                        speaker.say(filler)
+                        said.line(filler)
                     if result.first_text_ms is None:
                         result.first_text_ms = int((time.monotonic() - started) * 1000)
                 elif ev["kind"] == "tool_call":
@@ -473,17 +514,22 @@ class Mouth:
             raise_item()                                       # urgent: always, before the answer
         elif pick is not None:
             later = loop.call_later(self.wait_after_s, raise_item)
-        still = loop.call_later(self.still_after_s + (3.0 if pick else 0.0), lambda: speaker.say(STILL[lang]))
         try:
-            answer, hang = await asyncio.shield(task)
+            answer, hang = await asyncio.wait_for(asyncio.shield(task), self.ask_timeout_s)
+        except asyncio.TimeoutError:               # owner's request 2026-10-17: never more than this on a call
+            result.tool_ms = int((time.monotonic() - t0) * 1000)
+            result.deferred = True
+            speaker.say(LATER[lang])
+            said.line(LATER[lang])
+            self._keep(request, task, push=True, started=t0)
+            raise _Later() from None
         except asyncio.CancelledError:
-            self._keep(request, task)
+            self._keep(request, task, started=t0)
             raise
         except Exception as exc:   # never a silent call: say why
             log.exception("ask_kairo")
             answer, hang = f"{FAILED[lang]} ({type(exc).__name__})", False
         finally:
-            still.cancel()
             if later is not None:
                 later.cancel()
         result.tool_ms = int((time.monotonic() - t0) * 1000)
@@ -496,12 +542,19 @@ class Mouth:
         except Exception:
             return None
 
-    def _keep(self, request: str, task: asyncio.Task) -> None:
-        """Talked over while Claude worked: the answer is said in the next turn (or noted if it's in by then)."""
-        p = _Pending(request, task)
+    def _keep(self, request: str, task: asyncio.Task, *, push: bool = False, started: float | None = None) -> None:
+        """Talked over while Claude worked, or Claude took longer than a call waits: the answer is said in the
+        next turn once it is in. push: it also goes to the phone as a push the moment it comes (the owner
+        was told "I'll get back to you"; the call may be over by then)."""
+        p = _Pending(request, task, started=started if started is not None else time.monotonic(), push=push)
         self.pending.append(p)
 
         def done(_t: asyncio.Task) -> None:
+            if p.push and not task.cancelled() and task.exception() is None and self.late is not None:
+                try:
+                    self.late(request, task.result()[0])
+                except Exception:
+                    log.exception("late answer")
             if p.taken or p not in self.pending:
                 return
             self.pending.remove(p)
@@ -515,21 +568,26 @@ class Mouth:
 
     async def _deliver_pending(self, speaker, result: Turn, said: _Said, started: float, lang: str) -> None:
         """An answer still on its way from before a talk-over: wait for it in this turn and say it."""
-        while self.pending:
-            p = self.pending[0]
+        for p in list(self.pending):
+            if p.push:                                         # already "I'll get back to you": it comes as a push
+                continue
             p.taken = True
-            loop = asyncio.get_running_loop()
-            still = None if p.task.done() else loop.call_later(self.still_after_s, lambda: speaker.say(STILL[lang]))
+            left = p.started + self.ask_timeout_s - time.monotonic()   # never longer than a call waits for Claude
             try:
-                answer, hang = await asyncio.shield(p.task)
+                answer, hang = await asyncio.wait_for(asyncio.shield(p.task), max(0.0, left))
+            except asyncio.TimeoutError:
+                p.taken, p.push = False, True
+                speaker.say(LATER[lang])
+                said.line(LATER[lang])
+                continue
             except asyncio.CancelledError:
+                if p.task.cancelled():
+                    self.pending.remove(p)
+                    continue
                 p.taken = False                                # talked over again: it stays on its way
                 raise
             except Exception as exc:
                 answer, hang = f"{FAILED[lang]} ({type(exc).__name__})", False
-            finally:
-                if still is not None:
-                    still.cancel()
             self.pending.remove(p)
             self.hang_up = self.hang_up or hang
             self.messages.append({"role": "user", "content": f"<kairo-note>Kairo's answer to the owner's earlier request "

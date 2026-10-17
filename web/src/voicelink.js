@@ -489,6 +489,15 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
       set('speaking')
       send({ type: 'say', text, turn: turnNo })
     },
+    /* "Hey <name>." when a call you placed connects (the PC knows the name). */
+    greet() {
+      turnNo += 1
+      answering = true
+      spokenDone = false
+      player?.newAnswer()
+      set('speaking')
+      send({ type: 'greet', turn: turnNo })
+    },
     /* Tap on the orb while Kairo talks: stop it (the answer so far is kept). */
     stop() { interrupt('tapped'); afterAnswer() },
     /* Paused or muted: Kairo goes quiet (the answer is still written, into the captions) and
