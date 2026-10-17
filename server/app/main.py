@@ -1012,7 +1012,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
                                      current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
-                                     mouth_ready=None)
+                                     mouth_ready=None, warned=False)
 
         def interrupt() -> None:
             """The answer of a talked-over turn stops being written (what was said so far is kept)."""
@@ -1110,6 +1110,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     line.current = number
                     line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number)
                     line.speaker.say(text)
+                    if not line.warned:                # the call's first line: then the slow-voice line, once
+                        line.warned = True
+                        warning = await asyncio.to_thread(_slow_call)
+                        if warning:
+                            line.speaker.say(warning)
                     line.speaker.finish()
                 else:
                     await line.send({"type": "error", "message": "unknown message type"})
@@ -1145,6 +1150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.LATER[lang], voicelink.filler(lang),
                         _greeting())
                  for lang in ("en", "de")}
+        lines["en"] += (voicelink.SLOW_LINE,)
         threading.Thread(target=lambda: _openers().warm(lines), name="voice-openers", daemon=True).start()
 
     def _greeting() -> str:
@@ -1275,7 +1281,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         call = voicertc.build_call(conn, voice=app.state.voice, answer=answer, interrupt=talked_over, events=None,
                                    language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
-                                   speculate=speculate, discard=discard, greeting=_greeting())
+                                   speculate=speculate, discard=discard, greeting=_greeting(),
+                                   warning=await asyncio.to_thread(_slow_call) if path == "call" else None)
         key = id(call)
         _rtc_calls[key] = call
 
@@ -1443,21 +1450,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """At start: Whisper and Kokoro loaded once and run once (never per turn), the short lines Kairo says
         often made once (openers, holding lines, the greeting). Owner's request 2026-10-17: a part that
         ends up on the CPU although the PC has an NVIDIA card is never silent: one push, with the reason."""
-        voice = app.state.voice
-        voice.warm()
+        app.state.voice.warm()
         if voicertc.available():
             _warm_openers()
-        if not hasattr(voice, "devices"):
-            return
-        from . import gpu as gpu_mod
-        if gpu_mod.summary() is None:              # no NVIDIA driver visible: nothing to compare against
-            return
-        off = [f"{name}: {c.get('reason')}" for name, c in voice.devices().items()
-               if name in ("whisper", "kokoro") and c.get("loaded") and not c.get("ok")]
-        if off:
-            log.error("voice on the CPU: %s", "; ".join(off))
-            app.state.pusher.notify("Kairo's voice is on the CPU (slow)", "; ".join(off)[:400] + " (More → System → Voice speed)",
+        why = _voice_slow()
+        if why:
+            log.error("voice on the CPU: %s", why)
+            app.state.pusher.notify("Kairo's voice is on the CPU (slow)", why[:400] + " (More → System → Voice speed)",
                                     "/#more", source="voice")
+
+    def _voice_slow() -> str | None:
+        """Which parts of the voice are off the GPU on a PC with an NVIDIA card, and why ("whisper: on the
+        CPU: ..."), or None. Piper (German) is on the CPU by design; a voice model not running isn't a GPU problem."""
+        from . import gpu as gpu_mod
+        voice = app.state.voice
+        if not gpu_mod.present() or not hasattr(voice, "devices"):
+            return None
+        off = [f"{name}: {c.get('reason') or 'on the CPU'}" for name, c in voice.devices().items()
+               if name in ("whisper", "kokoro") and c.get("loaded") and not c.get("ok")]
+        if app.state.voice_llm.status()["state"] == "ready":
+            llm = gpu_mod.llama_device(app.state.voice_llm.log_dir / "voice-llm.log")
+            if llm.get("device") is not None and not llm.get("ok"):
+                off.append(f"voice model: {llm.get('reason')}")
+        return "; ".join(off) or None
+
+    def _slow_call() -> str | None:
+        """Owner's decision 2026-10-17: a call on a slow voice goes ahead; Kairo says so once at the start
+        (the line this returns) and the reason goes to the phone as a push."""
+        try:
+            why = _voice_slow()
+        except Exception:   # the check never stops a call
+            log.exception("voice: the GPU check")
+            return None
+        if not why:
+            return None
+        log.warning("a call on a slow voice: %s", why)
+        body = f"Off the GPU: {why}"[:400] + " (More → System → Voice speed)"
+        threading.Thread(target=app.state.pusher.notify, args=("Kairo's voice is slow right now", body, "/#more"),
+                         kwargs={"source": "voice"}, name="slow-voice-push", daemon=True).start()   # never delays the call
+        return voicelink.SLOW_LINE
 
     def _late_answer(request: str, answer: str) -> None:
         """Owner's request 2026-10-17: Claude took longer than a call waits and Kairo said "I'll get back to

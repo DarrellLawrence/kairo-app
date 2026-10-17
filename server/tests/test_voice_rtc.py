@@ -191,7 +191,7 @@ def _phone_track(times: list[float]):
 
 
 async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_after, timeout=25.0, interrupt=None,
-                voice=None, openers=None, greeting=None, first_message=None):
+                voice=None, openers=None, greeting=None, first_message=None, warning=None):
     """A fake phone calls Kairo over WebRTC on this machine. Returns what the phone saw."""
     import numpy as np
     from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -240,7 +240,8 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
 
     await pc.setLocalDescription(await pc.createOffer())
     conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
-    call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers, greeting=greeting)
+    call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers, greeting=greeting,
+                               warning=warning)
     run = asyncio.get_running_loop().create_task(call.run())
     ans = conn.get_answer()
     await pc.setRemoteDescription(RTCSessionDescription(sdp=ans["sdp"], type=ans["type"]))
@@ -445,3 +446,23 @@ def test_a_call_the_owner_places_opens_with_the_greeting_from_the_cache():
                               wait_for=lambda p: any(e.get("type") == "say" for e in p.events), timeout=15))
     said = [e["text"] for e in phone.events if e.get("type") == "say"]
     assert said == ["Hey Sam."] and voice.spoken == []          # from the cache: nothing synthesized
+
+
+def test_a_slow_voice_is_said_once_right_after_the_greeting():
+    """Owner's decision 2026-10-17: a voice off the GPU never blocks the call; Kairo says so once, at the
+    start, after the greeting (made at start like the other short lines, so it plays at once too)."""
+    _needs_pipecat()
+    from app.voicelink import SLOW_LINE
+
+    async def answer(text, language, number, speaker):
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    voice = FakeVoice()
+    openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 4800, 24000))
+    openers.warm({"en": ("Hey Sam.", SLOW_LINE)})
+    phone = asyncio.run(_call(answer, times=(30.0,), voice=voice, openers=openers, greeting="Hey Sam.",
+                              first_message={"type": "greet"}, warning=SLOW_LINE,
+                              wait_for=lambda p: sum(e.get("type") == "say" for e in p.events) >= 2, timeout=15))
+    said = [e["text"] for e in phone.events if e.get("type") == "say"]
+    assert said == ["Hey Sam.", SLOW_LINE] and voice.spoken == []

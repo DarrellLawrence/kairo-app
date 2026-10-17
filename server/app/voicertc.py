@@ -190,8 +190,9 @@ class OpenerCache:
     def get(self, text: str, lang: str) -> tuple[bytes, int] | None:
         return self.audio.get((lang, self.key(text)))
 
-    def put(self, text: str, lang: str, pcm: bytes, rate: int) -> None:
-        if len(text.split()) <= 6 and len(self.audio) < self.limit:
+    def put(self, text: str, lang: str, pcm: bytes, rate: int, *, any_length: bool = False) -> None:
+        """Short pieces of answers are kept as they are said; the lines warm() makes at start, whatever length."""
+        if (any_length or len(text.split()) <= 6) and len(self.audio) < self.limit:
             self.audio[(lang, self.key(text))] = (pcm, rate)
 
     def warm(self, lines: dict[str, tuple[str, ...]]) -> int:
@@ -204,7 +205,7 @@ class OpenerCache:
                     except Exception as exc:   # a voice that isn't installed: no cache for it
                         log.info("opener cache: %s (%s): %s", text, lang, exc)
                         break
-                    self.put(text, lang, pcm, rate)
+                    self.put(text, lang, pcm, rate, any_length=True)
                     n += 1
         return n
 
@@ -350,7 +351,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                events: Callable[[dict], Any] | None = None, language_mode: str = "auto",
                openers: OpenerCache | None = None, smart_turn_model: str | None = None,
                speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None,
-               greeting: str | None = None):
+               greeting: str | None = None, warning: str | None = None):
     """The pipeline for one call on an initialized SmallWebRTCConnection.
 
     voice: transcribe_pcm(pcm16k, language) -> Transcript; speak(text, language) -> (wav, lang).
@@ -361,6 +362,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     speculate: (words so far, language) -> None: the owner paused; start the answer early (not said).
     discard: () -> None: the owner talked on; what was started early is thrown away.
     greeting: what Kairo says when the phone asks for it ({"type": "greet"}: a call the owner placed).
+    warning: said once right after the first line the phone asks for (greet or the call's opening): the
+      voice is slow right now (a part of it is off the GPU).
     """
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -559,6 +562,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     async def _hung_up(_transport, _client):
         await task.cancel()
 
+    warn = [warning] if warning else []
+
     @transport.event_handler("on_app_message")
     async def _from_phone(_transport, message, _sender=None):
         """The phone asks Kairo to say a fixed line (a call's opening, or the greeting from the cache): no
@@ -572,7 +577,10 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
         elif message.get("type") == "greet" and greeting:
             text = greeting
         if text:
-            await task.queue_frames([TTSSpeakFrame(text)])
+            frames = [TTSSpeakFrame(text)]
+            if warn:                                 # the voice is off the GPU: said once, after the first line
+                frames.append(TTSSpeakFrame(warn.pop()))
+            await task.queue_frames(frames)
     call = Call(conn, task, PipelineRunner(handle_sigint=False), state)
     call.openers = cache
     return call

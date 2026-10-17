@@ -285,3 +285,68 @@ def test_a_call_the_owner_places_opens_with_hey_and_their_first_name(local):
         frames_until(ws)
     said = local.voice.spoken[0][0]
     assert said.startswith("Hey") and said.endswith(".") and len(said.split()) <= 2
+
+
+def _off_the_gpu(local, monkeypatch, whisper_ok: bool):
+    from app import gpu
+    from tests.test_voice_devices import DeviceVoice
+    monkeypatch.setattr(gpu, "present", lambda: True)               # this PC has an NVIDIA card
+    local.app.state.voice = DeviceVoice(local.voice, {
+        "whisper": {"device": "cuda" if whisper_ok else "cpu", "loaded": True, "ok": whisper_ok,
+                    "reason": None if whisper_ok else "on the CPU: Library cublas64_12.dll is not found"},
+        "kokoro": {"device": "cuda", "loaded": True, "ok": True, "reason": None},
+        "piper": {"device": "cpu", "loaded": True, "ok": True, "reason": None}})
+    pushes = []
+    monkeypatch.setattr(local.app.state.pusher, "notify", lambda title, body, url="/", **k: pushes.append((title, body)))
+    return pushes
+
+
+def test_a_call_on_a_slow_voice_goes_ahead_and_says_so_once(local, monkeypatch):
+    """Owner's decision 2026-10-17: off the GPU = warn, never block. Said once at the start of the call
+    (after the greeting or the call's opening), and a push with the reason."""
+    from app.voicelink import SLOW_LINE
+    pushes = _off_the_gpu(local, monkeypatch, whisper_ok=False)
+    with local.websocket_connect("/ws/voice") as ws:
+        ws.send_json({"type": "greet", "turn": 1})
+        frames_until(ws)
+        ws.send_json({"type": "say", "text": "I can't hear you. Let's talk later.", "turn": 2})
+        frames_until(ws)
+        local.voice.text = "hey how are you"
+        utter(ws, turn=3)
+        fr = frames_until(ws)
+    said = [t for t, *_ in local.voice.spoken]
+    assert said[0].startswith("Hey") and said[1] == SLOW_LINE
+    assert said.count(SLOW_LINE) == 1                                       # once a call, not every line
+    assert any(isinstance(f, dict) and f["type"] == "done" for f in fr)    # the call goes on
+    for _ in range(40):                                                     # the push goes out beside the call
+        if pushes:
+            break
+        time.sleep(0.05)
+    assert len(pushes) == 1 and "cublas64_12.dll" in pushes[0][1] and pushes[0][0] == "Kairo's voice is slow right now"
+
+
+def test_a_call_on_the_gpu_has_no_warning(local, monkeypatch):
+    from app.voicelink import SLOW_LINE
+    pushes = _off_the_gpu(local, monkeypatch, whisper_ok=True)
+    with local.websocket_connect("/ws/voice") as ws:
+        ws.send_json({"type": "say", "text": "Hi, it's Kairo.", "turn": 1})
+        frames_until(ws)
+    assert [t for t, *_ in local.voice.spoken] == ["Hi, it's Kairo."] and SLOW_LINE not in str(local.voice.spoken)
+    assert pushes == []
+
+
+def test_the_voice_model_off_the_gpu_counts_too(local, monkeypatch):
+    from app.voicelink import SLOW_LINE
+    pushes = _off_the_gpu(local, monkeypatch, whisper_ok=True)
+    from app import gpu
+    monkeypatch.setattr(gpu, "llama_device", lambda path: {"device": "cpu", "layers": "0/31", "ok": False,
+                                                           "reason": "0/31 layers on the GPU"})   # tests/test_gpu.py: the log
+    with local.websocket_connect("/ws/voice") as ws:
+        ws.send_json({"type": "greet", "turn": 1})
+        frames_until(ws)
+    assert [t for t, *_ in local.voice.spoken][1] == SLOW_LINE
+    for _ in range(40):
+        if pushes:
+            break
+        time.sleep(0.05)
+    assert "voice model: 0/31 layers on the GPU" in pushes[0][1]
