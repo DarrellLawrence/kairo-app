@@ -21,39 +21,56 @@ PCM = b"\x10\x00" * 16000   # one second of (very quiet) audio at 16 kHz
 
 # ---------------------------------------------------------------- sentences
 
-def test_first_sentence_goes_as_soon_as_it_is_written():
+def test_the_first_clause_goes_at_once_then_whole_sentences():
+    """Owner's request 2026-10-17: the voice starts after the first clause or 5 words, not the whole reply."""
     s = voicelink.Sentences()
-    assert s.feed("Sure, I moved it") == []
-    assert s.feed(" to Friday. Then") == ["Sure, I moved it to Friday."]
-    assert s.feed(" I did. And") == []                       # later pieces are longer: fewer, while one plays
-    assert s.feed(" that was all for today, really. ") == ["Then I did. And that was all for today, really."]
+    assert s.feed("Sure") == []
+    assert s.feed(", I moved it") == ["Sure,"]
+    assert s.feed(" to Friday. Then") == []                  # later pieces are longer: fewer, while one plays
+    assert s.feed(" I did. And that was all for today, really. ") == [
+        "I moved it to Friday. Then I did. And that was all for today, really."]
     assert s.flush() == ""
 
 
-def test_abbreviations_and_dates_are_not_sentence_ends():
+def test_no_comma_means_the_first_five_words():
     s = voicelink.Sentences()
-    assert s.feed("Am 3. Oktober hast du z.B. Mathe bei Dr. Weber. ") == ["Am 3. Oktober hast du z.B. Mathe bei Dr. Weber."]
+    assert s.feed("Your next train leaves at") == []           # the 5th word may still be going on
+    assert s.feed(" 7.42 from platform 3. ") == ["Your next train leaves at"]
+    assert s.flush() == "7.42 from platform 3."
 
 
-def test_too_short_first_piece_waits_and_the_rest_is_flushed():
+def test_abbreviations_dates_and_times_are_not_ends():
     s = voicelink.Sentences()
-    assert s.feed("Ok. ") == []
+    assert s.feed("Dr. Weber") == []                           # "Dr." is no clause
+    assert s.feed(" says hi") == []
+    assert s.feed(" again today. ") == ["Dr. Weber says hi again"]
+    s = voicelink.Sentences()
+    assert s.feed("Am 3. Oktober hast du z.B. Mathe bei Dr. Weber. ") == ["Am 3. Oktober hast du"]
+    assert s.flush() == "z.B. Mathe bei Dr. Weber."
+    s = voicelink.Sentences()
+    assert s.feed("At 7.") == []                               # 7.42 still being written
+    assert s.feed("42 then") == []
+
+
+def test_a_short_answer_is_flushed_whole():
+    s = voicelink.Sentences()
+    assert s.feed("Ok. ") == ["Ok."]
     assert s.feed("It is on your calendar") == []
-    assert s.flush() == "Ok. It is on your calendar"
+    assert s.flush() == "It is on your calendar"
 
 
 def test_a_long_run_on_sentence_is_cut_so_the_voice_does_not_wait():
     s = voicelink.Sentences()
     text = "First this, " + "and then that and the other thing " * 8
     out = s.feed(text)
-    assert len(out) == 1 and 150 < len(out[0]) <= voicelink.LONG and text.startswith(out[0])
-    assert text.startswith(out[0] + " ")                 # cut between words
+    assert out[0] == "First this," and len(out) == 2 and 150 < len(out[1]) <= voicelink.LONG
+    assert text[len("First this, "):].startswith(out[1] + " ")   # cut between words
 
 
 def test_the_hang_up_marker_is_never_spoken():
     s = voicelink.Sentences()
-    assert s.feed("Thanks, that helps a lot. [[hang up]]") == ["Thanks, that helps a lot."]
-    assert s.flush() == ""
+    assert s.feed("Thanks, that helps a lot. [[hang up]]") == ["Thanks,"]
+    assert s.flush() == "that helps a lot."
     s = voicelink.Sentences()
     assert s.feed("Bye for now [[hang up]]") == [] and s.flush() == "Bye for now"
 
@@ -167,7 +184,8 @@ def test_a_spoken_turn_comes_back_as_text_and_audio(line):
     assert all(f["turn"] == 1 for f in fr if isinstance(f, dict))   # every frame says which turn it is
     done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
     assert done["server"]["stt_ms"] >= 0 and done["model"] == "haiku" and done["interrupted"] is False
-    assert line.voice.spoken == [("echo: (spoken, on a call) Remind me to call the dentist tomorrow", "en")]
+    assert " ".join(t for t, _ in line.voice.spoken) == "echo: (spoken, on a call) Remind me to call the dentist tomorrow"
+    assert line.voice.spoken[0] == ("echo:", "en")                  # the first clause goes to the voice at once
     msgs = line.get("/api/chat/messages").json()["messages"]
     assert [(m["role"], m["text"]) for m in msgs] == [
         ("owner", "(spoken, on a call) Remind me to call the dentist tomorrow"),

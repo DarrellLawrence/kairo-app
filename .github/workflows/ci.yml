@@ -65,6 +65,28 @@ jobs:
       - run: python -m pytest -o addopts="" tests/test_voice.py tests/test_voicelab.py tests/test_voice_rtc.py tests/test_outbound.py -s
         working-directory: server
 
+  # Owner's report 2026-10-17: the voice folder exactly as the installer builds it on kairo-home (Kairo.psm1
+  # Invoke-ToolPip: the voice packages, then onnxruntime-gpu with --no-deps), the models from app.voice,
+  # then the self-test's voice checks with Kairo's venv first and the folder appended. This path never
+  # ran in CI before (windows-install skips voice); a release that breaks it never reaches the PC.
+  voice-install-windows:
+    runs-on: windows-latest
+    env:
+      KAIRO_WHISPER_MODEL: base
+      KAIRO_WHISPER_CPU_MODEL: base
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/kairo-voice/voice-models
+          key: voice-install-models-${{ hashFiles('server/app/voice/__init__.py') }}
+      - name: Build the voice folder like the installer and check it
+        shell: powershell
+        run: installer\ci\Test-VoiceInstall.ps1 -Repo $env:GITHUB_WORKSPACE -Work (Join-Path $env:RUNNER_TEMP 'kairo-voice')
+
   # Voice V3 (owner's request 2026-10-16): a call over WebRTC on Windows, like kairo-home: a fake phone
   # (aiortc) sends real speech, the real Silero VAD and Smart Turn decide, the audio comes back; through
   # the app too (/api/rtc/offer, the fake voice model). Only the call's packages, pinned as on the PC.
@@ -225,7 +247,7 @@ jobs:
   # kairo-home installs (fix P2.11/12): every job must succeed; a skipped one blocks the release.
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [build, server, voice, voice-windows, browser, web, release-tools, windows-install]
+    needs: [build, server, voice, voice-windows, voice-install-windows, browser, web, release-tools, windows-install]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -389,6 +389,7 @@ export function startLine({ path = 'call', callId = null, on = {}, status = null
     level() { return cur?.level() || 0 },
     finish() { return cur?.finish() || false },
     say(text) { cur?.say(text) },
+    greet() { cur?.greet?.() },
     stop() { cur?.stop() },
     pause() { cur?.pause() },
     resume() { cur?.resume() },

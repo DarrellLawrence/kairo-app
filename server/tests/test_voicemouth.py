@@ -9,7 +9,7 @@ import json
 import pytest
 
 from app import bringup
-from app.voicemouth import FILLERS, STILL, Mouth, Unmark
+from app.voicemouth import FILLERS, LATER, Mouth, Unmark, small_talk
 
 
 class Speaker:
@@ -78,9 +78,9 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_small_talk_is_answered_by_the_voice_model_alone():
+def test_chat_is_answered_by_the_voice_model_alone_and_its_only_tool_is_ask_kairo():
     m, sp, brain = Model(text("Hey! ", "All good here.")), Speaker(), Brain()
-    r = run(mouth(m, brain).turn("hey, how are you?", "en", sp))
+    r = run(mouth(m, brain).turn("tell me something nice", "en", sp))
     assert sp.heard == "Hey! All good here." and r.text == "Hey! All good here." and r.asked == [] and brain.asked == []
     assert m.calls[0]["tools"][0]["function"]["name"] == "ask_kairo" and len(m.calls[0]["tools"]) == 1
     sysmsg = m.calls[0]["messages"][0]["content"]
@@ -109,10 +109,45 @@ def test_german_gets_a_german_filler():
     assert sp.said[0] in FILLERS["de"]
 
 
-def test_a_slow_brain_gets_one_still_on_it():
-    m, sp = Model(tool("check my mail"), text("Nothing new.")), Speaker()
-    run(mouth(m, Brain(delay=0.3), items=[], still_after_s=0.1).turn("check my mail", "en", sp))
-    assert sp.said == [FILLERS["en"][0], STILL["en"]]
+def test_claude_gets_8_seconds_on_a_call_then_kairo_gets_back_with_a_push():
+    """Owner's request 2026-10-17: one holding line, never "still on it"; after the cap Kairo says it will
+    get back, the call moves on, and the answer comes as a push (and in the next turn)."""
+    m = Model(tool("check my mail"), text("Sure, and your mail: nothing new."))
+    late = []
+    mo = mouth(m, Brain(answer="Nothing new in your mail.", delay=0.3), items=[], ask_timeout_s=0.1,
+               late=lambda req, ans: late.append((req, ans)))
+
+    async def go():
+        sp1 = Speaker()
+        r1 = await mo.turn("check my mail", "en", sp1)
+        await asyncio.sleep(0.4)                                    # Claude's answer comes after the call moved on
+        sp2 = Speaker()
+        r2 = await mo.turn("ok and what's next", "en", sp2)
+        return sp1, r1, sp2, r2
+    sp1, r1, sp2, r2 = run(go())
+    assert sp1.said == [FILLERS["en"][0], LATER["en"]] and r1.deferred and r1.tool_ms < 300
+    assert late == [("check my mail", "Nothing new in your mail.")]
+    assert "Nothing new in your mail." in m.calls[-1]["messages"][-1]["content"]   # said in the next turn too
+    assert len(m.calls) == 2                                        # no extra round after "I'll get back to you"
+
+
+def test_the_holding_line_is_said_once_a_turn():
+    m = Model(tool("a"), tool("b"), text("Done."))
+    sp = Speaker()
+    run(mouth(m, items=[]).turn("first a then b", "en", sp))
+    assert sp.said == [FILLERS["en"][0]]
+
+
+def test_small_talk_never_goes_to_claude():
+    for said in ("Hello", "hey Kairo!", "hi there", "how are you?", "thanks", "thank you so much", "okay cool",
+                 "bye", "good morning", "hallo", "wie geht's", "danke", "tschüss", "[14:05] hey"):
+        assert small_talk(said), said
+    for said in ("hey what's on tomorrow?", "remind me to call mom", "thanks, and when is my train?", "ok add milk",
+                 "hello can you check my mail", ""):
+        assert not small_talk(said), said
+    m, brain = Model(text("Hey! All good.")), Brain()
+    r = run(mouth(m, brain).turn("hello", "en", Speaker()))
+    assert m.calls[0]["tools"] is None and brain.asked == [] and r.route == "talk"
 
 
 def test_the_conversation_only_grows_at_the_end_so_the_cache_holds():
@@ -401,3 +436,18 @@ def test_talking_on_drops_the_speculation_and_a_changed_card_does_too():
     r = run(go())
     assert mo.speculation_used == 0 and len(m.calls) == 3 and r.text == "C"
     assert "rain at 15:00" in m.calls[2]["messages"][-1]["content"]
+
+
+def test_yes_to_a_question_kairo_asked_keeps_the_tool():
+    """ "Should I add that?" "Yes." must still be able to reach Claude; a plain "yes" otherwise is just chat."""
+    assert small_talk("yes") and not small_talk("yes", after_question=True)
+    assert small_talk("thanks", after_question=True)
+    m = Model(text("Should I add milk to your list?"), tool("add milk to the list"), text("Done, it's on the list."))
+    brain = Brain(answer="Added milk to the shopping list.")
+    mo = mouth(m, brain, items=[])
+
+    async def go():
+        await mo.turn("I'm out of milk", "en", Speaker())
+        return await mo.turn("yes", "en", Speaker())
+    r = run(go())
+    assert m.calls[1]["tools"] is not None and brain.asked and r.route == "claude"

@@ -61,8 +61,29 @@ MAX_SAY = 600    # a greeting spoken without the model
 _PHANTOM = re.compile(r"untertitel|amara\.org|subtitles by|captions by|copyright ©|\bzdf\b|swr 20\d\d", re.I)
 
 
+FIRST_WORDS = 5  # owner's request 2026-10-16/17: the voice starts after the first clause or 5 words
+
+
+def first_clause(text: str, words: int = FIRST_WORDS) -> int | None:
+    """Where the first piece of a reply may go to the voice while it is still being written: just after its
+    first comma / colon / semicolon / sentence end, or after `words` words. None: keep collecting. Only
+    with a space after it (in "at 7.42" the "7." isn't an end yet), and never at "Dr." or "3." (a date)."""
+    for m in re.finditer(r"[,;:.!?](?=\s)|\s", text):
+        piece = text[:m.end()].strip()
+        if not piece:
+            continue
+        if m.group(0) in ",;:!?":
+            return m.end()
+        if m.group(0) == "." and not _NOT_AN_END.search(text[max(0, m.start() - 6):m.start() + 1]):
+            return m.end()
+        if len(piece.split()) >= words and m.group(0).isspace():
+            return m.end()
+    return None
+
+
 class Sentences:
-    """Cuts an answer into pieces to speak while it is still being written."""
+    """Cuts an answer into pieces to speak while it is still being written: the first at its first clause
+    or 5 words (the voice starts at once), then whole sentences."""
 
     def __init__(self) -> None:
         self.buf = ""
@@ -71,7 +92,13 @@ class Sentences:
     def feed(self, delta: str) -> list[str]:
         self.buf += delta or ""
         out, start = [], 0
-        for m in _END.finditer(self.buf):
+        if self.count == 0:
+            at = first_clause(self.buf)
+            if at is None:
+                return []
+            out.append(self.buf[:at].strip())
+            start = at
+        for m in _END.finditer(self.buf, start):
             end = m.end()
             if m.group(0)[0] == "." and _NOT_AN_END.search(self.buf[max(start, m.start() - 6):m.start() + 1]):
                 continue

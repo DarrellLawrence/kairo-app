@@ -1,0 +1,11 @@
+# Owner's approval 2026-10-17: Kokoro (the English voice) on the GPU. ONNX Runtime's CUDA build replaces
+# the CPU build in the voice folder: pipecat-ai, kokoro-onnx, piper-tts and faster-whisper all ask for
+# "onnxruntime", and the GPU build is the same Python module. The installer (Kairo.psm1 Install-Voice)
+# installs this file after requirements-voice.txt with --no-deps --upgrade; it is part of the voice
+# folder's name, so a change here means a clean new folder. Windows only (kairo-home).
+# 1.24.x: pipecat-ai 1.12 needs onnxruntime ~= 1.24.3. CUDA 12, like the cuBLAS/cuDNN Whisper uses.
+onnxruntime-gpu==1.24.4; sys_platform == "win32"
+nvidia-cuda-runtime-cu12==12.9.79; sys_platform == "win32"
+nvidia-cuda-nvrtc-cu12==12.9.86; sys_platform == "win32"
+nvidia-cufft-cu12==11.4.1.4; sys_platform == "win32"
+nvidia-curand-cu12==10.3.10.19; sys_platform == "win32"

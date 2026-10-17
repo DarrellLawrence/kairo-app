@@ -581,9 +581,33 @@ function Repair-ToolAcl([string]$Dir) {
 # (<release>\<kind>-site.txt), so a rollback also goes back to the matching packages. A folder
 # is only used once it is complete, never half-installed. The record is written first: from
 # then on the release expects <kind>, so a failed install fails the self-test (= rollback).
+# SHA-256 of the files' bytes one after the other (one file: the same as Get-FileHash).
+function Get-FilesHash([string[]]$Files) {
+    $ms = New-Object System.IO.MemoryStream
+    foreach ($f in $Files) { $b = [System.IO.File]::ReadAllBytes($f); $ms.Write($b, 0, $b.Length) }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($ms.ToArray())) -replace '-', '') } finally { $sha.Dispose(); $ms.Dispose() }
+}
+
+# requirements-<kind>.txt plus its add-ons (requirements-<kind>-*.txt, e.g. voice-gpu), in name order:
+# all of them name the folder, so changing any of them installs a clean new one.
+function Get-ToolSiteFiles([string]$ReleaseDir, [string]$Kind) {
+    $server = Join-Path $ReleaseDir 'server'
+    $extra = @(Get-ChildItem -Path $server -Filter "requirements-$Kind-*.txt" -File -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })
+    return @((Join-Path $server "requirements-$Kind.txt")) + $extra
+}
+
+# The pip command for a tool folder (also run by CI's voice-install-windows job, so CI installs exactly
+# like the PC does). -NoDeps -Upgrade: an add-on that replaces a package already in the folder.
+function Invoke-ToolPip([string]$Py, [string]$Target, [string]$Requirements, [string]$What, [switch]$NoDeps) {
+    $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location')
+    if ($NoDeps) { $pipArgs += @('--no-deps', '--upgrade') }
+    Invoke-Checked $Py ($pipArgs + @('--target', $Target, '-r', $Requirements)) $What
+}
+
 function Install-ToolSite($P, [string]$ReleaseDir, [string]$Kind, [string]$What, [scriptblock]$AfterPip) {
     $req = Join-Path $ReleaseDir "server\requirements-$Kind.txt"
-    $hash = (Get-FileHash -Algorithm SHA256 $req).Hash.Substring(0, 12).ToLower()
+    $hash = (Get-FilesHash (Get-ToolSiteFiles $ReleaseDir $Kind)).Substring(0, 12).ToLower()
     $site = Join-Path $P.Tools "$Kind-$hash"
     Set-Content -Path (Join-Path $ReleaseDir "$Kind-site.txt") -Value $site -Encoding ASCII
     if (Test-Path (Join-Path $site '.complete')) { return $site }
@@ -591,8 +615,7 @@ function Install-ToolSite($P, [string]$ReleaseDir, [string]$Kind, [string]$What,
     $new = "$site.new"
     $py = Join-Path $ReleaseDir 'venv\Scripts\python.exe'
     Write-Note "Installing $What (once per package list)..."
-    Invoke-Checked $py @('-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', '--no-warn-script-location',
-                         '--target', $new, '-r', $req) "Installing $What"
+    Invoke-ToolPip $py $new $req "Installing $What"
     if ($AfterPip) { & $AfterPip $new $py | Out-Host }
     Repair-ToolAcl $new
     Set-Content -Path (Join-Path $new '.complete') -Value (Get-Date -Format o) -Encoding ASCII
@@ -640,8 +663,15 @@ function Remove-UnusedToolSites($P) {
 function Install-Voice($P, [string]$ReleaseDir) {
     if ($env:KAIRO_SKIP_VOICE -eq '1') { Write-Note 'Voice skipped (KAIRO_SKIP_VOICE=1).'; return $true }
     if (-not (Test-Path (Join-Path $ReleaseDir 'server\requirements-voice.txt'))) { return $true }
+    # Owner's approval 2026-10-17: Kokoro on the GPU. The CUDA build of ONNX Runtime replaces the CPU build
+    # the voice packages pulled in (same module); --no-deps: its CUDA DLLs are pinned in the file itself.
+    $gpu = {
+        param($new, $py)
+        $gpuReq = Join-Path $ReleaseDir 'server\requirements-voice-gpu.txt'
+        if (Test-Path $gpuReq) { Invoke-ToolPip $py $new $gpuReq 'Installing the voice GPU runtime' -NoDeps }
+    }
     try {
-        $site = Install-ToolSite $P $ReleaseDir 'voice' 'voice (speech recognition and voices, about 2 GB)' $null
+        $site = Install-ToolSite $P $ReleaseDir 'voice' 'voice (speech recognition and voices on the GPU, about 3 GB)' $gpu
         $models = Join-Path $site 'models'
         if (-not (Test-Path (Join-Path $models '.complete'))) {
             Use-KairoEnv $P

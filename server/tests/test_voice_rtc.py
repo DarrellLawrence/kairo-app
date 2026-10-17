@@ -21,7 +21,8 @@ from types import SimpleNamespace
 import pytest
 
 from app import voicertc
-from app.voicertc import OpenerCache, RtcSpeaker, Timeline, first_clause, offer_on_tailnet, on_tailnet
+from app.voicelink import first_clause
+from app.voicertc import OpenerCache, RtcSpeaker, Timeline, offer_on_tailnet, on_tailnet
 
 SPEECH = Path(__file__).parent / "fixtures" / "speech_en.wav"    # "Remind me to call the dentist tomorrow morning."
 
@@ -30,10 +31,12 @@ SPEECH = Path(__file__).parent / "fixtures" / "speech_en.wav"    # "Remind me to
 
 def test_the_first_piece_goes_at_the_first_clause_or_five_words():
     assert first_clause("Sure, I'll") == len("Sure,")
-    assert first_clause("Okay.") == len("Okay.")
+    assert first_clause("Okay. ") == len("Okay.")
+    assert first_clause("Okay.") is None                                 # maybe "Okay.5": wait for the space
     assert first_clause("Your next train leaves at") is None           # 5 words, but no space after the 5th yet
     assert first_clause("Your next train leaves at ") == len("Your next train leaves at ")
     assert first_clause("The 7.42") is None                              # a dot inside a number is no end
+    assert first_clause("Dr. Weber says ") is None
     assert first_clause("") is None
 
 
@@ -107,8 +110,8 @@ def test_the_opener_cache_keeps_short_lines_only():
     c = OpenerCache(speak)
     assert c.warm({"en": ("Sure,", "Okay."), "de": ("Klar,",)}) == 3
     assert c.get("  sure, ", "en") == (b"\x01\x00" * 10, 24000) and c.get("Sure,", "de") is None
-    c.put("This is a much longer sentence.", "en", b"", 24000)
-    assert c.get("This is a much longer sentence.", "en") is None
+    c.put("This is a much longer sentence, too long.", "en", b"", 24000)
+    assert c.get("This is a much longer sentence, too long.", "en") is None
     assert c.warm({"en": ("Sure,",)}) == 0 and len(made) == 3
 
 
@@ -188,7 +191,7 @@ def _phone_track(times: list[float]):
 
 
 async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_after, timeout=25.0, interrupt=None,
-                voice=None, openers=None):
+                voice=None, openers=None, greeting=None, first_message=None):
     """A fake phone calls Kairo over WebRTC on this machine. Returns what the phone saw."""
     import numpy as np
     from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -209,10 +212,14 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
             pass
 
     async def pings():
+        sent = False
         while True:
             await asyncio.sleep(0.5)
             if channel.readyState == "open":
                 channel.send("ping")
+                if first_message is not None and not sent:
+                    channel.send(json.dumps(first_message))
+                    sent = True
 
     @pc.on("track")
     def on_track(track):
@@ -233,7 +240,7 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
 
     await pc.setLocalDescription(await pc.createOffer())
     conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
-    call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers)
+    call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers, greeting=greeting)
     run = asyncio.get_running_loop().create_task(call.run())
     ans = conn.get_answer()
     await pc.setRemoteDescription(RTCSessionDescription(sdp=ans["sdp"], type=ans["type"]))
@@ -420,3 +427,21 @@ def test_without_the_voice_packages_the_phone_is_told_to_use_the_old_line(local,
     r = local.post("/api/rtc/offer", json={"sdp": "v=0\r\n", "type": "offer"})
     assert r.status_code == 409 and r.json()["detail"] == "not_installed"
     assert local.post("/api/rtc/offer", json={"type": "offer"}).status_code == 400
+
+
+def test_a_call_the_owner_places_opens_with_the_greeting_from_the_cache():
+    """Owner's request 2026-10-17: "Hey <first name>." at once: no voice made for it, no model."""
+    _needs_pipecat()
+
+    async def answer(text, language, number, speaker):
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    voice = FakeVoice()
+    openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 4800, 24000))
+    openers.warm({"en": ("Hey Sam.",)})
+    phone = asyncio.run(_call(answer, times=(30.0,), voice=voice, openers=openers, greeting="Hey Sam.",
+                              first_message={"type": "greet"},
+                              wait_for=lambda p: any(e.get("type") == "say" for e in p.events), timeout=15))
+    said = [e["text"] for e in phone.events if e.get("type") == "say"]
+    assert said == ["Hey Sam."] and voice.spoken == []          # from the cache: nothing synthesized

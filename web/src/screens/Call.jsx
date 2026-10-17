@@ -128,6 +128,7 @@ export default function Call({ callId: initialId, onClose }) {
     if (greet) await api(`/api/voice/calls/${idRef.current}/answer`, { method: 'POST', body: {} }).catch(() => {})
     await voice.ready
     if (greet && l.on) voice.say(call?.opening || 'Hi, it’s Kairo.')
+    else if (l.on) voice.greet()                     // a call you placed: "Hey <name>." at once
   }
 
   const answer = () => {

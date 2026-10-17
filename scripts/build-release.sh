@@ -36,7 +36,7 @@ root="$stage/$name"
 mkdir -p "$root/app/server" "$root/app/web" "$root/installer"
 
 echo "==> Staging $name"
-cp -r server/app server/mcp_kairo server/hooks server/migrations server/tools server/alembic.ini server/requirements.txt server/requirements-voice.txt server/requirements-browser.txt server/requirements-memory.txt "$root/app/server/"
+cp -r server/app server/mcp_kairo server/hooks server/migrations server/tools server/alembic.ini server/requirements.txt server/requirements-voice.txt server/requirements-voice-gpu.txt server/requirements-browser.txt server/requirements-memory.txt "$root/app/server/"
 cp -r web/dist "$root/app/web/dist"
 cp -r config "$root/app/config"
 cp installer/*.ps1 installer/*.psm1 installer/versions.json "$root/installer/"

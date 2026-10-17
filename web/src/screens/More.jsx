@@ -714,12 +714,57 @@ const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 100
 // p50 / p95 per step for this version and the one before, the targets, and the last turns.
 const NET = { direct: 'Direct', relay: 'Through Tailscale’s relay', unknown: 'Not known' }
 
+// Owner's request 2026-10-17: where each part of the voice runs; anything off the GPU is red with its reason.
+const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', piper: 'German voice (Piper)' }
+const LINE_WHY = { not_installed: 'the call packages aren’t on the PC yet', voice_missing: 'speech to text isn’t installed', no_tailnet: 'the PC has no Tailscale address right now' }
+
+function VoiceDevices({ dev }) {
+  if (!dev) return null
+  const line = dev.line || {}
+  const onRtc = line.last_turn === 'webrtc'
+  const mb = (v) => (v == null ? '–' : `${(v / 1024).toFixed(1)} GB`)
+  return (
+    <>
+      <SectionTitle>Line</SectionTitle>
+      <List>
+        <ListRow icon={<IconPulse />} title={line.last_turn ? `Last call turn: ${onRtc ? 'WebRTC' : 'old line (upload)'}` : 'No call turn yet'}
+          subtitle={line.webrtc_ready ? 'The PC takes calls over WebRTC' : `Calls use the old line: ${LINE_WHY[line.reason] || line.reason || '?'}`}
+          value={<Badge tone={onRtc ? 'ok' : 'danger'} pop={false}>{onRtc ? 'WebRTC' : 'Old line'}</Badge>} />
+      </List>
+      <SectionTitle>Where the voice runs</SectionTitle>
+      <List>
+        {Object.entries(PARTS).map(([k, title]) => {
+          const c = dev.components?.[k]
+          if (!c) return null
+          const where = c.device === 'cuda' || c.device === 'gpu' ? 'GPU' : c.device === 'cpu' ? 'CPU' : '–'
+          const bits = [c.model, c.layers ? `${c.layers} layers` : null, c.loaded ? 'loaded' : 'not loaded',
+            c.load_ms != null ? `load ${secs(c.load_ms)}` : null, c.warm_ms != null ? `warm-up ${secs(c.warm_ms)}` : null].filter(Boolean)
+          return (
+            <ListRow key={k} icon={c.ok ? <IconBolt /> : <IconWarn />} title={title}
+              subtitle={c.ok ? bits.join(' · ') : `${c.reason || 'not on the GPU'} · ${bits.join(' · ')}`}
+              value={<Badge tone={k === 'piper' ? 'neutral' : c.ok ? 'ok' : 'danger'} pop={false}>{where}</Badge>} />
+          )
+        })}
+        {dev.gpu ? (
+          <ListRow icon={<IconPulse />} title={`${dev.gpu.name}: ${mb(dev.gpu.used_mb)} of ${mb(dev.gpu.total_mb)}`}
+            subtitle={(dev.gpu.processes || []).map((p) => `${p.kairo || p.name} ${p.used_mb != null ? mb(p.used_mb) : '?'}`).join(' · ') || `driver ${dev.gpu.driver}`} />
+        ) : (
+          <ListRow icon={<IconWarn />} title="Graphics card not visible" subtitle="nvidia-smi didn’t answer for Kairo’s account"
+            value={<Badge tone="danger" pop={false}>?</Badge>} />
+        )}
+      </List>
+    </>
+  )
+}
+
 function VoiceSpeedPage() {
   const [rep, setRep] = useState(null)
   const [net, setNet] = useState(null)
+  const [dev, setDev] = useState(null)
   const load = useCallback(() => {
     api('/api/voice/turns?days=7').then(setRep).catch(() => setRep({ versions: [], recent: [] }))
     api('/api/rtc?network=1').then(setNet).catch(() => setNet(null))
+    api('/api/voice/devices').then(setDev).catch(() => setDev(null))
   }, [])
   useEffect(() => { load() }, [load])
   if (!rep) return <Page title="Voice speed"><SkeletonCard lines={6} /></Page>
@@ -727,6 +772,7 @@ function VoiceSpeedPage() {
   const pathsOf = (v) => Object.entries(v?.paths || {})
   return (
     <Page title="Voice speed" onRefresh={load}>
+      <VoiceDevices dev={dev} />
       {!now ? <p className="k-muted k-small k-pad">No turns measured yet: talk to Kairo (Chat or a call) and come back.</p> : null}
       {pathsOf(now).map(([path, p]) => {
         const tgt = rep.targets?.[path] || {}

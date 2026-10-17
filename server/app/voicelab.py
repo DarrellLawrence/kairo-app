@@ -232,6 +232,7 @@ async def _run_model(vm: VoiceModel, temperature: float) -> dict:
             last = next((ln[7:] for ln in reversed(lines) if ln.startswith("Owner: ")), "")
             return _answers.get(last) or ("Done." if _lang == "en" else "Erledigt."), False
         mouth = Mouth(vm, ask=brain, context=dict(LAB_CARD), items=LAB_ITEMS, name="Sam", temperature=temperature,
+                      ask_timeout_s=120,     # the lab scores Claude's answers: no call cap here
                       clock=lambda: dt.datetime(2026, 10, 16, 6, 55))
         for i, case in enumerate(cases):
             ear = _Ear()
