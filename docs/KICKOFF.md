@@ -670,8 +670,8 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   the owner said to a raised topic goes to Claude during the call (owner's decision 2026-10-16): with
   the turn's own ask_kairo when there is one (no extra wait), else right after that turn (done →
   closed, later → snoozed, new information → saved), so later questions on the call get the new state.
-- **VRAM (12 GB):** Whisper large-v3-turbo ~2 GB, the voice model 2–6.5 GB, Kokoro/Piper and Smart
-  Turn on the CPU, the memory embeddings on the CPU once a voice model is installed, CUDA contexts
+- **VRAM (12 GB):** Whisper large-v3-turbo ~2 GB, the voice model 2–6.5 GB, Kokoro on the GPU too
+  (onnxruntime-gpu in the voice folder, owner's approval 2026-10-17), Piper and Smart Turn on the CPU, the memory embeddings on the CPU once a voice model is installed, CUDA contexts
   and the desktop ~1.5 GB. The lab reports what each candidate really uses.
 - **Kyutai** (streaming STT + TTS, English/French only) is measured by the lab against Whisper +
   Kokoro when the owner asks for it (its own Python, ~10 GB); Moshi is never the mouth (it can't take
@@ -689,6 +689,11 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   Claude) → Kokoro/Piper from the first clause (~5 words), short openers and holding lines from a
   cache. Talk-over stops the audio at once. The old line (/ws/voice) stays as the fallback (no
   voice packages, WebRTC can't connect).
+- **On a call (owner's request 2026-10-17):** small talk (hello, thanks, bye) never goes to Claude;
+  Claude gets 8 s, then Kairo says "I'll get back to you" once and the answer comes as a push (and in
+  the next turn); the holding line at most once a turn; a call the owner places opens with "Hey <first
+  name>." from the cache; Voice speed shows where each part runs (GPU or CPU, never a silent fallback)
+  and which line the call used.
 - **WebRTC on the tailnet only (owner's decision 2026-10-16):** the call's audio goes as UDP
   directly between the phone's and the PC's Tailscale addresses, not through tailscale serve. The
   PC offers only its tailnet addresses, takes only the phone's tailnet candidates, asks no

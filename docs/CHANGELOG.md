@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-17 — build: voice on the GPU (owner's report from the iPhone)
+- Found: the PC never got the last two updates (still 7a7a554). And a bug that very likely put Whisper on the processor since 14 Oct: it looked for its CUDA files only in a folder named "voice", but the voice packages moved to "voice-<number>". Fixed: it looks in the real folder. Voice speed now shows whether that was it.
+- Kokoro (the English voice) runs on the graphics card too (onnxruntime-gpu, your approval 2026-10-17). Whisper and Kokoro load once when Kairo starts and run once to warm up; no turn waits for a model.
+- Voice speed, on top: which line your last call used (WebRTC or the old line, and why) and where each part runs: Whisper, Kokoro, the voice model (layers on the GPU), the German voice, and the graphics card's memory. Anything on the processor is red with the reason. Kairo also sends one push when it starts with the voice on the processor. Run diagnosis lists the same.
+- On a call: "hello", "thanks", "bye" are answered by the voice model without Claude (no tool offered at all). Claude gets 8 seconds; then Kairo says "I'll get back to you." once and the call goes on; the answer comes as a push and in your next turn. The holding line at most once a turn; no more "still on it".
+- A call you place opens with "Hey <your first name>." at once (made once, played from the cache).
+- The old line also starts the voice after the first clause or 5 words.
+- Updates: the voice folder is now built in CI exactly as the installer builds it on the PC, then checked; releases wait for it. The auto-update notes every 5 minutes what it is waiting for and which versions failed (C:\Kairo\status\updater.json, in Run diagnosis).
+- Acceptance test 42: voice on the GPU.
+- Removed: "Still on it." and the first-sentence-only cut on the old line.
+
 ## 2026-10-16 — build: Voice V3, speed (owner's request)
 - Calls and the voice button now go over WebRTC, built on Pipecat: your iPhone sends its mic straight to the PC over Tailscale (Opus, the iPhone's echo cancellation) and plays Kairo's voice from the same connection. Talking over Kairo stops it at once, and it doesn't hear itself.
 - The PC decides when you're done: a 0.2 s pause, then Smart Turn v3 (a turn model) checks whether the thought is complete; if not, it waits up to 0.5 s more. Whisper writes your words down at that first pause, so the text is ready when the turn ends.
