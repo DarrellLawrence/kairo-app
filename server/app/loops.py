@@ -580,7 +580,8 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=
             _, created = upsert(s, kind="deadline" if due else "task", source="task", ref=tid, what=t.title, due=due,
                                 since=aware(t.created_at), now=now, tz=tz, times=times)
             counts["new"] += created
-    for e in s.exec(select(SchoolEvent).where(SchoolEvent.date >= utcnow() - dt.timedelta(days=1))
+    # the caller's clock, not the machine's (a test day, a brief planned ahead)
+    for e in s.exec(select(SchoolEvent).where(SchoolEvent.date >= now.astimezone(dt.timezone.utc) - dt.timedelta(days=1))
                     .where(SchoolEvent.date <= horizon)).all():
         if e.kind in ("test", "deadline"):
             study = s.exec(select(OpenLoop).where(OpenLoop.source == "study").where(OpenLoop.source_ref == str(e.id))).first()
