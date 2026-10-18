@@ -494,8 +494,12 @@ $v7 = "$v1-ci7"
 Check ((Invoke-AutoUpdate "v$v7" '[urgent] CI' (Join-Path $work 'not-there.zip')) -ne 0) 'a failed download reports failure'
 $us = Get-UpdaterStateObj
 Check ((Get-StateObj).current -eq $v4 -and -not (@($us.failed) -contains $v7) -and $us.retry.version -eq $v7 -and [int]$us.retry.attempts -eq 1) 'a hiccup is not blacklisted: retried later'
+$note = Get-Content -Raw (Join-Path $Root 'status\last-update.json') | ConvertFrom-Json
+Check ($note.message -match "$v7 didn't install \(try 1\): .+\. Still on $v4; next try in 10 minutes") "every failed try is noted for the iPhone push, with the reason ($($note.message))"
 $logLines = @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count
 Check ((Invoke-AutoUpdate "v$v7" '[urgent] CI' (Join-Path $work 'not-there.zip')) -eq 0 -and @(Get-Content (Join-Path $Root 'updater\auto-update.log')).Count -eq $logLines) 'the retry waits (10 minutes first)'
+$upd = Get-Content -Raw (Join-Path $Root 'status\updater.json') | ConvertFrom-Json
+Check ($upd.installed -eq $v4 -and [int]$upd.retry.attempts -eq 1 -and [datetime]$upd.at -gt (Get-Date).AddMinutes(-5)) 'each run leaves status\updater.json for Kairo (a stopped auto-update is a push)'
 
 # ---- a manual rollback sticks (fix P2.13)
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Rollback-Kairo.ps1') -CI -Root $Root | Out-Host

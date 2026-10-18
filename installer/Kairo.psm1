@@ -109,11 +109,14 @@ function Save-State($P, $State) {
 # hold:   a manual rollback left this version; it and older ones are not installed again (fix P2.13).
 # retry:  {version, attempts, next}: a hiccup (download, network) is retried later, never blacklisted.
 function Read-UpdaterState($P) {
-    $s = @{ etag = ''; release = $null; failed = @(); waiting = ''; down_since = ''; hold = ''; retry = $null }
+    $s = @{ etag = ''; release = $null; failed = @(); waiting = ''; down_since = ''; hold = ''; retry = $null; pending = $null; error = $null }
     $path = Join-Path $P.Updater 'state.json'
     if (Test-Path $path) {
-        $j = Get-Content -Raw $path | ConvertFrom-Json
-        foreach ($k in @('etag', 'release', 'waiting', 'down_since', 'hold', 'retry')) { if ($j.PSObject.Properties[$k]) { $s[$k] = $j.$k } }
+        # A broken state file would stop every update without a word: put it aside and start fresh (a release
+        # that failed before is then tried once more, and noted again if it fails).
+        try { $j = Get-Content -Raw $path | ConvertFrom-Json } catch { $j = $null }
+        if ($null -eq $j) { Move-Item -Force $path "$path.bad"; return $s }
+        foreach ($k in @('etag', 'release', 'waiting', 'down_since', 'hold', 'retry', 'pending', 'error')) { if ($j.PSObject.Properties[$k]) { $s[$k] = $j.$k } }
         if ($j.PSObject.Properties['failed']) { $s.failed = @($j.failed | Where-Object { $_ }) }
     }
     return $s

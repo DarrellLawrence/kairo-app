@@ -174,3 +174,23 @@ def test_starts_the_installer_planned_are_not_a_crash_loop(watch):
     for _ in range(4):
         health.record_start(watch.settings.data_dir, later)
     assert "restarted 4 times" in watch.run(full=False, now=later)["crash_loop"]
+
+
+def test_an_auto_update_that_stopped_running_is_a_push(watch):
+    """Owner's rule 2026-10-17: an update that fails is never silent. The auto-update notes its own
+    failures; a stopped one can't, so Kairo watches its status\\updater.json (written every 5 minutes)."""
+    now = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)      # Kairo has been up a while
+    note = watch.settings.data_dir.parent / "status" / "updater.json"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    assert "updates" not in watch.run(full=False, now=now)              # no file yet (older install): no alarm
+    note.write_bytes(b"\xef\xbb\xbf" + json.dumps({"at": (now - dt.timedelta(minutes=10)).isoformat()}).encode())
+    assert "updates" not in watch.run(full=False, now=now)
+    note.write_text(json.dumps({"at": (now - dt.timedelta(hours=3)).astimezone().isoformat()}), encoding="ascii")
+    problems = watch.run(full=False, now=now)
+    assert "hasn't run for 3 hours" in problems["updates"] and "Update Kairo" in problems["updates"]
+    assert len(watch.pusher.sent) == 1 and "auto-update" in watch.pusher.sent[0]["body"]
+    woke = now + dt.timedelta(hours=8)                                  # the PC slept: the updater gets its grace
+    assert "updates" not in watch.cheap(woke)
+    assert "updates" not in watch.cheap(woke + dt.timedelta(minutes=10))     # checked every 5 minutes
+    assert "updates" in watch.cheap(woke + dt.timedelta(minutes=21))          # still not run after the grace
+

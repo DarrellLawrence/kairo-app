@@ -54,6 +54,12 @@ def test_the_updaters_note_is_pushed_once_without_writing_to_it(migrated, monkey
     hk.update_notice()
     assert sent[-1] == "Kairo updated to 2026.10.16."
 
+    why = ("Kairo 2026.10.17.1100-abc1234 didn't install (try 2): the voice folder could not be built: pip failed "
+           "installing onnxruntime-gpu==1.24.4 (No space left on device). Still on 2026.10.16.1104-7a7a554; next try in 30 minutes.")
+    _write(note, {"message": why, "ok": False, "at": "2026-10-17T11:00:00", "notified": False})
+    hk.update_notice()
+    assert sent[-1] == why                                # the reason is never cut off (owner's rule 2026-10-17)
+
 
 def test_voice_models_move_next_to_the_packages_once_complete(tmp_path):
     data, site = tmp_path / "data", tmp_path / "tools" / "voice-abc"

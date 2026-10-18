@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-17 — build: failed updates always push; a slow voice says so (owner's rules)
+- Every update that fails now sends a push with the reason, every time: each failed try (with the try number and when the next one comes), an update that was undone (with the check that failed), a new version still waiting after 3 hours outside the quiet hours (and why: a chat, a job, a call), an error in the auto-update that lasts 30 minutes (then every 6 hours), and a missing GitHub token. Before, only an undone update and the 3rd failed try pushed; errors and endless waiting were silent.
+- Kairo also watches the auto-update itself: if it hasn't run for 30 minutes (its task is off or it breaks before it starts), that's a push and a red chip on Today.
+- A broken auto-update memory file no longer stops all updates: it is set aside and the auto-update starts fresh.
+- Update pushes are no longer cut at 200 characters, so the reason fits.
+- A voice part off the graphics card no longer goes unnoticed on a call: the call goes ahead, Kairo says once at its start "Heads up: my voice is slow right now, there's a GPU problem. I've sent you the details." and pushes which part and why. Same check as the push when Kairo starts.
+- Removed: the "only on the 3rd try" rule for update pushes.
+
 ## 2026-10-17 — build: voice on the GPU (owner's report from the iPhone)
 - Found: the PC never got the last two updates (still 7a7a554). And a bug that very likely put Whisper on the processor since 14 Oct: it looked for its CUDA files only in a folder named "voice", but the voice packages moved to "voice-<number>". Fixed: it looks in the real folder. Voice speed now shows whether that was it.
 - Kokoro (the English voice) runs on the graphics card too (onnxruntime-gpu, your approval 2026-10-17). Whisper and Kokoro load once when Kairo starts and run once to warm up; no turn waits for a model.

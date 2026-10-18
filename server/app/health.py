@@ -2,7 +2,7 @@
 
 Every 5 minutes (cheap, local): Claude logged out or out of usage, Kairo's tools not connected or the
 self-test failed, less than 10 GB free, Syncthing conflict copies in the vault, a crash loop (more than
-3 starts in an hour). Every hour (they go over the network): Google with a real API call (read: Gmail
+3 starts in an hour), the auto-update not running for 30 minutes. Every hour (they go over the network): Google with a real API call (read: Gmail
 profile; write: a token refresh, like the 7-day check), and Tailscale end to end (this PC calls its own
 https://<name>.ts.net/health, the way the iPhone does; any answer means the tailnet path works).
 
@@ -34,7 +34,9 @@ CHEAP_EVERY_S = 5 * 60
 FULL_EVERY_S = 60 * 60
 HOURLY = ("google_read", "google_write", "tailscale")
 # Shown on Today from here; Claude, tools and the self-test are already checked live there.
-TODAY_KEYS = ("google_read", "google_write", "tailscale", "disk", "conflicts", "crash_loop")
+TODAY_KEYS = ("google_read", "google_write", "tailscale", "disk", "conflicts", "crash_loop", "updates")
+UPDATER_STALE_MIN = 30   # the auto-update runs every 5 minutes (as SYSTEM) and writes status\updater.json each time
+UPDATER_GRACE_MIN = 20   # just after Kairo starts (the PC woke up) the updater may not have run yet
 
 
 def _now() -> dt.datetime:
@@ -115,6 +117,8 @@ class HealthWatch:
         self.settings, self.engine, self.runner, self.pusher = settings, engine, runner, pusher
         self.transport = transport or (lambda: None)
         self._http_get = http_get or (lambda url: httpx.get(url, timeout=10, follow_redirects=False))
+        self._started = _now()
+        self._checked: dt.datetime | None = None
 
     # -- cheap, local
 
@@ -152,7 +156,35 @@ class HealthWatch:
         starts = starts_last_hour(self.settings.data_dir, now)
         if starts > CRASH_STARTS:
             out["crash_loop"] = crash_loop_text(starts)
+        now = now or _now()
+        if self._checked is not None and (now - self._checked).total_seconds() > 3 * CHEAP_EVERY_S:
+            self._started = now              # the PC slept (or Kairo hung): the updater gets its grace again
+        self._checked = now
+        stale = self._updater_stopped(now)
+        if stale:
+            out["updates"] = stale
         return out
+
+    def _updater_stopped(self, now: dt.datetime) -> str | None:
+        """Owner's rule 2026-10-17: an update that fails is never silent. The auto-update notes its own
+        failures for the push; this catches the one it can't: it stopped running (its task is off, or the
+        script breaks before it starts)."""
+        from . import status_files
+        note = status_files.read_json(self.settings.data_dir, "updater.json")
+        if not isinstance(note, dict) or not note.get("at"):
+            return None                      # an install from before 2026-10-17, or a PC without the updater
+        try:
+            at = dt.datetime.fromisoformat(str(note["at"]).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if at.tzinfo is None:
+            at = at.astimezone()             # local time on the PC
+        mins = (now - at).total_seconds() / 60
+        if mins < UPDATER_STALE_MIN or (now - self._started).total_seconds() / 60 < UPDATER_GRACE_MIN:
+            return None
+        ago = f"{int(mins // 60)} hours" if mins >= 120 else f"{int(mins)} minutes"
+        return (f"The auto-update hasn't run for {ago}, so new versions don't arrive. "
+                "On the PC: Start menu -> Kairo -> Update Kairo shows why.")
 
     # -- hourly, over the network ("unknown" leaves the last result as it was)
 

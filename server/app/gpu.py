@@ -18,6 +18,11 @@ _DEVICE = re.compile(r"using device (CUDA\d+) \(([^)]+)\)")
 _RUN = re.compile(r"build: \d+")          # every llama-server start logs its build first
 
 
+def present() -> bool:
+    """An NVIDIA driver is installed (nvidia-smi comes with it): the voice is meant to run on the GPU here."""
+    return shutil.which("nvidia-smi") is not None
+
+
 def _smi(args: list[str]) -> list[list[str]] | None:
     exe = shutil.which("nvidia-smi")
     if not exe:

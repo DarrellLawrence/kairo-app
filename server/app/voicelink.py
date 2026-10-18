@@ -57,6 +57,9 @@ NEXT_MIN = 40    # later pieces are made while the one before plays: fewer, long
 LONG = 220       # no sentence end for this long: cut at a comma (or a space) so the voice doesn't wait
 HANG_UP = re.compile(r"\s*\[\[hang up\]\]\s*", re.I)   # a learning call's last turn; never spoken
 MAX_SAY = 600    # a greeting spoken without the model
+# Owner's decision 2026-10-17: a voice off the GPU never blocks a call; it is said once when the call starts
+# (after the greeting or the call's opening), and the reason goes to the phone as a push.
+SLOW_LINE = "Heads up: my voice is slow right now, there's a GPU problem. I've sent you the details."
 # What Whisper "hears" in a breath or room noise: subtitle credits from its training data. Never the owner.
 _PHANTOM = re.compile(r"untertitel|amara\.org|subtitles by|captions by|copyright ©|\bzdf\b|swr 20\d\d", re.I)
 

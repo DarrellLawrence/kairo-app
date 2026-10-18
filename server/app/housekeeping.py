@@ -109,7 +109,8 @@ class Housekeeping:
                 pending.append((own, data))
         if not pending:
             return
-        self._push(" ".join(str(d.get("message") or "Kairo was updated.") for _, d in pending)[:200])
+        # Owner's rule 2026-10-17: a failed update says why; the reason must fit (it was cut at 200).
+        self._push(" ".join(str(d.get("message") or "Kairo was updated.") for _, d in pending)[:500])
         for path, data in pending:
             if path is None:
                 with Session(self.app.state.health.engine) as s:
