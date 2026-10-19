@@ -126,9 +126,10 @@ class VoiceNotes:
         if self.recall is not None:
             system += await asyncio.to_thread(self.recall, text)
         parts, final, error, new_sid = [], None, None, None
+        model = self.pick_model("voice_note")
         async for ev in self.runner.stream(f"(voice note) {text}", session_id=session_id, system=system + RULES,
                                            tools=self.tools, origin="voice_note", thread_id=tid, purpose="voice_note",
-                                           model=self.pick_model("voice_note")):
+                                           model=model, reason=None if model == "haiku" else "settings"):
             if ev.kind is EventKind.session and ev.session_id:
                 new_sid = ev.session_id
             elif ev.kind is EventKind.text:

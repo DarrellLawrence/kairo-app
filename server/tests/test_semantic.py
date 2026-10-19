@@ -206,6 +206,28 @@ def test_chat_searches_memory_before_answering(migrated):
     assert not any("memory search for this message" in s for s in stub.systems)
 
 
+def test_short_replies_are_never_a_search():
+    """Acceptance #19: "leave it" is exactly MIN_QUERY_CHARS long, so it was searched and pulled in notes about
+    something else. Short replies and commands mean something in the conversation, not in the notes."""
+    for text in ("leave it", "Leave it.", "ok thanks", "lass es", "vergiss es!", "ok, drop it", "ok"):
+        assert not semantic.worth_searching(text), text
+    for text in ("my goals", "When is my Boxing training?", "leave it on the calendar for Friday"):
+        assert semantic.worth_searching(text), text
+
+
+def test_leave_it_on_a_call_is_not_searched_either(migrated):
+    app = create_app(migrated)
+    asked = []
+    app.state.memory.search = lambda q, k=5: asked.append(q) or []
+    app.state.runner.stream = StubRunner().stream
+    with TestClient(app) as c, c.websocket_connect("/ws/chat") as ws:
+        for text in ("(spoken, on a call) What's still open with the lab report?", "(spoken, on a call) leave it"):
+            ws.send_json({"type": "message", "text": text})
+            while ws.receive_json()["type"] not in ("done", "error"):
+                pass
+    assert asked == ["What's still open with the lab report?"]          # without Kairo's "(spoken...)" in front
+
+
 def test_personality_says_to_name_the_note():
     from app.settings import REPO_ROOT
     text = (REPO_ROOT / "config" / "personality.md").read_text(encoding="utf-8")
