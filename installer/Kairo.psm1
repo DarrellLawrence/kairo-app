@@ -869,7 +869,12 @@ function Remove-OldReleases($P, $State, [int]$Keep = 3) {
     $n = 0
     foreach ($d in $all) {
         $n++
-        if ($n -le $Keep -or $keepSet -contains $d.Name) { continue }
+        if ($n -le $Keep -or $keepSet -contains $d.Name) {
+            # Releases of 2026-10-19 carried the owner's profile once; it lives in the vault now (owner's decision).
+            $priv = Join-Path $d.FullName 'private'
+            if (Test-Path -LiteralPath $priv) { Remove-Item -LiteralPath $priv -Recurse -Force; Write-Note "removed private\ from release $($d.Name)" }
+            continue
+        }
         Remove-Item -Recurse -Force $d.FullName
         Write-Note "removed old release $($d.Name)"
     }

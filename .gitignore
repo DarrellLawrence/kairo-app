@@ -9,3 +9,5 @@ web/dist/
 *.pyc
 node_modules/
 dist/
+# The owner's profile lives only in the vault on the PC (owner's decision 2026-10-19), never here.
+private/

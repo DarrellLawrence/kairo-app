@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-19 — build: your profile only in the vault (your decision)
+- Your profile file is out of the repo and out of the release. Kairo imported it once on your PC (Run diagnosis showed it); it lives only in the vault there (10 Profile/), which every chat reads. `private/` is ignored by git, and a test fails if it ever comes back.
+- On the next update your PC also deletes the copy inside the older Kairo versions it keeps for going back.
+- Removed: the one-time import from the release (Kairo's start no longer looks for the file) and its CI switch. To change your profile now: send the file in chat and say "save this to my profile"; only that reaches the people, coach and calendar settings, editing the vault copy by hand doesn't.
+- Still on GitHub: the git history and the releases published while the file was in them. Deleting those releases is listed in the PR; the history needs a rewrite plus GitHub Support, only if you ask for it.
+
 ## 2026-10-19 — build: the update really switches; the voice back on the GPU (owner's diagnosis)
 - Found: your PC said "Kairo updated to e9f997a, ok" but kept running 7a7a554. The new version started (its voice warm-up is in the log), but the old server still held Kairo's port, so the health check and the self-test talked to the old one. Now the installer stops every Kairo server, also one the task no longer knows (found by its command line or by the port), never restarts the old code before the switch, and only counts an update when /health reports the new version; another version answering is stopped once, and if it's still not the new one, the update is undone and pushed. e9f997a was the newest release; there was nothing newer.
 - New: if the installed version isn't the one running for 10 minutes, that's a red chip on Today and a push. Run diagnosis shows installed vs running.

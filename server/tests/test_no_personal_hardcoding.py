@@ -14,13 +14,16 @@ FAKE = {"someone.else@gmail.com", "lea@gmail.com"}   # made up, used by the test
 EMAIL = re.compile(r"[a-z0-9._%+-]+@([a-z0-9-]+\.)+[a-z]{2,}", re.I)
 
 
-PRIVATE = "private/"   # owner's decision 2026-10-19: their own profile, in the private repo on purpose; never scanned or printed
-
-
 def tracked_files():
     out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=REPO_ROOT,
                          capture_output=True, text=True, check=True).stdout
-    return [p for p in out.splitlines() if p and not p.startswith(PRIVATE)]
+    return [p for p in out.splitlines() if p]
+
+
+def test_the_owners_profile_is_not_in_the_repo_or_the_release():
+    """Owner's decision 2026-10-19: once imported on the PC, the profile lives only in the vault there."""
+    assert not [p for p in tracked_files() if p.startswith("private/")]
+    assert "private" not in (REPO_ROOT / "scripts" / "build-release.sh").read_text(encoding="utf-8")
 
 
 def test_repo_profile_is_placeholders_only():

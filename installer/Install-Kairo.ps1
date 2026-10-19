@@ -99,8 +99,6 @@ try {
             CLAUDE_CONFIG_DIR = $P.ClaudeConfig
             KAIRO_PORT        = '8000'
         }
-        # CI installs the same zip with a fake Claude: never the owner's profile import there (2026-10-19).
-        if ($CI) { $envValues['KAIRO_PROFILE_SEED'] = '0' }
         # Vault sync: nice to have, never a reason for the install to fail.
         $sync = @{ ready = $false }
         try { [void](Install-Syncthing $P); $sync.ready = $true } catch { Write-Warn "Vault sync not set up: $($_.Exception.Message.Trim())" }

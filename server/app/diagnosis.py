@@ -418,8 +418,8 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
 
 
 def _owner_profile(r: _Report, c: sqlite3.Connection, vault_dir: Path) -> None:
-    """Owner's request 2026-10-19: proof that the profile shipped with the release is in. Counts only."""
-    r.h("Owner profile (shipped with the release, imported by Kairo)")
+    """Owner's request 2026-10-19: proof that the owner's profile is in. Counts only."""
+    r.h("Owner profile")
 
     def setting(key: str):
         try:
@@ -427,13 +427,11 @@ def _owner_profile(r: _Report, c: sqlite3.Connection, vault_dir: Path) -> None:
             return json.loads(row[0]) if row and row[0] else None
         except (sqlite3.Error, ValueError):
             return None
-    seed = setting("profile.seed") or {}
+    seed = setting("profile.seed") or {}   # the one import of the profile the releases of 2026-10-19 carried
     if seed:
         n = seed.get("counts") or {}
-        r.add(f"  imported {seed.get('at')}: {len(seed.get('sections') or {})} sections; this run: "
+        r.add(f"  imported from the release {seed.get('at')}: {len(seed.get('sections') or {})} sections; "
               + ", ".join(f"{k} {v}" for k, v in n.items()))
-    else:
-        r.add("  not imported yet")
     goals = vault_dir / "20 Goals"
     notes = [f for f in goals.rglob("*.md") if f.read_text(encoding="utf-8", errors="replace").strip()] if goals.is_dir() else []
     r.add(f"  goals: {len(notes)} note(s) in 20 Goals" + ("" if notes else " (EMPTY)"))

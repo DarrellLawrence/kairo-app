@@ -337,9 +337,13 @@ foreach ($l in $planted) { [void](New-Item -ItemType Junction -Path $l -Target $
 
 # ---- update keeps owner config
 Add-Content (Join-Path $Root 'data\config\profile.yaml') '# ci-marker'
+$shipped = Join-Path $Root "app\releases\$v1\private\profile"   # as the releases of 2026-10-19 carried it
+[void](New-Item -ItemType Directory -Force -Path $shipped)
+Set-Content -Path (Join-Path $shipped 'ABOUT_ME.md') -Value '# made up for CI' -Encoding ASCII
 $v2 = "$v1-ci2"
 $s2 = Copy-Setup $s1 'v2' $v2
 Check ((Invoke-Install $s2) -eq 0) 'update to v2 exits 0'
+Check (-not (Test-Path (Join-Path $Root "app\releases\$v1\private")) -and (Test-Path (Join-Path $Root "app\releases\$v1\release.json"))) 'the update removed private\ from the release kept for rollback (the profile lives in the vault)'
 Check (@($planted | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'fix F24: the update removed the links planted in data\'
 Check ((Get-Content -Raw (Join-Path $target 'canary.txt')).Trim() -eq 'untouched' -and @(Get-ChildItem $target).Count -eq 1) 'fix F24: nothing was written or deleted where the links pointed'
 Check ((Get-LocalUser -Name 'kairo-svc').Enabled -and -not (Test-Path (Join-Path $Root 'updater\data-lock.json'))) "fix F24: Kairo's account is on again after the data lock"

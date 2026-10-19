@@ -243,3 +243,32 @@ def test_the_gate_checks_places():
         with pytest.raises(Exception):
             actions.PlaceSet.model_validate(bad)
     actions.ProfileApply.model_validate({"import_id": 1, "places": [{"name": "Home", "kind": "home", "station": "A"}]})
+
+
+def test_weekends_are_social_but_a_training_keeps_its_own_rule():
+    rules = [{"match": "Training", "type": "FIXED"}, {"match": "*", "type": "SOCIAL", "days": ["sat", "sun"]}]
+    assert profile_import.rule_for(rules, "Boxing Training", "sat")["type"] == "FIXED"
+    assert profile_import.rule_for(rules, "Dinner with friends", "sat")["type"] == "SOCIAL"
+    assert profile_import.rule_for(rules, "Dinner with friends", "tue") is None
+    from app.actions import CalendarRule
+    with pytest.raises(ValueError):
+        CalendarRule.model_validate({"match": "*", "type": "SOCIAL"})                      # "*" needs days
+    assert profile_import._event_day({"start": "2026-10-24T11:15:00+02:00"}, TZ) == "sat"
+
+
+def test_diagnosis_shows_the_profile_in_counts_only(s, migrated):
+    """Owner's request 2026-10-19: Run diagnosis proves the profile is in: counts only, never its text."""
+    from app import diagnosis, vault as vault_mod
+    vault = migrated.data_dir / "vault"
+    rec = profile_import.store(s, vault, text=PROFILE_MD, today=TODAY)["record"]
+    weekends = {"match": "*", "type": "SOCIAL", "days": ["sat", "sun"]}
+    profile_import.apply(s, {"import_id": rec["id"], **APPLY, "calendar_rules": [*APPLY["calendar_rules"], weekends]},
+                         today=TODAY, tz=TZ, now=dt.datetime(2026, 10, 14, 10, tzinfo=TZ))
+    vault_mod.write_section(vault, "20 Goals/Goals.md", "profile", "- Climb a 7a")
+    text = diagnosis.run(db_url=migrated.db_url, data_dir=migrated.data_dir, app_root=migrated.data_dir / "no-app")["text"]
+    part = text.split("== Owner profile")[1].split("\n==")[0]
+    assert "goals: 1 note(s) in 20 Goals" in part and "coach settings: yes (" in part and "1 training days)" in part
+    assert "people: 1 (1 with a birthday)" in part and "calendar rules: 3 (1 by weekday)" in part
+    assert "quick questions still open: 1" in part and "imported from the release" not in part
+    for secret in ("Mila", "passport", "Climb", "Chemistry"):
+        assert secret not in part

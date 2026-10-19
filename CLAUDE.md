@@ -68,10 +68,9 @@ start the next until its checks pass and the owner says go.
   its one tool is ask_kairo, which hands the request to the Claude brain as an
   owner turn; it gets no other tool and never acts. The old voice pipeline is
   the fallback. Everything else stays on the Claude subscription (KICKOFF 13e).
-- Nothing personal hardcoded: use config/profile.yaml and .env. Only exception (owner's
-  decision 2026-10-19): private/profile/ABOUT_ME.md, the owner's own profile, shipped with the
-  release and imported by Kairo on the PC (KICKOFF G). Never print, quote or log its content
-  (logs, CI output, tests, issues, PR text); tests use the fake profile.
+- Nothing personal hardcoded: use config/profile.yaml and .env. The owner's profile lives only
+  in the vault on the PC (owner's decision 2026-10-19, KICKOFF G): never in the repo (private/ is
+  git-ignored) or a release. Never print, quote or log it; tests use the fake profile.
 - Secrets only in .env (never committed), the data folder's secrets\, or the
   OS keyring.
 - No public ports. The app is served only via tailscale serve. Only exception
