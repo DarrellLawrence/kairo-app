@@ -877,11 +877,30 @@ function Remove-OldReleases($P, $State, [int]$Keep = 3) {
 
 # ---------------------------------------------------------------- run / stop / health
 
+# The Kairo server. venv\Scripts\python.exe only launches the base Python with the same command line,
+# so the server itself runs from outside C:\Kairo: it is found by its command line too (app.serve with
+# this install's env file). Owner's report 2026-10-19: an old server outlived an update.
 function Get-KairoProcesses($P) {
     $root = $P.Root.TrimEnd('\') + '\'
+    $envFile = [string]$P.EnvFile
     return @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object {
-        $_.CommandLine -and $_.CommandLine -like '*app.serve*' -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, 'OrdinalIgnoreCase')
+        $_.CommandLine -and $_.CommandLine -like '*app.serve*' -and (
+            ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, 'OrdinalIgnoreCase')) -or
+            $_.CommandLine.IndexOf($envFile, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     })
+}
+
+# A Python still listening on Kairo's port: an old server nobody tracks any more. Other programs are left
+# alone (and named), Kairo can't start next to them anyway.
+function Get-PortServers {
+    $found = @()
+    $conns = @()
+    try { $conns = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $script:Port -State Listen -ErrorAction Stop) } catch { }
+    foreach ($id in @($conns | ForEach-Object { [int]$_.OwningProcess } | Select-Object -Unique)) {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
+        if ($proc) { $found += $proc }
+    }
+    return @($found)
 }
 
 # Kairo counts its starts to tell a crash loop (fix plan 32); a stop the installer makes on purpose
@@ -896,13 +915,16 @@ function Stop-Kairo($P) {
     Write-PlannedRestart $P
     $task = Get-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue
     if ($task) { Stop-ScheduledTask -TaskName $script:TaskName -TaskPath $script:TaskPath -ErrorAction SilentlyContinue }
-    foreach ($proc in (Get-KairoProcesses $P)) {
-        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-    }
     for ($i = 0; $i -lt 20; $i++) {
-        if (@(Get-KairoProcesses $P).Count -eq 0) { break }  # @(): an empty result is $null under StrictMode
+        $left = @(Get-KairoProcesses $P) + @(Get-PortServers | Where-Object { $_.Name -like 'python*.exe' })   # @(): $null under StrictMode
+        if ($left.Count -eq 0) { return }
+        foreach ($proc in $left) {
+            if ($i -eq 0) { Write-Note "stopping Kairo (pid $($proc.ProcessId), $($proc.ExecutablePath))" }
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        }
         Start-Sleep -Milliseconds 500
     }
+    foreach ($proc in (Get-PortServers)) { Write-Warn "Port $script:Port is still held by $($proc.Name) (pid $($proc.ProcessId), $($proc.ExecutablePath))." }
 }
 
 function Start-Kairo {
@@ -916,14 +938,33 @@ function Get-Health {
     } catch { return $null }
 }
 
-function Wait-Healthy([int]$Seconds = 90) {
+# $Version: only this version counts (its /health says which version answers; older ones don't say).
+function Wait-Healthy([int]$Seconds = 90, [string]$Version = '') {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         $h = Get-Health
-        if ($h -and $h.status -eq 'ok') { return $h }
+        if ($h -and $h.status -eq 'ok' -and (-not $Version -or [string](Get-Prop $h 'version') -eq $Version)) { return $h }
         Start-Sleep -Seconds 2
     }
     return $null
+}
+
+# Starts Kairo and waits until THIS version answers. Owner's report 2026-10-19: an update said "ok" while
+# the old server kept answering on the port (the new one could not start next to it). Another version
+# still answering is stopped once and Kairo started again; still not this version = not healthy.
+function Start-KairoVersion($P, [string]$Version) {
+    Start-Kairo
+    $h = Wait-Healthy 90 $Version
+    if ($h) { return $h }
+    $other = Get-Health
+    if ($other) {
+        $seen = [string](Get-Prop $other 'version')
+        Write-Warn "Kairo $(if ($seen) { $seen } else { '(an older version)' }) is still answering instead of $Version (pid $(Get-Prop $other 'pid')): stopping it."
+        Stop-Kairo $P
+        Start-Kairo
+        $h = Wait-Healthy 90 $Version
+    }
+    return $h
 }
 
 # Boot task: starts at boot as kairo-svc, whether or not anyone is logged in
@@ -1104,8 +1145,10 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
             try { & $InLock | Out-Host } finally { Exit-DataLock $P $restart }
         }
         Register-KairoTask $P $Svc
-        if (-not (Get-Health)) { Start-Kairo }
-        if (Wait-Healthy 90) { Write-Ok 'Kairo is running'; return $true }
+        $h = Get-Health
+        if ($h -and [string](Get-Prop $h 'version') -eq $version) { Write-Ok 'Kairo is running'; return $true }
+        if ($h) { Stop-Kairo $P }   # not this version answering (an old server): it goes
+        if (Start-KairoVersion $P $version) { Write-Ok 'Kairo is running'; return $true }
         Write-Bad 'Kairo is installed but not answering. See the log in C:\Kairo\data\logs\kairo.log'
         return $false
     }
@@ -1130,13 +1173,13 @@ function Deploy-Release($P, [string]$SourceApp, [string]$Python, $Svc, [switch]$
         if ($InLock) { & $InLock | Out-Host }
         $backup = Backup-Database $P "before-$version" $Python
         $migrated = Invoke-Alembic $P $newDir @('upgrade', 'head')
-    } finally { Exit-DataLock $P $restart }
+    } finally { Exit-DataLock $P @($restart | Where-Object { $_ -ne $script:TaskName }) }   # Kairo: after the switch, never the old code before it
     Set-CurrentRelease $P $version
     Register-KairoTask $P $Svc
     $healthy = $null
     if ($migrated) {
-        Start-Kairo
-        $healthy = Wait-Healthy 90
+        Stop-Kairo $P   # anything Task Scheduler started meanwhile (the 5-minute watchdog, a restart) ran the old code
+        $healthy = Start-KairoVersion $P $version
     } else {
         Write-Bad 'Database update failed.'
     }
@@ -1244,8 +1287,9 @@ function Restore-Release($P, [string]$CodeDirForDowngrade, [string]$Version, [st
                 Restore-DatabaseBackup $P $Backup
             } else { Write-Bad 'There is no database backup from before the update to restore.' }
         }
-    } finally { Exit-DataLock $P $restart }
+    } finally { Exit-DataLock $P @($restart | Where-Object { $_ -ne $script:TaskName }) }
     Set-CurrentRelease $P $Version
+    Stop-Kairo $P
     Start-Kairo
     if (Wait-Healthy 90) { Write-Ok "Kairo $Version is running again" }
     else { Write-Bad "Kairo $Version did not come back either. See C:\Kairo\data\logs\kairo.log" }

@@ -184,3 +184,13 @@ def test_owner_only(migrated, monkeypatch):
         boot_check(migrated, "owner@example.com")
         assert c.post("/api/diagnosis", headers=me).status_code == 200
         assert c.post("/api/diagnosis", headers={"tailscale-user-login": "guest@example.com"}).status_code == 403
+
+
+def test_an_installed_version_that_isnt_running_is_flagged(migrated, tmp_path):
+    """Owner's report 2026-10-19: the update note said "ok" while the PC kept running the old version."""
+    rel = tmp_path / "app" / "releases" / "2026.10.16.1104-aaaaaaa"
+    rel.mkdir(parents=True)
+    (rel / "release.json").write_text(json.dumps({"version": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    (tmp_path / "app" / "state.json").write_text(json.dumps({"current": "2026.10.18.1219-bbbbbbb"}), encoding="utf-8")
+    text = diagnosis.run(db_url=migrated.db_url, data_dir=migrated.data_dir, app_root=rel)["text"]
+    assert "installed (state.json): 2026.10.18.1219-bbbbbbb  <-- NOT RUNNING: the PC still runs 2026.10.16.1104-aaaaaaa" in text

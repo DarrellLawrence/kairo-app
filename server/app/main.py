@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from . import acceptance as acceptance_mod
+from . import versions
 from . import coach as coach_mod
 from . import profile_import as profile_import_mod
 from . import config_layers
@@ -614,6 +615,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"detail": "cross-origin request rejected"}, status_code=403)
         return await call_next(request)
 
+    _running_version = versions.running()
+
     @app.get("/health")
     def health():
         db_ok = True
@@ -632,6 +635,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "brain": brain.value,
             "brain_busy": runner.busy,
             "tools": getattr(runner.brain, "tools_status", lambda: "unknown")(),
+            # The installer only counts an update once THIS version answers (owner's report 2026-10-19).
+            "version": _running_version or "dev",
+            "pid": os.getpid(),
         }
         if not ok:
             raise HTTPException(status_code=503, detail=body)

@@ -194,3 +194,31 @@ def test_an_auto_update_that_stopped_running_is_a_push(watch):
     assert "updates" not in watch.cheap(woke + dt.timedelta(minutes=10))     # checked every 5 minutes
     assert "updates" in watch.cheap(woke + dt.timedelta(minutes=21))          # still not run after the grace
 
+
+def test_an_installed_version_that_isnt_running_is_red_with_a_push(watch, tmp_path):
+    """Owner's report 2026-10-19: "Kairo updated to the new version, ok", but the old server kept running."""
+    releases = tmp_path / "app" / "releases"
+    old = releases / "2026.10.16.1104-aaaaaaa"
+    old.mkdir(parents=True)
+    (old / "release.json").write_text(json.dumps({"version": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    state = tmp_path / "app" / "state.json"
+    state.write_text(json.dumps({"current": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    watch.app_root = old
+    now = dt.datetime.now(dt.timezone.utc)
+    assert "version" not in watch.run(full=False, now=now)
+    state.write_bytes(b"\xef\xbb\xbf" + json.dumps({"current": "2026.10.18.1219-bbbbbbb"}).encode())
+    assert "version" not in watch.run(full=False, now=now)                      # an update may be switching
+    problems = watch.run(full=False, now=now + dt.timedelta(minutes=11))
+    assert "2026.10.18.1219-bbbbbbb is installed" in problems["version"] and "2026.10.16.1104-aaaaaaa" in problems["version"]
+    assert len(watch.pusher.sent) == 1 and "didn't take" in watch.pusher.sent[0]["body"]
+    state.write_text(json.dumps({"current": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    assert "version" not in watch.run(full=False, now=now + dt.timedelta(minutes=12))
+
+
+def test_health_says_which_version_answers(migrated):
+    """The installer counts an update only once the new version itself answers on the port."""
+    from fastapi.testclient import TestClient
+    with TestClient(create_app(migrated)) as c:
+        body = c.get("/health").json()
+    assert body["version"] and isinstance(body["pid"], int)
+

@@ -439,6 +439,7 @@ Compress-Archive -Path $s2 -DestinationPath $zip2
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'installer\Update-Kairo.ps1') -CI -Root $Root -ZipPath $zip2 | Out-Host
 Check ($LASTEXITCODE -eq 0) 'Update Kairo with a zip exits 0'
 Check ((Get-StateObj).current -eq $v2) 'Update Kairo installed v2'
+Check ([string](Get-Prop (Get-HealthObj) 'version') -eq $v2) 'the update counts once v2 itself answers on the port (/health version)'
 
 # ---- Start menu, auto-update task, updater folder
 $menu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kairo'
@@ -465,8 +466,25 @@ $v4 = "$v1-ci4"
 $s4 = Copy-Setup $s1 'v4' $v4
 $zip4 = Join-Path $work "Kairo-Setup-$v4.zip"
 Compress-Archive -Path $s4 -DestinationPath $zip4
+# Owner's report 2026-10-19: an old server outlived the stop, kept the port, and the update said "ok".
+# Here a stray Python answers /health like an old Kairo (no version) on the port Kairo uses.
+Stop-Kairo (Get-KairoPaths $Root)
+$stale = Join-Path $work 'stale_server.py'
+Set-Content -Path $stale -Encoding ASCII -Value @(
+    'import http.server, json',
+    'class H(http.server.BaseHTTPRequestHandler):',
+    '    def do_GET(self):',
+    '        body = json.dumps({"status": "ok", "db": "ok", "migrated": True}).encode()',
+    '        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)',
+    '    def log_message(self, *a): pass',
+    'http.server.HTTPServer(("127.0.0.1", 8000), H).serve_forever()'
+)
+$stray = Start-Process -FilePath $env:KAIRO_PYTHON -ArgumentList "`"$stale`"" -PassThru -WindowStyle Hidden
+Start-Sleep -Seconds 3
+Check ((Get-HealthObj) -and -not (Get-Prop (Get-HealthObj) 'version')) 'a stray old server answers on the port'
 # [urgent] so the test does not depend on the time of day (quiet hours).
 Check ((Invoke-AutoUpdate "v$v4" '[urgent] CI' $zip4) -eq 0) 'auto-update exits 0'
+Check ([string](Get-Prop (Get-HealthObj) 'version') -eq $v4 -and $stray.HasExited) "the update stopped the stray server and $v4 itself answers"
 Check ((Get-StateObj).current -eq $v4) "auto-update installed $v4"
 $note = Get-Content -Raw (Join-Path $Root 'status\last-update.json') | ConvertFrom-Json
 Check ($note.message -eq "Kairo updated to $v4." -and -not $note.notified) 'one-line update note left for the iPhone push'
