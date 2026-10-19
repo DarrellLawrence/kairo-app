@@ -18,6 +18,7 @@ and the reviews (fix plan item 23).
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import json
 import logging
 import threading
@@ -143,6 +144,16 @@ def in_window(now: dt.time, start: str, end: str) -> bool:
     return (s <= now or now < e) if s > e else (s <= now < e)
 
 
+def _takes_model(ask) -> bool:
+    """The real ask takes purpose= and model=. Decided by its signature, never by catching a TypeError: one
+    raised inside a real run used to send the job again without a model (the CLI's default, maybe Opus)."""
+    try:
+        params = inspect.signature(ask).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(p.kind is p.VAR_KEYWORD or p.name == "model" for p in params)
+
+
 @dataclass
 class JobContext:
     """Handed to each job body."""
@@ -227,9 +238,9 @@ class Jobs:
             self._set_kv(s, f"brain_runs:{self.today().isoformat()}", str(st["runs_today"] + 1))
         from .models import pick
         kwargs = {"images": images} if images else {}
-        try:
+        if _takes_model(self._ask):
             result = self._ask(prompt, system, purpose=purpose, model=pick(purpose, self.schedule), **kwargs)
-        except TypeError:   # simple test doubles take (prompt, system[, images])
+        else:   # simple test doubles take (prompt, system[, images]); a real run never goes without its model
             result = self._ask(prompt, system, images) if images else self._ask(prompt, system)
         if result.status == "usage_limited":
             with Session(self.engine) as s:

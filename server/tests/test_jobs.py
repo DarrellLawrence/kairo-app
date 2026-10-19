@@ -148,6 +148,21 @@ def test_model_budget_and_usage_limit_pause_jobs(env):
     assert len(model.prompts) == 2
 
 
+def test_a_job_never_runs_again_without_its_model(env):
+    """A TypeError inside a real run used to send the job again without --model: the CLI's default model."""
+    seen = []
+
+    def ask(prompt, system, purpose="summary", model=None, images=None):
+        seen.append(model)
+        raise TypeError("a bug deep inside the run")
+
+    jobs = make_jobs(env, model=ask)
+    with pytest.raises(TypeError):
+        jobs.ask_brain("p", "s", purpose="triage")
+    assert seen == ["haiku"]
+    assert make_jobs(env, model=Model("ok")).ask_brain("p", "s").text == "ok"   # simple test doubles still work
+
+
 # ---------------------------------------------------------------- triage
 
 def triage_job(env, model):
