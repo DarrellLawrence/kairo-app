@@ -2,7 +2,8 @@
 
 Every 5 minutes (cheap, local): Claude logged out or out of usage, Kairo's tools not connected or the
 self-test failed, less than 10 GB free, Syncthing conflict copies in the vault, a crash loop (more than
-3 starts in an hour), the auto-update not running for 30 minutes. Every hour (they go over the network): Google with a real API call (read: Gmail
+3 starts in an hour), the auto-update not running for 30 minutes, an installed version that isn't the one
+running (owner's report 2026-10-19). Every hour (they go over the network): Google with a real API call (read: Gmail
 profile; write: a token refresh, like the 7-day check), and Tailscale end to end (this PC calls its own
 https://<name>.ts.net/health, the way the iPhone does; any answer means the tailnet path works).
 
@@ -21,7 +22,7 @@ from pathlib import Path
 import httpx
 from sqlmodel import Session
 
-from . import outbound, vault
+from . import outbound, vault, versions
 from .db import SettingKV
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected, load_token
 
@@ -34,9 +35,10 @@ CHEAP_EVERY_S = 5 * 60
 FULL_EVERY_S = 60 * 60
 HOURLY = ("google_read", "google_write", "tailscale")
 # Shown on Today from here; Claude, tools and the self-test are already checked live there.
-TODAY_KEYS = ("google_read", "google_write", "tailscale", "disk", "conflicts", "crash_loop", "updates")
+TODAY_KEYS = ("google_read", "google_write", "tailscale", "disk", "conflicts", "crash_loop", "updates", "version")
 UPDATER_STALE_MIN = 30   # the auto-update runs every 5 minutes (as SYSTEM) and writes status\updater.json each time
 UPDATER_GRACE_MIN = 20   # just after Kairo starts (the PC woke up) the updater may not have run yet
+VERSION_GRACE_MIN = 10   # an update switches, then restarts Kairo: a mismatch this long is no update in progress
 
 
 def _now() -> dt.datetime:
@@ -104,21 +106,27 @@ def crash_loop_text(n: int) -> str:
 # ---------------------------------------------------------------- the checks
 
 def kairo_url(data_dir: Path) -> str | None:
-    """Kairo's tailnet address, recorded by the boot check (boot-check.json, kairo_url)."""
+    """Kairo's tailnet address, recorded by the boot check (boot-check.json, kairo_url), else by the
+    auto-update's tailnet snapshot (tailnet.json, every 5 minutes: acceptance #30, the boot check ran days ago)."""
     from . import status_files
-    data = status_files.read_json(data_dir, "boot-check.json")
-    url = data.get("kairo_url") if isinstance(data, dict) else None
-    return url if outbound.tailnet_url_ok(url) else None    # never anywhere else (a planted file can't redirect it)
+    for name in ("boot-check.json", "tailnet.json"):
+        data = status_files.read_json(data_dir, name)
+        url = data.get("kairo_url") if isinstance(data, dict) else None
+        if outbound.tailnet_url_ok(url):     # never anywhere else (a planted file can't redirect it)
+            return url
+    return None
 
 
 class HealthWatch:
-    def __init__(self, *, settings, engine, runner, pusher, transport=None, http_get=None) -> None:
+    def __init__(self, *, settings, engine, runner, pusher, transport=None, http_get=None, app_root=None) -> None:
         """transport: a callable giving the Google HTTP transport (tests swap it in after start)."""
         self.settings, self.engine, self.runner, self.pusher = settings, engine, runner, pusher
         self.transport = transport or (lambda: None)
         self._http_get = http_get or (lambda url: httpx.get(url, timeout=10, follow_redirects=False))
         self._started = _now()
         self._checked: dt.datetime | None = None
+        self.app_root = app_root or versions.REPO_ROOT
+        self._mismatch: tuple[str, dt.datetime] | None = None   # (installed version, first seen)
 
     # -- cheap, local
 
@@ -163,7 +171,27 @@ class HealthWatch:
         stale = self._updater_stopped(now)
         if stale:
             out["updates"] = stale
+        other = self._not_running(now)
+        if other:
+            out["version"] = other
         return out
+
+    def _not_running(self, now: dt.datetime) -> str | None:
+        """Owner's report 2026-10-19: "Kairo updated, ok", but the old server kept running. The installed
+        release (state.json) and this process's must match; a mismatch for 10 minutes is no update in
+        progress any more."""
+        running, installed = versions.running(self.app_root), versions.installed(self.app_root)
+        # Only an older version still running counts: a newer one runs for a while during every update
+        # (state.json is written once its self-test passed).
+        if not running or not installed or not versions.older(running, installed):
+            self._mismatch = None
+            return None
+        if self._mismatch is None or self._mismatch[0] != installed:
+            self._mismatch = (installed, now)
+        if (now - self._mismatch[1]).total_seconds() / 60 < VERSION_GRACE_MIN:
+            return None
+        return (f"Kairo {installed} is installed, but the PC still runs {running}: the update didn't take. "
+                "Restart the PC; if it stays, Start menu -> Kairo -> Update Kairo shows why.")
 
     def _updater_stopped(self, now: dt.datetime) -> str | None:
         """Owner's rule 2026-10-17: an update that fails is never silent. The auto-update notes its own

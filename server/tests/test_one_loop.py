@@ -9,7 +9,9 @@ from sqlmodel import Session, select
 
 from app import loops
 from app.db import OpenLoop, SchoolEvent, Task, TriagedEmail, make_engine
-from tests.test_loops import TIMES, TZ, WED, triaged
+from tests.test_loops import TIMES, TZ, WED, mail, triaged
+
+SHOP, ORDER = "Shopco <hello@shopco.example>", "Is everything fine with your Shopco order?"
 
 
 def open_(s, **where):
@@ -17,6 +19,66 @@ def open_(s, **where):
     for k, v in where.items():
         q = q.where(getattr(OpenLoop, k) == v)
     return s.exec(q).all()
+
+
+def mail_with_task(s, mid, sender=SHOP, subject=ORDER, summary="asks how the order went", personal=None):
+    """A mail triage found a date in, and the task it made from it (as triage did before 2026-10-19)."""
+    mail(s, mid, sender, subject, summary, personal=personal)
+    t = Task(title=f"{subject} (from {sender.split('<')[0].strip()})", due=WED + dt.timedelta(days=2), priority=2,
+             source="email")
+    s.add(t)
+    s.commit()
+    s.refresh(t)
+    m = s.get(TriagedEmail, mid)
+    m.task_id, m.deadline = t.id, t.due.date()
+    s.add(m)
+    s.commit()
+    return t
+
+
+def test_a_shops_mail_with_a_date_is_never_a_loop(migrated):
+    """2026-10-19: a shop's feedback mail became three identical 'deadline' loops. A task made from a mail never
+    gets a loop of its own: the mail's reply loop is the one loop if a person waits, else there is none."""
+    with Session(make_engine(migrated.db_url)) as s:
+        mail_with_task(s, "s1", personal=False)                                        # the reply check: automated
+        mail_with_task(s, "s2", personal=False)
+        mail_with_task(s, "s3")                                                        # not checked yet
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        assert open_(s) == []
+
+
+def test_a_persons_mail_with_a_date_is_one_loop_once_checked(migrated):
+    with Session(make_engine(migrated.db_url)) as s:
+        mail_with_task(s, "k1", sender="Mr. Keller <keller@school.example>", subject="Projektarbeit",
+                       summary="wants the project by Friday")
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        assert open_(s) == []                                                          # not checked yet: no loop
+        m = s.get(TriagedEmail, "k1")
+        m.personal_reply = True
+        s.add(m)
+        s.commit()
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        [loop] = open_(s)
+        assert (loop.source, loop.kind, loop.who_email) == ("email", "reply", "keller@school.example")
+        assert loops.aware(loop.due).date() == (WED + dt.timedelta(days=2)).date()
+
+
+def test_the_same_thing_from_the_same_sender_is_one_loop(migrated):
+    with Session(make_engine(migrated.db_url)) as s:
+        for mid in ("a1", "a2", "a3"):
+            mail(s, mid, "Anna Meier <anna@example.com>", "Project review", "Asks if Thursday works", personal=True)
+        mail(s, "a4", "Anna Meier <anna@example.com>", "Agenda", "Sends the agenda, asks for comments", personal=True)
+        mail(s, "b1", "Tom Weber <tom@example.com>", "Project review", "Asks if Thursday works!", personal=True)
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        anna = [lp for lp in open_(s, who_email="anna@example.com") if lp.source_ref != "a4"]
+        assert len(anna) == 1 and len(open_(s)) == 3                                  # a4 and Tom's are their own
+        dups = [lp for lp in s.exec(select(OpenLoop).where(OpenLoop.source_ref.in_(["a1", "a2", "a3"]))).all()
+                if lp.id != anna[0].id]
+        assert [d.close_reason for d in dups] == [f"check: duplicate of #{anna[0].id}"] * 2
+        assert loops.sync(s, now=WED, tz=TZ, times=TIMES)["new"] == 0
+        loops.close(s, anna[0].id, "done", now=WED)
+        loops.sync(s, now=WED, tz=TZ, times=TIMES)
+        assert sorted(lp.source_ref for lp in open_(s)) == ["a4", "b1"]               # the duplicates don't come back
 
 
 def test_a_mail_and_its_task_are_one_loop(migrated):

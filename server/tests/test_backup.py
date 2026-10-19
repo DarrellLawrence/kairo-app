@@ -5,7 +5,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
+import subprocess
+import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -97,6 +100,39 @@ def test_real_restore_moves_the_current_data_aside(data):
     con.close()
     assert (data.data_dir / "vault" / "20 Goals" / "2026.md").read_text(encoding="utf-8").endswith("äöü")
     assert (saved / "db" / "kairo.sqlite").is_file()   # nothing thrown away
+
+
+KILLED_MID_WRITE = """
+import os, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("PRAGMA journal_mode=WAL")
+con.execute("PRAGMA wal_autocheckpoint=0")
+con.execute("DELETE FROM tasks")
+con.commit()
+os._exit(0)   # Stop-Process -Force: the last writes are still in kairo.sqlite-wal
+"""
+
+
+def test_restore_takes_the_wal_aside_with_the_database(data, tmp_path):
+    """Kairo's database is in WAL mode (acceptance #1). A WAL left next to the restored file would be
+    replayed into it; it belongs to the old database, so it moves aside with it."""
+    z = make(data)
+    db = data.db_path
+    script = tmp_path / "killed.py"
+    script.write_text(KILLED_MID_WRITE, encoding="utf-8")
+    subprocess.run([sys.executable, str(script), str(db)], check=True, timeout=60)
+    assert Path(f"{db}-wal").is_file()
+    saved = backup.restore(z, data.data_dir)
+    con = sqlite3.connect(db)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 5
+    finally:
+        con.close()
+    old = sqlite3.connect(saved / "db" / "kairo.sqlite")          # the old database, its last writes included
+    try:
+        assert old.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        old.close()
 
 
 def test_backup_and_restore_jobs_and_api(data):

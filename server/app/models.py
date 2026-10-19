@@ -42,6 +42,10 @@ NEVER_HAIKU = {"proactive", "judgment", "judgment_high", "money", "money_review"
                "chat_heavy", "loop_check", "voice_agenda"}
 OPUS_ONLY = {"judgment_high", "money", "money_review"}
 RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
+# The owner's own turns (chat, calls, voice notes; a money question in chat): More -> Usage shows why one
+# didn't run on Haiku (owner's rule 2026-10-19).
+OWNER_PURPOSES = ("call", "chat", "chat_voice", "voice_note", "learn_call", "money")
+ESCALATIONS = 20
 
 
 def judgment(importance: str | None) -> str:
@@ -61,12 +65,14 @@ def pick(purpose: str, schedule: dict | None = None) -> str:
     return override
 
 
-def record(engine, purpose: str, usage: dict | None, ok: bool) -> None:
+def record(engine, purpose: str, usage: dict | None, ok: bool, reason: str | None = None) -> None:
+    """reason: why an owner turn didn't run on Haiku (conversation.route_why), None otherwise."""
     u = usage or {}
     with Session(engine) as s:
         s.add(ModelRun(purpose=purpose[:40], model=(u.get("model") or None), ok=ok, duration_ms=u.get("duration_ms"),
                        input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"), cost_usd=u.get("cost_usd"),
-                       startup_ms=u.get("startup_ms"), first_text_ms=u.get("first_text_ms"), warm=u.get("warm")))
+                       startup_ms=u.get("startup_ms"), first_text_ms=u.get("first_text_ms"), warm=u.get("warm"),
+                       reason=reason[:200] if reason else None))
         s.commit()
 
 
@@ -93,4 +99,12 @@ def usage(s: Session, days: int) -> dict:
             b["minutes"] = round(b["minutes"], 1)
             b["usd"] = round(b["usd"], 2)
     return {"days": days, "by_model": by_model, "by_purpose": dict(sorted(by_purpose.items(), key=lambda kv: -kv[1]["runs"])),
-            "total_runs": len(rows)}
+            "total_runs": len(rows), "escalations": escalations(rows)}
+
+
+def escalations(rows: list[ModelRun], limit: int = ESCALATIONS) -> list[dict]:
+    """Owner's rule 2026-10-19: the owner's own turns that didn't run on Haiku, newest first, with why."""
+    out = [r for r in rows if r.purpose in OWNER_PURPOSES and r.model and family(r.model) != "haiku"]
+    out.sort(key=lambda r: (r.ts, r.id or 0), reverse=True)
+    return [{"model": family(r.model), "purpose": r.purpose, "reason": r.reason, "ts": r.ts.isoformat()}
+            for r in out[:limit]]

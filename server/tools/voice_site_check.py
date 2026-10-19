@@ -15,6 +15,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # server\: the app package, like Kairo's own start
 
 
+# What Whisper (CTranslate2) and Kokoro (ONNX Runtime CUDA) load from the nvidia-* packages in the folder.
+# Owner's report 2026-10-19: a second pip run had deleted cuBLAS and cuDNN, and nothing here noticed.
+CUDA_DLLS = ["cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll", "cudnn_ops64_9.dll", "cudnn_cnn64_9.dll",
+             "cudart64_12.dll", "cufft64_11.dll", "curand64_10.dll", "nvrtc64_*.dll"]
+LOAD = ["cudart64_12.dll", "cublasLt64_12.dll", "cublas64_12.dll", "cudnn64_9.dll"]   # by name, like CTranslate2
+
+
+def cuda_dlls(site: Path) -> list[str]:
+    """Problems with the CUDA DLLs in the voice folder (Windows): missing, or not loadable by name."""
+    import ctypes
+    from app.voice import _add_cuda_dlls, cuda_dll_dirs
+    dirs = cuda_dll_dirs(site)
+    problems = [f"{pat} is not in the voice folder" for pat in CUDA_DLLS if not any(any(d.glob(pat)) for d in dirs)]
+    _add_cuda_dlls(site)
+    for name in LOAD:
+        try:
+            ctypes.WinDLL(name)
+        except OSError as exc:
+            problems.append(f"{name} does not load: {exc}")
+    return problems
+
+
 def main(site: str, models: str) -> int:
     from app.voice import Voice
     v = Voice(Path(models), site_dir=Path(site))
@@ -32,6 +54,8 @@ def main(site: str, models: str) -> int:
         problems.append("pipecat/aiortc don't import from the voice folder")
     if sys.platform == "win32" and "CUDAExecutionProvider" not in out["providers"]:
         problems.append("the voice folder has the CPU build of ONNX Runtime, not onnxruntime-gpu")
+    if sys.platform == "win32":
+        problems += cuda_dlls(Path(site))
     for name in ("whisper", "kokoro"):
         if not devices[name]["loaded"]:
             problems.append(f"{name} did not load: {devices[name].get('reason')}")

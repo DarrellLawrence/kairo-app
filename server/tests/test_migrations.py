@@ -29,6 +29,17 @@ def test_models_and_migrations_match(migrated):
     assert diff == []
 
 
+def test_model_runs_say_why_they_were_not_on_haiku(migrated):
+    """0025: the reason column (owner's rule 2026-10-19), and it comes off again."""
+    cfg = alembic_config(migrated.db_url)
+    cols = lambda: {c["name"] for c in inspect(create_engine(migrated.db_url)).get_columns("model_runs")}  # noqa: E731
+    assert "reason" in cols()
+    command.downgrade(cfg, "0024")
+    assert "reason" not in cols() and "warm" in cols()
+    command.upgrade(cfg, "head")
+    assert "reason" in cols()
+
+
 def test_downgrade_to_base_and_back(migrated):
     cfg = alembic_config(migrated.db_url)
     command.downgrade(cfg, "base")

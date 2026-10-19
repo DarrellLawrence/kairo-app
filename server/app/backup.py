@@ -32,6 +32,7 @@ import zipfile
 from pathlib import Path
 
 INCLUDE = ("vault", "config", "inbox")
+SIDE_FILES = ("-wal", "-shm", "-journal")   # SQLite's files next to the database
 KEEP_DAILY = 14
 KEEP_WEEKLY = 8
 
@@ -158,7 +159,9 @@ def restore(zip_path: Path, data_dir: Path) -> Path:
     verify(zip_path)
     saved = data_dir / f"restore-saved-{dt.datetime.now():%Y%m%d-%H%M%S}"
     saved.mkdir(parents=True)
-    for rel in ("db/kairo.sqlite", "vault", "inbox"):
+    # The database's own side files go with it: they hold its last writes (WAL mode, a forced stop), and
+    # left next to the restored file they would be replayed into it.
+    for rel in ("db/kairo.sqlite", *(f"db/kairo.sqlite{x}" for x in SIDE_FILES), "vault", "inbox"):
         cur = data_dir / rel
         if cur.exists():
             (saved / rel).parent.mkdir(parents=True, exist_ok=True)

@@ -485,6 +485,45 @@ def test_learns_from_what_the_owner_closes(env):
         assert "marco@gym.example" in check or "you answer" in check.lower()    # the model learns from your choices too
 
 
+def test_old_shop_loops_and_duplicates_are_cleaned_out_once(env):
+    """2026-10-19: on the owner's PC a shop's feedback mail had become 3 identical open 'deadline' loops (source
+    task). The engine closes them before the sanity check, and once merges duplicates, keeping the oldest."""
+    from app.db import SettingKV
+    title = "Is everything fine with your Shopco order? (from Shopco)"
+    with Session(env["engine"]) as s:
+        for i in (1, 2, 3):
+            t = Task(title=title, due=WED + dt.timedelta(days=2), priority=2, source="email")
+            s.add(t)
+            s.commit()
+            s.refresh(t)
+            mail(s, f"shop{i}", "Shopco <hello@shopco.example>", "Is everything fine with your Shopco order?")
+            m = s.get(TriagedEmail, f"shop{i}")
+            m.task_id = t.id
+            s.add(m)
+            s.add(OpenLoop(kind="deadline", source="task", source_ref=str(t.id), what=title, since=WED, due=t.due))
+        for mid in ("a1", "a2"):
+            mail(s, mid, "Anna Meier <anna@example.com>", "Project review", "Asks if Thursday works", personal=True)
+            s.add(OpenLoop(kind="reply", source="email", source_ref=mid, who="Anna Meier", who_email="anna@example.com",
+                           what="Asks if Thursday works", since=WED - dt.timedelta(days=1)))
+            s.commit()
+        first, second = s.exec(select(OpenLoop).where(OpenLoop.source == "email").order_by(OpenLoop.id)).all()
+        ctx = Ctx(s, DRAFT)
+        engine_for(env, Pushes()).run(ctx, now=WED)
+        assert [lp.close_reason for lp in s.exec(select(OpenLoop).where(OpenLoop.source == "task"))] == ["automated"] * 3
+        s.refresh(first)
+        s.refresh(second)
+        assert first.status == "open" and second.close_reason == f"check: duplicate of #{first.id}"
+        assert "Shopco" not in "".join(p for purpose, p in ctx.prompts if purpose == "loop_check")   # no check spent on them
+        assert s.get(SettingKV, loops.CLEANUP_KEY) is not None
+        for ref in ("x1", "x2"):                                     # once: later ones are for upsert and the check
+            s.add(OpenLoop(kind="reply", source="email", source_ref=ref, who="Lea", who_email="lea@example.com",
+                           what="Asks for the slides", since=WED))
+        s.commit()
+        engine_for(env, Pushes()).run(Ctx(s, DRAFT), now=WED + dt.timedelta(minutes=15))
+        lea = s.exec(select(OpenLoop).where(OpenLoop.who_email == "lea@example.com")).all()
+        assert [lp.status for lp in lea] == ["open", "open"]
+
+
 def test_not_for_me_from_the_app(client, env):
     with Session(env["engine"]) as s:
         mail(s, "x", "Vereinsbot <club@verein.example>", "Training plan", personal=True)

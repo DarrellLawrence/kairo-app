@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from . import acceptance as acceptance_mod
+from . import versions
 from . import coach as coach_mod
 from . import profile_import as profile_import_mod
 from . import config_layers
@@ -51,6 +52,7 @@ from pydantic import ValidationError
 
 from .actions import LoopsAdd
 from .audit import audit
+from .jobkit import JOB_RULES
 from .jobkit import clip as clip_text
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
@@ -69,6 +71,8 @@ from .profile import load_profile, render_personality
 from .settings import REPO_ROOT, Settings, get_settings
 
 MAX_PROMPT_CHARS = 20_000
+# The voice lab by itself: first look after start, then every minute; after a failed job, half an hour
+LAB_FIRST_CHECK_S, LAB_CHECK_EVERY_S, LAB_RETRY_AFTER_ERROR_S = 120, 60, 1800
 
 
 def same_origin(origin: str | None, *hosts: str | None) -> bool:
@@ -173,7 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if settings.db_url.startswith("sqlite:///"):
         Path(settings.db_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    engine = make_engine(settings.db_url)
+    engine = make_engine(settings.db_url, wal=True)   # reads never block writes (acceptance #1)
     _mark_interrupted(engine)
     gate = load_gate(settings.config_dir)   # refuses to start on a broken or weakened permissions.yaml
     tool_token = secrets.token_urlsafe(32)  # new every start; only mcp_kairo gets it
@@ -183,7 +187,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     runner = chat.BrainRunner(make_brain(settings, mcp_config=mcp_config, hook_env=hook_env),
                               quiet_s=float(os.environ.get("KAIRO_OWNER_QUIET_S", chat.OWNER_QUIET_S)))
     from . import models as model_table
-    runner.on_usage = lambda purpose, usage, ok: model_table.record(engine, purpose, usage, ok)
+    runner.on_usage = lambda purpose, usage, ok, reason=None: model_table.record(engine, purpose, usage, ok, reason=reason)
     model_tools = tool_names(gate)
     try:
         with session_for(engine) as _s:
@@ -193,6 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pass
 
     async def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
+                         reason: str | None = None, own: str | None = None, language: str | None = None,
                          system: str | None = None, before_id: int | None = None, via=None):
         """The one way an owner message reaches the model: chat, calls, the self-test and the acceptance
         tests (fix P0, 2026-10-14: a self-test with its own prompt and tools was green while chat had
@@ -202,13 +207,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Voice V1 (2026-10-15): the one conversation runs on one warm process (conversation.py): a system
         prompt that stays the same (personality, profile card, memory), the per-turn context in front of
         the message, the model chosen per turn (Haiku unless needed; Haiku can hand over to Sonnet with
-        conversation.ESCALATE, never shown). A hand-over yields a usage event {"escalated": model}."""
-        model = model or conversation.route(text, purpose=purpose, schedule=app.state.jobs.schedule)
-        hits = await asyncio.to_thread(recall, text)
+        conversation.ESCALATE, never shown). A hand-over yields a usage event {"escalated": model, "why": ...}.
+        own: the owner's own words when text wraps them (a call's request, a getting-to-know-you call's notes):
+        the model, the memory search, their language and "leave it" go by them. reason: why model isn't Haiku
+        (recorded with the run, More -> Usage). language: the owner's language when own can't tell (a call)."""
+        own = conversation.own_words(text if own is None else own)
+        if model is None:
+            model, reason = conversation.route_why(own, purpose=purpose, schedule=app.state.jobs.schedule)
+        hits = await asyncio.to_thread(recall, own)
         if system is not None or via is not None:
             # the self-test's own prompt, acceptance's broken tool-server copy: one plain run
             async for event in (via or runner).stream(text, session_id=session_id, system=system or "", tools=model_tools,
-                                                      origin="owner_chat", thread_id=thread_id, purpose=purpose, model=model):
+                                                      origin="owner_chat", thread_id=thread_id, purpose=purpose, model=model,
+                                                      reason=reason):
                 yield event
             return
         if thread_id is not None and session_id is not None and conversation_hash() != (
@@ -221,12 +232,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(warm_conversation, warm, session_id, static, model)
             set_conversation_hash(stable)
         fast = model == "haiku" and purpose not in ("learn_call", "selftest")
+        language = language or conversation.message_language(own)
         prompt = conversation.header(right_now=right_now(), hits=hits, extras=quick_questions() + recent_files(),
-                                     fast=fast) + text
+                                     fast=fast, message=own, call=purpose == "call", language=language) + text
         filt = conversation.MarkerFilter()
         handed_over_sid = None
         async for event in runner.stream(prompt, session_id=session_id, system=static, tools=model_tools,
-                                         origin="owner_chat", thread_id=thread_id, purpose=purpose, model=model, warm=warm):
+                                         origin="owner_chat", thread_id=thread_id, purpose=purpose, model=model, warm=warm,
+                                         reason=reason):
             if event.kind is EventKind.text:
                 out = filt.feed(event.text)
                 if out:
@@ -243,11 +256,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if handed_over_sid is None and not filt.escalated():
             return
         heavy = model_table.pick("chat_heavy", app.state.jobs.schedule)
-        yield BrainEvent(EventKind.usage, data={"escalated": heavy})
-        follow = ("<kairo-context>\nThe stronger model takes this turn. Answer the owner's last message now, "
-                  "fully and in their language.\n</kairo-context>")
-        async for event in runner.stream(follow, session_id=handed_over_sid, system=static, tools=model_tools,
-                                         origin="owner_chat", thread_id=thread_id, purpose=purpose, model=heavy, warm=warm):
+        why = conversation.handed_over(filt.why())
+        yield BrainEvent(EventKind.usage, data={"escalated": heavy, "why": why})
+        async for event in runner.stream(conversation.handover(language=language), session_id=handed_over_sid,
+                                         system=static, tools=model_tools, origin="owner_chat", thread_id=thread_id,
+                                         purpose=purpose, model=heavy, warm=warm, reason=why):
             yield event
 
     def conversation_parts(thread_id, fresh: bool, before_id=None) -> tuple[str, str]:
@@ -313,7 +326,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def recall(text: str) -> str:
         """v8 C6: the best hits for the owner's message (keywords + meaning), with the note they come from."""
         mem = getattr(app.state, "memory", None)
-        if mem is None or len((text or "").strip()) < semantic.MIN_QUERY_CHARS:
+        if mem is None or not semantic.worth_searching(text):
             return ""
         try:
             return semantic.prompt_block(mem.search(text, k=5))
@@ -343,7 +356,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
             app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
             app.state.today_card.start()   # the Today card: always fresh, before any call
-            background.append(asyncio.create_task(_lab_first_run()))
+            background.append(asyncio.create_task(_lab_auto()))
+            background.append(asyncio.create_task(_profile_seed_first_run()))
         yield
         for call in list(getattr(app.state, "rtc_calls", {}).values()):   # calls over WebRTC end with Kairo
             try:
@@ -413,15 +427,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs")
     with session_for(engine) as _s:
         _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
+        if voicelab.clear_stale(_s):                # a run cut off by a restart: Run and the run by itself work again
+            log.warning("voice lab: the last run was cut off by a restart")
     app.state.smart_turn = smartturn.SmartTurn(lambda: voicellm.smart_turn_path(_vl_site), pad_side=_pad)   # may come later
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
         settings.data_dir / "memory" / "index.sqlite", vault_dir=settings.vault_dir, engine=engine,
-        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site,
-                                   cpu_only=lambda: bool(voicellm.available(_vl_site)))   # voice wins the VRAM
+        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site, cpu_only=lambda: _memory_on_cpu())
         if tool_sites.configured("memory") else None)
     tools.memory = app.state.memory
+
+    MEMORY_VRAM_MB = 3000   # the embedding model in fp16 and its batches
+
+    def _memory_on_cpu() -> bool:
+        """Owner's request 2026-10-19: the embeddings on the GPU too (12 GB on kairo-home hold Whisper, Kokoro,
+        the voice model and this). Only when the card is short of room do they go to the CPU, and say why."""
+        from . import gpu as gpu_mod
+        card = gpu_mod.summary()
+        if not card or card.get("total_mb") is None or card.get("used_mb") is None:
+            app.state.memory_cpu_why = None
+            return False
+        free = card["total_mb"] - card["used_mb"]
+        app.state.memory_cpu_why = f"only {free} MB free on the GPU (it needs {MEMORY_VRAM_MB})" if free < MEMORY_VRAM_MB else None
+        return free < MEMORY_VRAM_MB
 
     def _transcribe_for_capture(data: bytes) -> str:
         return app.state.voice.transcribe(data).text
@@ -515,7 +544,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evening_recap": lambda ctx: json.dumps(app.state.recap.run()),
                 "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id),
                 "voice_agenda": lambda ctx: bringup.agenda_job(ctx, profile, dt.datetime.now(profile.tz)),
-                "voice_lab": lambda ctx, language="auto": _voice_lab_job(ctx, language)})
+                "voice_lab": lambda ctx, language="auto", by="owner": _voice_lab_job(ctx, language, by),
+                "profile_seed": lambda ctx: _profile_seed_job(ctx)})
     from . import calendar_read, own_calendar
 
     def _calendar_week(start: dt.date):
@@ -614,6 +644,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"detail": "cross-origin request rejected"}, status_code=403)
         return await call_next(request)
 
+    _running_version = versions.running()
+
     @app.get("/health")
     def health():
         db_ok = True
@@ -632,6 +664,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "brain": brain.value,
             "brain_busy": runner.busy,
             "tools": getattr(runner.brain, "tools_status", lambda: "unknown")(),
+            # The installer only counts an update once THIS version answers (owner's report 2026-10-19).
+            "version": _running_version or "dev",
+            "pid": os.getpid(),
         }
         if not ok:
             raise HTTPException(status_code=503, detail=body)
@@ -950,14 +985,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         final_text: str | None = None
         error = None
         new_sid = None
-        model = conversation.route(text_in, purpose=chat_purpose, schedule=app.state.jobs.schedule)
+        model, why = conversation.route_why(text_in, purpose=chat_purpose, schedule=app.state.jobs.schedule)
         received = time.monotonic()
         first_words_ms = None
         async for event in owner_turn(prompt_in, session_id=session_id, thread_id=tid, purpose=chat_purpose,
-                                      model=model, before_id=msg_in.id):
+                                      model=model, reason=why, own=text_in, before_id=msg_in.id):
             if event.kind is EventKind.usage and (event.data or {}).get("escalated"):
-                model = event.data["escalated"]     # Haiku handed this turn over
-                await send({"type": "model", "model": model, "escalated": True})
+                model, why = event.data["escalated"], event.data.get("why")    # Haiku handed this turn over
+                await send({"type": "model", "model": model, "escalated": True, "why": why})
             elif event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
@@ -994,7 +1029,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "interrupted": interrupted,
                     "server": {"queue_ms": queue_ms,
                                "first_words_ms": first_words_ms if first_words_ms is not None
-                               else int((time.monotonic() - received) * 1000), **(server_extra or {})}})
+                               else int((time.monotonic() - received) * 1000), **(server_extra or {}),
+                               **({"why": why} if why else {})}})
         fold_memory_soon()
 
     @app.websocket("/ws/voice")
@@ -1184,6 +1220,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             llm.update(ok=False, reason=vm.get("error") or f"the voice model is {vm['state']}")
         comps["voice_model"] = {**llm, "model": vm.get("model"), "state": vm["state"],
                                 "loaded": vm["state"] == "ready"}
+        emb = _embeddings_device()
+        if emb is not None:
+            comps["embeddings"] = emb
         card = await asyncio.to_thread(gpu_mod.summary)
         if card is not None:                        # this process (Whisper, Kokoro) and llama.cpp's
             mine = {os.getpid(): "whisper+kokoro"}
@@ -1444,7 +1483,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return mouth
 
     _card_lines = [0]
-    LAB_FIRST_CHECK_S = 600
 
     def _warm_voice() -> None:
         """At start: Whisper and Kokoro loaded once and run once (never per turn), the short lines Kairo says
@@ -1473,6 +1511,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if llm.get("device") is not None and not llm.get("ok"):
                 off.append(f"voice model: {llm.get('reason')}")
         return "; ".join(off) or None
+
+    def _embeddings_device() -> dict | None:
+        """The memory's embedding model: where it runs, and why not on the GPU (None: not set up here)."""
+        emb = getattr(app.state.memory, "embedder", None) if getattr(app.state, "memory", None) else None
+        if emb is None:
+            return None
+        out = {"device": emb.device, "model": emb.model_file, "loaded": emb.running()}
+        if not out["loaded"]:
+            out.update(ok=False, reason=emb.last_error or "not started yet (it starts with the first memory search)")
+        elif emb.device == "cuda":
+            out.update(ok=True, reason=None)
+        else:
+            out.update(ok=False, reason=f"on the CPU: {getattr(app.state, 'memory_cpu_why', None) or 'CUDA did not start for it'}")
+        return out
+
+    def _off_gpu() -> str | None:
+        """Owner's request 2026-10-19 (self-test): every voice part and the embeddings on the GPU of a PC
+        with an NVIDIA card. None: no NVIDIA card; "": all on the GPU; else which ones aren't and why."""
+        from . import gpu as gpu_mod
+        if not gpu_mod.present():
+            return None
+        off = [_voice_slow() or ""]
+        emb = _embeddings_device()
+        if emb is not None and emb.get("loaded") and not emb.get("ok"):
+            off.append(f"embeddings: {emb.get('reason')}")
+        return "; ".join(x for x in off if x)
 
     def _slow_call() -> str | None:
         """Owner's decision 2026-10-17: a call on a slow voice goes ahead; Kairo says so once at the start
@@ -1523,11 +1587,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 log.exception("voice: reporting the owner's answer to %s", item.id)
 
     async def _mouth_ask(request: str, lines: list[str], about: str) -> tuple[str, bool]:
-        """ask_kairo from the voice model: an owner turn for Claude, as on any call."""
+        """ask_kairo from the voice model: an owner turn for Claude, as on any call. The model goes by the
+        request alone, never by Kairo's wording around it (a raised item, an answer riding along)."""
+        own = bringup.without_reports(request)
         if about:
             request = (f"{request}\n[This is the owner's answer to Kairo's {about}. Record it as you would in chat: "
                        "close or update the loop, save the answer.]")
-        return await _rt_ask(request, lines)
+        return await _rt_ask(request, lines, own=own)
 
     def _refresh_items(mouth: "Mouth") -> None:
         """Something on the list got done during the call (a loop closed): it comes off."""
@@ -1616,31 +1682,90 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fold_memory_soon()
         return True
 
-    def _voice_lab_job(ctx, language: str = "auto") -> str:
+    def _voice_lab_job(ctx, language: str = "auto", by: str = "owner") -> str:
         from .scheduler import Skipped
         if runner._lines > 0:
             raise Skipped("a call is on: the voice lab runs when the line is free")
+        if by == "auto" and not _lab_due():
+            raise Skipped("the voice lab already ran")      # the owner's Run got there first
         lab = voicelab.Lab(engine=engine, data_dir=settings.data_dir, site_dir=_vl_site, voice_model=app.state.voice_llm,
                            voice=app.state.voice, smart_turn=app.state.smart_turn,
                            judge=lambda prompt: ctx.ask(prompt, "", purpose="voice_lab").text,
                            tools_dir=settings.data_dir.parent / "tools")
-        rep = lab.run(language)
+        rep = lab.run(language, by=by)
         p_ = rep.get("pick") or {}
         return (f"picked {p_.get('model')}: {p_.get('why')}" if not rep.get("error") else f"failed: {rep['error']}")[:500]
 
-    async def _lab_first_run() -> None:
-        """The voice lab runs once by itself: the first time a voice model is ready and nobody is on the line
-        or talking to Kairo (owner's request 2026-10-16: nothing to do on the PC). Then only on Run."""
-        for _ in range(3):                             # at most 3 tries, 10 minutes apart at the earliest
-            while True:
-                await asyncio.sleep(LAB_FIRST_CHECK_S)
-                with session_for(engine) as s:
-                    if voicelab.last(s) or voicelab.state(s).get("running"):
-                        return
-                if (app.state.voice_llm.ready() and runner._lines == 0 and runner.current_origin is None
-                        and time.time() >= app.state.maintenance_until):
-                    break
-            await asyncio.to_thread(app.state.jobs.run_job, "voice_lab", forced=True)
+    def _lab_due() -> bool:
+        """The lab should run by itself: it never ran, or the PC has an NVIDIA card and the last run wasn't made
+        on it (e.g. before the GPU fix). Not again after its own run on that card: it had waited for the voice to
+        be on the GPU, so running again changes nothing (a model too big for the card's memory, say)."""
+        from . import gpu as gpu_mod
+        with session_for(engine) as s_:
+            last = voicelab.last(s_)
+        if not last:
+            return True
+        return gpu_mod.present() and not last.get("on_gpu") and not (last.get("by") == "auto" and last.get("gpu"))
+
+    def _lab_wait() -> str | None:
+        """Why the lab can't run by itself right now, or None."""
+        if not voicellm.available(_vl_site):
+            return "no voice model is installed yet"
+        vm = app.state.voice_llm.status()
+        if not app.state.voice_llm.ready() and vm["state"] != "off":   # off: a lab switched it off; the lab still measures
+            return f"the voice model is not ready ({vm['state']}{': ' + vm['error'] if vm.get('error') else ''})"[:300]
+        slow = _voice_slow()
+        if slow:
+            return f"the voice is off the GPU, it runs right after the GPU fix ({slow})"[:300]
+        if runner._lines > 0:
+            return "a call is on"
+        if runner.current_origin is not None:
+            return "Claude is busy (a chat or a job)"
+        if time.time() < app.state.maintenance_until:
+            return "an update is being installed"
+        with session_for(engine) as s_:
+            if killswitch.is_paused(s_):
+                return "Kairo is paused"
+        return None
+
+    _lab = {"said": None, "hold_until": 0.0, "error": ""}
+
+    async def _lab_step() -> str | None:
+        """One look: runs the lab when it's due and nothing is in its way. Returns why it waits (None: it ran
+        or there's nothing to do). A new reason is logged once and kept for the Voice lab page and Run diagnosis."""
+        with session_for(engine) as s_:
+            if voicelab.state(s_).get("running"):
+                return None
+        due = await asyncio.to_thread(_lab_due)
+        why = await asyncio.to_thread(_lab_wait) if due else None
+        if due and why is None and time.time() < _lab["hold_until"]:
+            why = f"the last try failed, trying again in a while ({_lab['error']})"[:300]
+        with session_for(engine) as s_:
+            voicelab.set_waiting(s_, why)
+        if why != _lab["said"]:
+            if why:
+                log.info("voice lab: waits to run by itself: %s", why)
+            _lab["said"] = why
+        if not due or why:
+            return why
+        log.info("voice lab: running by itself")
+        run = await asyncio.to_thread(app.state.jobs.run_job, "voice_lab", forced=True, by="auto")
+        if run.status == "error":
+            _lab.update(hold_until=time.time() + LAB_RETRY_AFTER_ERROR_S, error=(run.error or "")[:150])
+        return None
+
+    async def _lab_auto() -> None:
+        """The voice lab runs by itself (owner's request 2026-10-16: nothing to do on the PC; report 2026-10-19:
+        it never ran). It waits for the voice model, the GPU, a free line and an idle Claude, and never gives up."""
+        await asyncio.sleep(LAB_FIRST_CHECK_S)
+        while True:
+            try:
+                await _lab_step()
+            except Exception:   # the next look tries again
+                log.exception("voice lab: running it by itself")
+            await asyncio.sleep(LAB_CHECK_EVERY_S)
+
+    app.state.lab_step, app.state.lab_auto = _lab_step, _lab_auto
 
     @app.post("/api/selftest")
     async def selftest(request: Request):
@@ -1756,17 +1881,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             emb = app.state.memory.embedder
             extras["memory"] = (await asyncio.to_thread(emb.selftest)) if emb is not None \
                 else {"ok": None, "reason": "not set up for this release"}
+        if voice or memory:   # after the voice and the memory ran: their devices are known now
+            off = await asyncio.to_thread(_off_gpu)
+            extras["gpu"] = {"ok": None, "reason": "no NVIDIA card"} if off is None else \
+                {"ok": not off, "reason": f"not on the GPU: {off}" if off else ""}
         result["checks"].update({k: v.get("ok") for k, v in extras.items()})
         result["details"] = extras
         if extras.get("voice", {}).get("heard"):
             result["proof"]["transcription"] = extras["voice"]["heard"]
-        problems = [] if result["ok"] else [result["reason"]]
-        for kind, r in extras.items():
-            if r.get("ok") is False:
-                problems.append(f"{kind}: {r.get('reason')}")
-                if result["category"] not in ("toolchain", "claude"):   # a broken install outranks the rest (rollback)
-                    result.update(ok=False, category=kind, reason=f"{kind}: {r.get('reason')}")
-        result["problems"] = problems
+        result["problems"] = selftest_mod.add_extras(result, extras)
         result["seconds"] = round(time.monotonic() - started, 1)
         result["at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         log.info("self-test: %s", json.dumps({k: result[k] for k in ("ok", "category", "reason", "checks", "proof")}, default=str))
@@ -1785,7 +1908,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def release_version() -> str:
         try:
-            return str(json.loads((REPO_ROOT / "release.json").read_text(encoding="utf-8"))["version"])
+            return str(json.loads((REPO_ROOT / "release.json").read_text(encoding="utf-8-sig"))["version"])
         except (OSError, ValueError, KeyError):
             return "dev"
 
@@ -2057,6 +2180,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return imp
 
     app.state.captures.timetable = lambda ctx, data, mt: _timetable().import_file(ctx, data, mt)
+
+    # ---------------------------------------------------------------- the owner's profile from the release
+
+    from . import profile_seed
+
+    def _profile_seed_job(ctx) -> str:
+        """Owner's decision 2026-10-19: private/profile/ABOUT_ME.md (shipped with the release) imported once,
+        like "save this to my profile"; a changed file: only the changed sections. Counts only in the job's
+        record and the log, never the profile's text."""
+        text = profile_seed.read()
+        if text is None:
+            return json.dumps({"status": "no profile in this release"})
+
+        def ask(prompt: str) -> str | None:
+            r = ctx.ask(prompt, JOB_RULES, purpose="profile")
+            return r.text if r.ok else None
+        try:
+            g = google_read()
+        except Exception:   # Google not connected yet: the calendar rules apply later (the daily rules pass)
+            g = None
+        out = profile_seed.run(ctx.session, text=text, ask=ask, vault_dir=settings.vault_dir, tz=profile.tz,
+                               today=dt.datetime.now(profile.tz).date(), owner_name=profile.name, google_read=g,
+                               lessons_to_calendar=lambda lessons: _timetable().import_lessons(ctx.session, lessons))
+        if out["status"] == "imported":
+            pusher.notify("Kairo", profile_seed.push_text(out), "/#chat", source="profile")
+        return json.dumps({"status": out["status"], "counts": out.get("counts") or {}})
+
+    PROFILE_SEED_FIRST_S = 120
+
+    async def _profile_seed_first_run() -> None:
+        """Once after every start: import the shipped profile if it is new or changed. Tries again every 10
+        minutes while the model can't do it (logged out, usage limit), then every 6 hours."""
+        if os.environ.get("KAIRO_PROFILE_SEED") == "0":   # CI's installs (a fake Claude): never the owner's profile
+            return
+        await asyncio.sleep(PROFILE_SEED_FIRST_S)
+        tries = 0
+        while True:
+            try:
+                text = profile_seed.read()
+                if text is None:
+                    return
+                with session_for(engine) as s_:
+                    pending = profile_seed.changed(text, profile_seed.state(s_))
+                if not pending:
+                    return
+                run = await asyncio.to_thread(app.state.jobs.run_job, "profile_seed", forced=True)
+                status = json.loads(run.output_path or "{}").get("status") if run.status == "ok" else None
+                if status in ("imported", "unchanged", "not_owner"):
+                    return
+            except Exception:
+                log.exception("profile seed")
+            tries += 1
+            await asyncio.sleep(600 if tries < 12 else 6 * 3600)
 
     def _olat_job(ctx) -> str:
         from .scheduler import Skipped
@@ -3172,11 +3348,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return state
 
     async def _report_ask(request: str, lines: list[str]) -> tuple[str, bool]:
-        return await _rt_ask(request, lines)
+        """What the owner said to a raised item, for Claude to record: always Haiku (bookkeeping, owner's rule
+        2026-10-19), never routed on Kairo's wording of the item."""
+        return await _rt_ask(request, lines, model="haiku")
     app.state.report_ask = _report_ask               # an owner turn for Claude, like ask_kairo (tests listen here)
 
-    async def _rt_ask(request: str, lines: list[str]) -> tuple[str, bool]:
-        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call."""
+    async def _rt_ask(request: str, lines: list[str], *, own: str | None = None,
+                      model: str | None = None) -> tuple[str, bool]:
+        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call.
+        Owner's rule 2026-10-19: Haiku unless the request itself is a real judgment call (owner_turn routes on
+        the request, or own, never on brain_prompt's wording around it); the owner's words on the call give
+        the language."""
         if time.time() < app.state.maintenance_until:
             return "Kairo is installing an update. Try again in a minute.", False
         with session_for(engine) as s:
@@ -3188,11 +3370,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.add(thread)
                 s.commit()
             sid, tid = thread.brain_session_id, thread.id
-        prompt = realtime.brain_prompt(request, lines)
-        model = conversation.route(prompt, purpose="call", schedule=app.state.jobs.schedule)
+        said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
         parts: list[str] = []
         final, error, new_sid = None, None, None
-        async for event in owner_turn(prompt, session_id=sid, thread_id=tid, purpose="call", model=model):
+        async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=sid, thread_id=tid, purpose="call",
+                                      model=model, own=request if own is None else own,
+                                      language=conversation.message_language(said) if said else None):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:

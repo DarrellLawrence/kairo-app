@@ -11,6 +11,7 @@
 - **E. Coaching modules** (generic features; the owner's details come from the vault): training (weekly split around fixed training days, short home sessions on other days, only the equipment listed in the profile, tracked, streaks, pushback on skipped sessions and leg day); food and water (evening-before check: food packed, cutlery; protein focus; snack spending tracked; water reminders during work/school); study (exam plan to the date in the profile, commute = flashcards/voice quiz, short summaries + videos); money on Opus (monthly review, investing plan, spending pushback, savings goals, gift budgets, Christmas planning from early November; read-only always, facts + options + a recommendation, the owner decides); people (wishlists, birthdays, date ideas, what people said, 1:1 family time); faith (a small daily habit next to an existing morning habit, gentle, in the weekly review); style (wardrobe plan + budget inside the money plan, second-hand first).
 - **F. Fix plan, still open.** P1/P2 proven on the PC (self-test + acceptance). P3–P5 (noise and duplicates, one notification boss, one call budget, lag, observability) ranked by the in-app diagnosis numbers; the updater history joins the diagnosis in P5. SYSTEM writes into `data\` (junction risk) fixed before OLAT or any browser job runs for real: OLAT stays off until then.
 - **G. Profile import.** The owner attaches a profile file in chat ("save this to my profile"): stored as-is in `10 Profile/`, then the loops, calendar tags, people notes and plans it describes are created, and Kairo says in a few lines what it set up; unclear points go to quick questions. Real personal data never goes into the repo, tests, fixtures, logs, issues or PR text; the acceptance test uses a fake profile.
+  **Only exception (owner's decision 2026-10-19):** the owner's own profile, `private/profile/ABOUT_ME.md` in the private repo, ships with the release; on the first start after an update that brings or changes it, Kairo imports it once by itself (the same result as "save this to my profile": as-is in `10 Profile/`, people and birthdays, loops, calendar rules incl. "weekends SOCIAL" by weekday, coach facts, places and routes, goals in `20 Goals/`, the timetable as weekly FIXED blocks), then pushes a short summary with the unclear points as quick questions. A changed file: only the changed sections. Its text is never printed in logs, CI output, tests, issues or PR text; a PC whose owner has another name never imports it; CI installs never import it.
 - **Already built, now in the plan:** school portal (OLAT, read-only, section 15c; off until F24). Knowledge calls (max 1/day, open PR #18) merge after the one call budget (F23).
 - **Order:** A1 → A2 → F22 → B → D → C6 (semantic memory) → E → G → F23 → C7 (Obsidian graph) → F24. Each block is its own PR, merged on green; after each block the acceptance tests that apply run on kairo-home and the result is reported. Updates to the owner: 3 short lines (done / next / what the owner must do).
 
@@ -193,6 +194,7 @@ When the owner drops a new `KICKOFF.md` into `OneDrive\Kairo\inbox\`:
 **Flow:** code → tests pass (CI runs on Linux **and Windows**) → `scripts/build-release.sh` → `dist/Kairo-Setup-<version>.zip` → copy to kairo-home (USB stick or Tailscale "Send file") → unzip → double-click `Install-Kairo.bat` → it backs up the DB, installs the new release next to the old one, migrates, health-checks, and switches over → verify on iPhone.
 **Rollback:** automatic if the health check fails; manual: double-click `C:\Kairo\Rollback-Kairo.bat` (previous release + schema downgrade).
 **Failed updates are never silent (owner's rule 2026-10-17):** every try that fails or is undone is a push with the reason; so is a release still waiting after 3 hours outside the quiet hours, an error in the auto-update that lasts 30 minutes (then every 6 hours), a missing GitHub token, and an auto-update that stopped running (Kairo checks its status file).
+**An update counts only when the new version answers (owner's report 2026-10-19):** the installer stops every Kairo server (also one the task no longer knows, found by its command line or Kairo's port), starts the new one after the switch, and checks that /health reports the new version; else it rolls back. A version installed but not running for 10 minutes is red on Today and a push.
 **Config:** machine differences in `C:\Kairo\data\kairo.env` (written by the installer) or `.env` on the laptop; owner config in the data folder's `config\`.
 
 ### 2c. Client-ready rule (LOCKED)
@@ -489,7 +491,7 @@ focus on what matters: {{context}}.
 - Write only in Kairo-owned vault files; never overwrite the owner's text.
 ```
 
-`config/profile.yaml` holds **placeholders only** (owner's decision 2026-10-15: no personal data in the repo, tests, fixtures, logs, issues or PR text). The real values live only on the PC in `data\config\profile.yaml` (the owner layer); on the first start of the placeholder release Kairo copied the values it was running with there by itself. Tests use made-up data.
+`config/profile.yaml` holds **placeholders only** (owner's decision 2026-10-15: no personal data in the repo, tests, fixtures, logs, issues or PR text; only exception: `private/profile/ABOUT_ME.md`, owner's decision 2026-10-19, see G). The real values live only on the PC in `data\config\profile.yaml` (the owner layer); on the first start of the placeholder release Kairo copied the values it was running with there by itself. Tests use made-up data.
 ```yaml
 name: Owner
 default_language: English
@@ -672,8 +674,11 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   the turn's own ask_kairo when there is one (no extra wait), else right after that turn (done →
   closed, later → snoozed, new information → saved), so later questions on the call get the new state.
 - **VRAM (12 GB):** Whisper large-v3-turbo ~2 GB, the voice model 2–6.5 GB, Kokoro on the GPU too
-  (onnxruntime-gpu in the voice folder, owner's approval 2026-10-17), Piper and Smart Turn on the CPU, the memory embeddings on the CPU once a voice model is installed, CUDA contexts
-  and the desktop ~1.5 GB. The lab reports what each candidate really uses.
+  (onnxruntime-gpu in the voice folder, owner's approval 2026-10-17), Piper and Smart Turn on the CPU, the memory
+  embeddings on the GPU when 3 GB are free (owner's request 2026-10-19; else the CPU, with the reason), CUDA contexts
+  and the desktop ~1.5 GB. The lab reports what each candidate really uses. On a PC with an NVIDIA card the
+  self-test is red (and pushed) when Whisper, Kokoro, the voice model or the embeddings are off the GPU; it
+  never rolls an update back for that (owner's request 2026-10-19).
 - **Kyutai** (streaming STT + TTS, English/French only) is measured by the lab against Whisper +
   Kokoro when the owner asks for it (its own Python, ~10 GB); Moshi is never the mouth (it can't take
   Claude's results mid-conversation).
@@ -690,6 +695,10 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   Claude) → Kokoro/Piper from the first clause (~5 words), short openers and holding lines from a
   cache. Talk-over stops the audio at once. The old line (/ws/voice) stays as the fallback (no
   voice packages, WebRTC can't connect).
+- **Claude on calls (owner's rule 2026-10-19):** the local voice model talks; ask_kairo and the
+  reports from a call run on Haiku, also for tool work (tasks, reminders, notes, loops). Only a real
+  judgment call goes to Sonnet (or what the settings raise), and every run that isn't Haiku records why
+  (More → Usage → "Why not Haiku").
 - **On a call (owner's request 2026-10-17):** small talk (hello, thanks, bye) never goes to Claude;
   Claude gets 8 s, then Kairo says "I'll get back to you" once and the answer comes as a push (and in
   the next turn); the holding line at most once a turn; a call the owner places opens with "Hey <first

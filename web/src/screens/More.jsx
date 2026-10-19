@@ -159,7 +159,16 @@ function UsagePage() {
             {u.total_runs === 0 && <ListRow title="No runs yet" />}</List>
           <SectionTitle>By job</SectionTitle>
           <List>{Object.entries(u.by_purpose).filter(([k]) => !k.startsWith('voice_realtime')).map(row)}</List>
-          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it (realtime voice above is real money). Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews.</p>
+          {u.escalations?.length > 0 && (
+            <>
+              <SectionTitle>Why not Haiku</SectionTitle>
+              <List>{u.escalations.map((e, i) => (
+                <ListRow key={i} wrap title={e.reason || 'no reason recorded'}
+                  subtitle={`${e.model[0].toUpperCase() + e.model.slice(1)} · ${e.purpose} · ${parseTs(e.ts)?.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`} />
+              ))}</List>
+            </>
+          )}
+          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it (realtime voice above is real money). Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews. Chat and calls run on Haiku; "Why not Haiku" shows each of your turns that didn't, and why: the words that made it a judgment call, money, your settings, or Haiku handing it over.</p>
         </>
       )}
     </Page>
@@ -715,7 +724,7 @@ const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 100
 const NET = { direct: 'Direct', relay: 'Through Tailscale’s relay', unknown: 'Not known' }
 
 // Owner's request 2026-10-17: where each part of the voice runs; anything off the GPU is red with its reason.
-const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', piper: 'German voice (Piper)' }
+const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', embeddings: 'Memory search (embeddings)', piper: 'German voice (Piper)' }
 const LINE_WHY = { not_installed: 'the call packages aren’t on the PC yet', voice_missing: 'speech to text isn’t installed', no_tailnet: 'the PC has no Tailscale address right now' }
 
 function VoiceDevices({ dev }) {
@@ -876,7 +885,8 @@ function VoiceLabPage() {
           value={<Badge tone={vm.state === 'ready' ? 'ok' : 'warn'} pop={false}>{d.engine === 'local' ? 'Local' : 'OpenAI'}</Badge>} />
         {d.gpu && <ListRow icon={<IconPulse />} title={d.gpu.name} subtitle={`${d.gpu.used_mb} of ${d.gpu.total_mb} MB in use · driver ${d.gpu.driver}`} />}
         <ListRow icon={<IconBolt />} title={d.state?.running ? `Running: ${d.state.step}` : 'Run the voice lab'}
-          subtitle={d.state?.running ? 'Calls use the old voice until it is done' : 'English and German, about 10–20 minutes'}
+          subtitle={d.state?.running ? 'Calls use the old voice until it is done'
+            : d.state?.waiting ? `Runs by itself, waiting: ${d.state.waiting}` : 'English and German, about 10–20 minutes'}
           onClick={d.state?.running || !d.installed.length ? undefined : () => run('auto')} />
         {!d.state?.running && d.installed.length > 0 && (
           <ListRow icon={<IconBolt />} title="Run it English-only" subtitle="If you only talk English on calls" onClick={() => run('en')} />
@@ -890,8 +900,9 @@ function VoiceLabPage() {
       </List>
       <p className="k-muted k-small k-pad">“Question” is read from what you said, so this split is an estimate; each model’s exact numbers on fixed questions are below.</p>
       {r.pick && (
-        <p className="k-small k-pad selectable"><b>{r.pick.model ? `Picked: ${r.pick.model}` : 'Nothing picked'}</b> — {r.pick.why}{r.at ? ` (${parseTs(r.at).toLocaleString()}, ${r.seconds}s)` : ''}</p>
+        <p className="k-small k-pad selectable"><b>{r.pick.model ? `Picked: ${r.pick.model}` : 'Nothing picked'}</b> — {r.pick.why}{r.at ? ` (${parseTs(r.at).toLocaleString()}, ${r.seconds}s${r.on_gpu ? ', on the GPU' : ''})` : ''}</p>
       )}
+      {r.on_gpu === false && <p className="k-small k-pad selectable" style={{ color: 'var(--warn)' }}>Not measured on the GPU{r.off_gpu?.length ? `: ${r.off_gpu.join('; ')}` : ''}</p>}
       {r.error && <p className="k-small k-pad" style={{ color: 'var(--warn)' }}>{r.error}</p>}
       {models.map(([id, m]) => (
         <div key={id}>

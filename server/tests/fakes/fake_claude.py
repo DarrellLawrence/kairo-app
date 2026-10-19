@@ -27,7 +27,8 @@ turns run on that model; interrupt -> the running turn ends with result subtype
 error_during_execution, the process keeps serving turns.
 
 Modes for a warm process: FAKE_CLAUDE_MODE=long answers in 40 small pieces 50 ms apart (interrupt
-tests). A prompt with [[fake-escalate]] gets exactly "[[sonnet]]" while the model is haiku.
+tests). A prompt with [[fake-escalate]] gets exactly "[[sonnet]]" while the model is haiku
+([[fake-escalate: WHY]]: "[[sonnet]] WHY", Haiku's reason for handing over).
 
 Tools, like the real CLI (used by the release tool test and the self-test): when the
 prompt contains `[[fake-tool NAME {json args}]]`, the fake starts the MCP servers from
@@ -48,6 +49,7 @@ import time
 import uuid
 
 DIRECTIVE = re.compile(r"\[\[fake-tool (\w+) (\{.*?\})\]\]", re.S)
+ESCALATE = re.compile(r"\[\[fake-escalate(?:: ([^\]]*))?\]\]")
 
 
 def env(name):
@@ -256,8 +258,9 @@ def turn(args, prompt, sid, mode, partial, model=None, interrupted=lambda: False
 
     model_id = {"haiku": "claude-haiku-fake", "sonnet": "claude-sonnet-fake", "opus": "claude-opus-fake"}.get(model or "", "claude-fake")
     usage = {model_id: {"inputTokens": 10, "outputTokens": 5}}
-    if "[[fake-escalate]]" in prompt and model == "haiku":
-        reply = "[[sonnet]]"
+    escalate = ESCALATE.search(prompt)
+    if escalate and model == "haiku":
+        reply = "[[sonnet]]" + (f" {escalate.group(1)}" if escalate.group(1) else "")
     else:   # like a model: it answers the owner's words, not Kairo's context block in front of them
         reply = "echo: " + re.sub(r"(?s)^<kairo-context>.*?</kairo-context>\s*", "", prompt)
     out({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}, "session_id": sid})

@@ -36,7 +36,8 @@ DESCRIPTIONS = {
                       "text and an import_id. Then call profile_apply.",
     "profile_apply": "After profile_import: what the profile says, for Kairo's own tables. people (name, relation, "
                      "birthday YYYY-MM-DD or --MM-DD, notes), loops (things still to do, due), calendar_rules (a word in "
-                     "event titles -> FIXED never moves / FLEXIBLE Kairo may move / SOCIAL with others), coach (training_days, "
+                     "event titles -> FIXED never moves / FLEXIBLE Kairo may move / SOCIAL with others; days mon..sun limits "
+                     "a rule to those days, match \"*\" with days = every event on them, e.g. weekends SOCIAL), coach (training_days, "
                      "equipment, water_l, faith_habit, budgets, savings ... only what it says), exams (subject, date), places (name, "
                      "kind home/school/work/training, station, days mon..sun, via station). "
                      "Leave out what it doesn't say. Then tell the owner in a few lines what was added.",
@@ -47,7 +48,7 @@ DESCRIPTIONS = {
     "settings_set": "Change a setting the owner asked for ('quiet hours from 23:00', 'brief at 7').",
     "place_set": "Save a place: home, school, work, training (+ nearest station; address stays private on the PC; valid_from/until for a job that changes; days mon..sun when it's only some weekdays; via: the station the usual route goes through).",
     "place_remove": "Remove a saved place.",
-    "debrief": "Owner asks 'debrief me' / 'what's going on': the right scope for the time of day (or scope=everything when bored, a topic like school). Follow its 'how'.",
+    "debrief": "Owner asks 'debrief me' / 'give me a brief' / 'what's going on': the right scope for the time of day (or scope=everything when bored, a topic like school). Follow its 'how' (a few short lines, no question at the end).",
     "loops_list": "Open loops: mails and questions waiting for the owner, promises, deadlines. With id, who, what, since, urgency.",
     "loops_add": "Remember an open loop: a promise the owner made ('I'll send it tomorrow') or something someone waits for.",
     "loops_snooze": "Owner said 'not now' (when=later), 'in an hour' (in_1h), 'tomorrow', or an exact time (at). It comes back.",

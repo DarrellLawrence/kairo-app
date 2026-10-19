@@ -148,6 +148,27 @@ def test_no_address_recorded_is_no_alarm(watch):
     assert "tailscale" not in watch.run(full=True)
 
 
+def test_the_address_from_the_auto_update_when_the_boot_check_has_none(watch):
+    """Acceptance #30: the boot check runs after a boot (days ago); the auto-update writes tailnet.json every
+    5 minutes, so its address is there too."""
+    data = watch.settings.data_dir
+    status = data.parent / "status"
+    status.mkdir(parents=True, exist_ok=True)
+    tailnet = {"at": 1, "self_relay": "fra", "peers": [], "kairo_url": "https://kairo-home.tail1234.ts.net"}
+    (status / "tailnet.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(tailnet).encode())
+    (status / "boot-check.json").write_text(json.dumps({"all_ok": True, "checks": []}), encoding="utf-8")   # an old one
+    assert health.kairo_url(data) == "https://kairo-home.tail1234.ts.net"
+    asked = []
+    watch._http_get = lambda url: asked.append(url)
+    assert watch.run(full=True) == {} and asked == ["https://kairo-home.tail1234.ts.net/health"]
+    (status / "boot-check.json").write_text(json.dumps({"kairo_url": "https://kairo-pc.tail1234.ts.net"}), encoding="utf-8")
+    assert health.kairo_url(data) == "https://kairo-pc.tail1234.ts.net"                   # the boot check's comes first
+    (status / "boot-check.json").unlink()
+    for planted in ("https://evil.example/x", "http://kairo-home.tail1234.ts.net", "https://user@kairo-home.tail1234.ts.net"):
+        (status / "tailnet.json").write_text(json.dumps({**tailnet, "kairo_url": planted}), encoding="utf-8")
+        assert health.kairo_url(data) is None                                              # only Kairo's own tailnet address
+
+
 def test_todays_chip_and_housekeeping(migrated, monkeypatch):
     monkeypatch.setattr(health.shutil, "disk_usage", lambda p: Usage(500e9, 495e9, 5e9))
     app = create_app(migrated)
@@ -193,4 +214,41 @@ def test_an_auto_update_that_stopped_running_is_a_push(watch):
     assert "updates" not in watch.cheap(woke)
     assert "updates" not in watch.cheap(woke + dt.timedelta(minutes=10))     # checked every 5 minutes
     assert "updates" in watch.cheap(woke + dt.timedelta(minutes=21))          # still not run after the grace
+
+
+def test_an_installed_version_that_isnt_running_is_red_with_a_push(watch, tmp_path):
+    """Owner's report 2026-10-19: "Kairo updated to the new version, ok", but the old server kept running."""
+    releases = tmp_path / "app" / "releases"
+    old = releases / "2026.10.16.1104-aaaaaaa"
+    old.mkdir(parents=True)
+    (old / "release.json").write_text(json.dumps({"version": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    state = tmp_path / "app" / "state.json"
+    state.write_text(json.dumps({"current": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    watch.app_root = old
+    now = dt.datetime.now(dt.timezone.utc)
+    assert "version" not in watch.run(full=False, now=now)
+    state.write_bytes(b"\xef\xbb\xbf" + json.dumps({"current": "2026.10.18.1219-bbbbbbb"}).encode())
+    assert "version" not in watch.run(full=False, now=now)                      # an update may be switching
+    problems = watch.run(full=False, now=now + dt.timedelta(minutes=11))
+    assert "2026.10.18.1219-bbbbbbb is installed" in problems["version"] and "2026.10.16.1104-aaaaaaa" in problems["version"]
+    assert len(watch.pusher.sent) == 1 and "didn't take" in watch.pusher.sent[0]["body"]
+    state.write_text(json.dumps({"current": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
+    assert "version" not in watch.run(full=False, now=now + dt.timedelta(minutes=12))
+    state.write_text(json.dumps({"current": "2026.10.15.0900-ccccccc"}), encoding="utf-8")   # newer one under test
+    assert "version" not in watch.run(full=False, now=now + dt.timedelta(minutes=40))
+
+
+def test_a_release_json_with_a_bom_still_names_its_version(tmp_path):
+    """Windows PowerShell 5.1 writes UTF-8 with a BOM: a release it touched must not answer as "dev"."""
+    from app import versions
+    (tmp_path / "release.json").write_bytes(b"\xef\xbb\xbf" + json.dumps({"version": "2026.10.19.1247-abcdef0"}).encode())
+    assert versions.running(tmp_path) == "2026.10.19.1247-abcdef0"
+
+
+def test_health_says_which_version_answers(migrated):
+    """The installer counts an update only once the new version itself answers on the port."""
+    from fastapi.testclient import TestClient
+    with TestClient(create_app(migrated)) as c:
+        body = c.get("/health").json()
+    assert body["version"] and isinstance(body["pid"], int)
 

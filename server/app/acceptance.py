@@ -136,8 +136,9 @@ SPECS = [
                                          "an urgent item comes before the answer; never the same item twice, two a call at "
                                          "most; nothing worth it: only the holding line; your answer to it is recorded during "
                                          "the call (a later question on the same call gets the new state).", "TC"),
-    Spec(42, "Voice on the GPU", "manual", "More -> System -> Voice speed after a restart of the PC: Whisper, Kokoro and the "
-                                           "voice model say GPU (none red), the last call turn says WebRTC; \"hello\" on a call "
+    Spec(42, "Voice on the GPU", "manual", "More -> System -> Voice speed after a restart of the PC: Whisper, Kokoro, the "
+                                           "voice model and the embeddings say GPU (none red), the self-test is green, "
+                                           "the last call turn says WebRTC; \"hello\" on a call "
                                            "is answered without Claude; a question Claude needs longer than 8 s for gets "
                                            "\"I'll get back to you\" and the answer as a push; a call you place opens with "
                                            "\"Hey <your first name>\" at once.", "G")
@@ -793,7 +794,8 @@ async def t_health(ctx: Context) -> dict:
                   "never in the chat's prompt": not in_prompt,
                   "sorted out with one tap": not copy.exists() and note.read_text(encoding="utf-8").endswith("this PC's line")}
         detail = "; ".join([*hourly.values(), seen.get("disk", "")]).strip("; ") or (
-            f"{url} answers" if url else "no tailnet address recorded yet: run the boot check (Start menu -> Kairo Boot Check)")
+            f"{url} answers" if url else "no tailnet address recorded yet: the auto-update records it within "
+                                         "5 minutes (or Start menu -> Kairo -> Kairo Check). Is Tailscale signed in?")
         return _result(True, checks, detail)
     finally:
         for f in (note, copy):

@@ -162,3 +162,21 @@ def verdict(*, hooks: dict, mcp: str, listed: list[str], expected: list[str], to
     if context["personality"] == "older":
         return fail("config", context["detail"])
     return {"ok": True, "category": None, "reason": "", "checks": checks, "warnings": warnings}
+
+
+def add_extras(result: dict, extras: dict) -> list[str]:
+    """The voice, browser, memory and GPU checks on top of the verdict. A broken install outranks the rest
+    (the installer rolls back for it); the GPU (owner's request 2026-10-19: every voice part and the
+    embeddings on the GPU, else red and pushed) comes last and never rolls back: an older version can't
+    fix a driver or a card either. Returns the problems, in order."""
+    problems = [] if result["ok"] else [result["reason"]]
+    for kind, r in extras.items():
+        if r.get("ok") is not False:
+            continue
+        problems.append(f"{kind}: {r.get('reason')}")
+        if kind == "gpu":
+            if result["ok"]:
+                result.update(ok=False, category="gpu", reason=f"gpu: {r.get('reason')}")
+        elif result["ok"] or result["category"] in ("gpu", "context", "config", "model"):
+            result.update(ok=False, category=kind, reason=f"{kind}: {r.get('reason')}")
+    return problems
