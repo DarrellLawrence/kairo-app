@@ -695,6 +695,10 @@ rule changes for voice only. Everything else stays on the Claude subscription.
   Claude) → Kokoro/Piper from the first clause (~5 words), short openers and holding lines from a
   cache. Talk-over stops the audio at once. The old line (/ws/voice) stays as the fallback (no
   voice packages, WebRTC can't connect).
+- **Claude on calls (owner's rule 2026-10-19):** the local voice model talks; ask_kairo and the
+  reports from a call run on Haiku, also for tool work (tasks, reminders, notes, loops). Only a real
+  judgment call goes to Sonnet (or what the settings raise), and every run that isn't Haiku records why
+  (More → Usage → "Why not Haiku").
 - **On a call (owner's request 2026-10-17):** small talk (hello, thanks, bye) never goes to Claude;
   Claude gets 8 s, then Kairo says "I'll get back to you" once and the answer comes as a push (and in
   the next turn); the holding line at most once a turn; a call the owner places opens with "Hey <first
