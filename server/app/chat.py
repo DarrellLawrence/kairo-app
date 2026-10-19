@@ -47,13 +47,14 @@ class BrainRunner:
         # Tool calls arriving through mcp_kairo belong to this run.
         self.current_origin: str | None = None
         self.current_thread_id: int | None = None
-        self.on_usage = None   # (purpose, usage dict, ok) -> None: More -> Usage
+        self.on_usage = None   # (purpose, usage dict, ok, reason=None) -> None: More -> Usage
         self.last_owner_wait_ms = 0   # how long the last owner turn waited for the brain (app/turns.py)
 
-    def _note(self, purpose: str, event: BrainEvent) -> None:
+    def _note(self, purpose: str, event: BrainEvent, reason: str | None = None) -> None:
+        """reason: why this run isn't on Haiku (conversation.route_why), shown under More -> Usage."""
         if self.on_usage and event.kind in (EventKind.result, EventKind.error):
             try:
-                self.on_usage(purpose, (event.data or {}).get("usage"), event.kind == EventKind.result)
+                self.on_usage(purpose, (event.data or {}).get("usage"), event.kind == EventKind.result, reason=reason)
             except Exception:   # usage bookkeeping never breaks a run
                 pass
 
@@ -121,9 +122,10 @@ class BrainRunner:
 
     async def stream(self, prompt: str, *, session_id: str | None, system: str, tools: list[str],
                      origin: str = "owner_chat", thread_id: int | None = None, model: str | None = None,
-                     purpose: str = "chat", warm: Any = None) -> AsyncIterator[BrainEvent]:
+                     purpose: str = "chat", warm: Any = None, reason: str | None = None) -> AsyncIterator[BrainEvent]:
         """An owner turn (chat, call, voice note, self-test): first in line for the brain.
-        warm: a warm process key (calls, fix plan 30), see ClaudeCLIBrain.warm_up."""
+        warm: a warm process key (calls, fix plan 30), see ClaudeCLIBrain.warm_up. reason: why the model
+        isn't Haiku, recorded with the run."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[BrainEvent | None] = asyncio.Queue()
 
@@ -143,7 +145,7 @@ class BrainRunner:
                     if warm is not None:
                         kwargs["warm"] = warm
                     for event in self.brain.run(prompt, session_id=session_id, system=system, tools=tools, origin=origin, **kwargs):
-                        self._note(purpose, event)
+                        self._note(purpose, event, reason)
                         post(event)
                 except Exception as exc:  # adapter bug: report, don't kill the server
                     post(BrainEvent(EventKind.error, text=f"Brain error: {exc}"))

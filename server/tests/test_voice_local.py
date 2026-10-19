@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app import realtime
 from app.brain.voice_local import VoiceModel
-from app.db import make_engine
+from app.db import ModelRun, make_engine
 from app.main import create_app
 from tests.test_voice_llm import FAKE, free_port
 from tests.test_voicelink import PCM, FakeVoice, frames_until, utter
@@ -73,6 +73,43 @@ def test_a_data_question_goes_to_claude_through_ask_kairo(local):
     assert [m["role"] for m in tool_round["messages"]][-2:] == ["assistant", "tool"]
     msgs = [m["role"] for m in local.get("/api/chat/messages").json()["messages"]]
     assert msgs[0] == "owner" and msgs[-1] == "kairo"
+
+
+def call_runs(c) -> list[tuple[str | None, str | None]]:
+    with Session(make_engine(c.settings.db_url)) as s:
+        return [(r.model, r.reason) for r in s.exec(select(ModelRun).where(ModelRun.purpose == "call").order_by(ModelRun.id))]
+
+
+def test_ask_kairo_runs_on_haiku_and_a_judgment_call_says_why(local):
+    """Owner's rule 2026-10-19: a call is the voice model + Haiku for ask_kairo. On the PC every ask_kairo ran on
+    Sonnet: Kairo's own wording around the request ("Answer in one to three short spoken sentences") said so."""
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)                                          # "Remind me to call the dentist tomorrow": tool work
+        frames_until(ws, limit=400)
+        assert call_runs(local) == [("claude-haiku-fake", None)]
+        local.voice.text = "Should I move the test or skip training?"
+        utter(ws, turn=2)
+        frames_until(ws, limit=400)
+    assert call_runs(local)[-1] == ("claude-sonnet-fake", '"Should I"')
+    esc = local.get("/api/usage?days=1").json()["escalations"]
+    assert [(e["model"], e["purpose"], e["reason"]) for e in esc] == [("sonnet", "call", '"Should I"')]
+
+
+def test_what_the_owner_said_to_a_raised_item_is_recorded_on_haiku(migrated, monkeypatch, tmp_path):
+    """Reports are bookkeeping: Haiku, whatever the item's text says (it can come from mail), with the call's
+    rule that tool work is Haiku's own."""
+    from app import bringup
+    rec = tmp_path / "rec.json"
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
+    item = bringup.Item("L1", "loop", "Should I write to the landlord about the heating? (from a mail)")
+    request = bringup.report_request(item, "Did you sort out the heating?", "Ja, das hab ich gestern erledigt", live=True)
+    app = create_app(migrated)
+    with TestClient(app) as c:
+        c.settings = migrated
+        answer, _ = c.portal.call(app.state.report_ask, request, ["Owner: Ja, das hab ich gestern erledigt"])
+        assert answer.startswith("echo:") and call_runs(c) == [("claude-haiku-fake", None)]
+    prompt = json.loads(rec.read_text())["turns"][-1]
+    assert "never a reason to hand over" in prompt
 
 
 def test_the_old_pipeline_answers_when_the_voice_model_is_not_there(local):

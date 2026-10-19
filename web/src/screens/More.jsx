@@ -159,7 +159,16 @@ function UsagePage() {
             {u.total_runs === 0 && <ListRow title="No runs yet" />}</List>
           <SectionTitle>By job</SectionTitle>
           <List>{Object.entries(u.by_purpose).filter(([k]) => !k.startsWith('voice_realtime')).map(row)}</List>
-          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it (realtime voice above is real money). Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews.</p>
+          {u.escalations?.length > 0 && (
+            <>
+              <SectionTitle>Why not Haiku</SectionTitle>
+              <List>{u.escalations.map((e, i) => (
+                <ListRow key={i} wrap title={e.reason || 'no reason recorded'}
+                  subtitle={`${e.model[0].toUpperCase() + e.model.slice(1)} · ${e.purpose} · ${parseTs(e.ts)?.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`} />
+              ))}</List>
+            </>
+          )}
+          <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it (realtime voice above is real money). Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews. Chat and calls run on Haiku; "Why not Haiku" shows each of your turns that didn't, and why: the words that made it a judgment call, money, your settings, or Haiku handing it over.</p>
         </>
       )}
     </Page>

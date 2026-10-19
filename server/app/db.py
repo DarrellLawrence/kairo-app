@@ -453,6 +453,7 @@ class ModelRun(SQLModel, table=True):
     startup_ms: int | None = None          # process start -> Claude ready (0019; cold start cost)
     first_text_ms: int | None = None       # start -> first words of the answer
     warm: bool | None = None               # a warm process answered (calls, fix plan 30)
+    reason: str | None = None              # an owner turn not on Haiku: why (0025; '"should I"', money, settings, ...)
 
 
 class ChatThread(SQLModel, table=True):

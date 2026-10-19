@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 
 from fastapi.testclient import TestClient
+from sqlmodel import Session, select
 
 from app import models
 from app.brain.claude_cli import ClaudeCLIBrain, _usage
 from app.chat import AskResult
+from app.db import ModelRun, make_engine
 from app.main import create_app
 
 
@@ -50,3 +52,32 @@ def test_jobs_ask_with_their_model_and_usage_is_shown(migrated):
         u = c.get("/api/usage?days=1").json()
         assert u["by_model"]["haiku"]["runs"] == 1 and u["by_purpose"]["brief"]["tokens"] == 120
         assert u["models"]["review_big"] == "opus"
+
+
+def test_why_an_owner_turn_was_not_on_haiku_is_stored_and_shown(migrated):
+    """Owner's rule 2026-10-19: More -> Usage lists the owner's own turns that didn't run on Haiku, with why."""
+    app = create_app(migrated)
+    note = app.state.runner.on_usage
+    note("call", {"model": "claude-haiku-5-5"}, True)
+    note("call", {"model": "claude-sonnet-5-5"}, True, reason='"should I"')
+    note("brief", {"model": "claude-sonnet-5-5"}, True)                  # a job, not the owner's turn
+    note("call", None, False, reason="settings")                          # failed before a model ran
+    note("chat", {"model": "claude-opus-5-5"}, True, reason="settings")
+    note("money", {"model": "claude-opus-5-5"}, True, reason="money")
+    with Session(make_engine(migrated.db_url)) as s:
+        assert [r.reason for r in s.exec(select(ModelRun).order_by(ModelRun.id)).all()] == [
+            None, '"should I"', None, "settings", "settings", "money"]
+    with TestClient(app) as c:
+        u = c.get("/api/usage?days=1").json()
+    assert [(e["model"], e["purpose"], e["reason"]) for e in u["escalations"]] == [
+        ("opus", "money", "money"), ("opus", "chat", "settings"), ("sonnet", "call", '"should I"')]
+    assert all(e["ts"] for e in u["escalations"])
+
+
+def test_only_the_last_twenty_escalations_are_shown(migrated):
+    app = create_app(migrated)
+    for i in range(25):
+        app.state.runner.on_usage("call", {"model": "claude-sonnet-5-5"}, True, reason=f'"should I" {i}')
+    with TestClient(app) as c:
+        esc = c.get("/api/usage?days=1").json()["escalations"]
+    assert len(esc) == models.ESCALATIONS == 20 and esc[0]["reason"] == '"should I" 24' and esc[-1]["reason"] == '"should I" 5'

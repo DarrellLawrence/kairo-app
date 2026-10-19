@@ -283,7 +283,7 @@ def test_the_stronger_model_is_announced_with_a_filler(line, monkeypatch):
         utter(ws)
         fr = frames_until(ws)
     model = next(f for f in fr if isinstance(f, dict) and f["type"] == "model")
-    assert model == {"type": "model", "model": "sonnet", "escalated": True, "turn": 1}
+    assert model == {"type": "model", "model": "sonnet", "escalated": True, "why": "handed over by Haiku", "turn": 1}
     assert line.voice.spoken[0] == ("One moment.", "en")
     assert next(f for f in fr if isinstance(f, dict) and f["type"] == "done")["model"] == "sonnet"
     assert "[[sonnet]]" not in json.dumps(fr)
