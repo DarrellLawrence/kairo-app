@@ -489,3 +489,21 @@ def test_the_owners_own_tasks_and_coach_need_no_check(env):
         ctx = CheckCtx(s, {})
         assert checker(env).run(ctx, now=WED)["checked"] == 0 and ctx.prompts == []
         assert [l.id for l in loops.shown_loops(s, identity.load(s, OWNER))] == [t.id]
+
+
+def test_a_task_triage_made_from_a_mail_is_checked_like_the_mail(env):
+    """2026-10-19: a shop's feedback mail became a task loop and skipped the check as if the owner had made it."""
+    from app.db import Task
+    with Session(env["engine"]) as s:
+        task = Task(title="Is everything fine with your Shopco order? (from Shopco)", source="email", priority=2)
+        s.add(task)
+        s.commit()
+        s.refresh(task)
+        t = OpenLoop(kind="task", source="task", source_ref=str(task.id), what=task.title, since=WED, urgency="low")
+        s.add(t)
+        s.commit()
+        assert loops.shown_loops(s, identity.load(s, OWNER)) == []                # unchecked: not shown
+        ctx = CheckCtx(s, {str(t.id): {"verdict": "drop", "why": "noise", "reason": "a shop's feedback mail"}})
+        assert checker(env).run(ctx, now=WED)["dropped"] == 1
+        s.refresh(t)
+        assert t.status != "open" and t.close_reason == "check: a shop's feedback mail"

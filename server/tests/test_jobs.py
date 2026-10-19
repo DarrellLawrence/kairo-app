@@ -196,6 +196,30 @@ def test_triage_labels_tasks_and_flags_injection(env):
     assert len(model.prompts) == 1
 
 
+def test_triage_makes_no_task_from_shop_or_bulk_mail(env):
+    """2026-10-19: a shop's feedback mail with a date became a task, then three identical loops. Mail nobody waits
+    on (the reply check's rules, bulk-mail headers) is never a task; a person's mail with a date still is."""
+    from app import loops
+    fake = env["fake"]
+    for mid in ("s1", "s2", "s3"):
+        fake.add_message(mid, sender="Shopco <hello@shopco.example>", subject="Is everything fine with your Shopco order?",
+                         body="Tell us by Friday how it went!")
+    fake.add_message("b1", sender="Sam Example <sam@shopco.example>", subject="A quick question", body="Reply by Friday.")
+    fake.messages["b1"]["payload"]["headers"].append({"name": "List-Unsubscribe", "value": "<mailto:u@shopco.example>"})
+    model = Model([{"id": mid, "category": "reply", "summary": "wants an answer", "deadline": "2026-10-23", "suspicious": False}
+                   for mid in ("m1", "s1", "s2", "s3", "b1")])
+    assert triage_job(env, model).run_job("email_triage", forced=True).status == "ok"
+    assert '"bulk"' not in model.prompts[0][0]                                   # the model sees the mail, nothing else
+    with Session(env["engine"]) as s:
+        assert [t.title for t in s.exec(select(Task)).all()] == ["Projektarbeit (from Mr. Keller)"]
+        rows = {r.message_id: r for r in s.exec(select(TriagedEmail)).all()}
+        assert {m: (rows[m].personal_reply, rows[m].reply_why) for m in ("s1", "b1")} == {
+            "s1": (False, "automated (rules)"), "b1": (False, "automated (bulk mail headers)")}
+        assert rows["m1"].personal_reply is None                                 # a person: the reply check decides
+        loops.sync(s, now=dt.datetime(2026, 10, 19, 10, tzinfo=PROFILE.tz), tz=PROFILE.tz, times=loops.good_times({}))
+        assert loops.open_loops(s) == []
+
+
 def test_triage_waits_when_google_is_not_connected(env):
     (env["secrets"] / "google-read.json").unlink()
     model = Model()

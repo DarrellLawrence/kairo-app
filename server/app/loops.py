@@ -22,6 +22,7 @@ never in quiet hours, normal/low ones not while a calendar event is running.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import logging
 import re
@@ -31,7 +32,7 @@ from sqlmodel import Session, select
 
 from . import vault
 from .audit import audit
-from .db import AuditLog, OpenLoop, Person, ReplySender, SchoolEvent, Task, TriagedEmail, utcnow
+from .db import AuditLog, OpenLoop, Person, ReplySender, SchoolEvent, SettingKV, Task, TriagedEmail, utcnow
 from .jobkit import JOB_RULES, clip, extract_json
 from .scheduler import JobContext, Skipped
 from .tools import _body_text, _headers, untrusted
@@ -45,6 +46,7 @@ DEFAULT_TIMES = {"after_work": "17:30", "weekend": "10:00", "morning": "07:15", 
 DEFAULT_MAX_PINGS = 6
 VOICE_FILE = "10 Profile/voice.md"
 SEEN_KEY = "loops.sent_seen"
+CLEANUP_KEY = "loops.cleanup.2026-10-19"   # once: duplicates from before upsert merged them
 
 REPLY_CHECK_PROMPT = """For each email decide: does a real person wait for {owner}'s own personal answer?
 "yes": a real person (school, teacher, work, colleague, friend, family) wrote to {owner} personally and expects a reply or decision.
@@ -316,6 +318,15 @@ def upsert(s: Session, *, kind: str, source: str, ref: str | None, what: str, no
            action: str | None = None) -> tuple[OpenLoop, bool]:
     loop = s.exec(select(OpenLoop).where(OpenLoop.source == source).where(OpenLoop.source_ref == ref)).first() if ref else None
     created = loop is None
+    if created and ref and (twin := _duplicate(s, source, ref, what, who_email)) is not None:
+        # The same thing again from the same sender (a shop's mail three times): one loop. This one is kept,
+        # closed, so it doesn't come back once the first is done.
+        dup = OpenLoop(kind=kind, source=source, source_ref=ref, what=clip(what, 300), who=who, who_email=who_email,
+                       since=since or now, due=due)
+        _close(dup, f"check: duplicate of #{twin.id}", now)
+        s.add(dup)
+        s.commit()
+        return twin, False
     if created:
         loop = OpenLoop(kind=kind, source=source, source_ref=ref, since=since or now)
     if loop.status != "open":
@@ -339,11 +350,64 @@ def upsert(s: Session, *, kind: str, source: str, ref: str | None, what: str, no
     return loop, created
 
 
+def _norm(x: str | None) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", (x or "").lower()).split())
+
+
 def promise_ref(who: str | None, what: str) -> str:
     """One promise = one loop (fix plan item 18): the same key from chat and from sent mail (who + what)."""
-    def norm(x: str | None) -> str:
-        return " ".join(re.sub(r"[^\w\s]", " ", (x or "").lower()).split())
-    return f"p:{norm(who)}|{norm(what)[:60]}"
+    return f"p:{_norm(who)}|{_norm(what)[:60]}"
+
+
+MERGED_SOURCES = ("email", "task")   # loops that came from a mail; the others have their own keys (promise_ref, ...)
+
+
+def _same_key(s: Session, source: str, ref: str | None, what: str, who_email: str | None) -> tuple | None:
+    """What makes two loops one thing (2026-10-19): the same text from the same mail sender (for a task, the
+    sender of the mail triage made it from). None: never merged; a task the owner made twice may be two real
+    things (training on Tuesday and on Thursday)."""
+    if source not in MERGED_SOURCES:
+        return None
+    sender = (who_email or "").lower() or None
+    if source == "task":
+        m = s.exec(select(TriagedEmail).where(TriagedEmail.task_id == int(ref))).first() if (ref or "").isdigit() else None
+        sender = _email(m.sender) if m is not None else None
+    return (source, _norm(clip(what, 300)), sender) if sender else None
+
+
+def _duplicate(s: Session, source: str, ref: str, what: str, who_email: str | None) -> OpenLoop | None:
+    """The oldest open loop that is the same thing as this one, if any."""
+    key = _same_key(s, source, ref, what, who_email)
+    if key is None:
+        return None
+    rows = s.exec(select(OpenLoop).where(OpenLoop.status == "open").where(OpenLoop.source == source)
+                  .order_by(OpenLoop.id)).all()
+    return next((o for o in rows if o.source_ref != ref and _same_key(s, o.source, o.source_ref, o.what, o.who_email) == key),
+                None)
+
+
+def cleanup_once(s: Session, now: dt.datetime) -> int:
+    """Once (2026-10-19): open loops that are the same thing from the same sender, from before upsert merged
+    them (a shop's feedback mail had become three identical loops), are closed, keeping the oldest."""
+    if s.get(SettingKV, CLEANUP_KEY) is not None:
+        return 0
+    kept: dict[tuple, int] = {}
+    closed = 0
+    for loop in sorted(open_loops(s), key=lambda l: l.id):
+        key = _same_key(s, loop.source, loop.source_ref, loop.what, loop.who_email)
+        if key is None:
+            continue
+        if key not in kept:
+            kept[key] = loop.id
+            continue
+        _close(loop, f"check: duplicate of #{kept[key]}", now)
+        s.add(loop)
+        closed += 1
+    s.add(SettingKV(key=CLEANUP_KEY, value=now.isoformat()))
+    s.commit()
+    if closed:
+        log.info("cleanup: %s duplicate loops closed", closed)
+    return closed
 
 
 def add(s: Session, *, kind: str, what: str, who: str | None, due: dt.date | None, now: dt.datetime, tz, times: dict) -> OpenLoop:
@@ -532,6 +596,24 @@ def not_personal(sender: str | None, subject: str | None, summary: str | None) -
     return bool(NOT_A_REPLY.search(text))
 
 
+def rules_verdict(s: Session, m: TriagedEmail, bulk=False) -> tuple[bool, str] | None:
+    """Does a real person wait on the owner's own answer to this mail, by the rules and the owner's own choices?
+    None: they can't tell (the model decides). `bulk`: the mail has bulk-mail headers, or a function that asks
+    Gmail, called only when nothing else decided. Used by the reply check and by triage (no task from a shop)."""
+    verdict = s.get(ReplySender, _email(m.sender) or "")
+    if m.suspicious:
+        return False, "suspicious"
+    if verdict and verdict.verdict == "muted":
+        return False, "you muted this sender"
+    if verdict and verdict.verdict == "person":
+        return True, "you answer them"
+    if not_personal(m.sender, m.subject, m.summary):
+        return False, "automated (rules)"
+    if bulk() if callable(bulk) else bulk:
+        return False, "automated (bulk mail headers)"
+    return None
+
+
 def automated_headers(headers: dict[str, str]) -> bool:
     if any(h in headers for h in BULK_HEADERS):
         return True
@@ -570,11 +652,12 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=
 
     horizon = now + dt.timedelta(days=7)
     tasks = {str(t.id): t for t in s.exec(select(Task)).all()}
-    from_mail = {str(m.task_id) for m in s.exec(select(TriagedEmail).where(TriagedEmail.task_id.is_not(None))
-                                                .where(TriagedEmail.personal_reply == True)).all()}  # noqa: E712
+    # A task triage made from a mail never has a loop of its own: the mail's reply loop is the one loop when a
+    # person waits on the owner, else there is none (fix plan item 18; 2026-10-19: a shop's mail became 3 loops).
+    mail_of = {str(m.task_id): m for m in s.exec(select(TriagedEmail).where(TriagedEmail.task_id.is_not(None))).all()}
     for tid, t in tasks.items():
         due = aware(t.due)
-        if tid in from_mail:                               # the mail's reply loop is the one loop (fix plan item 18)
+        if tid in mail_of:
             continue
         if t.status in ("open", "doing") and ((due and due <= horizon) or (not due and t.priority >= 2)):
             _, created = upsert(s, kind="deadline" if due else "task", source="task", ref=tid, what=t.title, due=due,
@@ -595,8 +678,11 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=
         reason = None
         if loop.source == "task":
             t = tasks.get(loop.source_ref or "")
+            made_from = mail_of.get(loop.source_ref or "")
             if t is None or t.status in ("done", "dropped", "archived"):
                 reason = "done" if t is not None and t.status == "done" else "stale"
+            elif made_from is not None and made_from.personal_reply is False:
+                reason = "automated"   # a task from a shop's or a newsletter's mail (made before 2026-10-19)
         elif loop.source == "school":
             e = s.get(SchoolEvent, int(loop.source_ref)) if (loop.source_ref or "").isdigit() else None
             if e is None or aware(e.date) < now - dt.timedelta(hours=12):
@@ -718,6 +804,7 @@ class LoopEngine:
         owner = identity.load(s, self.profile, google_read=self.google_read)
         self.check_replies(ctx)
         counts = sync(s, now=now, tz=tz, times=self.times, answered=self.answered, owner=owner)
+        counts["closed"] += cleanup_once(s, now)   # before the check: no model call spent on them
         if self.checker is not None:
             counts["check"] = self.checker.run(ctx, now)
         try:                                   # once a day: school is in the calendar as weekly FIXED blocks
@@ -780,20 +867,11 @@ class LoopEngine:
         out = {"person": 0, "not": 0, "unsure": 0}
         ask = []
         for m in todo:
-            verdict = s.get(ReplySender, _email(m.sender) or "")
-            if m.suspicious:
-                m.personal_reply, m.reply_why = False, "suspicious"
-            elif verdict and verdict.verdict == "muted":
-                m.personal_reply, m.reply_why = False, "you muted this sender"
-            elif verdict and verdict.verdict == "person":
-                m.personal_reply, m.reply_why = True, "you answer them"
-            elif not_personal(m.sender, m.subject, m.summary):
-                m.personal_reply, m.reply_why = False, "automated (rules)"
-            elif self._is_bulk_ref(m.message_id):
-                m.personal_reply, m.reply_why = False, "automated (bulk mail headers)"
-            else:
+            got = rules_verdict(s, m, bulk=functools.partial(self._is_bulk_ref, m.message_id))
+            if got is None:
                 ask.append(m)
                 continue
+            m.personal_reply, m.reply_why = got
             s.add(m)
         s.commit()
         if ask:
@@ -940,7 +1018,6 @@ class PromiseFinder:
         return self.owner(s) if self.owner else identity.load(s, self.profile, google_read=self.google_read)
 
     def run(self, ctx: JobContext, now: dt.datetime | None = None) -> str:
-        from .db import SettingKV
         from .identity import people_in
         tz = self.profile.tz
         now = (now or dt.datetime.now(tz)).astimezone(tz)

@@ -17,10 +17,11 @@ import hashlib
 import json
 import logging
 
+from sqlalchemy.orm import object_session
 from sqlmodel import Session, select
 
 from . import loops
-from .db import OpenLoop, SettingKV, TriagedEmail
+from .db import OpenLoop, SettingKV, Task, TriagedEmail
 from .jobkit import JOB_RULES, clip, extract_json
 from .tools import untrusted
 
@@ -28,7 +29,7 @@ log = logging.getLogger("kairo.loop_check")
 
 BATCH = 8
 WHY = ("owner", "person", "action", "facts", "duplicate", "noise", "urgency", "other")
-OWN_SOURCES = ("chat", "task", "coach")   # the owner's own words, tasks and coach settings: nothing to check
+OWN_SOURCES = ("chat", "task", "coach")   # the owner's own words, tasks and coach settings: nothing to check (own())
 FIRST_RUN_KEY = "loops.first_check_told"
 
 PROMPT = """You check Kairo's open loops before the owner sees them. The owner is {owner}.
@@ -81,10 +82,21 @@ def addressed_to_owner(loop: OpenLoop, owner) -> bool:
     return owner.is_me(email=loop.who_email, name=None if loop.who_email else loop.who)
 
 
+def own(loop: OpenLoop) -> bool:
+    """The owner's own: no check needed. A task triage made from a mail is the mail's, not the owner's: it is
+    checked like the mail (2026-10-19: a shop's feedback mail became task loops nobody checked)."""
+    if loop.source not in OWN_SOURCES:
+        return False
+    if loop.source == "task" and (loop.source_ref or "").isdigit() and (s := object_session(loop)) is not None:
+        t = s.get(Task, int(loop.source_ref))
+        return t is None or t.source != "email"
+    return True
+
+
 def visible(loop: OpenLoop, owner=None) -> bool:
     if addressed_to_owner(loop, owner):
         return False
-    if loop.source in OWN_SOURCES:
+    if own(loop):
         return True                       # the owner's own: no check needed
     c = check_of(loop)
     if c.get("hash") == loop_hash(loop) and c.get("verdict") in ("ok", "fix"):
@@ -103,7 +115,7 @@ def passed(s: Session, loop: OpenLoop, *, why: str = "owner", reason: str = "you
 
 
 def needs_check(loop: OpenLoop) -> bool:
-    if loop.source in OWN_SOURCES:
+    if own(loop):
         return False
     c = check_of(loop)
     return not (c.get("hash") == loop_hash(loop) and c.get("verdict"))
