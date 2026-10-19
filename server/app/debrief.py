@@ -35,6 +35,15 @@ HOW = {
     "everything": "Full rundown, everything below, grouped. Still short per item.",
     "topic": "Only the topic asked for.",
 }
+# Acceptance #10: "give me a brief" must fit in 8 lines and end without a question (it came back in 11).
+LINES = 7
+LINES_EVERYTHING = 15   # the owner asked for everything
+
+
+def shape(mode: str) -> str:
+    n = LINES_EVERYTHING if mode == "everything" else LINES
+    return (f"Write it in at most {n} short lines, no headings: one point per line, the most important first; "
+            "put small things together on one line and leave out what doesn't fit. No question at the end.")
 
 
 def part_of_day(now: dt.datetime) -> str:
@@ -114,7 +123,7 @@ def gather(s: Session, *, now: dt.datetime, tz, google_read, scope: str = "auto"
         start, end = now, dt.datetime.combine(today + dt.timedelta(days=7), dt.time.max, tzinfo=tz)
     events, cal_error = fetch_events(google_read, start, end)
     shown = [e for e in events if not e["routine"]]
-    data: dict = {"mode": mode, "how": HOW[mode], "now": now.strftime("%A %H:%M"),
+    data: dict = {"mode": mode, "how": f"{HOW[mode]} {shape(mode)}", "now": now.strftime("%A %H:%M"),
                   "calendar": [{k: e[k] for k in ("summary", "start", "end", "all_day", "location", "changed")} for e in shown],
                   "routine_left_out": len(events) - len(shown)}
     if cal_error:

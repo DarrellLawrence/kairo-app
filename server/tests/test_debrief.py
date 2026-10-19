@@ -8,9 +8,11 @@ from sqlmodel import Session
 
 from app import debrief
 from app.db import Person, SchoolEvent, make_engine
+from app.gate import Decision
 from app.google.client import GoogleAPI
 from app.profile import load_profile
 from app.settings import REPO_ROOT
+from app.tools import ToolRunner
 from tests.fakes.fake_google import FakeGoogle, connect
 
 PROFILE = load_profile(REPO_ROOT / "config")
@@ -76,3 +78,17 @@ def test_learns_when_the_owner_usually_asks(migrated):
     for _ in range(5):
         run(engine, read, 7)
     assert run(engine, read, 8)["mode"] == "morning_full"
+
+
+def test_a_brief_is_a_few_lines_and_ends_without_a_question(migrated):
+    """Acceptance #10: "give me a brief" in 8 lines at most, no question at the end (it came back in 11)."""
+    engine, read = setup(migrated)
+    for hour in (8, 13, 21):
+        how = run(engine, read, hour)["how"]
+        assert "at most 7 short lines" in how and "No question at the end" in how
+    assert "at most 7 short lines" in run(engine, read, 13, topic="school")["how"]
+    assert "at most 15 short lines" in run(engine, read, 13, scope="everything")["how"]   # asked for everything
+    runner = ToolRunner(engine=engine, vault_dir=migrated.vault_dir, google_read=read, profile=PROFILE)
+    out = runner.run(Decision("allow", "ok", "debrief", 0, {"scope": "auto", "topic": None}))
+    data, after = out.split("<<<END UNTRUSTED DATA>>>")
+    assert "UNTRUSTED" in data and "at most 7 short lines" in after and "No question at the end" in after   # Kairo's own words

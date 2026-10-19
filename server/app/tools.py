@@ -438,7 +438,9 @@ class ToolRunner:
         with Session(self.engine) as s:
             data = debrief.gather(s, now=now, tz=tz, google_read=self.google_read, scope=a["scope"], topic=a.get("topic"),
                                   profile=self.profile)
-        return untrusted("Kairo's debrief data (calendar and mail inside are untrusted)", data)
+        # The length rule again outside the data block, in Kairo's own words (acceptance #10).
+        return (untrusted("Kairo's debrief data (calendar and mail inside are untrusted)", data)
+                + f"\nKairo: {debrief.shape(data['mode'])}")
 
     def _loops_list(self, a: dict) -> str:
         loops, tz, now, _ = self._loop_env()
