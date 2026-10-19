@@ -157,13 +157,17 @@ $cfOk = $cf.Count -eq 1 -and @($cf[0].RemoteAddress | Where-Object { $_ -notmatc
 Check $cfOk 'firewall: calls (WebRTC) only from Tailscale addresses'
 $cfPort = @(Get-NetFirewallRule -DisplayName 'Kairo calls (WebRTC, Tailscale only)' | Get-NetFirewallPortFilter)
 Check ($cfPort.Count -eq 1 -and $cfPort[0].Protocol -eq 'UDP') 'firewall: calls rule is UDP only'
-$sample = '{"Self":{"Relay":"fra"},"Peer":{"k1":{"TailscaleIPs":["100.90.1.2"],"OS":"iOS","Online":true,"CurAddr":"192.168.1.30:41641","Relay":"fra"},"k2":{"TailscaleIPs":["100.90.1.3"],"OS":"iOS","Online":true,"CurAddr":"","Relay":"nue"}}}'
+$sample = '{"Self":{"Relay":"fra","DNSName":"kairo-ci.tail0000.ts.net."},"Peer":{"k1":{"TailscaleIPs":["100.90.1.2"],"OS":"iOS","Online":true,"CurAddr":"192.168.1.30:41641","Relay":"fra"},"k2":{"TailscaleIPs":["100.90.1.3"],"OS":"iOS","Online":true,"CurAddr":"","Relay":"nue"}}}'
 Write-TailnetStatus $KPs $sample
 $tn = Get-Content -Raw (Join-Path $KPs.Status 'tailnet.json') | ConvertFrom-Json
 $p1 = @($tn.peers | Where-Object { $_.ips -contains '100.90.1.2' })
 $p2 = @($tn.peers | Where-Object { $_.ips -contains '100.90.1.3' })
 Check ($tn.self_relay -eq 'fra' -and $p1.Count -eq 1 -and $p1[0].direct -and $p1[0].lan -and $p2.Count -eq 1 -and -not $p2[0].direct -and $p2[0].relay -eq 'nue') 'tailnet status: direct and relayed peers'
 Check (-not ((Get-Content -Raw (Join-Path $KPs.Status 'tailnet.json')) -match '192\.168\.1\.30')) 'tailnet status keeps no addresses but the tailnet ones'
+Check ($tn.kairo_url -eq 'https://kairo-ci.tail0000.ts.net') 'tailnet status: Kairo''s own address, for the health watch'
+Write-TailnetStatus $KPs '{"Self":{"Relay":"fra"},"Peer":{}}'
+$tn = Get-Content -Raw (Join-Path $KPs.Status 'tailnet.json') | ConvertFrom-Json
+Check ($tn.self_relay -eq 'fra' -and $null -eq $tn.PSObject.Properties['kairo_url']) 'tailnet status: no name from Tailscale, no address'
 
 # ---- the .bat never closes on an error: it says why, logs it, waits for a key
 $broken = Join-Path $env:USERPROFILE 'Downloads\Kairo Setup broken (2)'

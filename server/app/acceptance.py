@@ -793,7 +793,8 @@ async def t_health(ctx: Context) -> dict:
                   "never in the chat's prompt": not in_prompt,
                   "sorted out with one tap": not copy.exists() and note.read_text(encoding="utf-8").endswith("this PC's line")}
         detail = "; ".join([*hourly.values(), seen.get("disk", "")]).strip("; ") or (
-            f"{url} answers" if url else "no tailnet address recorded yet: run the boot check (Start menu -> Kairo Boot Check)")
+            f"{url} answers" if url else "no tailnet address recorded yet: the auto-update records it within "
+                                         "5 minutes (or Start menu -> Kairo -> Kairo Check). Is Tailscale signed in?")
         return _result(True, checks, detail)
     finally:
         for f in (note, copy):
