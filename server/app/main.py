@@ -71,6 +71,8 @@ from .profile import load_profile, render_personality
 from .settings import REPO_ROOT, Settings, get_settings
 
 MAX_PROMPT_CHARS = 20_000
+# The voice lab by itself: first look after start, then every minute; after a failed job, half an hour
+LAB_FIRST_CHECK_S, LAB_CHECK_EVERY_S, LAB_RETRY_AFTER_ERROR_S = 120, 60, 1800
 
 
 def same_origin(origin: str | None, *hosts: str | None) -> bool:
@@ -354,7 +356,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
             app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
             app.state.today_card.start()   # the Today card: always fresh, before any call
-            background.append(asyncio.create_task(_lab_first_run()))
+            background.append(asyncio.create_task(_lab_auto()))
             background.append(asyncio.create_task(_profile_seed_first_run()))
         yield
         for call in list(getattr(app.state, "rtc_calls", {}).values()):   # calls over WebRTC end with Kairo
@@ -425,6 +427,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs")
     with session_for(engine) as _s:
         _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
+        if voicelab.clear_stale(_s):                # a run cut off by a restart: Run and the run by itself work again
+            log.warning("voice lab: the last run was cut off by a restart")
     app.state.smart_turn = smartturn.SmartTurn(lambda: voicellm.smart_turn_path(_vl_site), pad_side=_pad)   # may come later
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
@@ -540,7 +544,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evening_recap": lambda ctx: json.dumps(app.state.recap.run()),
                 "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id),
                 "voice_agenda": lambda ctx: bringup.agenda_job(ctx, profile, dt.datetime.now(profile.tz)),
-                "voice_lab": lambda ctx, language="auto": _voice_lab_job(ctx, language),
+                "voice_lab": lambda ctx, language="auto", by="owner": _voice_lab_job(ctx, language, by),
                 "profile_seed": lambda ctx: _profile_seed_job(ctx)})
     from . import calendar_read, own_calendar
 
@@ -1479,7 +1483,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return mouth
 
     _card_lines = [0]
-    LAB_FIRST_CHECK_S = 600
 
     def _warm_voice() -> None:
         """At start: Whisper and Kokoro loaded once and run once (never per turn), the short lines Kairo says
@@ -1679,31 +1682,90 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fold_memory_soon()
         return True
 
-    def _voice_lab_job(ctx, language: str = "auto") -> str:
+    def _voice_lab_job(ctx, language: str = "auto", by: str = "owner") -> str:
         from .scheduler import Skipped
         if runner._lines > 0:
             raise Skipped("a call is on: the voice lab runs when the line is free")
+        if by == "auto" and not _lab_due():
+            raise Skipped("the voice lab already ran")      # the owner's Run got there first
         lab = voicelab.Lab(engine=engine, data_dir=settings.data_dir, site_dir=_vl_site, voice_model=app.state.voice_llm,
                            voice=app.state.voice, smart_turn=app.state.smart_turn,
                            judge=lambda prompt: ctx.ask(prompt, "", purpose="voice_lab").text,
                            tools_dir=settings.data_dir.parent / "tools")
-        rep = lab.run(language)
+        rep = lab.run(language, by=by)
         p_ = rep.get("pick") or {}
         return (f"picked {p_.get('model')}: {p_.get('why')}" if not rep.get("error") else f"failed: {rep['error']}")[:500]
 
-    async def _lab_first_run() -> None:
-        """The voice lab runs once by itself: the first time a voice model is ready and nobody is on the line
-        or talking to Kairo (owner's request 2026-10-16: nothing to do on the PC). Then only on Run."""
-        for _ in range(3):                             # at most 3 tries, 10 minutes apart at the earliest
-            while True:
-                await asyncio.sleep(LAB_FIRST_CHECK_S)
-                with session_for(engine) as s:
-                    if voicelab.last(s) or voicelab.state(s).get("running"):
-                        return
-                if (app.state.voice_llm.ready() and runner._lines == 0 and runner.current_origin is None
-                        and time.time() >= app.state.maintenance_until):
-                    break
-            await asyncio.to_thread(app.state.jobs.run_job, "voice_lab", forced=True)
+    def _lab_due() -> bool:
+        """The lab should run by itself: it never ran, or the PC has an NVIDIA card and the last run wasn't made
+        on it (e.g. before the GPU fix). Not again after its own run on that card: it had waited for the voice to
+        be on the GPU, so running again changes nothing (a model too big for the card's memory, say)."""
+        from . import gpu as gpu_mod
+        with session_for(engine) as s_:
+            last = voicelab.last(s_)
+        if not last:
+            return True
+        return gpu_mod.present() and not last.get("on_gpu") and not (last.get("by") == "auto" and last.get("gpu"))
+
+    def _lab_wait() -> str | None:
+        """Why the lab can't run by itself right now, or None."""
+        if not voicellm.available(_vl_site):
+            return "no voice model is installed yet"
+        vm = app.state.voice_llm.status()
+        if not app.state.voice_llm.ready() and vm["state"] != "off":   # off: a lab switched it off; the lab still measures
+            return f"the voice model is not ready ({vm['state']}{': ' + vm['error'] if vm.get('error') else ''})"[:300]
+        slow = _voice_slow()
+        if slow:
+            return f"the voice is off the GPU, it runs right after the GPU fix ({slow})"[:300]
+        if runner._lines > 0:
+            return "a call is on"
+        if runner.current_origin is not None:
+            return "Claude is busy (a chat or a job)"
+        if time.time() < app.state.maintenance_until:
+            return "an update is being installed"
+        with session_for(engine) as s_:
+            if killswitch.is_paused(s_):
+                return "Kairo is paused"
+        return None
+
+    _lab = {"said": None, "hold_until": 0.0, "error": ""}
+
+    async def _lab_step() -> str | None:
+        """One look: runs the lab when it's due and nothing is in its way. Returns why it waits (None: it ran
+        or there's nothing to do). A new reason is logged once and kept for the Voice lab page and Run diagnosis."""
+        with session_for(engine) as s_:
+            if voicelab.state(s_).get("running"):
+                return None
+        due = await asyncio.to_thread(_lab_due)
+        why = await asyncio.to_thread(_lab_wait) if due else None
+        if due and why is None and time.time() < _lab["hold_until"]:
+            why = f"the last try failed, trying again in a while ({_lab['error']})"[:300]
+        with session_for(engine) as s_:
+            voicelab.set_waiting(s_, why)
+        if why != _lab["said"]:
+            if why:
+                log.info("voice lab: waits to run by itself: %s", why)
+            _lab["said"] = why
+        if not due or why:
+            return why
+        log.info("voice lab: running by itself")
+        run = await asyncio.to_thread(app.state.jobs.run_job, "voice_lab", forced=True, by="auto")
+        if run.status == "error":
+            _lab.update(hold_until=time.time() + LAB_RETRY_AFTER_ERROR_S, error=(run.error or "")[:150])
+        return None
+
+    async def _lab_auto() -> None:
+        """The voice lab runs by itself (owner's request 2026-10-16: nothing to do on the PC; report 2026-10-19:
+        it never ran). It waits for the voice model, the GPU, a free line and an idle Claude, and never gives up."""
+        await asyncio.sleep(LAB_FIRST_CHECK_S)
+        while True:
+            try:
+                await _lab_step()
+            except Exception:   # the next look tries again
+                log.exception("voice lab: running it by itself")
+            await asyncio.sleep(LAB_CHECK_EVERY_S)
+
+    app.state.lab_step, app.state.lab_auto = _lab_step, _lab_auto
 
     @app.post("/api/selftest")
     async def selftest(request: Request):

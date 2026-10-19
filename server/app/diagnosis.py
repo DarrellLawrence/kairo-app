@@ -325,23 +325,39 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
         lab = json.loads(lab) if lab and not str(lab).startswith("ERROR") else None
     except (TypeError, ValueError):
         lab = None
+    lab_state = one("SELECT value FROM settings WHERE key='voicelab.state'")
+    try:
+        lab_state = json.loads(lab_state) if lab_state and not str(lab_state).startswith("ERROR") else {}
+    except (TypeError, ValueError):
+        lab_state = {}
+    if not isinstance(lab_state, dict):
+        lab_state = {}
+    if lab_state.get("running"):
+        r.add(f"  voice lab running: {lab_state.get('step')} (since {lab_state.get('at')})")
+    elif lab_state.get("waiting"):
+        r.add(f"  voice lab waits to run by itself: {lab_state['waiting']} (since {lab_state.get('waiting_since')})")
     if not lab:
         r.add("  voice lab: not run yet")
     else:
-        r.add(f"  voice lab {lab.get('at')} ({lab.get('seconds')}s): pick {((lab.get('pick') or {}).get('model'))} - "
+        r.add(f"  voice lab {lab.get('at')} ({lab.get('seconds')}s, by {lab.get('by') or 'owner'}): pick "
+              f"{((lab.get('pick') or {}).get('model'))} - "
               f"{((lab.get('pick') or {}).get('why') or '')[:200]}{' ERROR ' + lab['error'] if lab.get('error') else ''}")
+        on_gpu = lab.get("on_gpu")
+        r.add("  on the GPU: " + ("not recorded (an older run)" if on_gpu is None else "yes" if on_gpu else
+                                  "NO - " + "; ".join(lab.get("off_gpu") or [])[:300]))
         gpu = lab.get("gpu") or {}
         if gpu:
             r.add(f"  gpu: {gpu.get('name')} {gpu.get('used_mb')}/{gpu.get('total_mb')} MB, driver {gpu.get('driver')}")
         r.add("  model | first word p50/p95 | tok/s | tool recall | false calls | facts | card on PC/wrong/via Claude | "
-              "natural en/de | vram | error")
+              "natural en/de | vram | device layers | error")
         for mid, m in (lab.get("models") or {}).items():
             fw = m.get("first_word_ms") or {}
             nat = m.get("natural") or {}
+            dev = m.get("device") or {}
             r.add(f"  {mid} | {fw.get('p50')}/{fw.get('p95')} | {m.get('tokens_per_s')} | {m.get('tool_recall')} | "
                   f"{m.get('false_calls')} | {m.get('fidelity')} | {m.get('card_on_pc')}/{m.get('card_wrong')}/"
                   f"{m.get('card_via_claude')} | {nat.get('en')}/{nat.get('de')} | {m.get('vram_mb')} | "
-                  f"{(m.get('error') or '')[:120]}")
+                  f"{dev.get('device')} {dev.get('layers')} | {(m.get('error') or '')[:120]}")
         sp = lab.get("speech") or {}
         st = (sp.get("smart_turn") or {})
         r.add(f"  speech: stt auto {((sp.get('stt') or {}).get('auto') or {}).get('ms')}, en {((sp.get('stt') or {}).get('en') or {}).get('ms')}; "
