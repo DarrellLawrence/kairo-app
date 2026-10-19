@@ -876,7 +876,8 @@ function VoiceLabPage() {
           value={<Badge tone={vm.state === 'ready' ? 'ok' : 'warn'} pop={false}>{d.engine === 'local' ? 'Local' : 'OpenAI'}</Badge>} />
         {d.gpu && <ListRow icon={<IconPulse />} title={d.gpu.name} subtitle={`${d.gpu.used_mb} of ${d.gpu.total_mb} MB in use · driver ${d.gpu.driver}`} />}
         <ListRow icon={<IconBolt />} title={d.state?.running ? `Running: ${d.state.step}` : 'Run the voice lab'}
-          subtitle={d.state?.running ? 'Calls use the old voice until it is done' : 'English and German, about 10–20 minutes'}
+          subtitle={d.state?.running ? 'Calls use the old voice until it is done'
+            : d.state?.waiting ? `Runs by itself, waiting: ${d.state.waiting}` : 'English and German, about 10–20 minutes'}
           onClick={d.state?.running || !d.installed.length ? undefined : () => run('auto')} />
         {!d.state?.running && d.installed.length > 0 && (
           <ListRow icon={<IconBolt />} title="Run it English-only" subtitle="If you only talk English on calls" onClick={() => run('en')} />
@@ -890,8 +891,9 @@ function VoiceLabPage() {
       </List>
       <p className="k-muted k-small k-pad">“Question” is read from what you said, so this split is an estimate; each model’s exact numbers on fixed questions are below.</p>
       {r.pick && (
-        <p className="k-small k-pad selectable"><b>{r.pick.model ? `Picked: ${r.pick.model}` : 'Nothing picked'}</b> — {r.pick.why}{r.at ? ` (${parseTs(r.at).toLocaleString()}, ${r.seconds}s)` : ''}</p>
+        <p className="k-small k-pad selectable"><b>{r.pick.model ? `Picked: ${r.pick.model}` : 'Nothing picked'}</b> — {r.pick.why}{r.at ? ` (${parseTs(r.at).toLocaleString()}, ${r.seconds}s${r.on_gpu ? ', on the GPU' : ''})` : ''}</p>
       )}
+      {r.on_gpu === false && <p className="k-small k-pad selectable" style={{ color: 'var(--warn)' }}>Not measured on the GPU{r.off_gpu?.length ? `: ${r.off_gpu.join('; ')}` : ''}</p>}
       {r.error && <p className="k-small k-pad" style={{ color: 'var(--warn)' }}>{r.error}</p>}
       {models.map(([id, m]) => (
         <div key={id}>

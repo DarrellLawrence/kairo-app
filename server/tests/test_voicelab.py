@@ -4,8 +4,11 @@ model that calls the tool on data questions), the fake voice, a scripted judge."
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -13,8 +16,9 @@ from sqlmodel import Session
 
 from app import voicelab, voicellm
 from app.brain.voice_local import VoiceModel
-from app.db import make_engine
+from app.db import SettingKV, make_engine
 from tests.test_voice_llm import FAKE, fake_hub, free_port
+from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model)
 from tests.test_voicelink import FakeVoice
 
 
@@ -51,6 +55,15 @@ def good_judge(prompt):
     return json.dumps({lab: {"en": 4.5, "de": 4.0, "note": "natural"} for lab in labels})
 
 
+def on_the_gpu(monkeypatch, ok: bool = True):
+    """This PC has an NVIDIA card; llama.cpp's log says all layers on it (ok) or none (tests/test_gpu.py: the log)."""
+    from app import gpu
+    monkeypatch.setattr(gpu, "present", lambda: True)
+    monkeypatch.setattr(gpu, "llama_device", lambda path: (
+        {"device": "gpu", "layers": "31/31", "gpu": "RTX 3060", "ok": True, "reason": None} if ok else
+        {"device": "cpu", "layers": "0/31", "gpu": None, "ok": False, "reason": "0/31 layers on the GPU"}))
+
+
 def test_the_lab_measures_every_candidate_and_picks_one(migrated, tmp_path, monkeypatch):
     pytest.importorskip("numpy")                    # the speech part needs the voice packages (CI: the voice job)
     site = make_site(monkeypatch, tmp_path)
@@ -73,14 +86,45 @@ def test_the_lab_measures_every_candidate_and_picks_one(migrated, tmp_path, monk
 
 def test_a_model_that_never_calls_the_tool_is_not_picked(migrated, tmp_path, monkeypatch):
     site = make_site(monkeypatch, tmp_path)
+    on_the_gpu(monkeypatch)
     _engine, lb = lab(migrated, tmp_path, site, good_judge, monkeypatch, FAKE_LLAMA_NO_TOOLS="1")
     rep = lb.run()                                  # without the voice packages too: then only the speech part is missing
     assert all(m["tool_recall"] == 0.0 for m in rep["models"].values())
     assert rep["pick"]["model"] is None and "no model passed" in rep["pick"]["why"]
+    assert rep["on_gpu"] is True and rep["off_gpu"] == [] and rep["by"] == "owner"
+    assert rep["models"]["lfm2.5-2.6b"]["device"] == {"device": "gpu", "layers": "31/31", "ok": True, "reason": None}
     with Session(_engine) as s:                       # owner's decision 2026-10-16: then the old voice
         assert voicellm.active(s, site) is None and voicellm.lab_rejected(voicellm.choice(s))
         voicellm.set_choice(s, "gemma-4-e4b", "owner")   # until they pick one themselves
         assert voicellm.active(s, site) == "gemma-4-e4b"
+
+
+def test_a_run_off_the_gpu_never_switches_the_voice_off(migrated, tmp_path, monkeypatch):
+    """Owner's report 2026-10-19: on the CPU every model is too slow; that says nothing about the GPU."""
+    site = make_site(monkeypatch, tmp_path)
+    on_the_gpu(monkeypatch, ok=False)                 # the card is there, llama.cpp ran on the CPU
+    engine, lb = lab(migrated, tmp_path, site, good_judge, monkeypatch, FAKE_LLAMA_NO_TOOLS="1")
+    with Session(engine) as s:
+        voicellm.set_choice(s, "gemma-4-e4b", "owner")
+    rep = lb.run()
+    assert rep["pick"]["model"] is None and "measured off the GPU" in rep["pick"]["why"]
+    assert rep["on_gpu"] is False and any("0/31 layers on the GPU" in w for w in rep["off_gpu"])
+    with Session(engine) as s:                        # the voice stays as it was
+        assert voicellm.choice(s)["model"] == "gemma-4-e4b" and voicellm.active(s, site) == "gemma-4-e4b"
+    from app import diagnosis
+    text = diagnosis.run(db_url=migrated.db_url, data_dir=migrated.data_dir, app_root=migrated.data_dir / "no-app")["text"]
+    assert "on the GPU: NO - " in text and "cpu 0/31" in text
+
+
+def test_whisper_on_the_cpu_means_the_run_was_not_on_the_gpu(monkeypatch):
+    from app import gpu
+    monkeypatch.setattr(gpu, "present", lambda: True)
+    models = {"m": {"device": {"device": "gpu", "layers": "31/31", "ok": True}}, "big": {"error": "not installed: disk"}}
+    assert voicelab.ran_on_gpu(models, {"whisper": {"loaded": True, "ok": True}, "piper": {"loaded": True, "ok": False}}) == (True, [])
+    ok, why = voicelab.ran_on_gpu(models, {"whisper": {"loaded": True, "ok": False, "reason": "on the CPU: cublas64_12.dll"}})
+    assert not ok and why == ["whisper: on the CPU: cublas64_12.dll"]
+    monkeypatch.setattr(gpu, "present", lambda: False)
+    assert voicelab.ran_on_gpu(models, {}) == (False, ["no NVIDIA driver on this PC"])
 
 
 def test_a_model_that_ignores_the_card_is_not_picked(migrated, tmp_path, monkeypatch):
@@ -153,3 +197,119 @@ def test_without_the_voice_packages_there_is_no_turn_detector(monkeypatch, tmp_p
     monkeypatch.setattr(smartturn, "np", None)
     st = smartturn.SmartTurn(model)
     assert not st.available() and st.probability(b"\x00\x00" * 1600) is None   # the quiet rule decides
+
+
+# ---------------------------------------------------------------- the lab by itself (owner's report 2026-10-19: it never ran)
+
+def _jobs(local, monkeypatch, run_job=None):
+    """run_job recorded instead of a 10-minute lab; a voice model is installed."""
+    calls = []
+
+    def fake(name, forced=False, **kw):
+        calls.append((name, forced, kw))
+        return types.SimpleNamespace(status="skipped", error="a call is on")
+    monkeypatch.setattr(local.app.state.jobs, "run_job", run_job or fake)
+    monkeypatch.setattr(voicellm, "available", lambda site: ["lfm2.5-2.6b"])
+    return calls
+
+
+def _put_last(local, report: dict) -> None:
+    with Session(make_engine(local.settings.db_url)) as s:
+        row = s.get(SettingKV, voicelab.LAST_KEY) or SettingKV(key=voicelab.LAST_KEY)
+        row.value = json.dumps(report)
+        s.add(row)
+        s.commit()
+
+
+def _step(local):
+    return asyncio.run(local.app.state.lab_step())
+
+
+def test_a_run_cut_off_by_a_restart_is_cleared_at_start(migrated):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    engine = make_engine(migrated.db_url)
+    with Session(engine) as s:
+        s.add(SettingKV(key=voicelab.STATE_KEY, value=json.dumps({"running": True, "step": "model LFM",
+                                                                  "at": "2026-10-18T09:00:00+00:00"})))
+        s.commit()
+    app = create_app(migrated)                        # Kairo starts: nothing can be running
+    with Session(engine) as s:
+        st = voicelab.state(s)
+    assert st["running"] is False and "cut off by a restart" in st["step"]
+    with TestClient(app) as c:                        # Run isn't blocked by the old flag (here: nothing installed)
+        r = c.post("/api/voice/lab/run", json={})
+    assert r.status_code == 409 and "no voice model is installed" in r.json()["detail"]
+
+
+def test_it_waits_while_the_voice_is_off_the_gpu_says_why_and_runs_once_it_is_on(local, monkeypatch, caplog):
+    from tests.test_voice_devices import DeviceVoice
+    calls = _jobs(local, monkeypatch)
+    on_the_gpu(monkeypatch)
+    local.vm.pause()
+    assert "the voice model is not ready (paused)" in _step(local) and calls == []
+    local.vm.resume()
+    assert local.vm.wait_ready(20)
+    whisper = {"device": "cpu", "loaded": True, "ok": False, "reason": "on the CPU: Library cublas64_12.dll is not found"}
+    local.app.state.voice = DeviceVoice(local.voice, {"whisper": whisper, "kokoro": {"loaded": True, "ok": True}})
+    caplog.set_level(logging.INFO, logger="kairo")
+    for _ in range(3):
+        why = _step(local)
+        assert "off the GPU" in why and "cublas64_12.dll" in why
+    assert calls == [] and sum("cublas64_12.dll" in r.getMessage() for r in caplog.records) == 1   # logged once
+    assert "cublas64_12.dll" in local.get("/api/voice/lab").json()["state"]["waiting"]          # the Voice lab page says why
+    assert "voice lab waits to run by itself: the voice is off the GPU" in local.post("/api/diagnosis").json()["text"]
+    local.app.state.runner._lines = 1                                                          # the GPU fix, during a call
+    whisper.update(device="cuda", ok=True, reason=None)
+    assert _step(local) == "a call is on" and calls == []
+    local.app.state.runner._lines = 0
+    assert _step(local) is None
+    assert calls == [("voice_lab", True, {"by": "auto"})]
+    assert "waiting" not in local.get("/api/voice/lab").json()["state"]
+
+
+def test_a_report_made_off_the_gpu_runs_again_once_the_gpu_is_there(local, monkeypatch):
+    from app import gpu
+    calls = _jobs(local, monkeypatch)
+    _put_last(local, {"at": "2026-10-18T10:00:00+00:00", "by": "owner", "on_gpu": False, "models": {}})
+    monkeypatch.setattr(gpu, "present", lambda: False)        # no NVIDIA card: that report is as good as it gets
+    assert _step(local) is None and calls == []
+    on_the_gpu(monkeypatch)
+    assert _step(local) is None and calls == [("voice_lab", True, {"by": "auto"})]
+    _put_last(local, {"at": "2026-10-19T10:00:00+00:00", "by": "auto", "on_gpu": False, "gpu": {"name": "RTX 3060"},
+                      "models": {}})                           # its own run on the card: not over and over
+    assert _step(local) is None and len(calls) == 1
+    _put_last(local, {"at": "2026-10-19T11:00:00+00:00", "by": "owner", "on_gpu": True, "models": {}})
+    assert _step(local) is None and len(calls) == 1
+    _put_last(local, {"at": "2026-10-17T10:00:00+00:00", "models": {}})   # a run from before the GPU was recorded
+    assert _step(local) is None and len(calls) == 2
+
+
+def test_the_job_skips_when_the_owners_run_got_there_first(local, monkeypatch):
+    on_the_gpu(monkeypatch)
+    _put_last(local, {"at": "2026-10-19T11:00:00+00:00", "by": "owner", "on_gpu": True, "models": {}})
+    run = local.app.state.jobs.run_job("voice_lab", forced=True, by="auto")
+    assert run.status == "skipped" and "already ran" in run.error
+
+
+def test_the_lab_by_itself_never_gives_up(local, monkeypatch):
+    """The old loop stopped after 3 tries that left no report (a call, a busy Claude) and died on an error."""
+    from app import main
+    tries = []
+
+    def run_job(name, forced=False, **kw):
+        tries.append(kw)
+        if len(tries) == 1:
+            raise RuntimeError("the first try breaks")
+        return types.SimpleNamespace(status="skipped", error="a call is on")
+    _jobs(local, monkeypatch, run_job)
+    monkeypatch.setattr(main, "LAB_FIRST_CHECK_S", 0)
+    monkeypatch.setattr(main, "LAB_CHECK_EVERY_S", 0.01)
+
+    async def go():
+        try:
+            await asyncio.wait_for(local.app.state.lab_auto(), 1.5)
+        except TimeoutError:
+            pass
+    asyncio.run(go())
+    assert len(tries) > 3 and all(kw == {"by": "auto"} for kw in tries)

@@ -14,6 +14,10 @@ Kyutai's streaming STT + TTS when its lab copy is installed.
 The pick: among models that call the tool reliably (recall >= 90%, false calls <= 15%), keep every
 fact (>= 90%), answer the card's questions on the PC (>= 70%, wrong <= 10%) and sound natural (Claude:
 >= 3.5 English, >= 3 German), the fastest to its first spoken word. The result is kept (Run diagnosis shows it) and the picked model talks from then on.
+
+On the GPU (owner's report 2026-10-19): the report says whether the run was made on the GPU (every model's
+layers and Whisper/Kokoro on it). A run off the GPU never switches the local voice off; Kairo runs the lab
+again by itself once the voice is on the GPU (main.py).
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ except ImportError:                                     # the app runs without t
     np = None
 from sqlmodel import Session
 
-from . import bringup, voicellm
+from . import bringup, gpu, voicellm
 from .brain.voice_local import PORT, VoiceModel
 from .db import SettingKV
 from .latency import pct
@@ -369,15 +373,13 @@ class Lab:
 
     def _state(self, **kw) -> None:
         with Session(self.engine) as s:
-            row = s.get(SettingKV, STATE_KEY) or SettingKV(key=STATE_KEY)
-            row.value = json.dumps({**kw, "at": self.now().isoformat(timespec="seconds")})
-            s.add(row)
-            s.commit()
+            _put_state(s, {**kw, "at": self.now().isoformat(timespec="seconds")})
 
-    def run(self, language_mode: str = "auto") -> dict:
+    def run(self, language_mode: str = "auto", by: str = "owner") -> dict:
+        """by: "owner" (Run) or "auto" (Kairo ran it by itself)."""
         started = time.monotonic()
         report: dict = {"at": self.now().isoformat(timespec="seconds"), "gpu": nvidia_smi(), "models": {}, "speech": {},
-                        "kyutai": None, "pick": None}
+                        "kyutai": None, "pick": None, "by": by}
         self._state(running=True, step="starting")
         self.vm.pause()                                    # the GPU is the lab's now; calls use the old pipeline
         try:
@@ -385,10 +387,14 @@ class Lab:
             self._judge(report)
             self._speech(report)
             self._kyutai(report)
+            report["on_gpu"], report["off_gpu"] = ran_on_gpu(report["models"], self._voice_devices())
             choice, why = pick(report["models"], language_mode)
+            if choice is None and not report["on_gpu"]:
+                why += "; measured off the GPU, so the voice stays as it was"
             report["pick"] = {"model": choice, "why": why}
             with Session(self.engine) as s:
-                voicellm.set_choice(s, choice, "lab")      # none passed: the old voice until the owner picks
+                if choice is not None or report["on_gpu"]:   # a run off the GPU never switches the voice off
+                    voicellm.set_choice(s, choice, "lab")    # none passed on the GPU: the old voice until the owner picks
                 pad = (report["speech"].get("smart_turn") or {}).get("pad_side")
                 if pad:
                     row = s.get(SettingKV, PAD_KEY) or SettingKV(key=PAD_KEY)
@@ -432,6 +438,8 @@ class Lab:
                     report["models"][mid] = entry
                     continue
                 entry["load_s"] = round(time.monotonic() - t0, 1)
+                entry["device"] = {k: v for k, v in gpu.llama_device(vm.log_dir / "voice-llm.log").items()
+                                   if k in ("device", "layers", "ok", "reason")}   # llama.cpp's own log: GPU or CPU
                 after = nvidia_smi()
                 if before and after:
                     entry["vram_mb"] = after["used_mb"] - before["used_mb"]
@@ -443,6 +451,14 @@ class Lab:
             finally:
                 vm.shutdown()
             report["models"][mid] = entry
+
+    def _voice_devices(self) -> dict:
+        """Where Whisper and Kokoro ran (the speech part loaded them), {} when the voice can't say."""
+        try:
+            return self.voice.devices() if self.voice is not None and hasattr(self.voice, "devices") else {}
+        except Exception:   # the check never breaks a run
+            log.exception("voice lab: where the voice runs")
+            return {}
 
     def _judge(self, report: dict) -> None:
         live = {mid: m for mid, m in report["models"].items() if m.get("_replies")}
@@ -553,6 +569,24 @@ class Lab:
         report["kyutai"] = {"state": "measured" if not data.get("error") else "failed", **data}
 
 
+def ran_on_gpu(models: dict, voice_devices: dict) -> tuple[bool, list[str]]:
+    """(True, []) when the run was made on the GPU: the PC has an NVIDIA card, every model that started had all
+    its layers on it, and Whisper and Kokoro ran on it. Else (False, why)."""
+    if not gpu.present():
+        return False, ["no NVIDIA driver on this PC"]
+    off = []
+    measured = {mid: m["device"] for mid, m in models.items() if m.get("device")}
+    if not measured:
+        off.append("no voice model started")
+    for mid, d in measured.items():
+        if not d.get("ok"):
+            off.append(f"{mid}: {d.get('reason') or 'not on the GPU'}"[:200])
+    for name, c in (voice_devices or {}).items():
+        if name in ("whisper", "kokoro") and c.get("loaded") and not c.get("ok"):
+            off.append(f"{name}: {c.get('reason') or 'on the CPU'}"[:200])
+    return not off, off
+
+
 def smart_turn_check(st, clips) -> dict:
     """Complete sentences should score high, the same audio cut mid-sentence low. Both pad sides tried."""
     out = {}
@@ -612,6 +646,36 @@ def state(s: Session) -> dict:
         return json.loads(row.value) if row and row.value else {"running": False}
     except ValueError:
         return {"running": False}
+
+
+def _put_state(s: Session, value: dict) -> None:
+    row = s.get(SettingKV, STATE_KEY) or SettingKV(key=STATE_KEY)
+    row.value = json.dumps(value)
+    s.add(row)
+    s.commit()
+
+
+def clear_stale(s: Session) -> bool:
+    """Kairo just started, so no lab can be running: a run cut off by a restart left running=True behind,
+    which blocked Run (409) and the run by itself for good. True when one was cleared."""
+    st = state(s)
+    if not st.get("running"):
+        return False
+    _put_state(s, {"running": False, "step": f"cut off by a restart ({st.get('step')})", "at": st.get("at")})
+    return True
+
+
+def set_waiting(s: Session, why: str | None) -> None:
+    """Why the lab hasn't run by itself yet (Voice lab page, Run diagnosis); None: not waiting.
+    Never written over a run in progress."""
+    st = state(s)
+    if st.get("running") or st.get("waiting") == why:
+        return
+    st.pop("waiting", None)
+    st.pop("waiting_since", None)
+    if why:
+        st.update(waiting=why, waiting_since=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    _put_state(s, st)
 
 
 def filler_words() -> set[str]:
