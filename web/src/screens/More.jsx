@@ -715,7 +715,7 @@ const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 100
 const NET = { direct: 'Direct', relay: 'Through Tailscale’s relay', unknown: 'Not known' }
 
 // Owner's request 2026-10-17: where each part of the voice runs; anything off the GPU is red with its reason.
-const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', piper: 'German voice (Piper)' }
+const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', embeddings: 'Memory search (embeddings)', piper: 'German voice (Piper)' }
 const LINE_WHY = { not_installed: 'the call packages aren’t on the PC yet', voice_missing: 'speech to text isn’t installed', no_tailnet: 'the PC has no Tailscale address right now' }
 
 function VoiceDevices({ dev }) {

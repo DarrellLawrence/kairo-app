@@ -419,10 +419,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
         settings.data_dir / "memory" / "index.sqlite", vault_dir=settings.vault_dir, engine=engine,
-        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site,
-                                   cpu_only=lambda: bool(voicellm.available(_vl_site)))   # voice wins the VRAM
+        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site, cpu_only=lambda: _memory_on_cpu())
         if tool_sites.configured("memory") else None)
     tools.memory = app.state.memory
+
+    MEMORY_VRAM_MB = 3000   # the embedding model in fp16 and its batches
+
+    def _memory_on_cpu() -> bool:
+        """Owner's request 2026-10-19: the embeddings on the GPU too (12 GB on kairo-home hold Whisper, Kokoro,
+        the voice model and this). Only when the card is short of room do they go to the CPU, and say why."""
+        from . import gpu as gpu_mod
+        card = gpu_mod.summary()
+        if not card or card.get("total_mb") is None or card.get("used_mb") is None:
+            app.state.memory_cpu_why = None
+            return False
+        free = card["total_mb"] - card["used_mb"]
+        app.state.memory_cpu_why = f"only {free} MB free on the GPU (it needs {MEMORY_VRAM_MB})" if free < MEMORY_VRAM_MB else None
+        return free < MEMORY_VRAM_MB
 
     def _transcribe_for_capture(data: bytes) -> str:
         return app.state.voice.transcribe(data).text
@@ -1190,6 +1203,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             llm.update(ok=False, reason=vm.get("error") or f"the voice model is {vm['state']}")
         comps["voice_model"] = {**llm, "model": vm.get("model"), "state": vm["state"],
                                 "loaded": vm["state"] == "ready"}
+        emb = _embeddings_device()
+        if emb is not None:
+            comps["embeddings"] = emb
         card = await asyncio.to_thread(gpu_mod.summary)
         if card is not None:                        # this process (Whisper, Kokoro) and llama.cpp's
             mine = {os.getpid(): "whisper+kokoro"}
@@ -1480,6 +1496,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 off.append(f"voice model: {llm.get('reason')}")
         return "; ".join(off) or None
 
+    def _embeddings_device() -> dict | None:
+        """The memory's embedding model: where it runs, and why not on the GPU (None: not set up here)."""
+        emb = getattr(app.state.memory, "embedder", None) if getattr(app.state, "memory", None) else None
+        if emb is None:
+            return None
+        out = {"device": emb.device, "model": emb.model_file, "loaded": emb.running()}
+        if not out["loaded"]:
+            out.update(ok=False, reason=emb.last_error or "not started yet (it starts with the first memory search)")
+        elif emb.device == "cuda":
+            out.update(ok=True, reason=None)
+        else:
+            out.update(ok=False, reason=f"on the CPU: {getattr(app.state, 'memory_cpu_why', None) or 'CUDA did not start for it'}")
+        return out
+
+    def _off_gpu() -> str | None:
+        """Owner's request 2026-10-19 (self-test): every voice part and the embeddings on the GPU of a PC
+        with an NVIDIA card. None: no NVIDIA card; "": all on the GPU; else which ones aren't and why."""
+        from . import gpu as gpu_mod
+        if not gpu_mod.present():
+            return None
+        off = [_voice_slow() or ""]
+        emb = _embeddings_device()
+        if emb is not None and emb.get("loaded") and not emb.get("ok"):
+            off.append(f"embeddings: {emb.get('reason')}")
+        return "; ".join(x for x in off if x)
+
     def _slow_call() -> str | None:
         """Owner's decision 2026-10-17: a call on a slow voice goes ahead; Kairo says so once at the start
         (the line this returns) and the reason goes to the phone as a push."""
@@ -1762,17 +1804,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             emb = app.state.memory.embedder
             extras["memory"] = (await asyncio.to_thread(emb.selftest)) if emb is not None \
                 else {"ok": None, "reason": "not set up for this release"}
+        if voice or memory:   # after the voice and the memory ran: their devices are known now
+            off = await asyncio.to_thread(_off_gpu)
+            extras["gpu"] = {"ok": None, "reason": "no NVIDIA card"} if off is None else \
+                {"ok": not off, "reason": f"not on the GPU: {off}" if off else ""}
         result["checks"].update({k: v.get("ok") for k, v in extras.items()})
         result["details"] = extras
         if extras.get("voice", {}).get("heard"):
             result["proof"]["transcription"] = extras["voice"]["heard"]
-        problems = [] if result["ok"] else [result["reason"]]
-        for kind, r in extras.items():
-            if r.get("ok") is False:
-                problems.append(f"{kind}: {r.get('reason')}")
-                if result["category"] not in ("toolchain", "claude"):   # a broken install outranks the rest (rollback)
-                    result.update(ok=False, category=kind, reason=f"{kind}: {r.get('reason')}")
-        result["problems"] = problems
+        result["problems"] = selftest_mod.add_extras(result, extras)
         result["seconds"] = round(time.monotonic() - started, 1)
         result["at"] = dt.datetime.now(dt.timezone.utc).isoformat()
         log.info("self-test: %s", json.dumps({k: result[k] for k in ("ok", "category", "reason", "checks", "proof")}, default=str))

@@ -277,3 +277,22 @@ def test_site_comes_from_the_release(tmp_path, monkeypatch):
     assert tool_sites.site("voice", tmp_path / "data") == tmp_path / "tools" / "voice" and not tool_sites.configured("voice")
     (tmp_path / "voice-site.txt").write_text(r"C:\Kairo\tools\voice-0123456789ab" + "\n")
     assert tool_sites.configured("voice") and str(tool_sites.site("voice", tmp_path)).endswith("voice-0123456789ab")
+
+
+def test_a_voice_part_off_the_gpu_is_red_but_never_outranks_a_broken_install():
+    """Owner's request 2026-10-19: on a PC with an NVIDIA card every voice part and the embeddings on the GPU,
+    else the self-test is red (and pushed). A broken install still decides (it rolls back); the GPU never does."""
+    from app import selftest
+    ok = {"ok": True, "category": None, "reason": ""}
+    r = dict(ok)
+    problems = selftest.add_extras(r, {"voice": {"ok": True}, "memory": {"ok": True},
+                                       "gpu": {"ok": False, "reason": "not on the GPU: whisper: on the CPU: cublas64_12.dll"}})
+    assert r["ok"] is False and r["category"] == "gpu" and "cublas64_12.dll" in r["reason"] and len(problems) == 1
+    r = dict(ok)
+    selftest.add_extras(r, {"voice": {"ok": False, "reason": "no sound"}, "gpu": {"ok": False, "reason": "off"}})
+    assert r["category"] == "voice"                                    # the rollback reason stays first
+    r = dict(ok)
+    selftest.add_extras(r, {"gpu": {"ok": None, "reason": "no NVIDIA card"}})
+    assert r["ok"] is True
+    psm = (Path(__file__).resolve().parents[2] / "installer" / "Kairo.psm1").read_text(encoding="utf-8")
+    assert "@('claude', 'model', 'context', 'config', 'gpu') -contains" in psm   # no rollback for the GPU

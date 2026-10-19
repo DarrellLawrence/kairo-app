@@ -4,7 +4,13 @@
 # installs this file after requirements-voice.txt with --no-deps --upgrade; it is part of the voice
 # folder's name, so a change here means a clean new folder. Windows only (kairo-home).
 # 1.24.x: pipecat-ai 1.12 needs onnxruntime ~= 1.24.3. CUDA 12, like the cuBLAS/cuDNN Whisper uses.
+# Every nvidia-* package is in this one file on purpose (owner's report 2026-10-19): pip --target --upgrade
+# replaces a whole top-level folder, and they all share nvidia\, so a second pip run deleted cuBLAS and
+# cuDNN from the first ("cublas64_12.dll not found", Kokoro "CUDA/cuDNN DLLs not found").
+# tools/voice_site_check.py (CI) checks that every DLL below is in the folder and loads.
 onnxruntime-gpu==1.24.4; sys_platform == "win32"
+nvidia-cublas-cu12==12.9.2.10; sys_platform == "win32"
+nvidia-cudnn-cu12==9.27.0.42; sys_platform == "win32"
 nvidia-cuda-runtime-cu12==12.9.79; sys_platform == "win32"
 nvidia-cuda-nvrtc-cu12==12.9.86; sys_platform == "win32"
 nvidia-cufft-cu12==11.4.1.4; sys_platform == "win32"

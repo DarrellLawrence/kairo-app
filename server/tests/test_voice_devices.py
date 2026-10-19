@@ -45,3 +45,16 @@ def test_the_line_of_the_last_spoken_turn_is_shown(local):
             "device": {"line": "webrtc", "net": "direct"}}
     assert local.post("/api/voice/turns", json=body).status_code == 200
     assert local.get("/api/voice/devices").json()["line"]["last_turn"] == "webrtc"
+
+
+def test_the_embeddings_say_where_they_run_too(local, monkeypatch):
+    """Owner's request 2026-10-19: every part on the GPU, the memory's embedding model included."""
+    import types
+    emb = types.SimpleNamespace(device="cpu", model_file="onnx/model_quantized.onnx", last_error="", running=lambda: True,
+                                close=lambda: None)
+    monkeypatch.setattr(local.app.state.memory, "embedder", emb)
+    local.app.state.memory_cpu_why = "only 900 MB free on the GPU (it needs 3000)"
+    c = local.get("/api/voice/devices").json()["components"]
+    assert c["embeddings"]["ok"] is False and "900 MB free" in c["embeddings"]["reason"]
+    emb.device = "cuda"
+    assert local.get("/api/voice/devices").json()["components"]["embeddings"]["ok"] is True
