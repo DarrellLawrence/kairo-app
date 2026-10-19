@@ -1908,7 +1908,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def release_version() -> str:
         try:
-            return str(json.loads((REPO_ROOT / "release.json").read_text(encoding="utf-8"))["version"])
+            return str(json.loads((REPO_ROOT / "release.json").read_text(encoding="utf-8-sig"))["version"])
         except (OSError, ValueError, KeyError):
             return "dev"
 

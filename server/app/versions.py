@@ -14,7 +14,7 @@ from .settings import REPO_ROOT
 def running(app_root: Path = REPO_ROOT) -> str | None:
     """This process's release (release.json next to the code it started from), None in a dev checkout."""
     try:
-        return str(json.loads((Path(app_root) / "release.json").read_text(encoding="utf-8"))["version"])
+        return str(json.loads((Path(app_root) / "release.json").read_text(encoding="utf-8-sig"))["version"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
 

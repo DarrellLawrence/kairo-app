@@ -458,7 +458,7 @@ def _owner_profile(r: _Report, c: sqlite3.Connection, vault_dir: Path) -> None:
 def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
     r.h("G.6 releases and update state")
     try:
-        info = json.loads((app_root / "release.json").read_text(encoding="utf-8"))
+        info = json.loads((app_root / "release.json").read_text(encoding="utf-8-sig"))
         r.add(f"  running: {info.get('version')} (claude {info.get('claude_code_version')}, python {info.get('python')})")
     except (OSError, ValueError):
         r.add(f"  running: {app_root.name} (no release.json: a dev checkout)")

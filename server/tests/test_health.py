@@ -238,6 +238,13 @@ def test_an_installed_version_that_isnt_running_is_red_with_a_push(watch, tmp_pa
     assert "version" not in watch.run(full=False, now=now + dt.timedelta(minutes=40))
 
 
+def test_a_release_json_with_a_bom_still_names_its_version(tmp_path):
+    """Windows PowerShell 5.1 writes UTF-8 with a BOM: a release it touched must not answer as "dev"."""
+    from app import versions
+    (tmp_path / "release.json").write_bytes(b"\xef\xbb\xbf" + json.dumps({"version": "2026.10.19.1247-abcdef0"}).encode())
+    assert versions.running(tmp_path) == "2026.10.19.1247-abcdef0"
+
+
 def test_health_says_which_version_answers(migrated):
     """The installer counts an update only once the new version itself answers on the port."""
     from fastapi.testclient import TestClient

@@ -895,7 +895,7 @@ function Get-KairoProcesses($P) {
 function Get-PortServers {
     $found = @()
     $conns = @()
-    try { $conns = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $script:Port -State Listen -ErrorAction Stop) } catch { }
+    try { $conns = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $script:Port -State Listen -ErrorAction SilentlyContinue) } catch { }   # no listener is not an error: keep the update log clean
     foreach ($id in @($conns | ForEach-Object { [int]$_.OwningProcess } | Select-Object -Unique)) {
         $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
         if ($proc) { $found += $proc }
