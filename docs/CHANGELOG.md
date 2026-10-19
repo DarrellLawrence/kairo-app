@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-19 — build: the update really switches; the voice back on the GPU (owner's diagnosis)
+- Found: your PC said "Kairo updated to e9f997a, ok" but kept running 7a7a554. The new version started (its voice warm-up is in the log), but the old server still held Kairo's port, so the health check and the self-test talked to the old one. Now the installer stops every Kairo server, also one the task no longer knows (found by its command line or by the port), never restarts the old code before the switch, and only counts an update when /health reports the new version; another version answering is stopped once, and if it's still not the new one, the update is undone and pushed. e9f997a was the newest release; there was nothing newer.
+- New: if the installed version isn't the one running for 10 minutes, that's a red chip on Today and a push. Run diagnosis shows installed vs running.
+- Found: "cublas64_12.dll not found" (Whisper) and "CUDA/cuDNN DLLs not found" (Kokoro) came from my change of 17 Oct: the second pip run (the GPU add-on) replaced the whole nvidia folder and deleted cuBLAS and cuDNN. All NVIDIA packages are installed in one run now; CI checks that every DLL is there and loads.
+- The self-test is red (and pushed) when Whisper, Kokoro, the voice model or the embeddings run on the CPU on your PC; it never undoes an update for that. The embeddings go back on the GPU when 3 GB are free. Voice speed lists the embeddings too.
+- Removed: "the voice model wins the VRAM" (embeddings always on the CPU).
+
 ## 2026-10-17 — build: failed updates always push; a slow voice says so (owner's rules)
 - Every update that fails now sends a push with the reason, every time: each failed try (with the try number and when the next one comes), an update that was undone (with the check that failed), a new version still waiting after 3 hours outside the quiet hours (and why: a chat, a job, a call), an error in the auto-update that lasts 30 minutes (then every 6 hours), and a missing GitHub token. Before, only an undone update and the 3rd failed try pushed; errors and endless waiting were silent.
 - Kairo also watches the auto-update itself: if it hasn't run for 30 minutes (its task is off or it breaks before it starts), that's a push and a red chip on Today.
