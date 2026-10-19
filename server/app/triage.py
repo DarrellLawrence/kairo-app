@@ -4,7 +4,8 @@
 2. The model sorts each mail into reply / fyi / ignore, writes a one-line
    summary, spots deadlines and flags mails that try to give orders.
 3. The backend applies Kairo/... labels (tier 2) through the gate and the
-   executor, turns deadlines into tasks and keeps the result for the brief.
+   executor, turns deadlines into tasks (never from a shop's, a newsletter's
+   or a notification's mail) and keeps the result for the brief.
 
 Mail is untrusted: nothing here can create an approval card (jobs can't), and
 the model only returns data. A suspicious mail is labelled and listed, never
@@ -20,6 +21,7 @@ from email.utils import parsedate_to_datetime
 
 from sqlmodel import Session, or_, select
 
+from . import loops
 from .audit import audit
 from .db import Task, TriagedEmail, utcnow
 from .gate import TOOL_PREFIX, PROPOSE_TOOL
@@ -81,7 +83,8 @@ class Triage:
                 h = _headers(full)
                 mails.append({"id": full["id"], "thread_id": full.get("threadId"), "from": h.get("from"),
                               "subject": h.get("subject"), "date": h.get("date"),
-                              "body": (_body_text(full.get("payload") or {}) or full.get("snippet", ""))[:BODY_CHARS]})
+                              "body": (_body_text(full.get("payload") or {}) or full.get("snippet", ""))[:BODY_CHARS],
+                              "bulk": loops.automated_headers(h)})   # Kairo's own note, not shown to the model
             return mails
         except GoogleNotConnected as exc:
             raise Skipped(f"Google not connected: {exc}") from exc
@@ -112,14 +115,20 @@ class Triage:
                 # Never a task, never "needs reply": it only gets flagged.
                 item.category = "fyi" if category == "reply" else category
                 counts["suspicious"] += 1
-            elif item.deadline and category == "reply":
-                task = Task(title=clip(f"{item.subject or 'Email'} (from {_name(item.sender)})", 200),
-                            due=dt.datetime.combine(item.deadline, dt.time(12), tzinfo=tz), priority=2, source="email")
-                s.add(task)
-                s.commit()
-                s.refresh(task)
-                item.task_id = task.id
-                counts["tasks"] += 1
+            elif category == "reply":
+                # The reply check's rules right away: a date in a shop's, a newsletter's or a notification's mail is
+                # never a task (2026-10-19: a shop's feedback mail became three identical loops).
+                got = loops.rules_verdict(s, item, bulk=mail.get("bulk", False))
+                if got is not None:
+                    item.personal_reply, item.reply_why = got
+                if item.deadline and item.personal_reply is not False:
+                    task = Task(title=clip(f"{item.subject or 'Email'} (from {_name(item.sender)})", 200),
+                                due=dt.datetime.combine(item.deadline, dt.time(12), tzinfo=tz), priority=2, source="email")
+                    s.add(task)
+                    s.commit()
+                    s.refresh(task)
+                    item.task_id = task.id
+                    counts["tasks"] += 1
             counts[item.category] += 1
             s.add(item)
             s.commit()
@@ -147,7 +156,8 @@ def classify(mails: list[dict], ask, *, today: dt.date, language: str) -> list[d
     """The model sorts mails: data only, no side effects (the triage job and acceptance test 7 use it).
     ask(prompt, system) -> AskResult. Rows whose id isn't one of the mails are dropped."""
     prompt = PROMPT.format(today=today.isoformat(), language=language,
-                           emails="\n\n".join(untrusted(f"an email (id {m['id']})", m) for m in mails))
+                           emails="\n\n".join(untrusted(f"an email (id {m['id']})", {k: v for k, v in m.items() if k != "bulk"})
+                                              for m in mails))
     answer = ask(prompt, JOB_RULES)
     if not answer.ok:
         raise RuntimeError(f"model failed: {answer.error or answer.status}")
