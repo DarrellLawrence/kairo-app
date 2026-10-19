@@ -173,7 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if settings.db_url.startswith("sqlite:///"):
         Path(settings.db_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    engine = make_engine(settings.db_url)
+    engine = make_engine(settings.db_url, wal=True)   # reads never block writes (acceptance #1)
     _mark_interrupted(engine)
     gate = load_gate(settings.config_dir)   # refuses to start on a broken or weakened permissions.yaml
     tool_token = secrets.token_urlsafe(32)  # new every start; only mcp_kairo gets it
