@@ -106,11 +106,15 @@ def crash_loop_text(n: int) -> str:
 # ---------------------------------------------------------------- the checks
 
 def kairo_url(data_dir: Path) -> str | None:
-    """Kairo's tailnet address, recorded by the boot check (boot-check.json, kairo_url)."""
+    """Kairo's tailnet address, recorded by the boot check (boot-check.json, kairo_url), else by the
+    auto-update's tailnet snapshot (tailnet.json, every 5 minutes: acceptance #30, the boot check ran days ago)."""
     from . import status_files
-    data = status_files.read_json(data_dir, "boot-check.json")
-    url = data.get("kairo_url") if isinstance(data, dict) else None
-    return url if outbound.tailnet_url_ok(url) else None    # never anywhere else (a planted file can't redirect it)
+    for name in ("boot-check.json", "tailnet.json"):
+        data = status_files.read_json(data_dir, name)
+        url = data.get("kairo_url") if isinstance(data, dict) else None
+        if outbound.tailnet_url_ok(url):     # never anywhere else (a planted file can't redirect it)
+            return url
+    return None
 
 
 class HealthWatch:

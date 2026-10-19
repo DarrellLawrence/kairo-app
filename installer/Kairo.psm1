@@ -1048,6 +1048,8 @@ function Get-Prop($Object, [string]$Name) {
 # Voice V3 (2026-10-16): how each device on the tailnet reaches this PC, direct or through Tailscale's
 # relay (C:\Kairo\status\tailnet.json, read by app\tailnet.py). Kairo's own account may not ask
 # Tailscale; SYSTEM does it on every auto-update tick. Only what a call needs: no public addresses.
+# Also Kairo's own https://<name>.ts.net address (kairo_url): the health watch calls it every hour,
+# also when the boot check that records it too ran days ago (acceptance #30).
 function Write-TailnetStatus($P, [string]$Json = '') {
     if (-not $Json) {
         $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
@@ -1073,8 +1075,11 @@ function Write-TailnetStatus($P, [string]$Json = '') {
                                   relay = [string](Get-Prop $peer 'Relay'); peer_relay = [bool](Get-Prop $peer 'PeerRelay') }
         }
     }
-    $out = [ordered]@{ at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); self_relay = [string](Get-Prop (Get-Prop $st 'Self') 'Relay')
+    $me = Get-Prop $st 'Self'
+    $out = [ordered]@{ at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); self_relay = [string](Get-Prop $me 'Relay')
                        peers = @($peers) }
+    $dns = ([string](Get-Prop $me 'DNSName')).TrimEnd('.')
+    if ($dns) { $out['kairo_url'] = 'https://' + $dns }
     if (-not (Test-Path $P.Status)) { [void](New-Item -ItemType Directory -Path $P.Status) }
     $file = Join-Path $P.Status 'tailnet.json'
     ConvertTo-Json -InputObject $out -Depth 5 | Set-Content -Path "$file.new" -Encoding ASCII

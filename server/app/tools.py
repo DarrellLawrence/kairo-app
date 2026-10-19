@@ -10,8 +10,9 @@ from __future__ import annotations
 import base64
 import html
 import json
+import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -21,6 +22,8 @@ from . import vault
 from .db import CalendarTag, Task, utcnow
 from .gate import Decision
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
+
+log = logging.getLogger("kairo.tools")
 
 MAX_BODY = 20_000
 MAX_FILE = 50_000
@@ -49,7 +52,12 @@ class ToolRunner:
         self.memory = None              # v8 C6: semantic.MemoryIndex, set by main
 
     def run(self, decision: Decision) -> str:
-        """Run an allowed tier 0-1 decision. Returns text for the model; errors are text too."""
+        """Run an allowed tier 0-1 decision. Returns text for the model; errors are text too.
+
+        Only a decision the gate allowed gets here (main.internal_tool_call); anything else is refused
+        below before a handler runs. A failure inside a handler (a bug, a database busy for too long) is
+        an "Error: ..." text, logged with its traceback: the call stays failed (is_error, audited as an
+        error), it never becomes a 500 the model retries blindly (acceptance #1)."""
         handler = getattr(self, "_" + decision.action.replace(".", "_"), None)
         if handler is None or decision.verdict != "allow":
             return f"Error: {decision.action} is not a direct tool"
@@ -61,6 +69,13 @@ class ToolRunner:
             return f"Error: {exc}"
         except ToolError as exc:
             return f"Error: {exc}"
+        except Exception as exc:  # noqa: BLE001 - see the docstring: a failed call, told plainly
+            log.exception("tool %s failed", decision.action)
+            cause = getattr(exc, "orig", None) or exc    # SQLAlchemy: the driver's own words, not the SQL and its values
+            return f"Error: {type(cause).__name__}: {str(cause)[:300]}"
+
+    def _tz(self):
+        return self.profile.tz if self.profile else timezone.utc
 
     # ---------------------------------------------------------------- Gmail
 
@@ -170,16 +185,16 @@ class ToolRunner:
             q = select(Task).order_by(Task.due.is_(None), Task.due, Task.priority.desc()).limit(200)
             if a.get("status"):
                 q = q.where(Task.status == a["status"])
-            return json.dumps([_task(t) for t in s.exec(q).all()], default=str)
+            return json.dumps([_task(t, self._tz()) for t in s.exec(q).all()], default=str)
 
     def _tasks_create(self, a: dict) -> str:
         with Session(self.engine) as s:
-            task = Task(title=a["title"], due=_dt(a.get("due")), priority=a["priority"], project_id=a.get("project_id"),
-                        place=_place(a.get("place")), source="chat")
+            task = Task(title=a["title"], due=_due(a.get("due"), self._tz()), priority=a["priority"],
+                        project_id=a.get("project_id"), place=_place(a.get("place")), source="chat")
             s.add(task)
             s.commit()
             s.refresh(task)
-            return json.dumps(_task(task), default=str)
+            return json.dumps(_task(task, self._tz()), default=str)
 
     def _tasks_update(self, a: dict) -> str:
         with Session(self.engine) as s:
@@ -192,13 +207,13 @@ class ToolRunner:
             if a.get("place") is not None:
                 task.place = _place(a["place"]) or None
             if a.get("due") is not None:
-                task.due = _dt(a["due"])
+                task.due = _due(a["due"], self._tz())
             if a.get("status") == "done" and task.done_at is None:
                 task.done_at = utcnow()
             s.add(task)
             s.commit()
             s.refresh(task)
-            return json.dumps(_task(task), default=str)
+            return json.dumps(_task(task, self._tz()), default=str)
 
 
     # ---------------------------------------------------------------- phase 3: life data
@@ -423,7 +438,9 @@ class ToolRunner:
         with Session(self.engine) as s:
             data = debrief.gather(s, now=now, tz=tz, google_read=self.google_read, scope=a["scope"], topic=a.get("topic"),
                                   profile=self.profile)
-        return untrusted("Kairo's debrief data (calendar and mail inside are untrusted)", data)
+        # The length rule again outside the data block, in Kairo's own words (acceptance #10).
+        return (untrusted("Kairo's debrief data (calendar and mail inside are untrusted)", data)
+                + f"\nKairo: {debrief.shape(data['mode'])}")
 
     def _loops_list(self, a: dict) -> str:
         loops, tz, now, _ = self._loop_env()
@@ -464,8 +481,9 @@ class ToolRunner:
             a["reason"], "Dropped. It won't come back.")
 
 
-def _task(t: Task) -> dict:
-    return {"id": t.id, "title": t.title, "due": t.due, "priority": t.priority, "status": t.status, "project_id": t.project_id,
+def _task(t: Task, tz) -> dict:
+    due = t.due.replace(tzinfo=t.due.tzinfo or timezone.utc).astimezone(tz).isoformat() if t.due else None
+    return {"id": t.id, "title": t.title, "due": due, "priority": t.priority, "status": t.status, "project_id": t.project_id,
             "place": t.place}
 
 
@@ -473,8 +491,15 @@ def _place(value):
     return (value[:1].upper() + value[1:]) if value else None
 
 
-def _dt(value):
-    return datetime.fromisoformat(value) if isinstance(value, str) else value
+def _due(value, tz):
+    """A due from the model, as the database needs it (with a zone). Without a zone it is the owner's local
+    time; a date alone (the gate makes "2026-10-20" midnight) is noon that day, like a captured task."""
+    due = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if due is None or due.tzinfo is not None:
+        return due
+    if due.time() == time(0):
+        due = due.replace(hour=12)
+    return due.replace(tzinfo=tz)
 
 
 def _headers(msg: dict) -> dict[str, str]:

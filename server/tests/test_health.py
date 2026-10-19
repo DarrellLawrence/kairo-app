@@ -148,6 +148,27 @@ def test_no_address_recorded_is_no_alarm(watch):
     assert "tailscale" not in watch.run(full=True)
 
 
+def test_the_address_from_the_auto_update_when_the_boot_check_has_none(watch):
+    """Acceptance #30: the boot check runs after a boot (days ago); the auto-update writes tailnet.json every
+    5 minutes, so its address is there too."""
+    data = watch.settings.data_dir
+    status = data.parent / "status"
+    status.mkdir(parents=True, exist_ok=True)
+    tailnet = {"at": 1, "self_relay": "fra", "peers": [], "kairo_url": "https://kairo-home.tail1234.ts.net"}
+    (status / "tailnet.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(tailnet).encode())
+    (status / "boot-check.json").write_text(json.dumps({"all_ok": True, "checks": []}), encoding="utf-8")   # an old one
+    assert health.kairo_url(data) == "https://kairo-home.tail1234.ts.net"
+    asked = []
+    watch._http_get = lambda url: asked.append(url)
+    assert watch.run(full=True) == {} and asked == ["https://kairo-home.tail1234.ts.net/health"]
+    (status / "boot-check.json").write_text(json.dumps({"kairo_url": "https://kairo-pc.tail1234.ts.net"}), encoding="utf-8")
+    assert health.kairo_url(data) == "https://kairo-pc.tail1234.ts.net"                   # the boot check's comes first
+    (status / "boot-check.json").unlink()
+    for planted in ("https://evil.example/x", "http://kairo-home.tail1234.ts.net", "https://user@kairo-home.tail1234.ts.net"):
+        (status / "tailnet.json").write_text(json.dumps({**tailnet, "kairo_url": planted}), encoding="utf-8")
+        assert health.kairo_url(data) is None                                              # only Kairo's own tailnet address
+
+
 def test_todays_chip_and_housekeeping(migrated, monkeypatch):
     monkeypatch.setattr(health.shutil, "disk_usage", lambda p: Usage(500e9, 495e9, 5e9))
     app = create_app(migrated)

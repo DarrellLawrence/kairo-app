@@ -7,9 +7,10 @@ SQLModel.metadata.create_all() in app code.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Text, UniqueConstraint
+from sqlalchemy import Column, Text, UniqueConstraint, event, make_url
 from sqlmodel import Field, Session, SQLModel, create_engine
 
 
@@ -493,9 +494,39 @@ class SettingKV(SQLModel, table=True):
     value: str | None = Field(default=None, sa_column=Column(Text))
 
 
-def make_engine(db_url: str):
-    connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
-    return create_engine(db_url, connect_args=connect_args)
+BUSY_TIMEOUT_S = 30   # a write waits this long for another writer (a job, the memory worker) instead of failing
+WAL_SWITCH_TIMEOUT_MS = 5000
+
+
+def make_engine(db_url: str, *, wal: bool = False):
+    """wal: the backend's engine (main.py) puts the database file in WAL mode, once (the mode stays in the
+    file): reads never block a write and a write never blocks reads, so a backup or a job reading for a
+    while can't make a task fail "database is locked" (acceptance #1). Every other process opening the file
+    (the gate hook, diagnosis, backups) then uses WAL too, without asking for it."""
+    if not db_url.startswith("sqlite"):
+        return create_engine(db_url)
+    engine = create_engine(db_url, connect_args={"check_same_thread": False, "timeout": BUSY_TIMEOUT_S})
+    database = make_url(db_url).database
+    if wal and database and database != ":memory:" and not database.startswith("file::memory:"):
+        event.listen(engine, "first_connect", _use_wal)
+    return engine
+
+
+def _use_wal(dbapi_conn, _record) -> None:
+    """Best effort: if another program holds the database right now, this start stays in the old mode
+    (the busy timeout still applies) and the next start tries again."""
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute(f"PRAGMA busy_timeout = {WAL_SWITCH_TIMEOUT_MS}")
+        try:
+            mode = cur.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            mode = f"unchanged ({exc})"
+        if str(mode).lower() != "wal":
+            logging.getLogger("kairo.db").warning("database not switched to WAL: %s", mode)
+        cur.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_S * 1000}")
+    finally:
+        cur.close()
 
 
 def session_for(engine) -> Session:

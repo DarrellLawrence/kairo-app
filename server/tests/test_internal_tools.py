@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import logging
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -17,7 +21,9 @@ from sqlmodel import Session, select
 import app.main as main_mod
 from app.db import Approval, AuditLog, Task, make_engine
 from app.executor import Executor
+from app.gate import Decision
 from app.main import create_app
+from app.tools import ToolRunner
 from tests.conftest import FAKE_CLAUDE, SERVER_DIR, alembic_config
 from tests.fakes.fake_google import FakeGoogle, connect, decode_raw
 
@@ -265,3 +271,110 @@ def test_quick_questions_reach_the_chat_prompt(setup):
         s.commit()
     prompt = app.state.system_prompt()
     assert "Quick questions waiting" in prompt and "Was the bag from Anna? Gift idea?" in prompt and "captures_answer" in prompt
+
+
+# ---------------------------------------------------------------- a busy database or a bug: a clear tool error, never a 500
+# (acceptance #1: "add task ... tomorrow" got "the Kairo backend returned an error twice")
+
+def test_a_due_date_without_a_zone_is_the_owners_local_day(setup, migrated):
+    from app.profile import load_profile
+    tz = load_profile(migrated.config_dir).tz
+    r = setup["call"]("tasks_create", {"title": "Buy milk", "due": "2026-10-20"})        # "tomorrow": a date alone
+    assert r.status_code == 200 and r.json()["is_error"] is False, r.text
+    assert json.loads(r.json()["text"])["due"].startswith("2026-10-20T12:00:00")          # told back in local time
+    r = setup["call"]("tasks_create", {"title": "Call the dentist", "due": "2026-10-20T09:00:00"})
+    assert r.status_code == 200 and r.json()["is_error"] is False, r.text
+    task_id = json.loads(r.json()["text"])["id"]
+    r = setup["call"]("tasks_update", {"id": task_id, "due": "2026-10-21T08:30:00"})
+    assert r.status_code == 200 and r.json()["is_error"] is False, r.text
+    with Session(setup["engine"]) as s:
+        due = {t.title: t.due.astimezone(tz) for t in s.exec(select(Task)).all()}
+    assert (due["Buy milk"].date(), due["Buy milk"].hour) == (dt.date(2026, 10, 20), 12)   # noon, like a captured task
+    assert (due["Call the dentist"].date(), due["Call the dentist"].hour, due["Call the dentist"].minute) == (dt.date(2026, 10, 21), 8, 30)
+
+
+def test_the_backend_waits_for_a_busy_database_and_reads_never_block_writes(setup):
+    with setup["app"].state.engine.connect() as c:
+        assert c.exec_driver_sql("PRAGMA busy_timeout").scalar() >= 30_000
+        assert c.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+
+
+def test_a_task_is_added_while_another_writer_holds_the_lock(setup, migrated):
+    held, done = threading.Event(), threading.Event()
+
+    def job_writing():                                   # a job or the memory worker in the middle of a write
+        con = sqlite3.connect(migrated.db_path, timeout=30)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("INSERT INTO settings (key, value) VALUES ('test.busy', '1')")
+            held.set()
+            time.sleep(1.5)
+            con.commit()
+        finally:
+            con.close()
+            done.set()
+
+    threading.Thread(target=job_writing, daemon=True).start()
+    assert held.wait(10)
+    r = setup["call"]("tasks_create", {"title": "Buy milk", "due": "2026-10-20T09:00:00"})
+    assert r.status_code == 200 and r.json()["is_error"] is False, r.text
+    assert done.wait(10)
+    with Session(setup["engine"]) as s:
+        assert [t.title for t in s.exec(select(Task)).all()] == ["Buy milk"]
+
+
+def test_a_long_read_does_not_stop_a_task_being_added(setup, migrated):
+    reader = sqlite3.connect(migrated.db_path, timeout=30)   # a backup or a job reading for a while
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM tasks").fetchone()
+        started = time.monotonic()
+        r = setup["call"]("tasks_create", {"title": "Buy milk"})
+        assert r.status_code == 200 and r.json()["is_error"] is False, r.text
+        assert time.monotonic() - started < 5
+    finally:
+        reader.rollback()
+        reader.close()
+
+
+def test_an_unexpected_failure_is_a_readable_tool_error_and_logged(setup, monkeypatch, caplog):
+    def broken(self, a):
+        raise RuntimeError("disk on fire")
+    monkeypatch.setattr(ToolRunner, "_tasks_create", broken)
+    caplog.set_level(logging.ERROR, logger="kairo.tools")
+    r = setup["call"]("tasks_create", {"title": "Buy milk"})
+    assert r.status_code == 200
+    assert r.json() == {"text": "Error: RuntimeError: disk on fire", "is_error": True}
+    assert any(a.action == "tasks.create" and a.outcome == "error" for a in audit_rows(setup["engine"]))
+    rec = next(x for x in caplog.records if x.name == "kairo.tools")
+    assert "tasks.create" in rec.getMessage() and rec.exc_info and rec.exc_info[0] is RuntimeError
+
+
+def test_a_database_error_reads_short_without_the_sql(setup, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    def locked(self, a):
+        raise OperationalError("INSERT INTO tasks (title) VALUES (?)", ("Buy milk",), sqlite3.OperationalError("database is locked"))
+    monkeypatch.setattr(ToolRunner, "_tasks_create", locked)
+    r = setup["call"]("tasks_create", {"title": "Buy milk"}).json()
+    assert r == {"text": "Error: OperationalError: database is locked", "is_error": True}
+
+
+def test_a_failing_tool_never_turns_a_denial_into_a_run(setup, migrated, monkeypatch):
+    ran = []
+
+    def records(self, a):
+        ran.append(a)
+        raise RuntimeError("x")
+    monkeypatch.setattr(ToolRunner, "_tasks_create", records)
+    setup["app"].state.runner.current_origin = None                          # no brain run: refused before any tool
+    assert setup["call"]("tasks_create", {"title": "x"}).json()["text"].startswith("Not allowed")
+    setup["app"].state.runner.current_origin = "owner_chat"
+    r = setup["call"]("tasks_create", {"title": "x", "evil": True}).json()   # fails the schema: the gate denies
+    assert r["is_error"] is True and r["text"].startswith("Not allowed")
+    assert ran == []
+    runner = ToolRunner(engine=setup["engine"], vault_dir=migrated.vault_dir, google_read=lambda: None)
+    for verdict in ("deny", "approve", "execute"):
+        out = runner.run(Decision(verdict, "no", "tasks.create", 1, {"title": "x"}))
+        assert out == "Error: tasks.create is not a direct tool"
+    assert ran == []
