@@ -112,6 +112,39 @@ def test_on_a_call_haiku_keeps_the_tool_work():
     assert "a few words saying why" in call and "a few words saying why" in chat
 
 
+@pytest.mark.parametrize("message, lang", [
+    ("Was steht morgen an? Bitte ganz kurz.", "German"),
+    ("Thanks. And this weekend, in one line?", "English"),
+    ("(spoken, on a call) Remind me to call the dentist tomorrow", "English"),
+    ("lass es", "German"),
+    ("ok", None),
+    ("Sam", None),
+])
+def test_the_header_says_which_language_this_message_is_in(message, lang):
+    """Acceptance #21: after a German turn an English one got a German answer."""
+    h = conversation.header(right_now="Right now: x.", hits="", extras="", fast=True, message=message)
+    if lang is None:
+        assert "The owner wrote this message in" not in h
+    else:
+        assert f"The owner wrote this message in {lang}: answer in {lang}" in h
+    assert "answer in German" in conversation.handover(language="de")
+    assert "answer in" not in conversation.handover(language=None).split("their language.")[1]
+
+
+@pytest.mark.parametrize("message, rule", [
+    ("leave it", True), ("drop it", True), ("Forget it.", True), ("(spoken, on a call) lass es", True),
+    ("ach, vergiss es", True), ("ok leave it, I'll do it myself", True),
+    ("what's still open with the lab report?", False),
+    ("please don't drop it from the list, the library book still has to go back before Friday, it matters", False),
+])
+def test_leave_it_means_the_last_thing_talked_about(message, rule):
+    """Acceptance #19: two loops raised, then "leave it": Haiku dropped the first one listed, not the last."""
+    h = conversation.header(right_now="Right now: x.", hits="", extras="", fast=True, message=message)
+    assert (conversation.LEAVE_IT_RULE in h) is rule
+    if rule:
+        assert "talked about LAST" in h and "not the first" in h
+
+
 def test_profile_card_is_short(tmp_path):
     (tmp_path / "10 Profile").mkdir(parents=True)
     (tmp_path / "10 Profile" / "me.md").write_text("# Me\n" + "A long profile line.\n" * 2000, encoding="utf-8")
@@ -179,3 +212,15 @@ def test_a_hand_over_says_why_and_more_usage_lists_it(migrated, monkeypatch, tmp
     assert b["model"] == "sonnet" and b["server"]["why"] == '"should I"'
     assert [(e["model"], e["purpose"], e["reason"]) for e in u["escalations"]] == [
         ("sonnet", "chat", '"should I"'), ("sonnet", "chat", "handed over by Haiku: judgment, which plan to drop")]
+
+
+def test_each_message_is_answered_in_its_own_language(migrated, monkeypatch, tmp_path):
+    rec = tmp_path / "rec.json"
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
+    with TestClient(create_app(migrated)) as c, c.websocket_connect("/ws/chat") as ws:
+        say(ws, "Was steht morgen an? Bitte ganz kurz.")
+        say(ws, "Thanks. And this weekend, in one line?")
+        say(ws, "leave it")
+    turns = json.loads(rec.read_text())["turns"]
+    assert "answer in German" in turns[0] and "answer in English" in turns[1] and "answer in German" not in turns[1]
+    assert conversation.LEAVE_IT_RULE in turns[2] and conversation.LEAVE_IT_RULE not in turns[1]

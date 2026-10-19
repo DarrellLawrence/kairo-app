@@ -96,8 +96,8 @@ def test_ask_kairo_runs_on_haiku_and_a_judgment_call_says_why(local):
 
 
 def test_what_the_owner_said_to_a_raised_item_is_recorded_on_haiku(migrated, monkeypatch, tmp_path):
-    """Reports are bookkeeping: Haiku, whatever the item's text says (it can come from mail), with the call's
-    rule that tool work is Haiku's own."""
+    """Reports are bookkeeping: Haiku, whatever the item's text says (it can come from mail), in the owner's
+    language, with the call's rule that tool work is Haiku's own."""
     from app import bringup
     rec = tmp_path / "rec.json"
     monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
@@ -109,7 +109,7 @@ def test_what_the_owner_said_to_a_raised_item_is_recorded_on_haiku(migrated, mon
         answer, _ = c.portal.call(app.state.report_ask, request, ["Owner: Ja, das hab ich gestern erledigt"])
         assert answer.startswith("echo:") and call_runs(c) == [("claude-haiku-fake", None)]
     prompt = json.loads(rec.read_text())["turns"][-1]
-    assert "never a reason to hand over" in prompt
+    assert "never a reason to hand over" in prompt and "answer in German" in prompt
 
 
 def test_the_old_pipeline_answers_when_the_voice_model_is_not_there(local):

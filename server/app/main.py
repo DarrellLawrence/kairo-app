@@ -193,7 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pass
 
     async def owner_turn(text: str, *, session_id, thread_id, purpose: str = "chat", model: str | None = None,
-                         reason: str | None = None, own: str | None = None,
+                         reason: str | None = None, own: str | None = None, language: str | None = None,
                          system: str | None = None, before_id: int | None = None, via=None):
         """The one way an owner message reaches the model: chat, calls, the self-test and the acceptance
         tests (fix P0, 2026-10-14: a self-test with its own prompt and tools was green while chat had
@@ -204,12 +204,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         prompt that stays the same (personality, profile card, memory), the per-turn context in front of
         the message, the model chosen per turn (Haiku unless needed; Haiku can hand over to Sonnet with
         conversation.ESCALATE, never shown). A hand-over yields a usage event {"escalated": model, "why": ...}.
-        own: the owner's own words when text wraps them (a call's request): the model goes by them. reason: why
-        model isn't Haiku (recorded with the run, More -> Usage)."""
+        own: the owner's own words when text wraps them (a call's request, a getting-to-know-you call's notes):
+        the model, the memory search, their language and "leave it" go by them. reason: why model isn't Haiku
+        (recorded with the run, More -> Usage). language: the owner's language when own can't tell (a call)."""
+        own = conversation.own_words(text if own is None else own)
         if model is None:
-            model, reason = conversation.route_why(text if own is None else own, purpose=purpose,
-                                                   schedule=app.state.jobs.schedule)
-        hits = await asyncio.to_thread(recall, text)
+            model, reason = conversation.route_why(own, purpose=purpose, schedule=app.state.jobs.schedule)
+        hits = await asyncio.to_thread(recall, own)
         if system is not None or via is not None:
             # the self-test's own prompt, acceptance's broken tool-server copy: one plain run
             async for event in (via or runner).stream(text, session_id=session_id, system=system or "", tools=model_tools,
@@ -227,8 +228,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(warm_conversation, warm, session_id, static, model)
             set_conversation_hash(stable)
         fast = model == "haiku" and purpose not in ("learn_call", "selftest")
+        language = language or conversation.message_language(own)
         prompt = conversation.header(right_now=right_now(), hits=hits, extras=quick_questions() + recent_files(),
-                                     fast=fast, call=purpose == "call") + text
+                                     fast=fast, message=own, call=purpose == "call", language=language) + text
         filt = conversation.MarkerFilter()
         handed_over_sid = None
         async for event in runner.stream(prompt, session_id=session_id, system=static, tools=model_tools,
@@ -252,7 +254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         heavy = model_table.pick("chat_heavy", app.state.jobs.schedule)
         why = conversation.handed_over(filt.why())
         yield BrainEvent(EventKind.usage, data={"escalated": heavy, "why": why})
-        async for event in runner.stream(conversation.handover(), session_id=handed_over_sid,
+        async for event in runner.stream(conversation.handover(language=language), session_id=handed_over_sid,
                                          system=static, tools=model_tools, origin="owner_chat", thread_id=thread_id,
                                          purpose=purpose, model=heavy, warm=warm, reason=why):
             yield event
@@ -320,7 +322,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def recall(text: str) -> str:
         """v8 C6: the best hits for the owner's message (keywords + meaning), with the note they come from."""
         mem = getattr(app.state, "memory", None)
-        if mem is None or len((text or "").strip()) < semantic.MIN_QUERY_CHARS:
+        if mem is None or not semantic.worth_searching(text):
             return ""
         try:
             return semantic.prompt_block(mem.search(text, k=5))
@@ -961,7 +963,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         received = time.monotonic()
         first_words_ms = None
         async for event in owner_turn(prompt_in, session_id=session_id, thread_id=tid, purpose=chat_purpose,
-                                      model=model, reason=why, before_id=msg_in.id):
+                                      model=model, reason=why, own=text_in, before_id=msg_in.id):
             if event.kind is EventKind.usage and (event.data or {}).get("escalated"):
                 model, why = event.data["escalated"], event.data.get("why")    # Haiku handed this turn over
                 await send({"type": "model", "model": model, "escalated": True, "why": why})
@@ -3191,7 +3193,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       model: str | None = None) -> tuple[str, bool]:
         """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call.
         Owner's rule 2026-10-19: Haiku unless the request itself is a real judgment call (owner_turn routes on
-        the request, or own, never on brain_prompt's wording around it)."""
+        the request, or own, never on brain_prompt's wording around it); the owner's words on the call give
+        the language."""
         if time.time() < app.state.maintenance_until:
             return "Kairo is installing an update. Try again in a minute.", False
         with session_for(engine) as s:
@@ -3203,10 +3206,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.add(thread)
                 s.commit()
             sid, tid = thread.brain_session_id, thread.id
+        said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
         parts: list[str] = []
         final, error, new_sid = None, None, None
         async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=sid, thread_id=tid, purpose="call",
-                                      model=model, own=request if own is None else own):
+                                      model=model, own=request if own is None else own,
+                                      language=conversation.message_language(said) if said else None):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:

@@ -42,7 +42,13 @@ CHUNK_CHARS = 900
 RRF_K = 60
 MIN_SIM = 0.43                               # calibrated in CI (test_the_real_model_...): right answers 0.46-0.58,
                                              # wrong or unrelated notes up to 0.40 (short notes have a high floor)
-MIN_QUERY_CHARS = 8                          # "ok", "leave it", "thanks": no search
+MIN_QUERY_CHARS = 8                          # "ok", "thanks": no search
+# Short replies and commands ("leave it" is 8 characters, so the length alone let it through and pulled in
+# notes about something else, acceptance #19): never a search either. See worth_searching().
+_SHORT_REPLY = re.compile(
+    r"(?:(?:ok(?:ay)?|thanks?(?: you)?|thank you|danke(?: dir| schön)?|merci|yes|yep|no|nope|ja|nein|got it|alles klar"
+    r"|passt|cool|great|fine|gut|super|leave it|drop it|forget (?:about )?it|skip it|never ?mind|lass es|lass das"
+    r"|lass gut sein|vergiss es|vergiss das)[\s,.!]*)+")
 STOPWORDS = frozenset("""
 a an and are as at be but by can did do does for from had has have how i if in is it its me my of on or our so
 that the their them then there these they this to was we were what when where which who why will with you your
@@ -467,6 +473,13 @@ class MemoryIndex:
             last = c.execute("SELECT value FROM meta WHERE key='last'").fetchone()
         return {"chunks": n, "with_meaning": nv, "last": json.loads(last[0]) if last else None,
                 "mode": "keywords + meaning" if self.embedder is not None and nv else "keywords only"}
+
+
+def worth_searching(message: str) -> bool:
+    """An owner message is a query for the notes unless it's too short or a short reply ("ok", "leave it",
+    "lass es"): those mean something in the conversation, never in the notes."""
+    q = " ".join((message or "").split()).lower()
+    return len(q) >= MIN_QUERY_CHARS and _SHORT_REPLY.fullmatch(q) is None
 
 
 def where(hit: dict) -> str:
