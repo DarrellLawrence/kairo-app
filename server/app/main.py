@@ -52,6 +52,7 @@ from pydantic import ValidationError
 
 from .actions import LoopsAdd
 from .audit import audit
+from .jobkit import JOB_RULES
 from .jobkit import clip as clip_text
 from .executor import Executor
 from .gate import TOOL_PREFIX, load_gate
@@ -345,6 +346,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
             app.state.today_card.start()   # the Today card: always fresh, before any call
             background.append(asyncio.create_task(_lab_first_run()))
+            background.append(asyncio.create_task(_profile_seed_first_run()))
         yield
         for call in list(getattr(app.state, "rtc_calls", {}).values()):   # calls over WebRTC end with Kairo
             try:
@@ -529,7 +531,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "evening_recap": lambda ctx: json.dumps(app.state.recap.run()),
                 "document": lambda ctx, doc_id=None: _document_job(ctx, doc_id),
                 "voice_agenda": lambda ctx: bringup.agenda_job(ctx, profile, dt.datetime.now(profile.tz)),
-                "voice_lab": lambda ctx, language="auto": _voice_lab_job(ctx, language)})
+                "voice_lab": lambda ctx, language="auto": _voice_lab_job(ctx, language),
+                "profile_seed": lambda ctx: _profile_seed_job(ctx)})
     from . import calendar_read, own_calendar
 
     def _calendar_week(start: dt.date):
@@ -2103,6 +2106,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return imp
 
     app.state.captures.timetable = lambda ctx, data, mt: _timetable().import_file(ctx, data, mt)
+
+    # ---------------------------------------------------------------- the owner's profile from the release
+
+    from . import profile_seed
+
+    def _profile_seed_job(ctx) -> str:
+        """Owner's decision 2026-10-19: private/profile/ABOUT_ME.md (shipped with the release) imported once,
+        like "save this to my profile"; a changed file: only the changed sections. Counts only in the job's
+        record and the log, never the profile's text."""
+        text = profile_seed.read()
+        if text is None:
+            return json.dumps({"status": "no profile in this release"})
+
+        def ask(prompt: str) -> str | None:
+            r = ctx.ask(prompt, JOB_RULES, purpose="profile")
+            return r.text if r.ok else None
+        try:
+            g = google_read()
+        except Exception:   # Google not connected yet: the calendar rules apply later (the daily rules pass)
+            g = None
+        out = profile_seed.run(ctx.session, text=text, ask=ask, vault_dir=settings.vault_dir, tz=profile.tz,
+                               today=dt.datetime.now(profile.tz).date(), owner_name=profile.name, google_read=g,
+                               lessons_to_calendar=lambda lessons: _timetable().import_lessons(ctx.session, lessons))
+        if out["status"] == "imported":
+            pusher.notify("Kairo", profile_seed.push_text(out), "/#chat", source="profile")
+        return json.dumps({"status": out["status"], "counts": out.get("counts") or {}})
+
+    PROFILE_SEED_FIRST_S = 120
+
+    async def _profile_seed_first_run() -> None:
+        """Once after every start: import the shipped profile if it is new or changed. Tries again every 10
+        minutes while the model can't do it (logged out, usage limit), then every 6 hours."""
+        if os.environ.get("KAIRO_PROFILE_SEED") == "0":   # CI's installs (a fake Claude): never the owner's profile
+            return
+        await asyncio.sleep(PROFILE_SEED_FIRST_S)
+        tries = 0
+        while True:
+            try:
+                text = profile_seed.read()
+                if text is None:
+                    return
+                with session_for(engine) as s_:
+                    pending = profile_seed.changed(text, profile_seed.state(s_))
+                if not pending:
+                    return
+                run = await asyncio.to_thread(app.state.jobs.run_job, "profile_seed", forced=True)
+                status = json.loads(run.output_path or "{}").get("status") if run.status == "ok" else None
+                if status in ("imported", "unchanged", "not_owner"):
+                    return
+            except Exception:
+                log.exception("profile seed")
+            tries += 1
+            await asyncio.sleep(600 if tries < 12 else 6 * 3600)
 
     def _olat_job(ctx) -> str:
         from .scheduler import Skipped

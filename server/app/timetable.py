@@ -100,9 +100,29 @@ class Importer:
         lessons = clean((row or {}).get("lessons") if isinstance(row, dict) else None)
         if not lessons:
             return {"created": 0, "why": "no lessons found"}
+        return self._blocks_to_calendar(s, lessons, digest=digest, today=today,
+                                        valid_until=(row or {}).get("valid_until") if isinstance(row, dict) else None)
+
+    def import_lessons(self, s: Session, lessons: list[dict], *, today: dt.date | None = None) -> dict:
+        """Lessons already read elsewhere (the owner's profile, owner's decision 2026-10-19): the same weekly
+        FIXED blocks through the gate, the same rule that a different timetable mid-semester is only told."""
+        today = today or dt.datetime.now(self.tz).date()
+        lessons = clean(lessons)
+        if not lessons:
+            return {"created": 0, "why": "no lessons"}
+        digest = hashlib.sha256(json.dumps(lessons, sort_keys=True).encode()).hexdigest()
+        prev = self._setting(s)
+        if prev and prev.get("digest") == digest:
+            return {"created": 0, "why": "already imported"}
+        if prev and prev.get("events") and dt.date.fromisoformat(prev["until"]) >= today:
+            return {"created": 0, "why": "a timetable is already in the calendar this semester"}
+        return self._blocks_to_calendar(s, lessons, digest=digest, today=today)
+
+    def _blocks_to_calendar(self, s: Session, lessons: list[dict], *, digest: str, today: dt.date,
+                            valid_until=None) -> dict:
         until = semester_end(today)
         try:
-            v = dt.date.fromisoformat(str((row or {}).get("valid_until") or ""))
+            v = dt.date.fromisoformat(str(valid_until or ""))
             if today < v < until:
                 until = v
         except ValueError:

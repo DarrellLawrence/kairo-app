@@ -192,8 +192,19 @@ class ProfileLoop(Strict):
 
 
 class CalendarRule(Strict):
-    match: str = Field(min_length=2, max_length=60)        # a word in event titles
+    match: str = Field(min_length=1, max_length=60)        # a word in event titles; "*" = any title (needs days)
     type: Literal["FIXED", "SOCIAL", "FLEXIBLE"]
+    # Owner's profile 2026-10-19 ("weekends are SOCIAL"): only events on these days. A rule with a word in
+    # the title outranks a day rule (training on a Saturday stays FIXED).
+    days: list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] = Field(default_factory=list, max_length=7)
+
+    @model_validator(mode="after")
+    def word_or_days(self):
+        if self.match.strip() == "*" and not self.days:
+            raise ValueError('a rule for any title ("*") needs days')
+        if self.match.strip() != "*" and len(self.match.strip()) < 2:
+            raise ValueError("match is a word of at least 2 characters, or * with days")
+        return self
 
 
 class ProfileExam(Strict):

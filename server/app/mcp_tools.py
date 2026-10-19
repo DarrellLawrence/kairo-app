@@ -36,7 +36,8 @@ DESCRIPTIONS = {
                       "text and an import_id. Then call profile_apply.",
     "profile_apply": "After profile_import: what the profile says, for Kairo's own tables. people (name, relation, "
                      "birthday YYYY-MM-DD or --MM-DD, notes), loops (things still to do, due), calendar_rules (a word in "
-                     "event titles -> FIXED never moves / FLEXIBLE Kairo may move / SOCIAL with others), coach (training_days, "
+                     "event titles -> FIXED never moves / FLEXIBLE Kairo may move / SOCIAL with others; days mon..sun limits "
+                     "a rule to those days, match \"*\" with days = every event on them, e.g. weekends SOCIAL), coach (training_days, "
                      "equipment, water_l, faith_habit, budgets, savings ... only what it says), exams (subject, date), places (name, "
                      "kind home/school/work/training, station, days mon..sun, via station). "
                      "Leave out what it doesn't say. Then tell the owner in a few lines what was added.",

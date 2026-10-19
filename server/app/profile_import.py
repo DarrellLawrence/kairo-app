@@ -69,7 +69,9 @@ def last(s: Session) -> dict | None:
 # ---------------------------------------------------------------- 1. store it as-is
 
 def store(s: Session, vault_dir: Path, *, capture_id: int | None = None, text: str | None = None,
-          today: dt.date) -> dict:
+          today: dt.date, name: str | None = None, replaces: str | None = None) -> dict:
+    """name: the file name in 10 Profile (text only). replaces: the sha256 of the copy Kairo wrote before
+    (the profile shipped with the release): that one is updated in place; the owner's own notes never are."""
     if capture_id is not None:
         cap = s.get(Capture, capture_id)
         path = Path(cap.raw_path or "") if cap else None
@@ -77,13 +79,14 @@ def store(s: Session, vault_dir: Path, *, capture_id: int | None = None, text: s
             raise ProfileError(f"no shared file #{capture_id}")
         data, name = path.read_bytes(), cap.file_name or path.name
     else:
-        data, name = (text or "").encode("utf-8"), f"Profile {today.isoformat()}.md"
+        data, name = (text or "").encode("utf-8"), name or f"Profile {today.isoformat()}.md"
     folder = Path(vault_dir) / FOLDER
     folder.mkdir(parents=True, exist_ok=True)
     base = files.safe_name(name, "Profile.md")
     dest = folder / base
     n = 2
-    while dest.exists() and dest.read_bytes() != data:       # never overwrite the owner's own profile notes
+    while (dest.exists() and dest.read_bytes() != data       # never overwrite the owner's own profile notes
+           and not (replaces and hashlib.sha256(dest.read_bytes()).hexdigest() == replaces)):
         dest = folder / f"{Path(base).stem} ({n}){Path(base).suffix}"
         n += 1
     fresh = not dest.exists()
@@ -160,9 +163,12 @@ def apply(s: Session, a: dict, *, today: dt.date, tz, google_read=None, now: dt.
     if a.get("loops"):
         said.append(f"{len(a['loops'])} to-dos")
     if a.get("calendar_rules"):
-        merged = {r["match"].lower(): r for r in rules(s)}
+        merged = {_rule_key(r): r for r in rules(s)}
         for r in a["calendar_rules"]:
-            merged[r["match"].lower()] = {"match": r["match"], "type": r["type"]}
+            rule = {"match": r["match"], "type": r["type"]}
+            if r.get("days"):
+                rule["days"] = list(r["days"])
+            merged[_rule_key(rule)] = rule
         _put(s, RULES_KEY, list(merged.values()))
         tagged = apply_rules(s, google_read, tz, today=today)
         said.append(f"{len(a['calendar_rules'])} calendar rules" + (f" ({tagged} events tagged)" if tagged else ""))
@@ -217,9 +223,40 @@ def apply(s: Session, a: dict, *, today: dt.date, tz, google_read=None, now: dt.
     return {"saved": record["path"], "added": said, "created": new}
 
 
+def _rule_key(r: dict) -> str:
+    return r["match"].lower() + ("@" + ",".join(r["days"]) if r.get("days") else "")
+
+
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _event_day(e: dict, tz) -> str | None:
+    start = e.get("start")
+    raw = (start.get("dateTime") or start.get("date")) if isinstance(start, dict) else start
+    try:
+        d = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if d.tzinfo is not None:
+        d = d.astimezone(tz)
+    return WEEKDAYS[d.weekday()]
+
+
+def rule_for(rs: list[dict], title: str, day: str | None) -> dict | None:
+    """The rule an event falls under: a word in its title first, then a weekday rule ("*")."""
+    title = (title or "").lower()
+    ordered = sorted(rs, key=lambda r: r["match"].strip() == "*")
+    for r in ordered:
+        if r.get("days") and day not in r["days"]:
+            continue
+        if r["match"].strip() == "*" or r["match"].lower() in title:
+            return r
+    return None
+
+
 def apply_rules(s: Session, google_read, tz, *, today: dt.date, days: int = RULE_DAYS) -> int:
-    """Tag the next weeks' events whose title contains a rule's word. Untagged = FIXED anyway; a rule
-    never overrides a tag the owner set by hand (calendar_tag)."""
+    """Tag the next weeks' events whose title contains a rule's word (or that fall on a rule's weekdays).
+    Untagged = FIXED anyway; a rule never overrides a tag the owner set by hand (calendar_tag)."""
     rs = rules(s)
     if not rs or google_read is None:
         return 0
@@ -232,8 +269,7 @@ def apply_rules(s: Session, google_read, tz, *, today: dt.date, days: int = RULE
     ruled = set(_get(s, RULED_KEY, []) or [])
     n = 0
     for e in events:
-        title = (e.get("summary") or "").lower()
-        rule = next((r for r in rs if r["match"].lower() in title), None)
+        rule = rule_for(rs, e.get("summary") or "", _event_day(e, tz))
         if rule is None or not e.get("id"):
             continue
         row = s.get(CalendarTag, e["id"])
