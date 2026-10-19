@@ -28,3 +28,14 @@ def installed(app_root: Path = REPO_ROOT) -> str | None:
         return str(json.loads((root.parent.parent / "state.json").read_text(encoding="utf-8-sig"))["current"]) or None
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def older(a: str, b: str) -> bool:
+    """Release a is older than b (versions are yyyy.MM.dd.HHmm-<sha>). Unknown forms: not older."""
+    def key(v: str) -> tuple[int, ...] | None:
+        try:
+            return tuple(int(x) for x in v.split("-", 1)[0].split("."))
+        except ValueError:
+            return None
+    ka, kb = key(a), key(b)
+    return ka is not None and kb is not None and ka < kb

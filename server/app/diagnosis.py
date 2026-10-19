@@ -411,8 +411,8 @@ def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
     from . import versions        # owner's report 2026-10-19: installed and running must be the same
     installed, running = versions.installed(app_root), versions.running(app_root)
     if installed:
-        r.add(f"  installed (state.json): {installed}" + ("" if installed == running else
-                                                          f"  <-- NOT RUNNING: the PC still runs {running}"))
+        r.add(f"  installed (state.json): {installed}" + (f"  <-- NOT RUNNING: the PC still runs {running}"
+                                                          if running and versions.older(running, installed) else ""))
     if app_root.parent.name.lower() == "releases":
         r.add("  installed:", ", ".join(sorted(p.name for p in app_root.parent.iterdir() if p.is_dir())))
     from . import status_files   # fix F24: the installer's files moved to C:\Kairo\status

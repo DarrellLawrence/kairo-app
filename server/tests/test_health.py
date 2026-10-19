@@ -213,6 +213,8 @@ def test_an_installed_version_that_isnt_running_is_red_with_a_push(watch, tmp_pa
     assert len(watch.pusher.sent) == 1 and "didn't take" in watch.pusher.sent[0]["body"]
     state.write_text(json.dumps({"current": "2026.10.16.1104-aaaaaaa"}), encoding="utf-8")
     assert "version" not in watch.run(full=False, now=now + dt.timedelta(minutes=12))
+    state.write_text(json.dumps({"current": "2026.10.15.0900-ccccccc"}), encoding="utf-8")   # newer one under test
+    assert "version" not in watch.run(full=False, now=now + dt.timedelta(minutes=40))
 
 
 def test_health_says_which_version_answers(migrated):

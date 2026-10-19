@@ -177,7 +177,9 @@ class HealthWatch:
         release (state.json) and this process's must match; a mismatch for 10 minutes is no update in
         progress any more."""
         running, installed = versions.running(self.app_root), versions.installed(self.app_root)
-        if not running or not installed or running == installed:
+        # Only an older version still running counts: a newer one runs for a while during every update
+        # (state.json is written once its self-test passed).
+        if not running or not installed or not versions.older(running, installed):
             self._mismatch = None
             return None
         if self._mismatch is None or self._mismatch[0] != installed:
