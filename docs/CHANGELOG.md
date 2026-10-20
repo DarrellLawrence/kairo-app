@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-20 — build: calls sound like a person (owner's calls on the iPhone)
+- After "Hello" a call said `<|tool_call_start|>[ask_kairo()]<|tool_call_end|>` out loud: the voice model writes its tool calls as text and the PC passed them on as words. Now they are taken out before anything is said (never even half), read as real calls, and a call is only run when Kairo offered that tool on the turn and it has what it needs; anything else is dropped without a word. "Hello" gets "Hey <your first name>." at once, without the voice model; a reply that was only a dropped call still says a short line ("Okay.", or "Sorry, can you say that again?").
+- Claude's notes are no longer read out ("The owner mentioned…", "L23 (urgent, loop)", "Let me check the bring-up list", numbered lists). Claude is asked for plain sentences to you, and everything a call says or shows goes through one clean-up as a safety net: ids and tags out, thinking out loud dropped, a list becomes at most two short sentences. The chat keeps what Claude wrote.
+- Bring-ups: at most one a call, only after you asked or said something real (never after "hello", "thanks", small talk or noise), and never both said on the call and pushed: one pushed in the last 6 hours isn't said, and one said on the call isn't pushed as well.
+- Acceptance test 43: call answers are plain speech (automated, with the real Claude). Acceptance 39 and 41 now say one bring-up a call.
+- Removed: the "two bring-ups a call, urgent not counted" cap.
+
 ## 2026-10-17 — build: failed updates always push; a slow voice says so (owner's rules)
 - Every update that fails now sends a push with the reason, every time: each failed try (with the try number and when the next one comes), an update that was undone (with the check that failed), a new version still waiting after 3 hours outside the quiet hours (and why: a chat, a job, a call), an error in the auto-update that lasts 30 minutes (then every 6 hours), and a missing GitHub token. Before, only an undone update and the 3rd failed try pushed; errors and endless waiting were silent.
 - Kairo also watches the auto-update itself: if it hasn't run for 30 minutes (its task is off or it breaks before it starts), that's a push and a red chip on Today.
