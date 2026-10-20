@@ -401,6 +401,33 @@ def _database(r: _Report, c: sqlite3.Connection, since: str) -> None:
                   + (f" | failed: {', '.join(failed)}" if failed else ""))
 
 
+def _speaker(r: _Report, c: sqlite3.Connection, data_dir: Path, now: dt.datetime) -> None:
+    """Owner's approval 2026-10-20: only the owner is answered on calls. Counts and times only: never
+    the words of a turn, never the voiceprint (only whether it is there)."""
+    from . import speaker
+    r.h("Speaker check (only the owner is answered on calls)")
+
+    def value(key: str):
+        try:
+            row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        except sqlite3.Error as e:
+            return f"ERROR {e}"
+        return row[0] if row else None
+    mode = value(speaker.MODE_KEY)
+    taught = (data_dir / speaker.VOICEPRINT).is_file()
+    r.add(f"  setting: {mode if mode in speaker.MODES else speaker.DEFAULT_MODE}; voice taught: {'yes' if taught else 'no'}")
+    raw = value(speaker.STATS_KEY)
+    if isinstance(raw, str) and raw.startswith("ERROR"):
+        r.add(f"  {raw}")
+        return
+    s = speaker.summarize(speaker._rows(raw), now, 7)
+    n = s["counts"]
+    r.add(f"  call turns, last 7 days: {s['turns']} checked: {n['answered']} answered, {n['not_you']} ignored (not you), "
+          f"{n['too_quiet']} ignored (too quiet / far); {s['scored']} with a voiceprint score")
+    r.add(f"  check time ms p50/p95: {s['ms']['p50']}/{s['ms']['p95']} on {s['device'] or '-'}; "
+          f"the turn waited p50/p95: {s['wait_ms']['p50']}/{s['wait_ms']['p95']}")
+
+
 def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
     r.h("G.6 releases and update state")
     try:
@@ -549,6 +576,7 @@ def run(*, db_url: str, data_dir: Path, app_root: Path, now: dt.datetime | None 
     else:
         try:
             _database(r, c, since)
+            _speaker(r, c, data_dir, now)
         finally:
             c.close()
     _devices(r, devices)

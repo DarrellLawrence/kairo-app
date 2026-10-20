@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-20
+- On calls Kairo answers only you (your approval 2026-10-20: one model file, no new package). A turn much quieter than your own voice on that call (the TV, someone across the room) is ignored. Once you teach Kairo your voice (More → Settings → Voice → Teach Kairo your voice: read a short text for 30 s), other voices are ignored too: no reply, no Claude, nothing brought up, the call keeps listening. Short words like "yes" are only ignored when clearly someone else's. The voice button is always answered.
+- Speaker check: strict / normal / off (default normal). The model is WeSpeaker CAM++ (29 MB), downloaded and checked with the voice models (pinned in voicellm.json); without it the check says "model missing" and is off, calls still work. It runs next to Whisper on the GPU, so a turn waits a few ms at most. Your voiceprint stays on the PC, encrypted; the recording is not kept; Remove deletes it.
+- Voice speed lists ignored turns ("ignored: not you", "ignored: too quiet / far") with time and score, never the words, and the speaker check's device and time per turn; Run diagnosis has the counts. Acceptance test 43.
+- Found while building it: ONNX Runtime 1.24 (the PC's version) computes this model wrong with its graph optimizations on. Kairo checks every way of running it against the plain one when it loads and uses the first that agrees.
+- Updates: a voice model file the previous voice-model folder already has (same checksum) is copied, not downloaded again.
+- Removed: nothing (new).
+
 ## 2026-10-17 — build: failed updates always push; a slow voice says so (owner's rules)
 - Every update that fails now sends a push with the reason, every time: each failed try (with the try number and when the next one comes), an update that was undone (with the check that failed), a new version still waiting after 3 hours outside the quiet hours (and why: a chat, a job, a call), an error in the auto-update that lasts 30 minutes (then every 6 hours), and a missing GitHub token. Before, only an undone update and the 3rd failed try pushed; errors and endless waiting were silent.
 - Kairo also watches the auto-update itself: if it hasn't run for 30 minutes (its task is off or it breaks before it starts), that's a push and a red chip on Today.

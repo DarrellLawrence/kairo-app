@@ -140,7 +140,13 @@ SPECS = [
                                            "voice model say GPU (none red), the last call turn says WebRTC; \"hello\" on a call "
                                            "is answered without Claude; a question Claude needs longer than 8 s for gets "
                                            "\"I'll get back to you\" and the answer as a push; a call you place opens with "
-                                           "\"Hey <your first name>\" at once.", "G")
+                                           "\"Hey <your first name>\" at once.", "G"),
+    Spec(43, "Only the owner is answered", "manual", "Settings -> Voice -> Teach Kairo your voice (30 s); then a call on "
+                                                     "the iPhone: someone else talks near the phone, the TV runs across the "
+                                                     "room: no answer, the call keeps listening; you talk (also a short "
+                                                     "\"yes\"): answered. Voice speed lists the ignored turns (\"ignored: not "
+                                                     "you\" / \"too quiet / far\", time and score, no words) and the speaker "
+                                                     "check on the GPU.", "LV"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "

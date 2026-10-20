@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, parseTs } from '../api.js'
 import { clientLog, device } from '../clientlog.js'
 import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
+import { PASSAGE, SECONDS, recordVoice, sendVoice } from '../voiceprint.js'
 import {
   Badge, Button, Card, EmptyState, IconBell, IconBolt, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower,
   IconPulse, IconRefresh, IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Segmented, Sheet, SkeletonCard, Stack,
@@ -715,7 +716,7 @@ const secs = (ms) => (ms == null ? '–' : ms < 1000 ? `${ms} ms` : `${(ms / 100
 const NET = { direct: 'Direct', relay: 'Through Tailscale’s relay', unknown: 'Not known' }
 
 // Owner's request 2026-10-17: where each part of the voice runs; anything off the GPU is red with its reason.
-const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', piper: 'German voice (Piper)' }
+const PARTS = { whisper: 'Speech to text (Whisper)', kokoro: 'English voice (Kokoro)', voice_model: 'Voice model (llama.cpp)', piper: 'German voice (Piper)', speaker: 'Speaker check (CAM++)' }
 const LINE_WHY = { not_installed: 'the call packages aren’t on the PC yet', voice_missing: 'speech to text isn’t installed', no_tailnet: 'the PC has no Tailscale address right now' }
 
 function VoiceDevices({ dev }) {
@@ -739,10 +740,12 @@ function VoiceDevices({ dev }) {
           const where = c.device === 'cuda' || c.device === 'gpu' ? 'GPU' : c.device === 'cpu' ? 'CPU' : '–'
           const bits = [c.model, c.layers ? `${c.layers} layers` : null, c.loaded ? 'loaded' : 'not loaded',
             c.load_ms != null ? `load ${secs(c.load_ms)}` : null, c.warm_ms != null ? `warm-up ${secs(c.warm_ms)}` : null].filter(Boolean)
+          const notes = [c.note, c.checked].filter(Boolean)       // the speaker check: off until taught, a runtime skipped
+          const idle = k === 'piper' || (k === 'speaker' && c.ok && !c.loaded)
           return (
             <ListRow key={k} icon={c.ok ? <IconBolt /> : <IconWarn />} title={title}
-              subtitle={c.ok ? bits.join(' · ') : `${c.reason || 'not on the GPU'} · ${bits.join(' · ')}`}
-              value={<Badge tone={k === 'piper' ? 'neutral' : c.ok ? 'ok' : 'danger'} pop={false}>{where}</Badge>} />
+              subtitle={c.ok ? [...notes, ...bits].join(' · ') : `${c.reason || 'not on the GPU'} · ${bits.join(' · ')}`}
+              value={<Badge tone={idle ? 'neutral' : c.ok ? 'ok' : 'danger'} pop={false}>{where}</Badge>} />
           )
         })}
         {dev.gpu ? (
@@ -757,14 +760,43 @@ function VoiceDevices({ dev }) {
   )
 }
 
+// Owner's approval 2026-10-20: on calls only the owner is answered (server/app/speaker.py). The ignored turns
+// with their time, reason and score; what was said is never kept.
+const when = (ts) => parseTs(ts)?.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+
+function SpeakerTurns({ s }) {
+  if (!s) return null
+  const n = s.counts || {}
+  const where = s.device === 'cuda' ? 'GPU' : s.device === 'cpu' ? 'CPU' : null
+  return (
+    <>
+      <SectionTitle>Only you are answered · last {s.days} days</SectionTitle>
+      <List>
+        <ListRow icon={<IconShield />} title={s.check ? `Speaker check on (${s.mode})` : `Speaker check off: ${s.why_off}`}
+          subtitle={`${s.turns} call turns · ${n.answered || 0} answered · ${n.not_you || 0} not you · ${n.too_quiet || 0} too quiet / far`
+            + (s.scored ? ` · check ${secs(s.ms?.p50)} (p95 ${secs(s.ms?.p95)}) · turn waited ${secs(s.wait_ms?.p50)} (p95 ${secs(s.wait_ms?.p95)})` : '')}
+          value={<Badge tone={s.check ? (where === 'CPU' ? 'warn' : 'ok') : 'neutral'} pop={false}>{where || (s.check ? 'On' : 'Off')}</Badge>} />
+        {(s.ignored || []).map((x, i) => (
+          <ListRow key={i} icon={<IconWarn />} title={`${when(x.at)} · ${x.title}`}
+            subtitle={x.reason === 'not_you'
+              ? `score ${x.score != null ? x.score.toFixed(2) : '–'} · ${x.speech_s} s of speech`
+              : `level ${x.level_db ?? '–'} dB (you on this call: ${x.owner_db ?? '–'} dB) · ${x.speech_s} s of speech`} />
+        ))}
+      </List>
+    </>
+  )
+}
+
 function VoiceSpeedPage() {
   const [rep, setRep] = useState(null)
   const [net, setNet] = useState(null)
   const [dev, setDev] = useState(null)
+  const [spk, setSpk] = useState(null)
   const load = useCallback(() => {
     api('/api/voice/turns?days=7').then(setRep).catch(() => setRep({ versions: [], recent: [] }))
     api('/api/rtc?network=1').then(setNet).catch(() => setNet(null))
     api('/api/voice/devices').then(setDev).catch(() => setDev(null))
+    api('/api/voice/speaker').then(setSpk).catch(() => setSpk(null))
   }, [])
   useEffect(() => { load() }, [load])
   if (!rep) return <Page title="Voice speed"><SkeletonCard lines={6} /></Page>
@@ -773,6 +805,7 @@ function VoiceSpeedPage() {
   return (
     <Page title="Voice speed" onRefresh={load}>
       <VoiceDevices dev={dev} />
+      <SpeakerTurns s={spk} />
       {!now ? <p className="k-muted k-small k-pad">No turns measured yet: talk to Kairo (Chat or a call) and come back.</p> : null}
       {pathsOf(now).map(([path, p]) => {
         const tgt = rep.targets?.[path] || {}
@@ -1221,6 +1254,89 @@ function RealtimeSpend({ b }) {
   )
 }
 
+// Owner's approval 2026-10-20: on calls Kairo answers only you (server/app/speaker.py, web/src/voiceprint.js).
+const SPEAKER_MODES = [{ value: 'strict', label: 'Strict' }, { value: 'normal', label: 'Normal' }, { value: 'off', label: 'Off' }]
+const SPEAKER_MODE_TEXT = {
+  strict: 'Strict: a voice must clearly be yours. Now and then Kairo may miss you; it hardly ever answers anyone else.',
+  normal: 'Normal: when in doubt Kairo answers. A short word (“yes”, “stop”) is only ignored when it is clearly someone else’s.',
+  off: 'Off: every voice near the phone is answered. A voice far quieter than yours (the TV, someone across the room) is still ignored.',
+}
+
+function OnlyYou() {
+  const toast = useToast()
+  const [st, setSt] = useState(null)
+  const [rec, setRec] = useState(null)              // { done, speech, level } while recording
+  const [busy, setBusy] = useState(false)
+  const recorder = useRef(null)
+  const load = useCallback(() => api('/api/voice/speaker').then(setSt).catch(() => setSt(null)), [])
+  useEffect(() => { load() }, [load])
+  useEffect(() => () => recorder.current?.stop(), [])
+  const teach = async () => {
+    setRec({ done: 0, speech: 0, level: 0 })
+    const r = recordVoice({ onProgress: setRec })
+    recorder.current = r
+    try {
+      const pcm = await r.done
+      setRec(null)
+      setBusy(true)
+      setSt(await sendVoice(pcm))
+      toast.show({ text: 'Done. On calls Kairo now answers only you.', duration: 4000 })
+    } catch (e) {
+      setRec(null)
+      toast.show({ text: `Not saved: ${e.message}`, duration: 6000 })
+    } finally {
+      setBusy(false)
+      recorder.current = null
+    }
+  }
+  const remove = async () => {
+    try { setSt(await api('/api/voice/speaker', { method: 'DELETE' })); toast.show({ text: 'Your voiceprint is removed from the PC.' }) } catch (e) { toast.show({ text: e.message }) }
+  }
+  const setMode = async (mode) => {
+    try { setSt(await api('/api/voice/speaker/settings', { method: 'PUT', body: { mode } })) } catch (e) { toast.show({ text: e.message }) }
+  }
+  if (!st) return null
+  const problem = st.enrolled?.problem
+  const taught = Boolean(st.enrolled) && !problem
+  return (
+    <>
+      <SectionTitle>Only you are answered on calls</SectionTitle>
+      <List>
+        <ListRow icon={<IconShield />}
+          title={taught ? 'Kairo knows your voice' : problem ? 'Teach Kairo your voice again' : 'Kairo doesn’t know your voice yet'}
+          subtitle={taught
+            ? `Taught ${parseTs(st.enrolled.at)?.toLocaleDateString()} · ${st.check ? `speaker check: ${st.mode}` : `speaker check ${st.why_off}`}`
+            : (problem || 'Until then only the quiet check runs: the TV or someone far away is ignored, any voice near the phone is answered.')}
+          value={<Badge tone={st.check ? 'ok' : 'neutral'} pop={false}>{taught ? 'Yes' : 'No'}</Badge>} />
+      </List>
+      <div className="k-pad">
+        {rec ? (
+          <Card>
+            <p className="k-muted k-small">Read this aloud in your normal voice, holding the phone as on a call:</p>
+            <p>{PASSAGE}</p>
+            <div className="k-progress" style={{ margin: '8px 0' }}><div className="k-progress-bar" style={{ transform: `scaleX(${rec.done})` }} /></div>
+            <p className="k-muted k-small">{Math.round(rec.done * SECONDS)} of {SECONDS} s · {rec.speech} s of your voice heard</p>
+            <Button variant="secondary" block onClick={() => recorder.current?.stop()}>Done reading</Button>
+          </Card>
+        ) : (
+          <Button variant={taught ? 'secondary' : 'primary'} block loading={busy} onClick={teach}>
+            {taught ? 'Teach Kairo your voice again' : 'Teach Kairo your voice'}
+          </Button>
+        )}
+        {st.enrolled && !rec && <Button variant="danger" block style={{ marginTop: 8 }} onClick={remove}>Remove</Button>}
+        <p className="k-muted k-small" style={{ marginTop: 8 }}>About {SECONDS} seconds, alone and somewhere quiet. The PC keeps only a voiceprint, encrypted; never the recording. The voice button is always answered.</p>
+      </div>
+      <SectionTitle>Speaker check</SectionTitle>
+      <div className="k-pad">
+        <Segmented id="speakermode" value={st.mode} onChange={setMode} options={SPEAKER_MODES} />
+        <p className="k-muted k-small" style={{ marginTop: 8 }}>{SPEAKER_MODE_TEXT[st.mode]}</p>
+        {st.mode !== 'off' && !st.check && st.model?.reason && !st.model?.ok ? <p className="k-muted k-small">{st.model.reason}</p> : null}
+        <p className="k-muted k-small">Ignored turns (time, reason, score; never what was said) are in System → Voice speed.</p>
+      </div>
+    </>
+  )
+}
+
 const REALTIME_REASON = {
   local: 'The voice model on your PC talks (System → Voice lab shows which one and how fast).',
   off: 'Off: calls use the local voice.', no_key: 'No OpenAI key yet: calls use the local voice.',
@@ -1263,6 +1379,7 @@ function RealtimePage() {
           </select>
         </label>
       </div>
+      <OnlyYou />
       <List>
         <ListRow icon={<IconMic />} title={st.available ? 'OpenAI Realtime on' : s.engine === 'openai' ? 'OpenAI Realtime not ready' : 'Local voice'}
           subtitle={st.available ? `${s.model} · voice ${s.voice}` : (REALTIME_REASON[st.reason] || st.message)}
@@ -1339,7 +1456,7 @@ function SettingsPage() {
           onClick={() => stack.push('Google', () => <GooglePage st={google} />)} />
         <ListRow icon={<IconKey />} title="Logins" subtitle="School portal (OLAT), read-only" chevron
           onClick={() => stack.push('Logins', () => <LoginsPage />)} />
-        <ListRow icon={<IconMic />} title="Voice" subtitle="Local voice model or OpenAI Realtime, language" chevron
+        <ListRow icon={<IconMic />} title="Voice" subtitle="Local voice or OpenAI Realtime, language, teach Kairo your voice" chevron
           onClick={() => stack.push('Voice', () => <RealtimePage />)} />
       </List>
       <SectionTitle>Developer</SectionTitle>
