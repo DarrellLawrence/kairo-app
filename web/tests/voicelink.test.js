@@ -280,6 +280,20 @@ test('nothing understood: no answer, the call listens again', async () => {
   v.close()
 })
 
+test('a turn the PC ignored (someone else, or too far away): no answer, not "nothing heard", listening again', async () => {
+  let none = 0
+  let ignored = null
+  const { v, ws, say, hush } = await talk('call', { noSpeech: () => { none += 1 }, ignored: (f) => { ignored = f.reason } })
+  hush(5); say(10); hush(26)
+  const before = sentTurns.length
+  ws.json({ type: 'ignored', reason: 'not_you', score: 0.08 })
+  assert.equal(ignored, 'not_you')
+  assert.equal(none, 0)                       // three of these never end the call as "I can't hear you"
+  assert.equal(v.state, 'listening')
+  assert.equal(sentTurns.length, before)      // not one of the owner's turns: Voice speed lists it from the PC
+  v.close()
+})
+
 test('hanging up mid-sentence still sends what you said', async () => {
   const { v, ws, say, hush } = await talk()
   hush(12)

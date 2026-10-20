@@ -5,11 +5,13 @@ night, does the talking on calls and the voice button; Claude still does the wor
 (brain/voice_local.py). The installer (as admin) downloads llama.cpp's server, the candidate models
 (voicellm.json) and the turn detector into tools\\voicellm-<hash> (admins only; Kairo's account only
 reads it). The voice lab (voicelab.py) measures the candidates on this PC and picks the fastest one
-that sounds natural and calls the tool reliably.
+that sounds natural and calls the tool reliably. The speaker check's model (owner's approval 2026-10-20,
+speaker.py) comes the same way, pinned in voicellm.json to one revision, size and sha256.
 
 Downloads only from fixed hosts (outbound.py): GitHub's API and release files for llama.cpp, checked
 against the sha256 GitHub publishes; Hugging Face for the models, checked against the sha256 Hugging
-Face lists, at the revision recorded in installed.json.
+Face lists, at the revision recorded in installed.json. A file a complete older folder already has
+(same place, same checksum) is copied from there instead of downloaded again.
 
   python -m app.voicellm download --to <folder>      the installer
   python -m app.voicellm kyutai-dir                  where the Kyutai lab copy belongs (installer)
@@ -19,12 +21,14 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import os
 import json
 import logging
 import re
 import shutil
 import sys
 import tarfile
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -94,6 +98,13 @@ def available(site_dir: Path) -> list[str]:
 
 def smart_turn_path(site_dir: Path) -> Path | None:
     rel = (installed(site_dir).get("smart_turn") or {}).get("file")
+    p = Path(site_dir) / rel if rel else None
+    return p if p and p.is_file() else None
+
+
+def speaker_path(site_dir: Path) -> Path | None:
+    """The speaker check's model (None: not installed, the check is off)."""
+    rel = (installed(site_dir).get("speaker") or {}).get("file")
     p = Path(site_dir) / rel if rel else None
     return p if p and p.is_file() else None
 
@@ -181,6 +192,42 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _older_sites(to: Path) -> list[Path]:
+    """Complete voicellm folders next to this one (made from an earlier voicellm.json), newest first."""
+    me = Path(to).resolve()
+    found = [d for d in Path(to).parent.glob("voicellm-*") if d.is_dir() and d.resolve() != me and (d / COMPLETE).is_file()]
+    return sorted(found, key=lambda d: d.stat().st_mtime, reverse=True)
+
+
+def _get(url: str, to: Path, dest: Path, sha256: str, size: int | None, older: list[Path]) -> None:
+    """_fetch, but a file an older folder already has at the same place is taken from there first (hard-linked,
+    else copied: a new voicellm.json would otherwise download every model again); _fetch then checks its sha256."""
+    rel = dest.relative_to(to)
+    if not dest.is_file():
+        for d in older:
+            src = d / rel
+            if src.is_file() and (size is None or src.stat().st_size == size) and _sha256(src) == sha256.lower():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dest.with_name(dest.name + ".part")
+                tmp.unlink(missing_ok=True)
+                try:                  # a hard link: no second copy of a model of several GB on the disk
+                    os.link(src, tmp)
+                except OSError:       # another drive or a file system without links
+                    shutil.copyfile(src, tmp)
+                tmp.replace(dest)
+                break
+    _fetch(url, dest, sha256, size)
+
+
+def _speaker(to: Path, cfg: dict, older: list[Path]) -> dict:
+    """The speaker check's model: one pinned file (revision, size and sha256 in voicellm.json)."""
+    dest = to / "speaker" / Path(cfg["path"]).name
+    url = f"{HF}/{cfg['repo']}/resolve/{cfg['revision']}/{urllib.parse.quote(cfg['path'])}"
+    _get(url, to, dest, cfg["sha256"], cfg.get("size"), older)
+    return {"repo": cfg["repo"], "revision": cfg["revision"], "file": dest.relative_to(to).as_posix(),
+            "sha256": cfg["sha256"], "size": cfg.get("size")}
+
+
 def pick_assets(assets: list[dict], patterns: list[str], tag: str) -> list[dict]:
     """One release asset per pattern ({tag} filled in). Fails when one is missing or has no digest."""
     out = []
@@ -243,7 +290,7 @@ def hf_pick(repo: str, quants: list[str]) -> dict:
     raise RuntimeError(f"{repo}: no GGUF file for {', '.join(quants)}")
 
 
-def _smart_turn(to: Path, cfg: dict) -> dict:
+def _smart_turn(to: Path, cfg: dict, older: list[Path] = ()) -> dict:
     info = _get_json(f"{HF}/api/models/{cfg['repo']}")
     rev = info["sha"]
     tree = _get_json(f"{HF}/api/models/{cfg['repo']}/tree/{rev}?recursive=true")
@@ -254,7 +301,7 @@ def _smart_turn(to: Path, cfg: dict) -> dict:
         raise RuntimeError(f"{cfg['repo']}: no turn-detector model file")
     f = hits[-1]                                       # the newest version's CPU build
     dest = to / "smart-turn" / Path(f["path"]).name
-    _fetch(f"{HF}/{cfg['repo']}/resolve/{rev}/{f['path']}", dest, f["lfs"]["oid"], f["lfs"].get("size"))
+    _get(f"{HF}/{cfg['repo']}/resolve/{rev}/{f['path']}", to, dest, f["lfs"]["oid"], f["lfs"].get("size"), list(older))
     return {"repo": cfg["repo"], "revision": rev, "file": dest.relative_to(to).as_posix(), "sha256": f["lfs"]["oid"]}
 
 
@@ -264,8 +311,9 @@ def download(to: Path, *, log_=print, free_bytes=None) -> dict:
     m = manifest()
     to = Path(to)
     to.mkdir(parents=True, exist_ok=True)
+    older = _older_sites(to)
     out: dict = {"llama": _llama(to, m["llama_cpp"], log_), "models": {}, "skipped": [], "smart_turn": None,
-                 "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+                 "speaker": None, "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     picks = []
     for s in m["models"]:
         try:
@@ -279,13 +327,17 @@ def download(to: Path, *, log_=print, free_bytes=None) -> dict:
             continue
         dest = to / "models" / s["id"] / Path(p["path"]).name
         log_(f"{s['title']}: {p['path']} ({(p['size'] or 0) / 1024 ** 3:.1f} GB)")
-        _fetch(f"{HF}/{s['repo']}/resolve/{p['revision']}/{p['path']}", dest, p["sha256"], p["size"])
+        _get(f"{HF}/{s['repo']}/resolve/{p['revision']}/{p['path']}", to, dest, p["sha256"], p["size"], older)
         out["models"][s["id"]] = {"file": dest.relative_to(to).as_posix(), "repo": s["repo"], "revision": p["revision"],
                                   "sha256": p["sha256"], "size": p["size"], "quant": p["quant"]}
     try:
-        out["smart_turn"] = _smart_turn(to, m["smart_turn"])
+        out["smart_turn"] = _smart_turn(to, m["smart_turn"], older)
     except Exception as exc:   # endpointing falls back to plain silence
         out["skipped"].append({"model": "smart-turn", "why": f"{type(exc).__name__}: {exc}"[:200]})
+    try:
+        out["speaker"] = _speaker(to, m["speaker"], older)
+    except Exception as exc:   # the speaker check says "model missing" and stays off; calls still work
+        out["skipped"].append({"model": "speaker", "why": f"{type(exc).__name__}: {exc}"[:200]})
     if not out["models"]:
         raise RuntimeError("no voice model could be installed: " + "; ".join(x["why"] for x in out["skipped"]))
     (to / INSTALLED).write_text(json.dumps(out, indent=1), encoding="utf-8")

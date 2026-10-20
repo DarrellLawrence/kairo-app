@@ -12,7 +12,9 @@ input, mail, web page, file or setting can point them anywhere else.
 - Realtime voice (owner's decision 2026-10-15, voice only): only OpenAI's API (realtime.HOSTS).
 - Local voice (owner's decision 2026-10-16): the voice model's server on 127.0.0.1 only
   (brain/voice_local.py); its files from GitHub (llama.cpp, checked against GitHub's sha256) and
-  Hugging Face (checked against Hugging Face's sha256), downloaded by the installer (voicellm.py).
+  Hugging Face (checked against Hugging Face's sha256), downloaded by the installer (voicellm.py), the
+  speaker check's model too (owner's approval 2026-10-20: one file, pinned revision and sha256).
+  speaker.py itself never touches the network.
 - Calls over WebRTC (owner's request 2026-10-16, voice only): the call's audio to the owner's phone on
   the tailnet only. This PC offers only its Tailscale addresses, takes only the phone's tailnet
   candidates and asks no STUN/TURN server (voicertc.tailnet_only, offer_on_tailnet).

@@ -218,8 +218,9 @@ function lineUrl() {
   return `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/voice`
 }
 
-/* The mic as 20 ms frames of 16 kHz PCM: onFrame(Int16Array, rms). */
-async function startCapture(onFrame) {
+/* The mic as 20 ms frames of 16 kHz PCM: onFrame(Int16Array, rms). Also what "Teach Kairo your voice"
+   records with (voiceprint.js), so the PC learns the voice exactly as a call hears it. */
+export async function startCapture(onFrame) {
   const m = await micStream()
   const ctx = m.ctx
   const source = ctx.createMediaStreamSource(m.stream)
@@ -417,6 +418,11 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
         } else {
           on.transcript?.(f.text, f.language)
         }
+        break
+      case 'ignored':                            // not the owner, or too far away (server/app/speaker.py): no
+        turn = null                              // answer, not "nothing heard", not one of the owner's turns
+        on.ignored?.(f)
+        afterAnswer()
         break
       case 'delta':
         turn?.mark('first_words')

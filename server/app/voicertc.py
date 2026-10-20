@@ -320,9 +320,9 @@ class Call:
 class _State:
     """What the pieces of one call share."""
 
-    def __init__(self, *, answer, interrupt, events, language_mode: str, speculate=None, discard=None):
+    def __init__(self, *, answer, interrupt, events, language_mode: str, speculate=None, discard=None, gate=None):
         self.answer, self.interrupt, self.events, self.language_mode = answer, interrupt, events, language_mode
-        self.speculate, self.discard = speculate, discard
+        self.speculate, self.discard, self.gate = speculate, discard, gate
         self.heard = ""                        # this turn's words so far (each pause adds what came before it)
         self.turn = Timeline()
         self.language: str | None = None
@@ -351,7 +351,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                events: Callable[[dict], Any] | None = None, language_mode: str = "auto",
                openers: OpenerCache | None = None, smart_turn_model: str | None = None,
                speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None,
-               greeting: str | None = None, warning: str | None = None):
+               greeting: str | None = None, warning: str | None = None, gate: Callable[[], Any] | None = None):
     """The pipeline for one call on an initialized SmallWebRTCConnection.
 
     voice: transcribe_pcm(pcm16k, language) -> Transcript; speak(text, language) -> (wav, lang).
@@ -364,6 +364,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     greeting: what Kairo says when the phone asks for it ({"type": "greet"}: a call the owner placed).
     warning: said once right after the first line the phone asks for (greet or the call's opening): the
       voice is slow right now (a part of it is off the GPU).
+    gate: async () -> bool, asked when a turn is finished: False = not the owner (speaker.py), the turn is
+      ignored (no answer, nothing started early kept) and the call keeps listening.
     """
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -394,7 +396,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     from .voicelink import heard, wav_pcm
 
     state = _State(answer=answer, interrupt=interrupt or (lambda n: None), events=events or conn.send_app_message,
-                   language_mode=language_mode, speculate=speculate, discard=discard)
+                   language_mode=language_mode, speculate=speculate, discard=discard, gate=gate)
     cache = openers or OpenerCache(lambda text, lang: wav_pcm(voice.speak(text, lang)[0]))
 
     class Watch(FrameProcessor):
@@ -461,6 +463,9 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             if isinstance(frame, LLMContextFrame):
                 text = _last_user_text(frame.context)
                 state.heard = ""
+                if text and state.gate is not None and not await state.gate():   # not the owner (speaker.py)
+                    text = ""
+                    state.ahead("drop")
                 if text:
                     state.number += 1
                     speaker = RtcSpeaker(state.number)

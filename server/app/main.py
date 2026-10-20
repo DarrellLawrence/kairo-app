@@ -42,6 +42,7 @@ from . import turns
 from . import speech, voicelink
 from . import selftest as selftest_mod
 from . import semantic
+from . import speaker as speaker_mod
 from . import tool_sites
 from . import conflicts as conflicts_mod, health as health_mod, links as links_mod, status_files
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, knowledge, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
@@ -428,6 +429,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if voicelab.clear_stale(_s):                # a run cut off by a restart: Run and the run by itself work again
             log.warning("voice lab: the last run was cut off by a restart")
     app.state.smart_turn = smartturn.SmartTurn(lambda: voicellm.smart_turn_path(_vl_site), pad_side=_pad)   # may come later
+    # Owner's approval 2026-10-20: on calls only the owner is answered (speaker.py); the model comes with
+    # the voice model's folder, the owner's voiceprint stays in the data folder, encrypted.
+    app.state.speaker = speaker_mod.Speaker(
+        speaker_mod.SpeakerModel(lambda: voicellm.speaker_path(_vl_site), site_dir=app.state.voice.site_dir),
+        settings.data_dir / speaker_mod.VOICEPRINT, engine)
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
@@ -1046,7 +1052,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
                                      current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
-                                     mouth_ready=None, warned=False)
+                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"))
 
         def interrupt() -> None:
             """The answer of a talked-over turn stops being written (what was said so far is kept)."""
@@ -1192,6 +1198,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         the PC; made once, played from the cache)."""
         return voicemouth.greeting_for(profile.name)
 
+    def _speaker_gate(path: str, on_ignored=None) -> "speaker_mod.CallGate | None":
+        """Owner's approval 2026-10-20: on a call only the owner is answered (too quiet / far, and once the
+        owner taught Kairo their voice, not them: ignored). The voice button is the owner's own press: always
+        answered."""
+        return app.state.speaker.gate(path, on_ignored=on_ignored) if path == "call" else None
+
     def _rtc_ready() -> str | None:
         """Why a call can't go over WebRTC right now (the phone then uses /ws/voice), or None."""
         if not voicertc.available():
@@ -1220,6 +1232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         emb = _embeddings_device()
         if emb is not None:
             comps["embeddings"] = emb
+        comps["speaker"] = app.state.speaker.device()       # owner's approval 2026-10-20: the speaker check
         card = await asyncio.to_thread(gpu_mod.summary)
         if card is not None:                        # this process (Whisper, Kokoro) and llama.cpp's
             mine = {os.getpid(): "whisper+kokoro"}
@@ -1238,7 +1251,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 last_line = (json.loads(last.device_json or "{}").get("line")) or "old"
             except ValueError:
                 last_line = "old"
-        return {"components": comps, "gpu": card, "all_on_gpu": all(c.get("ok") for k, c in comps.items() if k != "piper"),
+        on_gpu = all(c.get("ok") for k, c in comps.items() if k != "piper" and (k != "speaker" or c.get("loaded")))
+        return {"components": comps, "gpu": card, "all_on_gpu": on_gpu,
                 "line": {"webrtc_ready": why is None, "reason": why, "last_turn": last_line,
                          "last_turn_at": last.ts.isoformat() if last is not None else None}}
 
@@ -1315,10 +1329,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if line.mouth is not None:
                 line.mouth.drop_speculation()
 
-        call = voicertc.build_call(conn, voice=app.state.voice, answer=answer, interrupt=talked_over, events=None,
+        def ignored(v) -> None:
+            """The phone hears that a turn was ignored: the reason and the score, never the words."""
+            conn.send_app_message({"type": "ignored", "reason": v.outcome, "score": v.score})
+        gate = _speaker_gate(path, ignored)
+        call = voicertc.build_call(conn, voice=speaker_mod.Listening(app.state.voice, gate) if gate else app.state.voice,
+                                   answer=answer, interrupt=talked_over, events=None,
                                    language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
                                    speculate=speculate, discard=discard, greeting=_greeting(),
-                                   warning=await asyncio.to_thread(_slow_call) if path == "call" else None)
+                                   warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
+                                   gate=gate.answer if gate else None)
         key = id(call)
         _rtc_calls[key] = call
 
@@ -1367,6 +1387,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.gather(after, return_exceptions=True)
         started = time.monotonic()
         tr, failure = None, None
+        gate = getattr(line, "gate", None) if path == "call" else None
+        piece = gate.hear(bytes(utt.pcm)) if gate is not None else None   # the speaker check, next to Whisper
         try:
             if utt.early is not None and utt.early[0] == len(utt.pcm):
                 tr = await utt.early[1]            # transcribed at the pause, nothing came after
@@ -1382,11 +1404,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                        "message": f"Speech recognition failed on the PC: {type(exc).__name__}: {exc}"}
         stt_ms = int((time.monotonic() - started) * 1000)
         if failure is not None:
+            if piece is not None:
+                speaker_mod.CallGate.words(piece, False)
             await line.send({**failure, "turn": number})
             return
         text = voicelink.heard(tr.text if tr else "")
         language = tr.language if tr else None
         latency.record(engine, "stt", stt_ms)
+        if piece is not None:
+            speaker_mod.CallGate.words(piece, bool(text))
+            verdict = await gate.decide() if text else None
+            if verdict is not None and not verdict.answer:   # not the owner: no transcript, no answer, listening on
+                await line.send({"type": "ignored", "reason": verdict.outcome, "score": verdict.score, "turn": number})
+                return
         await line.send({"type": "transcript", "text": text, "language": language, "stt_ms": stt_ms, "turn": number})
         if not text:
             return
@@ -1508,6 +1538,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         often made once (openers, holding lines, the greeting). Owner's request 2026-10-17: a part that
         ends up on the CPU although the PC has an NVIDIA card is never silent: one push, with the reason."""
         app.state.voice.warm()
+        app.state.speaker.warm()                     # only once the owner taught Kairo their voice
         if voicertc.available():
             _warm_openers()
         why = _voice_slow()
@@ -3429,6 +3460,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s:
             audit(s, actor="owner", action="realtime.key", outcome="removed" if removed else "none")
         return _rt_status()
+
+    # ---------------------------------------------------------------- only the owner is answered (2026-10-20)
+
+    @app.get("/api/voice/speaker")
+    def speaker_get():
+        """Settings -> Voice and Voice speed: taught or not, the setting, the check's device and time, the
+        ignored turns (time, reason, score; never the words)."""
+        with session_for(engine) as s:
+            return app.state.speaker.state(s)
+
+    @app.put("/api/voice/speaker/settings")
+    def speaker_settings(body: dict):
+        try:
+            mode = app.state.speaker.set_mode(str((body or {}).get("mode") or ""))
+        except speaker_mod.SpeakerError as exc:
+            raise HTTPException(400, str(exc))
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="speaker.settings", outcome=mode)
+            return app.state.speaker.state(s)
+
+    @app.post("/api/voice/speaker/enroll")
+    async def speaker_enroll(request: Request):
+        """Teach Kairo your voice: about 30 s of the owner reading aloud on the phone (16 kHz 16-bit mono,
+        audio/l16). The PC makes the voiceprint and keeps only that, encrypted in the data folder; the
+        recording itself is never stored."""
+        ctype, _, params = (request.headers.get("content-type") or "").partition(";")
+        if ctype.strip().lower() != "audio/l16" or params.replace(" ", "").lower() not in ("", "rate=16000"):
+            raise HTTPException(400, "send the recording as audio/l16; rate=16000 (16-bit mono)")
+        size = request.headers.get("content-length") or "0"
+        if not size.isdigit() or int(size) > speaker_mod.MAX_ENROLL_BYTES:
+            raise HTTPException(413, "that recording is too long")
+        body = await request.body()
+        try:
+            info = await asyncio.to_thread(app.state.speaker.enroll, body)
+        except speaker_mod.NotReady as exc:
+            raise HTTPException(503, str(exc))
+        except speaker_mod.SpeakerError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:   # never a bare 500: the app shows this text
+            log.exception("speaker check: enrolment")
+            raise HTTPException(503, f"The PC couldn't make the voiceprint: {type(exc).__name__}")
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="speaker.enroll", outcome=f"voiceprint stored ({info['speech_s']} s of speech)")
+            return app.state.speaker.state(s)
+
+    @app.delete("/api/voice/speaker")
+    def speaker_remove():
+        removed = app.state.speaker.remove()
+        with session_for(engine) as s:
+            audit(s, actor="owner", action="speaker.remove", outcome="removed" if removed else "none")
+            return app.state.speaker.state(s)
 
     # ---------------------------------------------------------------- the voice lab (local voice, 2026-10-16)
 

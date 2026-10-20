@@ -148,6 +148,12 @@ SPECS = [
                                                       "the way a call asks (ask_kairo's wrapper, Claude's answer as the "
                                                       "call says it): no ids (L12, #3), no list or numbering, never "
                                                       "\"the owner\", no thinking out loud (\"let me check...\").", "G"),
+    Spec(44, "Only the owner is answered", "manual", "Settings -> Voice -> Teach Kairo your voice (30 s); then a call on "
+                                                     "the iPhone: someone else talks near the phone, the TV runs across the "
+                                                     "room: no answer, the call keeps listening; you talk (also a short "
+                                                     "\"yes\"): answered. Voice speed lists the ignored turns (\"ignored: not "
+                                                     "you\" / \"too quiet / far\", time and score, no words) and the speaker "
+                                                     "check on the GPU.", "LV"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "

@@ -10,6 +10,11 @@
 - Personal to-dos come back in the evening at home (17:30 on, weekends too), never on the commute or during a call, each with one concrete next step; every skip brings the next one sooner and more directly, after 3 a smaller first step.
 - The orange line on the call screen only shows when something is wrong, not because the local voice is your choice.
 - Setup: the iPhone sync step says where the Device ID and the address go in Mobius Sync.
+- On calls Kairo answers only you (your approval 2026-10-20: one model file, no new package). A turn much quieter than your own voice on that call (the TV, someone across the room) is ignored. Once you teach Kairo your voice (More → Settings → Voice → Teach Kairo your voice: read a short text for 30 s), other voices are ignored too: no reply, no Claude, nothing brought up, the call keeps listening. Short words like "yes" are only ignored when clearly someone else's. The voice button is always answered.
+- Speaker check: strict / normal / off (default normal). The model is WeSpeaker CAM++ (29 MB), downloaded and checked with the voice models (pinned in voicellm.json); without it the check says "model missing" and is off, calls still work. It runs next to Whisper on the GPU, so a turn waits a few ms at most. Your voiceprint stays on the PC, encrypted; the recording is not kept; Remove deletes it.
+- Voice speed lists ignored turns ("ignored: not you", "ignored: too quiet / far") with time and score, never the words, and the speaker check's device and time per turn; Run diagnosis has the counts. Acceptance test 43.
+- Found while building it: ONNX Runtime 1.24 (the PC's version) computes this model wrong with its graph optimizations on. Kairo checks every way of running it against the plain one when it loads and uses the first that agrees.
+- Updates: a voice model file the previous voice-model folder already has (same checksum) is copied, not downloaded again.
 
 ## 2026-10-19 — build: your profile only in the vault (your decision)
 - Your profile file is out of the repo and out of the release. Kairo imported it once on your PC (Run diagnosis showed it); it lives only in the vault there (10 Profile/), which every chat reads. `private/` is ignored by git, and a test fails if it ever comes back.
