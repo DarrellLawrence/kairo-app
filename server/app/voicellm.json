@@ -15,6 +15,10 @@
      "temperature": 0.7, "context": 8192}
   ],
   "smart_turn": {"repo": "pipecat-ai/smart-turn-v3", "pattern": "(?i)cpu.*\\.onnx$|^smart-turn-v3\\.\\d+\\.onnx$"},
+  "speaker": {"_note": "Only the owner is answered on calls (owner's approval 2026-10-20): WeSpeaker CAM++ (English, VoxCeleb) as sherpa-onnx publishes it, pinned to this revision, size and sha256 (app/speaker.py).",
+              "repo": "csukuangfj/speaker-embedding-models", "revision": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+              "path": "wespeaker_en_voxceleb_CAM++.onnx", "size": 29292684,
+              "sha256": "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef"},
   "kyutai": {
     "_note": "Only for the voice lab's comparison, and only once the owner asks for it (More -> System -> Voice lab). Its own Python, never Kairo's.",
     "torch": "2.9.1",

@@ -716,11 +716,13 @@ function Install-Memory($P, [string]$ReleaseDir) {
     }
 }
 
-# Local voice (owner's decision 2026-10-16): llama.cpp's server, the candidate voice models and the turn
-# detector (server\app\voicellm.json) in tools\voicellm-<hash> (admins only; Kairo's account only reads it).
-# Up to about 14 GB, once per voicellm.json; a model that doesn't fit on the disk is skipped (the voice lab
-# says so). Partial downloads are kept and checked, so a second try continues. Never a reason to roll back:
-# without it the old voice pipeline answers.
+# Local voice (owner's decision 2026-10-16): llama.cpp's server, the candidate voice models, the turn
+# detector and the speaker check's model (owner's approval 2026-10-20: one file, pinned revision, size and
+# sha256), all from server\app\voicellm.json, in tools\voicellm-<hash> (admins only; Kairo's account only
+# reads it). Up to about 14 GB, once per voicellm.json; a model that doesn't fit on the disk is skipped (the
+# voice lab says so). Partial downloads are kept and checked, so a second try continues; a file the previous
+# folder already has (same checksum) is copied from there instead of downloaded again. Never a reason to
+# roll back: without it the old voice pipeline answers (and without the speaker model the check is off).
 function Install-VoiceLLM($P, [string]$ReleaseDir) {
     if ($env:KAIRO_SKIP_VOICELLM -eq '1') { Write-Note 'Local voice model skipped (KAIRO_SKIP_VOICELLM=1).'; return $true }
     $manifest = Join-Path $ReleaseDir 'server\app\voicellm.json'
