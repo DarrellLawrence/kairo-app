@@ -342,6 +342,10 @@ export function startRealtime({ path = 'call', callId = null, on = {} } = {}) {
 }
 
 /* The best line there is: realtime when the PC says so, else (or as soon as realtime fails) local. */
+// Reasons for the local voice that are a choice, not a problem: no banner on the call screen
+// (owner's request 2026-10-20: the orange line only when something is wrong).
+export const QUIET_REASONS = ['local', 'off', 'no_key']
+
 export function startLine({ path = 'call', callId = null, on = {}, status = null } = {}) {
   let cur = null
   let closed = false

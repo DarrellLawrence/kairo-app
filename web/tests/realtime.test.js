@@ -2,7 +2,7 @@
 // what is tested here is when a turn starts (your last sound) and what it marks.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { makeLastVoice, makeLiveMeter } from '../src/realtime.js'
+import { QUIET_REASONS, makeLastVoice, makeLiveMeter } from '../src/realtime.js'
 
 function clock(t = 0) {
   return { now: () => t, set: (v) => { t = v } }
@@ -75,4 +75,9 @@ test('talking over Kairo or hanging up ends the turn as interrupted; an old last
   log.clock.set(12000); m.stopped(11800)
   m.end('hung up')
   assert.equal(log.turns[1].outcome, 'no_speech')            // nothing came back before you hung up
+})
+
+test('the call screen stays quiet when local voice is a choice, and speaks up when something is wrong', () => {
+  for (const r of ['local', 'off', 'no_key']) assert.ok(QUIET_REASONS.includes(r), r)
+  for (const r of ['cap', 'down', 'api', 'sideband', 'paused', 'updating', 'webrtc']) assert.ok(!QUIET_REASONS.includes(r), r)
 })

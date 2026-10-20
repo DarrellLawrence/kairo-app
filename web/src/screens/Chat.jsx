@@ -8,7 +8,7 @@ import {
 } from '../ui/index.js'
 import { CaptureSheet } from './CaptureSheet.jsx'
 import { playLastAgain, speak, stopSpeaking, unlockAudio } from '../voice.js'
-import { realtimeStatus, startLine } from '../realtime.js'
+import { QUIET_REASONS, realtimeStatus, startLine } from '../realtime.js'
 import { audioOutcome, startTurn } from '../turns.js'
 
 const STATUS_TEXT = {
@@ -155,7 +155,7 @@ export default function Chat() {
     voiceRef.current = startLine({
       path: 'chat_voice', status: rtStatus.current, on: {
         engine: (name, why) => {
-          if (name === 'local' && why?.message && !['off', 'no_key'].includes(why.reason)) toast.show({ text: why.message })
+          if (name === 'local' && why?.message && !QUIET_REASONS.includes(why.reason)) toast.show({ text: why.message })
         },
         transcript: (text) => {
           setMic('busy')

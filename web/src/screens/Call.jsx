@@ -11,7 +11,7 @@ import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
 import { releaseWhileSpeaking, setReleaseWhileSpeaking, unlockAudio } from '../voice.js'
-import { realtimeStatus, startLine } from '../realtime.js'
+import { QUIET_REASONS, realtimeStatus, startLine } from '../realtime.js'
 
 const HANG_UP = /\s*\[\[hang up\]\]\s*$/i
 const HANG_UP_ANY = /\s*\[\[hang up\]\]\s*/gi   // the marker is never spoken or shown
@@ -94,7 +94,7 @@ export default function Call({ callId: initialId, onClose }) {
       path: 'call', callId: idRef.current, status: rtStatus.current, on: {
         engine: (name, why) => {
           setEngine(name)
-          if (name === 'local' && why?.message && !['off', 'no_key'].includes(why.reason)) setErr(why.message)
+          if (name === 'local' && why?.message && !QUIET_REASONS.includes(why.reason)) setErr(why.message)
         },
         budget: (pct) => setErr(`Realtime voice: ${pct}% of this month’s budget used.`),
         state: (s) => {
