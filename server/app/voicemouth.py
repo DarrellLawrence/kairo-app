@@ -29,6 +29,7 @@ from typing import Awaitable, Callable
 
 from . import bringup, todaycard
 from .brain.voice_local import ASK_KAIRO
+from .speech import PlainStream, plain
 
 log = logging.getLogger("kairo.mouth")
 
@@ -453,7 +454,7 @@ class Mouth:
                                       "content": json.dumps({"answer": answer}, ensure_ascii=False)})
             await self._deliver_pending(speaker, result, said, started, lang)
             if not said.streamed and not greet and not result.deferred:   # never a silent line (owner's call 2026-10-20)
-                line = (answer if answer is not None else
+                line = (plain(answer) or AGAIN[lang] if answer is not None else
                         (self.greeting if _GREETS.match(_bare(owner_text)) else NEUTRAL[lang]) if chat_only else AGAIN[lang])
                 self._line(line, speaker, result, said, started)
                 if last is not None and not (last.get("content") or "").strip():
@@ -494,11 +495,21 @@ class Mouth:
 
     async def _round(self, tools, max_tokens: int, speaker, result: Turn, said: _Said, started: float, lang: str,
                      source: _Spec | None = None):
-        """One generation: the words go to the voice as they come; a tool call gets the holding line.
-        Returns (what the model wrote, markers and all; its tool call or None). source: the same
-        generation, started early at the owner's pause (speculation)."""
-        unmark = Unmark()
-        raw, call, done = "", None, {}
+        """One generation: the words go to the voice as they come (plain speech: speech.PlainStream); a tool
+        call gets the holding line. Returns (what the model wrote, markers and all, or what was said when the
+        sanitizer took something out; its tool call or None). source: the same generation, started early at
+        the owner's pause (speculation)."""
+        unmark, clean = Unmark(), PlainStream()
+        raw, call, done, spoken = "", None, {}, []
+
+        def speak(piece: str) -> None:
+            if piece:
+                spoken.append(piece)
+                said.stream(piece)
+                speaker.feed(piece)
+                if result.first_text_ms is None:
+                    result.first_text_ms = int((time.monotonic() - started) * 1000)
+
         gen = source.events() if source is not None else self.model.stream(
             self.messages, tools=tools, temperature=self.temperature, max_tokens=max_tokens)
         async with contextlib.aclosing(gen):
@@ -507,13 +518,9 @@ class Mouth:
                     result.first_token_ms = int((time.monotonic() - started) * 1000)
                 if ev["kind"] == "text":
                     raw += ev["text"]
-                    piece = unmark.feed(ev["text"])
-                    if piece:
-                        said.stream(piece)
-                        speaker.feed(piece)
-                        if result.first_text_ms is None:
-                            result.first_text_ms = int((time.monotonic() - started) * 1000)
+                    speak(clean.feed(unmark.feed(ev["text"])))
                 elif ev["kind"] == "tool_start" and call is None:
+                    speak(clean.feed(unmark.flush()) + clean.flush())   # what came before the call, in order
                     call = True
                     if not result.filled:                  # the holding line at most once a turn
                         result.filled = True
@@ -527,15 +534,15 @@ class Mouth:
                     call = ev
                 elif ev["kind"] == "done":
                     done = ev
-        rest = unmark.flush()
-        if rest:
-            said.stream(rest)
-            speaker.feed(rest)
+        speak(clean.feed(unmark.flush()) + clean.flush())
         result.raised += unmark.raised
         result.timings = done.get("timings") or result.timings
         usage = done.get("usage") or {}
         if isinstance(usage.get("prompt_tokens"), int):
             self.prompt_tokens = usage["prompt_tokens"] + int(usage.get("completion_tokens") or 0)
+        words = "".join(spoken)
+        if _squash(MARK.sub("", raw)) != _squash(words):      # it sees what was said, not what was taken out
+            raw = "".join(f"[[raised:{i}]] " for i in unmark.raised) + words
         return raw, call
 
     @staticmethod
@@ -568,7 +575,9 @@ class Mouth:
         def raise_item() -> None:
             if pick is None or (pick.priority != "urgent" and task.done()):   # the answer is here: no detour
                 return
-            line = bringup.wait_line(pick, lang, len(self.said_for))     # a different lead each time
+            line = plain(bringup.wait_line(pick, lang, len(self.said_for)))   # a different lead each time
+            if not line:
+                return
             speaker.say(line)
             said.line(f"[[raised:{pick.id}]] {line}")
             result.raised.append(pick.id)
@@ -666,6 +675,10 @@ class Mouth:
             speaker.feed(" ")                                  # ... after the last sentence, not glued to it
             raw, _ = await self._round(None, MAX_ANSWER_TOKENS, speaker, result, said, started, lang)
             self.messages.append({"role": "assistant", "content": raw.strip()})
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def _args(arguments, fallback: str) -> tuple[str, str | None]:

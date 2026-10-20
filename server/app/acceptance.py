@@ -15,6 +15,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import re
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
@@ -140,7 +141,11 @@ SPECS = [
                                            "voice model say GPU (none red), the last call turn says WebRTC; \"hello\" on a call "
                                            "is answered without Claude; a question Claude needs longer than 8 s for gets "
                                            "\"I'll get back to you\" and the answer as a push; a call you place opens with "
-                                           "\"Hey <your first name>\" at once.", "G")
+                                           "\"Hey <your first name>\" at once.", "G"),
+    Spec(43, "Call answers are plain speech", "auto", "With the real Claude: a question about two open things, asked "
+                                                      "the way a call asks (ask_kairo's wrapper, Claude's answer as the "
+                                                      "call says it): no ids (L12, #3), no list or numbering, never "
+                                                      "\"the owner\", no thinking out loud (\"let me check...\").", "G"),
 ]
 BY_ID = {s.id: s for s in SPECS}
 CI_ONLY = {12: "Proven in CI (windows-install: a release whose self-test fails is rolled back by itself, and the old "
@@ -181,6 +186,7 @@ class Context:
     runner: object = None                                  # chat.BrainRunner (fix plan 26-30: lag)
     health: object = None                                  # health.HealthWatch (fix plan 32)
     data_dir: Path | None = None
+    call_ask: Callable[[str], Awaitable[str]] | None = None  # ask_kairo as on a call -> what the call would say (43)
 
 
 class RecordingExecutor:
@@ -1132,12 +1138,52 @@ async def t_picker(ctx: Context) -> dict:
     return _result(True, checks)
 
 
+# ---------------------------------------------------------------- 43 call answers are plain speech (owner's call 2026-10-20)
+
+SAID_IDS = re.compile(r"\b[LK]\d{1,6}\b|#\d{1,6}\b|\((?:urgent|normal|low)\b", re.I)
+SAID_LIST = re.compile(r"(?m)^\s*(?:[-*•]|\d{1,2}[.)])\s|(?:^|[:.!?]\s)1[.)]\s.*\s2[.)]\s", re.S)
+SAID_META = re.compile(r"(?:^|[.!?]\s+)(?:(?:ok(?:ay)?|so|sure|well|alright|now)[,.]?\s+)*(?:let me (?:check|look|see|think)|"
+                       r"let's see|i'll (?:check|look at) the\b.*?\blist|according to the (?:bring[- ]?up|agenda|loop)|"
+                       r"the user\b)|bring[- ]?up list|ask_kairo", re.I)
+
+
+async def t_call_speech(ctx: Context) -> dict:
+    """Test 43: what a call says of Claude's answer is plain speech, on the real path (the call's own wrapper and
+    answer handling), with two KAIRO-TEST open loops so there is something with ids and priorities to tell."""
+    from .db import OpenLoop
+    if ctx.call_ask is None:
+        return _result(False, {}, "no call path to ask through")
+    with Session(ctx.engine) as s:
+        a = OpenLoop(kind="task", source="chat", source_ref=f"{MARK}-speech-a", what=f"{MARK}: hand in the lab report",
+                     urgency="urgent")
+        b = OpenLoop(kind="task", source="chat", source_ref=f"{MARK}-speech-b", what=f"{MARK}: return the library book",
+                     urgency="normal")
+        s.add_all([a, b])
+        s.commit()
+        ids = (a.id, b.id)
+    try:
+        said = (await ctx.call_ask(f"What's still open with the {MARK} things? Tell me all of them.")).strip()
+    finally:
+        with Session(ctx.engine) as s:
+            for i in ids:
+                row = s.get(OpenLoop, i)
+                if row is not None:
+                    s.delete(row)
+            s.commit()
+    checks = {"an answer to say": bool(re.search(r"\w", said)),
+              "no ids": SAID_IDS.search(said) is None,
+              "no list or numbering": SAID_LIST.search(said) is None,
+              "never \"the owner\"": "the owner" not in said.lower(),
+              "no thinking out loud": SAID_META.search(said) is None}
+    return _result(True, checks, f"Kairo would say: {said[:240]}")
+
+
 AUTO: dict[int, Callable[[Context], Awaitable[dict]]] = {
     1: t_tools, 2: t_memory, 7: t_outbound, 9: t_one_thread, 10: t_personality, 11: t_selftest, 18: t_semantic,
     19: t_leave_it, 21: t_language, 22: t_routing, 23: t_call_windows,
     20: t_profile_import, 24: t_training, 25: t_food_water, 26: t_study, 27: t_money, 28: t_people_faith_style,
     29: t_lag, 30: t_health, 31: t_graph, 33: t_knowledge_call, 34: t_recap, 35: t_document,
-    36: t_promise_attend, 37: t_never_owner, 38: t_picker,
+    36: t_promise_attend, 37: t_never_owner, 38: t_picker, 43: t_call_speech,
 }
 
 

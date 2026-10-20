@@ -169,6 +169,18 @@ def test_the_brain_gets_the_owners_own_words_and_acts_only_on_them():
     assert "Owner: can you add milk" in p and "only on what the owner said" in p
 
 
+def test_call_answers_are_asked_for_as_plain_speech_and_come_back_as_it():
+    """Owner's call 2026-10-20: Claude's notes ("The owner mentioned...", "L23 (urgent, loop)") were read out."""
+    p = realtime.brain_prompt("what's open?", [])
+    for rule in ("second person", "no ids", "no lists or numbering", "no notes about the owner in the third",
+                 "no thinking out loud"):
+        assert rule in p, rule
+    said, hang = realtime.spoken_answer("Let me check the bring-up list. L23 (urgent, loop): reply to Lea. [[hang up]]")
+    assert (said, hang) == ("Reply to Lea.", True)
+    assert realtime.spoken_answer("") == ("Done.", False)
+    assert realtime.spoken_answer("Let me check the bring-up list.")[0] == "Okay."    # nothing to say: never empty
+
+
 # ---------------------------------------------------------------- OpenAI calls (faked transport)
 
 def answer_transport(seen, status=200, location="/v1/realtime/calls/rtc_abc123", body="v=0\r\nanswer\r\n", fail_first_400=False):

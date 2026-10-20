@@ -396,3 +396,20 @@ def test_small_talk_answered_with_only_a_raw_call_gets_a_short_line_not_silence(
     assert "<|" not in _all_text(fr) and "tools" not in requests_seen(local)[-1]
     msgs = [(m["role"], m["text"]) for m in local.get("/api/chat/messages").json()["messages"]]
     assert msgs == [("owner", "(spoken, on a call) thanks"), ("kairo", NEUTRAL["en"])]      # Claude never ran
+
+
+def test_the_old_voice_says_plain_speech_and_the_chat_keeps_claudes_words(local):
+    """The voice model is off: Claude talks on the call itself. Its notes are never said or shown on the call."""
+    local.vm.pause()
+    local.voice.text = "Note L23 (urgent, loop) and card #12 for me"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    said = " ".join(t for t, _ in local.voice.spoken)
+    shown = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+    for bad in ("L23", "(urgent, loop)", "#12"):
+        assert bad not in said and bad not in shown and bad not in done["text"], bad
+    assert said.startswith("echo: (spoken, on a call) Note and card for me")
+    last = local.get("/api/chat/messages").json()["messages"][-1]
+    assert last["role"] == "kairo" and "L23 (urgent, loop)" in last["text"]   # the conversation keeps what Claude wrote

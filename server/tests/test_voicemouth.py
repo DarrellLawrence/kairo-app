@@ -29,6 +29,11 @@ class Speaker:
         return "".join(t for k, t in self.events if k == "feed")
 
 
+def fed_at(sp, start: str) -> int:
+    """Where the words starting with `start` began to go to the voice (they may come in pieces)."""
+    return next(i for i, (k, t) in enumerate(sp.events) if k == "feed" and (start.startswith(t) or t.startswith(start)))
+
+
 class Model:
     """A scripted voice model: a list of replies, each a list of events (or a callable on messages)."""
 
@@ -245,7 +250,7 @@ def test_the_wait_is_a_holding_line_then_one_item_that_fits():
     assert sp.said == [FILLERS["en"][0], "Quick one: Did you answer Lea about Friday yet?"]   # fits what they asked
     assert r.waited == ["L1"] and r.raised == ["L1"] and "Friday is free after 4." in sp.heard
     assert "[[raised:L1]] Quick one: Did you answer Lea" in m.calls[1]["messages"][2]["content"]   # the model knows
-    assert sp.events.index(("say", sp.said[1])) < sp.events.index(("feed", "Friday is free after 4."))
+    assert sp.events.index(("say", sp.said[1])) < fed_at(sp, "Friday is free")
 
 
 def test_a_fast_answer_never_waits_for_the_item():
@@ -258,7 +263,7 @@ def test_urgent_comes_first_before_the_answer_even_when_fast():
     m, sp = Model(tool("is Friday free?"), text("Free after 4.")), Speaker()
     r = run(mouth(m, Brain(delay=0.0), items=[LEA, FORM], wait_after_s=5).turn("Is Friday free?", "en", sp))
     assert sp.said[1] == "Before I forget, this one's urgent: The school form has to be signed today." and r.waited == ["L3"]
-    assert sp.events.index(("say", sp.said[1])) < sp.events.index(("feed", "Free after 4."))
+    assert sp.events.index(("say", sp.said[1])) < fed_at(sp, "Free after")
 
 
 def test_one_item_per_wait_never_twice_and_the_cap_holds():
@@ -436,6 +441,31 @@ def test_talking_on_drops_the_speculation_and_a_changed_card_does_too():
     r = run(go())
     assert mo.speculation_used == 0 and len(m.calls) == 3 and r.text == "C"
     assert "rain at 15:00" in m.calls[2]["messages"][-1]["content"]
+
+
+# ---------------------------------------------------------------- plain speech (owner's call 2026-10-20)
+
+def test_what_the_voice_model_says_on_a_call_is_plain_speech():
+    """It read out Claude's notes: ids, tags, "let me check the bring-up list". Never again, not even half."""
+    m = Model(text("Let me check ", "the bring-up list. ", "L23 (urgent, ", "loop): you still owe Lea ", "an answer."))
+    sp = Speaker()
+    mo = mouth(m, items=[])
+    r = run(mo.turn("anything I forgot?", "en", sp))
+    for bad in ("L23", "urgent, loop", "bring-up", "Let me"):
+        assert bad not in sp.heard and bad not in r.text, bad
+    assert "you still owe Lea an answer." in sp.heard
+    assert mo.messages[-1]["content"] == r.text                         # it sees what it said, not its notes
+
+
+def test_claudes_answer_said_directly_and_the_wait_line_are_plain_speech_too():
+    m, sp = Model(tool("what's open?"), []), Speaker()
+    r = run(mouth(m, Brain(answer="The owner asked. 1. Reply to Lea\n2. Order the case\n3. Sign the form"), items=[])
+            .turn("What's open?", "en", sp))
+    assert sp.said[1] == "Reply to Lea. Order the case." and "owner" not in r.text
+    item = bringup.Item("L7", "loop", "promise: order the case", says={"en": "L7 (normal, loop): did you order the case?"})
+    m, sp = Model(tool("is Friday free?"), text("Free after 4.")), Speaker()
+    run(mouth(m, Brain(delay=0.2), items=[item], wait_after_s=0.02).turn("Is Friday free?", "en", sp))
+    assert sp.said[1] == "Quick one: did you order the case?"
 
 
 # ---------------------------------------------------------------- greetings and dropped calls (owner's call 2026-10-20)

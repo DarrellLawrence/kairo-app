@@ -38,7 +38,7 @@ from . import loop_send as loop_send_mod
 from . import conversation
 from . import memory
 from . import turns
-from . import voicelink
+from . import speech, voicelink
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
@@ -1370,16 +1370,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await speaker.done()
             return
 
+        clean = speech.PlainStream()               # owner's call 2026-10-20: plain speech, never Claude's notes
+
         async def sink(frame) -> None:
             kind = frame.get("type") if isinstance(frame, dict) else None
             if line.writing == number and number <= line.stopped:
                 line.interrupt()                   # talked over before the brain had started
             if kind == "delta":
+                frame = {**frame, "text": clean.feed(frame.get("text") or "")}
                 speaker.feed(frame["text"])
             elif kind == "model" and frame.get("escalated"):
                 speaker.say(voicelink.filler(language))
             elif kind == "done":
                 line.writing = None
+                rest = clean.flush()
+                if rest and not frame.get("interrupted"):
+                    speaker.feed(rest)
+                    await line.send({"type": "delta", "text": rest, "turn": number})
+                text = str(frame.get("text") or "")
+                hang = " [[hang up]]" if "[[hang up]]" in text else ""
+                frame = {**frame, "text": (speech.plain(text.replace("[[hang up]]", " ")) + hang).strip()}
                 if frame.get("interrupted"):
                     speaker.stop()
                 else:
@@ -1810,6 +1820,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         out.reply = out.reply or "".join(parts).strip()
         return out
 
+    async def acceptance_call_ask(request: str) -> str:
+        """Test 43: ask_kairo as a call asks it, what the call would say of the answer; not in the one conversation."""
+        text, error, _ = await _call_turn(request, [f"Owner: {request}"], session_id=None, thread_id=None,
+                                          purpose="acceptance")
+        if error is not None:
+            raise RuntimeError(error.text or "Claude failed")
+        return realtime.spoken_answer(text)[0]
+
     def acceptance_classify(mail: dict) -> list[dict]:
         ask = lambda prompt, system: app.state.jobs.ask_brain(prompt, system, purpose="triage")   # noqa: E731
         return triage.classify([mail], ask, today=dt.datetime.now(profile.tz).date(), language=profile.default_language)
@@ -1861,7 +1879,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             share=acceptance_share, runner=runner, health=app.state.health, data_dir=settings.data_dir,
             knowledge=app.state.knowledge, recap=app.state.recap, gauntlet=app.state.gauntlet,
             ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
-                prompt, system, images=images, purpose=purpose))
+                prompt, system, images=images, purpose=purpose), call_ask=acceptance_call_ask)
 
     async def run_acceptance(ids: list[int] | None = None) -> dict:
         if app.state.acceptance_running:
@@ -3188,19 +3206,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.add(thread)
                 s.commit()
             sid, tid = thread.brain_session_id, thread.id
-        prompt = realtime.brain_prompt(request, lines)
-        model = conversation.route(prompt, purpose="call", schedule=app.state.jobs.schedule)
-        parts: list[str] = []
-        final, error, new_sid = None, None, None
-        async for event in owner_turn(prompt, session_id=sid, thread_id=tid, purpose="call", model=model):
-            if event.kind is EventKind.session and event.session_id:
-                new_sid = event.session_id
-            elif event.kind is EventKind.text:
-                parts.append(event.text)
-            elif event.kind is EventKind.result:
-                final, new_sid = event.text or "".join(parts), event.session_id or new_sid
-            elif event.kind is EventKind.error:
-                error, new_sid = event, event.session_id or new_sid
+        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call")
         if new_sid:
             with session_for(engine) as s:
                 thread = s.get(ChatThread, tid)
@@ -3211,8 +3217,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fold_memory_soon()
         if error is not None:
             return f"I couldn't get that done: {clip_text(error.text, 160)}", False
-        answer = (final or "".join(parts)).strip()
-        return answer.replace("[[hang up]]", "").strip() or "Done.", "[[hang up]]" in answer
+        return realtime.spoken_answer(text)   # plain speech, on every voice line
+
+    async def _call_turn(request: str, lines: list[str], *, session_id, thread_id, purpose: str):
+        """ask_kairo's turn for Claude, as on any call: the call's wrapper (realtime.brain_prompt) and model.
+        (Claude's whole answer, the error or None, the brain session.) Acceptance test 43 runs it too."""
+        prompt = realtime.brain_prompt(request, lines)
+        model = conversation.route(prompt, purpose="call", schedule=app.state.jobs.schedule)
+        parts: list[str] = []
+        final, error, new_sid = None, None, None
+        async for event in owner_turn(prompt, session_id=session_id, thread_id=thread_id, purpose=purpose, model=model):
+            if event.kind is EventKind.session and event.session_id:
+                new_sid = event.session_id
+            elif event.kind is EventKind.text:
+                parts.append(event.text)
+            elif event.kind is EventKind.result:
+                final, new_sid = event.text or "".join(parts), event.session_id or new_sid
+            elif event.kind is EventKind.error:
+                error, new_sid = event, event.session_id or new_sid
+        return (final or "".join(parts)).strip(), error, new_sid
 
     @app.get("/api/voice/realtime")
     def realtime_get():

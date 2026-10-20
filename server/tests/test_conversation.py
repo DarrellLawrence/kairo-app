@@ -107,3 +107,11 @@ def test_haiku_hands_over_to_sonnet_and_the_owner_never_sees_the_marker(migrated
     assert data["models"] == ["haiku", "sonnet"]
     assert done["model"] == "sonnet" and "[[sonnet]]" not in done["text"] and "[[sonnet]]" not in streamed
     assert "[[sonnet]]" not in msgs[-1]["text"] and msgs[-1]["role"] == "kairo"
+
+
+def test_spoken_turns_are_answered_as_plain_speech_to_the_owner():
+    """Owner's call 2026-10-20: ids, numbered lists and thinking out loud were read out on calls."""
+    from app.conversation import TURN_RULES
+    rules = " ".join(TURN_RULES.split())
+    for rule in ('to the owner as "you"', "no lists, numbering or markdown", "no ids", "no thinking out loud"):
+        assert rule in rules, rule
