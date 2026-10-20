@@ -61,13 +61,14 @@ def _aware(t):
 
 def candidates(s: Session, profile, now: dt.datetime) -> list[Item]:
     """Straight from the data, no model: urgent loops, then the rest, Kairo's questions, captures, tests."""
-    from . import capture, knowledge, loops
+    from . import capture, dues, knowledge, loops
     from .db import SchoolEvent
     out: list[Item] = []
     try:
         for loop in loops.shown_loops(s, profile=profile)[:4]:
             who = f" ({loop.who})" if loop.who else ""
-            out.append(Item(f"L{loop.id}", "loop", f"{loop.kind}: {loop.what}{who}"[:200],
+            when = f" ({dues.words(loop.due, now, profile.tz)})" if loop.due else ""
+            out.append(Item(f"L{loop.id}", "loop", f"{loop.kind}: {loop.what}{who}{when}"[:200],
                             "urgent" if loop.urgency == "urgent" else "normal"))
     except Exception:   # never lose a call over this list
         pass

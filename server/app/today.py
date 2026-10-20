@@ -12,7 +12,7 @@ import re
 from sqlmodel import Session, select
 
 from . import brief as brief_mod
-from . import triage
+from . import dues, triage
 from .db import Checkin, HealthDay, SchoolEvent, Task, utcnow
 from .jobkit import clip
 
@@ -50,18 +50,9 @@ def top3(s: Session, today: dt.date, tz) -> list[dict]:
         due = _local(t.due, tz)
         return (0 if due and due <= end else 1, due or dt.datetime.max.replace(tzinfo=tz), -t.priority, t.id)
 
-    out = []
-    for t in sorted(open_, key=rank)[:3]:
-        due = _local(t.due, tz)
-        why = None
-        if due and due.date() < today:
-            why = "overdue"
-        elif due and due.date() == today:
-            why = "due today"
-        elif due:
-            why = "due " + due.strftime("%a")
-        out.append({"id": t.id, "title": t.title, "why": why, "done": False})
-    return out
+    now = dt.datetime.combine(today, dt.time.min, tzinfo=tz)
+    return [{"id": t.id, "title": t.title, "why": dues.words(t.due, now, tz) if t.due else None,
+             "overdue": dues.overdue(t.due, now, tz), "done": False} for t in sorted(open_, key=rank)[:3]]
 
 
 def _sender_name(sender: str | None) -> str:

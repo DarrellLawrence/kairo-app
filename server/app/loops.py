@@ -30,7 +30,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from . import vault
+from . import dues, vault
 from .audit import audit
 from .db import AuditLog, OpenLoop, Person, ReplySender, SchoolEvent, SettingKV, Task, TriagedEmail, utcnow
 from .jobkit import JOB_RULES, clip, extract_json
@@ -199,17 +199,6 @@ def _ago(since: dt.datetime, now: dt.datetime, tz) -> str:
     return "last week" if days < 14 else f"{days} days ago"
 
 
-def _when(due: dt.datetime, now: dt.datetime, tz) -> str:
-    days = (due.astimezone(tz).date() - now.astimezone(tz).date()).days
-    if days < 0:
-        return f"{-days} day{'s' if days != -1 else ''} overdue" if days < -1 else "overdue since yesterday"
-    if days == 0:
-        return "due today"
-    if days == 1:
-        return "due tomorrow"
-    return f"due {due.astimezone(tz):%A}" if days < 7 else f"due {due.astimezone(tz):%d %b}"
-
-
 def phrase(loop: OpenLoop, now: dt.datetime, tz) -> str:
     """What Kairo says. A little more direct each time it comes back."""
     since = aware(loop.since)
@@ -223,13 +212,13 @@ def phrase(loop: OpenLoop, now: dt.datetime, tz) -> str:
             return f"{who} is still waiting for your answer: {loop.what}."
         return f"{who} asked {_ago(since, now, tz)}: {loop.what}."
     if loop.kind == "promise":
-        by = f" ({_when(aware(loop.due), now, tz)})" if loop.due else ""
+        by = f" ({dues.words(loop.due, now, tz)})" if loop.due else ""
         if again:
             return f"You promised {loop.who or 'it'} {_ago(since, now, tz)}: {loop.what}. Still open{by}."
         return f"You told {loop.who or 'someone'} you'd {loop.what}{by}."
     if loop.kind in PA_KINDS:   # the PA engine writes the whole sentence
         return f"Still open: {loop.what}" if again else loop.what
-    due = f", {_when(aware(loop.due), now, tz)}" if loop.due else ""
+    due = f", {dues.words(loop.due, now, tz)}" if loop.due else ""
     return f"{loop.what}{due}. Still not done." if again else f"{loop.what}{due}."
 
 
@@ -253,6 +242,7 @@ def as_dict(loop: OpenLoop, now: dt.datetime, tz) -> dict:
     since = aware(loop.since)
     return {"id": loop.id, "kind": loop.kind, "source": loop.source, "who": loop.who, "who_email": loop.who_email,
             "what": loop.what, "since": since.isoformat(), "due": aware(loop.due).isoformat() if loop.due else None,
+            "when": dues.words(loop.due, now, tz) if loop.due else None,
             "waiting_days": (now.astimezone(tz).date() - since.astimezone(tz).date()).days,
             "urgency": loop.urgency, "status": loop.status, "raised": loop.raised,
             "next_at": aware(loop.next_at).isoformat() if loop.next_at else None,
@@ -452,7 +442,8 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
     loop = _get_open(s, loop_id)
     due = aware(loop.due)
     ready = " It's ready: just check it." if draft_of(loop) else ""
-    if due is not None and due - now <= CRITICAL_WINDOW:
+    ahead = due is not None and due > now          # an overdue one can move: its deadline is gone (2026-10-20)
+    if ahead and due - now <= CRITICAL_WINDOW:
         raise Refused(f"No, this one can't move: {loop.what} is due {_hhmm(due, now, tz)}.{ready} Do it now.")
     counted = True
     if at is not None:
@@ -471,7 +462,7 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
         counted = not just_raised
     else:
         raise LoopError("when must be later, in_1h or tomorrow")
-    if due is not None and nxt > due - dt.timedelta(minutes=30):
+    if ahead and nxt > due - dt.timedelta(minutes=30):
         nxt = max(now + dt.timedelta(minutes=15), due - dt.timedelta(hours=1))   # never past the deadline
     pushed = loop.snoozed
     if counted:
@@ -481,8 +472,10 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
     s.commit()
     s.refresh(loop)
     msg = f"OK, back {_hhmm(nxt, now, tz)}."
-    if due is not None and due - now <= IMPORTANT_WINDOW and pushed >= 2:
+    if ahead and due - now <= IMPORTANT_WINDOW and pushed >= 2:
         msg += f" But it's due {_hhmm(due, now, tz)}.{ready or ' Do it before then.'}"
+    elif due is not None and not ahead and pushed >= 2:
+        msg += f" But it's {dues.words(due, now, tz)}.{ready}"
     return loop, msg
 
 
