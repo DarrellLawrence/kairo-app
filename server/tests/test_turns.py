@@ -136,3 +136,14 @@ def test_slow_turns_are_logged_with_their_slowest_step(migrated, caplog):
     assert rep["slow_causes"] == {"endpoint_ms": 1}
     assert rep["network"]["relay"]["turns"] == 1 and rep["network"]["direct"]["rtt_p50"] == 24
     assert rep["recent"][0]["line"] == "webrtc"
+
+
+def test_a_turn_ended_by_a_tap_says_so(migrated):
+    """Owner's request 2026-10-20: "I'm done" is a tap; Voice speed shows how each turn ended."""
+    with TestClient(create_app(migrated)) as c:
+        assert post(c, turn_id="t1", marks={"playing": 560}, server={**RTC_SERVER, "vad_ms": 0},
+                    device={"line": "webrtc", "net": "direct", "ended": "tap"}).status_code == 200
+        assert post(c, turn_id="t2", marks={"playing": 560}, server=RTC_SERVER,
+                    device={"line": "webrtc", "net": "direct"}).status_code == 200
+        rep = c.get("/api/voice/turns?days=7").json()
+    assert sorted(str(r["ended"]) for r in rep["recent"]) == ["None", "tap"]

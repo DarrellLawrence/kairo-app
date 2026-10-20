@@ -245,6 +245,19 @@ test('talking over Kairo stops it at once and starts your next turn', async () =
   v.close()
 })
 
+test('a tap while you talk ends your turn now and the turn says it was a tap; with nothing said it does nothing', async () => {
+  const { v, ws, say, hush } = await talk()
+  hush(10)
+  assert.equal(v.finish(), false)                                     // nothing heard yet
+  assert.ok(!ws.types().includes('end'))
+  say(10)                                                             // talking, no pause
+  assert.equal(v.finish(), true)
+  assert.deepEqual(ws.sent.find((m) => m.type === 'end'), { type: 'end', path: 'call', call_id: 7, turn: 1 })
+  assert.equal(v.state, 'thinking')
+  v.close()
+  assert.equal(sentTurns.at(-1).device.ended, 'tap')
+})
+
 test('a spoken chat message closes the mic at the end of speech (the answer plays on the loudspeaker)', async () => {
   const { v, say, hush } = await talk('chat_voice')
   hush(5); say(10); hush(26)

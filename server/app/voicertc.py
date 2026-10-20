@@ -11,6 +11,13 @@ events (transcripts, what Kairo says, per-turn times). One call is one Pipecat p
 Talking over Kairo is an interruption: Pipecat stops the audio at once and the voice model's turn is
 cancelled (what was said is kept, a pending Claude answer comes later, as before).
 
+"I'm done" (owner's request 2026-10-20: "when I'm around people I can just tap it and then it knows I'm done
+talking"): a loud room can keep the VAD hearing speech, so no pause ever ends the turn. A tap on the phone
+sends {"type": "done"}; if anything was heard since the last turn, the turn ends as soon as Whisper has
+written it down (the VAD's speech is cut at the tap; Smart Turn's verdict and its pause are not waited for)
+and goes on to the same acceptance point as any turn (speaker check + quiet gate, then the answer).
+Recorded as ended by "tap", timed from the tap.
+
 Everything runs in Kairo's own process: the models Kairo already loaded (Whisper, Kokoro, Piper, the
 llama.cpp voice model) are used as they are. Pipecat and aiortc come with the voice packages
 (requirements-voice.txt); without them `available()` is False and the old line (/ws/voice) answers.
@@ -40,6 +47,9 @@ VAD_STOP_S = 0.2              # the first short pause: Whisper starts, Smart Tur
 # started early on those words, so little is lost).
 TURN_MAX_SILENCE_S = 0.5
 TRAILING_SILENCE_S = 0.2      # Whisper gets this much silence after the words (it ends the last word)
+# After a tap the VAD hears nothing until that turn is taken (a loud room would start a new stretch of speech,
+# which holds the turn open, before Whisper is through); never longer than this.
+TAP_HOLD_S = 3.0
 OUT_RATE = 24000              # Kokoro's rate; Piper (22.05 kHz) is resampled to it
 OPENERS = {
     "en": ("Sure,", "Sure.", "Okay,", "Okay.", "Yeah,", "Yeah.", "Got it.", "Hey!", "Hm,", "Right,", "Nice.", "Done."),
@@ -139,7 +149,8 @@ class Timeline:
     vad_stop: float | None = None        # the VAD noticed the pause (VAD_STOP_S after the last word)
     stt_start: float | None = None
     stt_done: float | None = None
-    turn_end: float | None = None        # Smart Turn (or the long pause) ended the turn
+    turn_end: float | None = None        # Smart Turn (or the long pause, or a tap) ended the turn
+    tapped: float | None = None          # the owner tapped "done" then: the turn ended by the tap, timed from it
     first_token: float | None = None     # the voice model's first word or tool call
     tts_start: float | None = None
     first_audio: float | None = None     # the first audio of the answer went to the phone
@@ -151,14 +162,14 @@ class Timeline:
     marks: dict = field(default_factory=dict)
 
     def ms(self) -> dict:
-        """Server steps (ms). The end of speech is VAD_STOP_S before the VAD noticed it."""
+        """Server steps (ms). The end of speech is VAD_STOP_S before the VAD noticed it, or the tap."""
         if self.vad_stop is None:
             return {}
-        end = self.vad_stop - VAD_STOP_S
+        end = self.tapped if self.tapped is not None else self.vad_stop - VAD_STOP_S
 
         def at(t):
             return None if t is None else max(0, round((t - end) * 1000))
-        out = {"vad_ms": int(VAD_STOP_S * 1000)}
+        out = {"vad_ms": 0 if self.tapped is not None else int(VAD_STOP_S * 1000)}
         if self.stt_start is not None and self.stt_done is not None:
             out["stt_ms"] = round((self.stt_done - self.stt_start) * 1000)
         for key, t in (("turn_at_ms", self.turn_end), ("first_token_at_ms", self.first_token),
@@ -329,6 +340,24 @@ class _State:
         self.number = 0
         self.speaker: RtcSpeaker | None = None
         self.speaking: Timeline | None = None   # the turn whose answer is being spoken
+        self.vad_on = False                     # the VAD hears speech right now
+        self.pending = 0                        # pieces of speech Whisper is still writing down
+        self.tap: str | None = None             # "waiting": tapped, the turn ends once Whisper is through; "ended"
+        self.tap_at = 0.0
+
+    def tap_now(self) -> bool:
+        """The owner tapped "done". False when nothing was heard since the last turn (nothing to end)."""
+        if self.tapping() is not None or not (self.vad_on or self.pending or self.heard):
+            return False
+        self.tap, self.tap_at = "waiting", time.monotonic()
+        return True
+
+    def tapping(self) -> str | None:
+        """The tap in progress (the VAD hears nothing meanwhile), at most TAP_HOLD_S."""
+        if self.tap is not None and time.monotonic() - self.tap_at > TAP_HOLD_S:
+            log.warning("rtc: a tapped turn wasn't taken within %.0f s: the call listens as before", TAP_HOLD_S)
+            self.tap, self.pending = None, 0
+        return self.tap
 
     def send(self, msg: dict) -> None:
         try:
@@ -370,9 +399,9 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
     from pipecat.audio.vad.silero import SileroVADAnalyzer
-    from pipecat.audio.vad.vad_analyzer import VADParams
+    from pipecat.audio.vad.vad_analyzer import VADParams, VADState
     from pipecat.frames.frames import (
-        AggregatedTextFrame, BotStoppedSpeakingFrame, Frame, InterruptionFrame, LLMContextFrame,
+        AggregatedTextFrame, BotStoppedSpeakingFrame, ControlFrame, Frame, InterruptionFrame, LLMContextFrame,
         LLMFullResponseEndFrame, LLMFullResponseStartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame,
         UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
     )
@@ -389,7 +418,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     from pipecat.services.tts_service import TTSService
     from pipecat.transports.base_transport import TransportParams
     from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-    from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+    from pipecat.turns.types import ProcessFrameResult
+    from pipecat.turns.user_stop import BaseUserTurnStopStrategy, TurnAnalyzerUserTurnStopStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
     from pipecat.utils.text.base_text_aggregator import AggregationType
 
@@ -399,16 +429,78 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                    language_mode=language_mode, speculate=speculate, discard=discard, gate=gate)
     cache = openers or OpenerCache(lambda text, lang: wav_pcm(voice.speak(text, lang)[0]))
 
+    @dataclass
+    class Tapped(ControlFrame):
+        """The owner tapped "done" (in order with the transcripts, kept through interruptions)."""
+        interruptible: bool = field(default=False, init=False)
+
+    @dataclass
+    class Transcribed(ControlFrame):
+        """Whisper is through with one piece of speech (after its words, if it found any)."""
+        interruptible: bool = field(default=False, init=False)
+
+    class OwnerVAD(SileroVADAnalyzer):
+        """Silero, deaf while a tap is in progress: the speech it was hearing ends at once, and a loud room
+        can't start a new stretch (which would hold the tapped turn open) before the turn is taken."""
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._deaf = False
+
+        async def analyze_audio(self, buffer: bytes) -> VADState:
+            if state.tapping() is not None:
+                if not self._deaf:
+                    self._deaf = True
+                    self.set_params(self.params)           # quiet now; it starts afresh afterwards
+                return VADState.QUIET
+            self._deaf = False
+            return await super().analyze_audio(buffer)
+
+    class TapStop(BaseUserTurnStopStrategy):
+        """A tap ends the turn as soon as Whisper has written down all that was said, without waiting for a
+        pause or Smart Turn's verdict (Smart Turn doesn't get the tapped turn's words, so it can't end it
+        a second time)."""
+
+        def __init__(self):
+            super().__init__()
+            self._text = ""
+
+        async def handle_user_turn_started(self):
+            self._text = ""
+
+        async def handle_user_turn_stopped(self):
+            self._text = ""
+
+        async def process_frame(self, frame: Frame) -> ProcessFrameResult:
+            if isinstance(frame, TranscriptionFrame):
+                self._text = f"{self._text} {frame.text}".strip()
+            if state.tapping() != "waiting":
+                return ProcessFrameResult.CONTINUE
+            if isinstance(frame, (Tapped, Transcribed)) and not state.vad_on and not state.pending:
+                if self._text:
+                    state.tap, state.turn.tapped = "ended", state.tap_at
+                    await self.trigger_user_turn_stopped()
+                else:
+                    state.tap = None                       # nothing was said: nothing to end
+            if isinstance(frame, (TranscriptionFrame, Transcribed)):
+                return ProcessFrameResult.STOP
+            return ProcessFrameResult.CONTINUE
+
     class Watch(FrameProcessor):
-        """The end of speech the VAD saw starts a turn's clock."""
+        """The end of speech the VAD saw starts a turn's clock; the phone hears when speech starts (a turn
+        is going on: a tap then ends it)."""
 
         async def process_frame(self, frame: Frame, direction: FrameDirection):
             await super().process_frame(frame, direction)
             if isinstance(frame, VADUserStoppedSpeakingFrame):
+                state.vad_on = False
+                state.pending += 1               # Whisper writes this piece down now
                 state.turn.vad_stop = time.monotonic()
             elif isinstance(frame, VADUserStartedSpeakingFrame):
+                state.vad_on = True
                 state.turn = Timeline()          # talked on: the clock starts again at the next pause
                 state.ahead("drop")
+                state.send({"type": "speech"})
             await self.push_frame(frame, direction)
 
     class WhisperSTT(SegmentedSTTService):
@@ -420,6 +512,15 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             return False
 
         async def run_stt(self, audio: bytes):
+            text = await self._words(audio)
+            state.pending = max(0, state.pending - 1)
+            if text:
+                yield TranscriptionFrame(text, "owner", time.strftime("%Y-%m-%dT%H:%M:%S"), finalized=True)
+            elif not state.heard:                # only noise since the last turn: no turn is going on
+                state.send({"type": "quiet"})
+            yield Transcribed()
+
+        async def _words(self, audio: bytes) -> str:
             t = state.turn
             t.stt_start = time.monotonic()
             lang = "en" if state.language_mode == "en" else None
@@ -428,11 +529,11 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             except Exception as exc:   # nothing that sounds like words (or Whisper failed): no turn
                 log.info("rtc: speech to text: %s: %s", type(exc).__name__, exc)
                 t.stt_done = time.monotonic()
-                return
+                return ""
             t.stt_done = time.monotonic()
             text = heard(tr.text or "")
             if not text:
-                return
+                return ""
             t.text = f"{t.text} {text}".strip()
             if tr.language in ("en", "de"):
                 t.language = state.language = tr.language
@@ -440,13 +541,15 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             state.ahead("start", state.heard, t.language or state.language)   # before Smart Turn has decided
             state.send({"type": "heard", "text": text, "language": tr.language,
                         "stt_ms": int((t.stt_done - t.stt_start) * 1000)})
-            yield TranscriptionFrame(text, "owner", time.strftime("%Y-%m-%dT%H:%M:%S"), finalized=True)
+            return text
 
     class EndOfTurn(FrameProcessor):
         async def process_frame(self, frame: Frame, direction: FrameDirection):
             await super().process_frame(frame, direction)
             if isinstance(frame, UserStoppedSpeakingFrame):
                 state.turn.turn_end = time.monotonic()
+            elif isinstance(frame, (Tapped, Transcribed)):
+                return                           # the turn strategies' markers end here
             await self.push_frame(frame, direction)
 
     class Answer(LLMService):
@@ -466,6 +569,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                 if text and state.gate is not None and not await state.gate():   # not the owner (speaker.py)
                     text = ""
                     state.ahead("drop")
+                state.tap = None                 # the turn is taken (or ignored): the VAD listens again
                 if text:
                     state.number += 1
                     speaker = RtcSpeaker(state.number)
@@ -486,7 +590,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
 
         async def _answer(self, text: str, turn: Timeline, speaker: RtcSpeaker):
             state.send({"type": "transcript", "text": text, "language": turn.language, "turn": speaker.turn,
-                        "server": turn.ms()})
+                        "server": turn.ms(), **({"ended": "tap"} if turn.tapped is not None else {})})
             speaker.server = turn.ms()
             work = asyncio.get_running_loop().create_task(answer(text, turn.language or state.language, speaker.turn, speaker))
             work.add_done_callback(_quiet)
@@ -557,8 +661,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     stop = TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3(
         smart_turn_model_path=smart_turn_model, params=SmartTurnParams(stop_secs=TURN_MAX_SILENCE_S)))
     pair = LLMContextAggregatorPair(LLMContext(), user_params=LLMUserAggregatorParams(
-        user_turn_strategies=UserTurnStrategies(stop=[stop])))
-    pipeline = Pipeline([transport.input(), VADProcessor(vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=VAD_STOP_S))),
+        user_turn_strategies=UserTurnStrategies(stop=[TapStop(), stop])))
+    pipeline = Pipeline([transport.input(), VADProcessor(vad_analyzer=OwnerVAD(params=VADParams(stop_secs=VAD_STOP_S))),
                          Watch(), WhisperSTT(), pair.user(), EndOfTurn(), Answer(), KairoTTS(), transport.output(),
                          Spoken(), pair.assistant()])
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True, audio_out_sample_rate=OUT_RATE))
@@ -572,8 +676,13 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     @transport.event_handler("on_app_message")
     async def _from_phone(_transport, message, _sender=None):
         """The phone asks Kairo to say a fixed line (a call's opening, or the greeting from the cache): no
-        model involved."""
+        model involved. Or the owner tapped "done": their turn ends now."""
         if not isinstance(message, dict):
+            return
+        if message.get("type") == "done":
+            if state.tap_now():
+                log.info("rtc: tapped: the turn ends once Whisper is through")
+                await task.queue_frames([Tapped()])
             return
         text = ""
         if message.get("type") == "say":
