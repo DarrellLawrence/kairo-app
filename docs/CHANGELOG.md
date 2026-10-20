@@ -18,6 +18,7 @@
 - Check-ins don't stack up any more: one open per kind (daily, weekly…); a newer one closes the older as missed (it still counts against the streak), a daily one expires at the end of its next day, and the pile already on the PC is cleaned up once.
 - Mail a machine sent (no-reply / notification / newsletter senders, mailing lists, auto-replies, what triage calls automatic) never causes a push: not as "suspicious mail", not as a reply loop, not in the brief. It is still labelled and listed. Mail from people notifies as before. A suspicious mail from a machine is labelled Kairo/Suspicious in Gmail, without a push.
 - The morning brief now sees the open loops (people waiting, promises), so an urgent one can make the top 3.
+- Calls: tap the orb when you're done talking and the turn ends at once (no wait for a pause; for loud rooms). The speaker check still runs on it; Voice speed shows "ended by tap".
 
 ## 2026-10-19 — build: your profile only in the vault (your decision)
 - Your profile file is out of the repo and out of the release. Kairo imported it once on your PC (Run diagnosis showed it); it lives only in the vault there (10 Profile/), which every chat reads. `private/` is ignored by git, and a test fails if it ever comes back.
