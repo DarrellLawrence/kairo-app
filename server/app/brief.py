@@ -157,6 +157,8 @@ class BriefMaker:
         for d in shown:
             row = s.get(OpenLoop, d["id"])
             if row is not None and row.status == "open":
+                if loops.personal(row) and not loops.pressing(row, now, self.profile.tz):
+                    continue          # said in the brief; its reminder still comes at a good moment (2026-10-20)
                 loops.mark_raised(s, row, now, self.profile.tz, times)
 
     # ---------------------------------------------------------------- write
