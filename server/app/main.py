@@ -2168,6 +2168,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/reviews")
     def list_reviews(status: str = "open", limit: int = 30):
         with session_for(engine) as s:
+            reviews.tidy(s, dt.datetime.now(profile.tz).date())   # one card per kind, never a stale day
             q = select(Review).order_by(Review.period_start.desc(), Review.id.desc()).limit(min(limit, 200))
             if status != "all":
                 q = q.where(Review.status == status)

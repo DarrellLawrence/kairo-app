@@ -14,6 +14,13 @@ Schedule (owner's timezone):
   yearly     last Sunday of December
 When several fall on the same Sunday, only the biggest is created (the yearly
 review covers the month, the quarter and the half-year).
+
+At most one open review per kind (owner's report 2026-10-20: missed check-ins
+stacked up): a new one turns every older open one of its kind into "missed",
+and a daily check-in still open at the end of its next day is missed too.
+tidy() applies both; it runs on start, on every new review and before the
+open list is read. A missed review gets no push (a held one is dropped), adds
+no check-in, so the streak counts the day as missed.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from dataclasses import asdict, dataclass
 
 from sqlmodel import Session, select
 
-from . import life, location, vault
+from . import life, location, push, vault
 from .db import Approval, Checkin, OnboardingAnswer, Review, Task, utcnow
 
 BIG = ["weekly", "monthly", "quarterly", "half_year", "yearly"]   # smallest -> biggest
@@ -214,8 +221,29 @@ def create(session: Session, kind: str, day: dt.date, tz=None) -> tuple[Review, 
                prefill_json=json.dumps(prefill(session, kind, start, end, tz)))
     session.add(r)
     session.commit()
+    tidy(session, kind=kind)   # the older open ones of this kind are missed (or this one, if it is the older)
     session.refresh(r)
     return r, True
+
+
+def tidy(session: Session, today: dt.date | None = None, *, kind: str | None = None) -> int:
+    """Only the newest open review per kind stays open; with `today`, a daily one also expires at the
+    end of its next day. The rest become "missed" and their held pushes are dropped. Returns how many."""
+    q = select(Review).where(Review.status == "open")
+    if kind:
+        q = q.where(Review.kind == kind)
+    seen, n = set(), 0
+    for r in session.exec(q.order_by(Review.period_start.desc(), Review.id.desc())).all():
+        stale = today is not None and r.kind == "daily" and r.period_start < today - dt.timedelta(days=1)
+        if r.kind in seen or stale:
+            r.status = "missed"
+            session.add(r)
+            push.drop_held(session, f"/#reviews/{r.id}", "the review was missed")
+            n += 1
+        seen.add(r.kind)
+    if n:
+        session.commit()
+    return n
 
 
 def as_dict(r: Review) -> dict:

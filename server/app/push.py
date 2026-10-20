@@ -63,6 +63,15 @@ def in_quiet_hours(profile: Profile, now: datetime | None = None) -> bool:
     return (start <= t or t < end) if start > end else (start <= t < end)
 
 
+def drop_held(s: Session, url: str, why: str) -> int:
+    """A held push whose subject is gone (a review that was missed) never goes out. The caller commits."""
+    rows = s.exec(select(PushLog).where(PushLog.status == "held").where(PushLog.url == url)).all()
+    for r in rows:
+        r.status, r.why = "dropped", why
+        s.add(r)
+    return len(rows)
+
+
 class Pusher:
     def __init__(self, *, engine, secrets_dir: Path, profile: Profile, sender: Callable | None = None,
                  max_per_day: Callable[[], int] | None = None):

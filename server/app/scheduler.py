@@ -12,7 +12,7 @@ APScheduler in the backend process, in the owner's timezone. Rules for every job
 Missed runs (PC off or Kairo restarting): APScheduler keeps no schedule across restarts, so
 catch_up() runs what matters when Kairo starts: the brief if it is before 10:00 and today's
 brief is missing, triage, open loops and the PA when their last run is older than their interval,
-and the reviews (fix plan item 23).
+and the reviews (fix plan item 23); reviews that stacked up meanwhile are missed (reviews.tidy).
 """
 
 from __future__ import annotations
@@ -340,7 +340,7 @@ class Jobs:
     def _daily_review_body(self, ctx: JobContext, day: dt.date | None = None) -> None:
         day = day or self.today()
         r, created = reviews.create(ctx.session, "daily", day, self.profile.tz)
-        if created:
+        if created and r.status == "open":   # one for an older day than an open one is missed at once
             from .voice import calls
             rang = None
             if calls.options(ctx.session)["checkin"]:   # a real question, but still only in a call window (v8 D)
@@ -358,7 +358,7 @@ class Jobs:
         if not kind:
             raise Skipped("no review due today")
         r, created = reviews.create(ctx.session, kind, day, self.profile.tz)
-        if created:
+        if created and r.status == "open":
             self.pusher.notify(reviews.TITLES[kind], f"About {reviews.MINUTES[kind]} minutes. Kairo filled in what it knows.",
                                f"/#reviews/{r.id}", source="review")
 
@@ -373,6 +373,11 @@ class Jobs:
     def catch_up(self, now: dt.datetime | None = None) -> None:
         """Kairo was off (or restarting) at a scheduled time: run what matters now (fix plan item 23)."""
         now = (now or self.now()).astimezone(self.profile.tz)
+        try:   # reviews that stacked up while Kairo was off (or before the one-open-per-kind rule) are missed
+            with Session(self.engine) as s:
+                reviews.tidy(s, now.date())
+        except Exception:
+            log.exception("review cleanup failed")
         if now.strftime("%H:%M") >= self.times["big"]:
             self.big_review(now.date())
         if now.strftime("%H:%M") >= self.times["daily"]:

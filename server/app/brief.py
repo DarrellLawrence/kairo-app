@@ -17,7 +17,7 @@ import logging
 from sqlmodel import Session, select
 
 from .portal.olat import mark_briefed as portal_mark_briefed, news as portal_news
-from . import dues, life, location, triage, vault
+from . import dues, life, location, reviews, triage, vault
 from .db import Approval, Brief, Capture, Checkin, OpenLoop, Review, SchoolEvent, Task
 from .google.client import GoogleError, GoogleNotConnected
 from .jobkit import JOB_RULES, clip, extract_json
@@ -68,6 +68,7 @@ class BriefMaker:
         return r.events, (None if r.ok else r.error)
 
     def gather(self, s: Session, day: dt.date) -> dict:
+        reviews.tidy(s, day)   # first: it commits; no stale check-in in the brief
         tz = self.profile.tz
         week_end = dt.datetime.combine(day + dt.timedelta(days=7), dt.time.max, tzinfo=tz)
         day_start = dt.datetime.combine(day, dt.time.min, tzinfo=tz)

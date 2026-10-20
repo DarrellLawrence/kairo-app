@@ -218,7 +218,7 @@ class Review(SQLModel, table=True):
     period_end: dt.date | None = None
     vault_path: str | None = None
     commitments_json: str | None = None
-    status: str = Field(default="open", index=True)  # open / done / skipped
+    status: str = Field(default="open", index=True)  # open / done / skipped / missed (free text, reviews.tidy)
     prefill_json: str | None = Field(default=None, sa_column=Column(Text))   # what Kairo gathered
     answers_json: str | None = Field(default=None, sa_column=Column(Text))   # the owner's answers
     created_at: datetime | None = Field(default_factory=utcnow)
