@@ -35,10 +35,11 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from . import dues, vault
+from . import dues, machine_mail, vault
 from .audit import audit
 from .db import AuditLog, OpenLoop, Person, ReplySender, SchoolEvent, SettingKV, Task, TriagedEmail, utcnow
 from .jobkit import JOB_RULES, clip, extract_json
+from .machine_mail import address as _email, automated_sender
 from .scheduler import JobContext, Skipped
 from .tools import _body_text, _headers, untrusted
 
@@ -647,25 +648,6 @@ def _name(sender: str | None) -> str | None:
     return clip(name, 60) or None
 
 
-def _email(sender: str | None) -> str | None:
-    m = re.search(r"<([^>]+)>", sender or "")
-    return (m.group(1) if m else (sender or "")).strip().lower() or None
-
-
-AUTOMATED_LOCAL = re.compile(r"^(no-?reply|do-?not-?reply|donotreply|noreply|notifications?|newsletters?|news|marketing|"
-                             r"promo(tions)?|mailer(-daemon)?|bounces?|updates?|alerts?|digest)([+.-].*)?$", re.I)   # info@, hello@, team@: by headers
-AUTOMATED_DOMAIN = re.compile(r"(mailchimp|sendgrid|mailgun|mcsv\.net|amazonses|sparkpost|hubspot|klaviyo|brevo|sendinblue|"
-                              r"constantcontact|mail\.instagram|facebookmail|linkedin\.com|accounts\.google)", re.I)
-BULK_HEADERS = ("list-unsubscribe", "list-id")
-
-
-def automated_sender(sender: str | None) -> bool:
-    """Newsletters, notifications, promos: never a ping, never a loop. Real people, school, work are."""
-    email = _email(sender) or ""
-    local, _, domain = email.partition("@")
-    return bool(AUTOMATED_LOCAL.match(local) or AUTOMATED_DOMAIN.search(domain))
-
-
 NOT_A_REPLY = re.compile(
     r"\b(codes?|bestätigungscode|verification|verify|verifizier\w*|bestätig\w*|confirm (your|the) (email|e-mail|account|address)|"
     r"security (alert|code|notice)|sicherheits\w*|passwor[dt]|reset|sign-?in|log-?in|anmelde\w*|one-time|otp|2fa|"
@@ -685,7 +667,7 @@ def not_personal(sender: str | None, subject: str | None, summary: str | None) -
         return True
     email = _email(sender) or ""
     local, _, domain = email.partition("@")
-    if MARKETING_SUBDOMAIN.search(domain) or ACCOUNT_LOCAL.fullmatch(local) or re.match(r".*no-?reply", local, re.I):
+    if MARKETING_SUBDOMAIN.search(domain) or ACCOUNT_LOCAL.fullmatch(local):
         return True
     if local and domain and local == domain.split(".")[0]:   # sbb@sbb.ch, apple@apple.com: a company, not a person
         return True
@@ -695,30 +677,26 @@ def not_personal(sender: str | None, subject: str | None, summary: str | None) -
     return bool(NOT_A_REPLY.search(text))
 
 
-def rules_verdict(s: Session, m: TriagedEmail, bulk=False) -> tuple[bool, str] | None:
+def rules_verdict(s: Session, m: TriagedEmail, headers=None) -> tuple[bool, str] | None:
     """Does a real person wait on the owner's own answer to this mail, by the rules and the owner's own choices?
-    None: they can't tell (the model decides). `bulk`: the mail has bulk-mail headers, or a function that asks
-    Gmail, called only when nothing else decided. Used by the reply check and by triage (no task from a shop)."""
-    verdict = s.get(ReplySender, _email(m.sender) or "")
+    None: they can't tell (the model decides). A mail a machine sent never is, even from an address the owner
+    once answered (machine_mail, owner's report 2026-10-20). `headers`: the mail's headers (triage has them), or
+    a function that asks Gmail, called only when nothing else decided. Used by the reply check and by triage."""
     if m.suspicious:
         return False, "suspicious"
+    why = machine_mail.sent_by_machine(m.sender, None if callable(headers) else headers, m.category)
+    if why:
+        return False, f"automated ({why})"
+    verdict = s.get(ReplySender, _email(m.sender) or "")
     if verdict and verdict.verdict == "muted":
         return False, "you muted this sender"
     if verdict and verdict.verdict == "person":
         return True, "you answer them"
     if not_personal(m.sender, m.subject, m.summary):
         return False, "automated (rules)"
-    if bulk() if callable(bulk) else bulk:
-        return False, "automated (bulk mail headers)"
+    if callable(headers) and (why := machine_mail.sent_by_machine(headers=headers)):
+        return False, f"automated ({why})"
     return None
-
-
-def automated_headers(headers: dict[str, str]) -> bool:
-    if any(h in headers for h in BULK_HEADERS):
-        return True
-    if (headers.get("precedence") or "").lower() in ("bulk", "list", "junk"):
-        return True
-    return (headers.get("auto-submitted") or "no").lower() != "no"
 
 
 def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=None) -> dict:
@@ -731,6 +709,11 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=
     for m in s.exec(select(TriagedEmail).where(TriagedEmail.category == "reply")
                     .where(TriagedEmail.triaged_at >= since_cut)).all():
         if m.suspicious or m.personal_reply is not True:   # only real people waiting on the owner (reply check)
+            continue
+        if why := machine_mail.sent_by_machine(m.sender, category=m.category):
+            m.personal_reply, m.reply_why = False, f"automated ({why})"   # once taken for a person (2026-10-20)
+            s.add(m)
+            s.commit()
             continue
         if owner is not None and owner.is_me(email=_email(m.sender)):
             continue                                         # the owner's own mail (another address, a note to self)
@@ -786,8 +769,9 @@ def sync(s: Session, *, now: dt.datetime, tz, times: dict, answered=None, owner=
             e = s.get(SchoolEvent, int(loop.source_ref)) if (loop.source_ref or "").isdigit() else None
             if e is None or aware(e.date) < now - dt.timedelta(hours=12):
                 reason = "stale"
-        elif loop.source == "email" and (m0 := s.get(TriagedEmail, loop.source_ref)) is not None and m0.personal_reply is False:
-            reason = "automated"   # noise from before the reply check, or the owner muted the sender
+        elif loop.source == "email" and (m0 := s.get(TriagedEmail, loop.source_ref)) is not None and (
+                m0.personal_reply is False or machine_mail.sent_by_machine(m0.sender, category=m0.category)):
+            reason = "automated"   # noise from before the reply check, a machine's mail, or the owner muted the sender
         elif loop.source == "email" and answered is not None:
             m = s.get(TriagedEmail, loop.source_ref)
             try:
@@ -936,8 +920,11 @@ class LoopEngine:
         if pick is None:
             why = "in a calendar event" if len(waits) < len(due) else f"waiting for a good moment ({next(iter(waits.values()))})"
             return json.dumps({**counts, "raised": None, "why": why})
-        if pick.kind == "reply" and pick.source == "email" and self._is_bulk(pick):
-            _close(pick, "automated", now)          # a newsletter or notification after all: never a ping
+        if pick.source == "email" and (why := self._machine(s, pick)):
+            _close(pick, "automated", now)          # a machine's mail after all (its headers): never a ping
+            if (m := s.get(TriagedEmail, pick.source_ref or "")) is not None:
+                m.personal_reply, m.reply_why = False, f"automated ({why})"   # nor "needs a reply" in the brief
+                s.add(m)
             s.add(pick)
             s.commit()
             return json.dumps({**counts, "raised": None, "why": "automated mail"})
@@ -981,7 +968,7 @@ class LoopEngine:
         out = {"person": 0, "not": 0, "unsure": 0}
         ask = []
         for m in todo:
-            got = rules_verdict(s, m, bulk=functools.partial(self._is_bulk_ref, m.message_id))
+            got = rules_verdict(s, m, headers=functools.partial(self._mail_headers, m.message_id))
             if got is None:
                 ask.append(m)
                 continue
@@ -1007,20 +994,25 @@ class LoopEngine:
             out["person" if m.personal_reply else "unsure" if m.reply_why == "unsure" else "not"] += 1
         return out
 
-    def _is_bulk_ref(self, message_id: str) -> bool:
-        return self._is_bulk(OpenLoop(kind="reply", source="email", source_ref=message_id, what=""))
+    def _machine(self, s: Session, loop: OpenLoop) -> str | None:
+        """Did a machine send the loop's mail after all? The shared decision, with the mail's headers from Gmail."""
+        m = s.get(TriagedEmail, loop.source_ref or "")
+        return machine_mail.sent_by_machine(m.sender if m else loop.who_email,
+                                            functools.partial(self._mail_headers, loop.source_ref),
+                                            m.category if m else None)
 
-    def _is_bulk(self, loop: OpenLoop) -> bool:
+    def _mail_headers(self, message_id: str | None) -> dict[str, str]:
+        """The headers the machine check reads, from Gmail ({} when Gmail can't be read: then they don't decide)."""
         try:
             g = self.google_read()
             try:
-                msg = g.get(f"/gmail/v1/users/me/messages/{loop.source_ref}", format="metadata",
-                            metadataHeaders=["List-Unsubscribe", "List-Id", "Precedence", "Auto-Submitted"])
+                msg = g.get(f"/gmail/v1/users/me/messages/{message_id}", format="metadata",
+                            metadataHeaders=list(machine_mail.HEADER_NAMES))
             finally:
                 g.close()
         except Exception:
-            return False
-        return automated_headers({k.lower(): v for k, v in _headers(msg).items()})
+            return {}
+        return _headers(msg)
 
     def _where(self, s: Session, now: dt.datetime) -> str | None:
         """Home, out or on the way, from the location events (home: the places of kind home); None: unknown."""
