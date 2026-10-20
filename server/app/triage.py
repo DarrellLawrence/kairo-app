@@ -9,7 +9,8 @@
 
 Mail is untrusted: nothing here can create an approval card (jobs can't), and
 the model only returns data. A suspicious mail is labelled and listed, never
-acted on.
+acted on; the owner gets a push about it only when a person sent it: mail a
+machine sent never causes a push (machine_mail, owner's report 2026-10-20).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from email.utils import parsedate_to_datetime
 
 from sqlmodel import Session, or_, select
 
-from . import loops
+from . import loops, machine_mail
 from .audit import audit
 from .db import Task, TriagedEmail, utcnow
 from .gate import TOOL_PREFIX, PROPOSE_TOOL
@@ -84,7 +85,8 @@ class Triage:
                 mails.append({"id": full["id"], "thread_id": full.get("threadId"), "from": h.get("from"),
                               "subject": h.get("subject"), "date": h.get("date"),
                               "body": (_body_text(full.get("payload") or {}) or full.get("snippet", ""))[:BODY_CHARS],
-                              "bulk": loops.automated_headers(h)})   # Kairo's own note, not shown to the model
+                              # for Kairo's own machine check (machine_mail), never shown to the model
+                              "headers": {k: h[k] for k in (n.lower() for n in machine_mail.HEADER_NAMES) if k in h}})
             return mails
         except GoogleNotConnected as exc:
             raise Skipped(f"Google not connected: {exc}") from exc
@@ -106,6 +108,7 @@ class Triage:
             mail = by_id.pop(row["id"])
             category = row.get("category") if row.get("category") in CATEGORIES else "fyi"
             suspicious = row.get("suspicious") is True
+            machine = machine_mail.sent_by_machine(mail.get("from"), mail.get("headers") or {}, category)
             item = TriagedEmail(message_id=mail["id"], thread_id=mail.get("thread_id"), sender=clip(mail.get("from"), 200),
                                 subject=clip(mail.get("subject"), 300), received_at=_parse_date(mail.get("date")),
                                 category=category, summary=clip(row.get("summary"), 300),
@@ -118,7 +121,7 @@ class Triage:
             elif category == "reply":
                 # The reply check's rules right away: a date in a shop's, a newsletter's or a notification's mail is
                 # never a task (2026-10-19: a shop's feedback mail became three identical loops).
-                got = loops.rules_verdict(s, item, bulk=mail.get("bulk", False))
+                got = loops.rules_verdict(s, item, headers=mail.get("headers") or {})
                 if got is not None:
                     item.personal_reply, item.reply_why = got
                 if item.deadline and item.personal_reply is not False:
@@ -135,7 +138,10 @@ class Triage:
             labels = [CATEGORIES[item.category]] + ([SUSPICIOUS_LABEL] if suspicious else [])
             self._label(s, item.message_id, labels)
             if suspicious and self.on_flag:
-                self.on_flag(item)
+                if machine:   # labelled and listed, but a machine's mail never pushes (2026-10-20)
+                    log.info("suspicious mail %s not pushed: %s", item.message_id, machine)
+                else:
+                    self.on_flag(item)
         return json.dumps(counts)
 
     def _label(self, s: Session, message_id: str, labels: list[str]) -> None:
@@ -156,7 +162,7 @@ def classify(mails: list[dict], ask, *, today: dt.date, language: str) -> list[d
     """The model sorts mails: data only, no side effects (the triage job and acceptance test 7 use it).
     ask(prompt, system) -> AskResult. Rows whose id isn't one of the mails are dropped."""
     prompt = PROMPT.format(today=today.isoformat(), language=language,
-                           emails="\n\n".join(untrusted(f"an email (id {m['id']})", {k: v for k, v in m.items() if k != "bulk"})
+                           emails="\n\n".join(untrusted(f"an email (id {m['id']})", {k: v for k, v in m.items() if k != "headers"})
                                               for m in mails))
     answer = ask(prompt, JOB_RULES)
     if not answer.ok:

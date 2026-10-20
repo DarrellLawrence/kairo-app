@@ -224,7 +224,8 @@ def test_triage_makes_no_task_from_shop_or_bulk_mail(env):
     model = Model([{"id": mid, "category": "reply", "summary": "wants an answer", "deadline": "2026-10-23", "suspicious": False}
                    for mid in ("m1", "s1", "s2", "s3", "b1")])
     assert triage_job(env, model).run_job("email_triage", forced=True).status == "ok"
-    assert '"bulk"' not in model.prompts[0][0]                                   # the model sees the mail, nothing else
+    prompt = model.prompts[0][0].lower()
+    assert '"headers"' not in prompt and "list-unsubscribe" not in prompt          # the model sees the mail, nothing else
     with Session(env["engine"]) as s:
         assert [t.title for t in s.exec(select(Task)).all()] == ["Projektarbeit (from Mr. Keller)"]
         rows = {r.message_id: r for r in s.exec(select(TriagedEmail)).all()}
