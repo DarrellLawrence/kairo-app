@@ -450,3 +450,18 @@ def test_an_item_said_on_the_call_is_not_pushed_too(local):
             break
         time.sleep(0.05)
     assert row.raised == 1 and loops.aware(row.next_at) > dt.datetime.now(dt.timezone.utc)   # delivered: no push now
+
+
+
+def test_hello_on_the_old_line_is_the_greeting_too_never_claude(local):
+    """The voice model is off (the lab runs, it crashed): "hello" still gets the cached greeting at once."""
+    local.vm.pause()
+    local.voice.text = "Hello?"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert done["model"] == "greeting" and done["text"].startswith("Hey") and len(done["text"].split()) <= 2
+    assert [t for t, _ in local.voice.spoken] == [done["text"]]
+    msgs = [(m["role"], m["text"]) for m in local.get("/api/chat/messages").json()["messages"]]
+    assert msgs == [("owner", "(spoken, on a call) Hello?"), ("kairo", done["text"])]      # Claude never ran

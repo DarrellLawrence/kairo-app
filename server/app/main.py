@@ -1369,6 +1369,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if _mouth_ok(call_id) and await _mouth_turn(line, speaker, text, language, number, stt_ms):
             await speaker.done()
             return
+        if voicemouth.greeting_only(text):         # "hello" on the old line too: the cached greeting, never Claude
+            greeting = _greeting()
+            _rt_said("owner", text)
+            speaker.say(greeting)
+            await line.send({"type": "delta", "text": greeting, "turn": number})
+            await line.send({"type": "done", "text": greeting, "model": "greeting", "interrupted": False, "turn": number,
+                             "server": {"stt_ms": stt_ms}})
+            _rt_said("kairo", greeting)
+            speaker.finish()
+            await speaker.done()
+            return
 
         clean = speech.PlainStream()               # owner's call 2026-10-20: plain speech, never Claude's notes
 
