@@ -1,6 +1,7 @@
 // Voice call with Kairo (used daily). Full screen, the orb is the interface:
 // it follows your voice while listening and Kairo's while speaking. Talk over
-// Kairo to interrupt, tap the orb to pause, hang up any time: whatever you
+// Kairo to interrupt, tap the orb when you're done talking (in a loud room no
+// pause may end your turn) or to pause, hang up any time: whatever you
 // were still saying is still sent, and Kairo answers it in chat.
 // Voice V1: the whole call runs on one line to the PC (voicelink.js): your voice streams while you
 // talk, Kairo's answer streams back sentence by sentence.
@@ -11,7 +12,7 @@ import { spring } from '../design/motion.js'
 import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
 import { releaseWhileSpeaking, setReleaseWhileSpeaking, unlockAudio } from '../voice.js'
-import { QUIET_REASONS, realtimeStatus, startLine } from '../realtime.js'
+import { QUIET_REASONS, realtimeStatus, startLine, tapOrb as tapLine } from '../realtime.js'
 
 const HANG_UP = /\s*\[\[hang up\]\]\s*$/i
 const HANG_UP_ANY = /\s*\[\[hang up\]\]\s*/gi   // the marker is never spoken or shown
@@ -24,6 +25,7 @@ const HINT = {
   listening: 'Just talk. Pause when you are done.', thinking: '', speaking: 'Talk or tap to interrupt',
   paused: 'Tap the orb to go on', muted: 'Kairo can’t hear you',
 }
+const TALKING_HINT = 'Tap when you’re done'   // you're talking: a tap on the orb ends your turn now
 
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
@@ -34,6 +36,7 @@ export default function Call({ callId: initialId, onClose }) {
   const [log, setLog] = useState([])
   const [err, setErr] = useState('')
   const [needTap, setNeedTap] = useState(false)   // iOS didn't play Kairo's voice: "Tap to play"
+  const [talking, setTalking] = useState(false)   // the line hears a turn of yours: a tap on the orb ends it
   const [engine, setEngine] = useState(null)      // 'realtime' (OpenAI), 'webrtc' (the PC's own voice over WebRTC) or 'local' (the old line)
   const rtStatus = useRef(null)
   const [secs, setSecs] = useState(0)
@@ -100,8 +103,10 @@ export default function Call({ callId: initialId, onClose }) {
         state: (s) => {
           if (!l.on || s === 'idle') return
           if (s === 'speaking') setNeedTap(false)
+          if (s !== 'listening') setTalking(false)
           set(s === 'paused' && l.muted ? 'muted' : s)
         },
+        hearing: (h) => setTalking(Boolean(h)),
         transcript: (text) => {
           l.empty = 0
           l.reply = ''
@@ -160,8 +165,7 @@ export default function Call({ callId: initialId, onClose }) {
     unlockAudio()
     const l = live.current
     if (!l.on || !l.voice) return
-    if (l.phase === 'paused') { l.voice.resume(); return }
-    if (['listening', 'speaking', 'thinking'].includes(l.phase)) l.voice.pause()
+    tapLine(l.voice, l.phase)            // talking: your turn ends now; else pause / go on
   }
 
   const toggleMute = () => {
@@ -179,6 +183,7 @@ export default function Call({ callId: initialId, onClose }) {
   const ringing = phase === 'ringing'
   const over = ['missed', 'ended', 'error'].includes(phase)
   const orbState = ['listening', 'thinking', 'speaking', 'paused'].includes(phase) ? phase : phase === 'muted' ? 'paused' : 'idle'
+  const talkingNow = talking && phase === 'listening'
   return (
     <motion.div className="k-call" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.25 }}>
       <div className="k-call-top">
@@ -186,7 +191,7 @@ export default function Call({ callId: initialId, onClose }) {
       </div>
 
       <div className="k-call-stage">
-        <motion.button type="button" className="k-call-orb" onClick={tapOrb} aria-label={phase === 'paused' ? 'Go on' : 'Pause'}
+        <motion.button type="button" className="k-call-orb" onClick={tapOrb} aria-label={phase === 'paused' ? 'Go on' : talkingNow ? 'Done talking' : 'Pause'}
           initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: over ? 0.35 : 1 }} whileTap={{ scale: 0.96 }} transition={spring.smooth}>
           <VoiceOrb state={orbState} getLevel={getLevel} />
         </motion.button>
@@ -195,7 +200,7 @@ export default function Call({ callId: initialId, onClose }) {
             {LABEL[phase]}
           </motion.p>
         </AnimatePresence>
-        <p className="k-call-sub">{phase === 'error' ? err : ringing && call ? call.reason : HINT[phase] || ''}</p>
+        <p className="k-call-sub">{phase === 'error' ? err : ringing && call ? call.reason : talkingNow ? TALKING_HINT : HINT[phase] || ''}</p>
         {engine && !over && <p className="k-call-sub" style={{ opacity: 0.55 }}>{engine === 'realtime' ? 'Realtime voice' : engine === 'webrtc' ? 'Local voice · WebRTC' : 'Local voice'}</p>}
         {err && phase !== 'error' && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{err}</p>}
         {(needTap || phase === 'speaking') && (

@@ -870,9 +870,9 @@ function VoiceSpeedPage() {
           <List>
             {rep.recent.map((r, i) => (
               <ListRow key={i} title={`${new Date(parseTs(r.ts)).toLocaleTimeString()} · ${r.path.replace('_', ' ')} · ${r.model || '?'}`}
-                subtitle={r.line === 'webrtc'
-                  ? `${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''} · turn ${secs(r.steps.endpoint_ms)} · first word ${secs(r.steps.llm_ms)} · voice ${secs(r.steps.tts_ms)} · network ${secs(r.steps.net_ms)}${r.net ? ` (${r.net})` : ''}`
-                  : `${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''} · STT ${secs(r.steps.stt_ms)} · first words ${secs(r.steps.first_words_ms)} · voice ${secs(r.steps.tts_ms)}`}
+                subtitle={`${r.total_ms != null ? secs(r.total_ms) : 'no audio'}${r.reason ? ` · ${r.reason}` : ''}${r.ended === 'tap' ? ' · ended by tap' : ''}${r.line === 'webrtc'
+                  ? ` · turn ${secs(r.steps.endpoint_ms)} · first word ${secs(r.steps.llm_ms)} · voice ${secs(r.steps.tts_ms)} · network ${secs(r.steps.net_ms)}${r.net ? ` (${r.net})` : ''}`
+                  : ` · STT ${secs(r.steps.stt_ms)} · first words ${secs(r.steps.first_words_ms)} · voice ${secs(r.steps.tts_ms)}`}`}
                 value={<Badge tone={['played', 'text'].includes(r.outcome) ? 'ok' : 'warn'} pop={false}>{r.outcome}</Badge>} />
             ))}
           </List>

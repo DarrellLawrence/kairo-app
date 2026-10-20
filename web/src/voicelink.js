@@ -335,9 +335,10 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
   }
 
   // endedAt: when you stopped talking (the quiet before the end counts as Kairo's time).
-  const endSpeech = (endedAt, byPc = null) => {
+  // tapped: you tapped "done" (Voice speed shows how the turn ended).
+  const endSpeech = (endedAt, byPc = null, tapped = false) => {
     pending.length = 0
-    turn = startTurn(path, endedAt)
+    turn = startTurn(path, endedAt, tapped ? { ended: 'tap' } : {})
     turn.mark('endpoint')
     if (byPc) {                                  // the PC ended the turn (smart endpointing): its number
       turnNo = byPc.turn
@@ -483,7 +484,7 @@ export function startVoice({ path = 'call', callId = null, on = {} } = {}) {
     finish() {
       if (!vad.speaking) return false
       vad.reset()
-      endSpeech(performance.now())
+      endSpeech(performance.now(), null, true)
       return true
     },
     /* Kairo says this (a greeting), no model involved. */

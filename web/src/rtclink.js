@@ -2,7 +2,8 @@
 // (server/app/voicertc.py). Your voice goes as WebRTC audio (Opus, the iPhone's echo cancellation)
 // straight to the PC over Tailscale; Kairo's voice comes back on the same connection and plays in an
 // <audio> element (so echo cancellation knows what to cancel and you can talk over Kairo). The PC
-// decides when you're done (Silero VAD + Smart Turn) and stops its voice when you talk over it. A data
+// decides when you're done (Silero VAD + Smart Turn), or you tap (finish(): owner's request 2026-10-20,
+// for a loud room where the PC never hears a pause), and stops its voice when you talk over it. A data
 // channel carries the captions and the PC's own times.
 //
 // Order on iOS: the mic first (getUserMedia), then the peer connection (without the mic permission,
@@ -57,11 +58,12 @@ export function makeRtcMeter(path, { start = startTurn, now = () => performance.
     get turn() { return turn },
     get number() { return number },
     network(values) { net = { ...net, ...values } },
-    heard(f, lastVoice) {          // "transcript": the PC heard a whole turn
+    heard(f, lastVoice, tappedAt = null) {   // "transcript": the PC heard a whole turn
       if (turn) finish(turn.has('playing') ? 'played' : 'interrupted', turn.has('playing') ? null : 'talked on')
       const t = now()
-      const endedAt = lastVoice != null && t - lastVoice < 5000 ? lastVoice : t - 300
-      turn = start(path, endedAt, { line: 'webrtc', ...net })
+      const tapped = f.ended === 'tap' && tappedAt != null      // you tapped "done": the turn ended then
+      const endedAt = tapped ? tappedAt : lastVoice != null && t - lastVoice < 5000 ? lastVoice : t - 300
+      turn = start(path, endedAt, { line: 'webrtc', ...net, ...(tapped ? { ended: 'tap' } : {}) })
       number = f.turn
       turn.server(f.server)
       turn.mark('endpoint', endedAt + (f.server?.turn_at_ms ?? 0))
@@ -143,8 +145,11 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   let spoken = false          // the PC's voice went quiet after it
   let disconnectedAt = null
   let reply = ''
+  let talking = false         // the PC hears a turn of yours (speech, or words not answered yet): a tap ends it
+  let tappedAt = null
 
   const set = (s) => { if (state !== s) { state = s; on.state?.(s) } }
+  const hear = (v) => { if (talking !== v) { talking = v; on.hearing?.(v) } }
   const send = (obj) => { if (dc?.readyState === 'open') dc.send(typeof obj === 'string' ? obj : JSON.stringify(obj)) }
 
   const teardown = () => {
@@ -189,11 +194,20 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     let f
     try { f = JSON.parse(raw) } catch { return }
     switch (f.type) {
+      case 'speech':                         // the PC's VAD hears speech: a turn starts or goes on
+        hear(true)
+        break
       case 'heard':                          // words at a pause (the turn may go on)
-        on.hearing?.(false)
+        if (f.text) hear(true)
+        break
+      case 'quiet':                          // only noise since the last turn: nothing to end
+      case 'ignored':                        // not you, or too far away (speaker check): not your turn
+        hear(false)
         break
       case 'transcript':
-        meter.heard(f, lastVoice.last)
+        hear(false)
+        meter.heard(f, lastVoice.last, tappedAt)
+        tappedAt = null
         reply = ''
         written = spoken = false
         set('thinking')
@@ -241,8 +255,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       const before = lastVoice.last
       lastVoice.feed(listening ? r : 0, t)
       if (lastVoice.last !== before && state === 'speaking') {   // you talk over Kairo: the PC stops it
-        meter.cut('talked over')
-        on.hearing?.(true)
+        meter.cut('talked over')                                // (and says "speech": your turn goes on)
         set('listening')
       }
     }
@@ -342,8 +355,14 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     engine: 'webrtc',
     get state() { return state },
     level() { return state === 'speaking' ? outLevel : state === 'listening' ? micLevel : 0 },
-    /* The PC decides when you're done; a tap can't end a turn sooner on this line. */
-    finish() { return false },
+    /* You tapped "done": the PC ends your turn now, without waiting for a pause (it still checks it's
+       you). False when the PC hears no turn of yours (nothing said yet): the tap is then a pause. */
+    finish() {
+      if (!talking || !listening || closed) return false
+      tappedAt = performance.now()
+      send({ type: 'done' })
+      return true
+    },
     /* "Hey <name>." when a call you placed connects: from the PC's cache, no model involved. */
     greet() {
       written = true
@@ -365,6 +384,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     },
     pause() {
       listening = false
+      hear(false)
       mic?.stream.getAudioTracks().forEach((t) => { t.enabled = false })
       if (audio) audio.muted = true
       meter.cut('paused')

@@ -2,7 +2,7 @@
 // what is tested here is when a turn starts (your last sound) and what it marks.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { QUIET_REASONS, makeLastVoice, makeLiveMeter } from '../src/realtime.js'
+import { QUIET_REASONS, makeLastVoice, makeLiveMeter, tapOrb } from '../src/realtime.js'
 
 function clock(t = 0) {
   return { now: () => t, set: (v) => { t = v } }
@@ -80,4 +80,26 @@ test('talking over Kairo or hanging up ends the turn as interrupted; an old last
 test('the call screen stays quiet when local voice is a choice, and speaks up when something is wrong', () => {
   for (const r of ['local', 'off', 'no_key']) assert.ok(QUIET_REASONS.includes(r), r)
   for (const r of ['cap', 'down', 'api', 'sideband', 'paused', 'updating', 'webrtc']) assert.ok(!QUIET_REASONS.includes(r), r)
+})
+
+test('the call orb: a tap while you talk means "I\'m done"; otherwise it pauses or goes on (owner, 2026-10-20)', () => {
+  const line = (talking) => {
+    const calls = []
+    return { calls, finish: () => { calls.push('finish'); return talking }, pause: () => calls.push('pause'), resume: () => calls.push('resume') }
+  }
+  let l = line(true)
+  assert.equal(tapOrb(l, 'listening'), 'done')                     // you're talking: your turn ends now
+  assert.deepEqual(l.calls, ['finish'])
+  l = line(false)
+  assert.equal(tapOrb(l, 'listening'), 'pause')                    // nothing heard yet: a pause, as before
+  assert.deepEqual(l.calls, ['finish', 'pause'])
+  for (const phase of ['speaking', 'thinking']) {                  // Kairo's turn: a pause, as before
+    l = line(true)
+    assert.equal(tapOrb(l, phase), 'pause')
+    assert.deepEqual(l.calls, ['pause'])
+  }
+  l = line(true)
+  assert.equal(tapOrb(l, 'paused'), 'resume')
+  assert.deepEqual(l.calls, ['resume'])
+  assert.equal(tapOrb(line(true), 'connecting'), null)
 })

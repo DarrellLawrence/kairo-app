@@ -346,6 +346,16 @@ export function startRealtime({ path = 'call', callId = null, on = {} } = {}) {
 // (owner's request 2026-10-20: the orange line only when something is wrong).
 export const QUIET_REASONS = ['local', 'off', 'no_key']
 
+/* A tap on the call's orb (owner's request 2026-10-20: "around people I can just tap it and then it knows
+   I'm done talking"): while Kairo listens and you've started talking, your turn ends now; otherwise it
+   pauses (or goes on when paused), as before. Returns what it did. */
+export function tapOrb(line, phase) {
+  if (phase === 'paused') { line.resume(); return 'resume' }
+  if (phase === 'listening' && line.finish()) return 'done'
+  if (['listening', 'speaking', 'thinking'].includes(phase)) { line.pause(); return 'pause' }
+  return null
+}
+
 export function startLine({ path = 'call', callId = null, on = {}, status = null } = {}) {
   let cur = null
   let closed = false

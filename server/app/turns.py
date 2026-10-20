@@ -205,7 +205,8 @@ def summary(s: Session, days: int = 7, now: dt.datetime | None = None, versions:
             d = json.loads(r.device_json or "{}")
         except ValueError:
             d = {}
-        return {"line": d.get("line") or "ws", "net": d.get("net"), "via": d.get("via")}
+        # ended: "tap" = the owner tapped "I'm done" (owner's request 2026-10-20), else the pause ended it
+        return {"line": d.get("line") or "ws", "net": d.get("net"), "via": d.get("via"), "ended": d.get("ended")}
     recent = [{"ts": _aware(r.ts).isoformat(), "version": r.version, "path": r.path, "model": r.model,
                "total_ms": r.total_ms, "outcome": r.outcome, "reason": r.reason, "steps": json.loads(r.steps_json or "{}"),
                **line_of(r)}

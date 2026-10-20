@@ -101,6 +101,26 @@ def test_the_turn_clock_counts_from_the_end_of_speech():
     assert Timeline().ms() == {}
 
 
+def test_a_tapped_turn_is_timed_from_the_tap():
+    """The owner tapped "done" at 10.0 (the VAD's speech was cut 20 ms later): no pause was waited for."""
+    ms = Timeline(vad_stop=10.02, stt_start=10.02, stt_done=10.14, turn_end=10.15, tapped=10.0, first_token=10.3,
+                  tts_start=10.3, first_audio=10.32).ms()
+    assert ms["vad_ms"] == 0 and ms["turn_at_ms"] == 150 and ms["first_audio_at_ms"] == 320 and ms["stt_ms"] == 120
+
+
+def test_a_tap_counts_only_when_something_was_heard_and_never_holds_the_call_for_long():
+    s = voicertc._State(answer=None, interrupt=lambda n: None, events=lambda m: None, language_mode="auto")
+    assert s.tap_now() is False and s.tapping() is None          # nothing heard since the last turn
+    for heard in ({"vad_on": True}, {"pending": 1}, {"heard": "remind me"}):
+        s = voicertc._State(answer=None, interrupt=lambda n: None, events=lambda m: None, language_mode="auto")
+        for k, v in heard.items():
+            setattr(s, k, v)
+        assert s.tap_now() is True and s.tapping() == "waiting", heard
+        assert s.tap_now() is False                               # one tap at a time
+    s.pending, s.tap_at = 2, s.tap_at - voicertc.TAP_HOLD_S - 0.1   # never taken (Whisper stuck): let go
+    assert s.tapping() is None and s.pending == 0
+
+
 def test_the_opener_cache_keeps_short_lines_only():
     made = []
 
@@ -154,13 +174,14 @@ def _speech_48k():
     return y
 
 
-def _phone_track(times: list[float]):
+def _phone_track(times: list[float], speech=None):
     """The phone's microphone: half a second of room, then speech at each of `times` (seconds after the
-    start), silence otherwise; real-time pace, 20 ms frames at 48 kHz."""
+    start), silence otherwise; real-time pace, 20 ms frames at 48 kHz. speech: 48 kHz samples (default:
+    the recorded sentence)."""
     import numpy as np
     from aiortc import MediaStreamTrack
     from av import AudioFrame
-    speech = _speech_48k()
+    speech = _speech_48k() if speech is None else speech
 
     class Mic(MediaStreamTrack):
         kind = "audio"
@@ -191,15 +212,18 @@ def _phone_track(times: list[float]):
 
 
 async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_after, timeout=25.0, interrupt=None,
-                voice=None, openers=None, greeting=None, first_message=None, warning=None):
-    """A fake phone calls Kairo over WebRTC on this machine. Returns what the phone saw."""
+                voice=None, openers=None, greeting=None, first_message=None, warning=None, speech=None, later=(),
+                gate=None):
+    """A fake phone calls Kairo over WebRTC on this machine. Returns what the phone saw.
+    later: (seconds after the mic started, message[, event]) sent on the data channel then, once the PC sent
+    that event (the phone taps "done" only after the PC said it hears speech); phone.sent: when."""
     import numpy as np
     from aiortc import RTCPeerConnection, RTCSessionDescription
     voicertc.tailnet_only(allow_loopback=True)      # the fake phone is in this process: it offers 127.0.0.1 too
     voice = voice or FakeVoice()
-    phone = SimpleNamespace(events=[], audio_after=[], mic=None, loud=[])
+    phone = SimpleNamespace(events=[], audio_after=[], mic=None, loud=[], sent=[])
     pc = RTCPeerConnection()
-    mic = _phone_track(list(times))
+    mic = _phone_track(list(times), speech)
     phone.mic = mic
     pc.addTrack(mic)
     channel = pc.createDataChannel("kairo")
@@ -221,6 +245,15 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
                     channel.send(json.dumps(first_message))
                     sent = True
 
+    async def script():
+        for at, msg, *after in later:
+            while (mic.t0 is None or channel.readyState != "open"
+                   or (after and not any(e.get("type") == after[0] for e in phone.events))):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(max(0.0, mic.t0 + at - time.monotonic()))
+            channel.send(json.dumps(msg))
+            phone.sent.append((time.monotonic(), msg))
+
     @pc.on("track")
     def on_track(track):
         async def read():
@@ -241,11 +274,12 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
     await pc.setLocalDescription(await pc.createOffer())
     conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
     call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers, greeting=greeting,
-                               warning=warning)
+                               warning=warning, gate=gate)
     run = asyncio.get_running_loop().create_task(call.run())
     ans = conn.get_answer()
     await pc.setRemoteDescription(RTCSessionDescription(sdp=ans["sdp"], type=ans["type"]))
     pinger = asyncio.get_running_loop().create_task(pings())
+    scripted = asyncio.get_running_loop().create_task(script())
     try:
         deadline = time.monotonic() + timeout
         while not wait_for(phone) and time.monotonic() < deadline:
@@ -253,6 +287,7 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
         await asyncio.sleep(0.3)
     finally:
         pinger.cancel()
+        scripted.cancel()
         await call.stop()
         await pc.close()
         await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), 10)
@@ -326,6 +361,93 @@ def test_talking_over_kairo_stops_its_voice_and_the_answer():
     # the long answer played until the owner talked (from 5.0 s), then not at all while they spoke
     assert any(1.0 < t < 5.0 for t in phone.loud)
     assert not [t for t in phone.loud if 5.8 < t < 7.4], [t for t in phone.loud if 5.8 < t < 7.4][:5]
+
+
+# ---------------------------------------------------------------- "I'm done": a tap ends the turn
+
+def _steady(seconds: float):
+    """A loud steady sound (48 kHz) that never pauses: with _loud_is_speech, the owner in a loud room, where
+    the VAD never hears the pause that would end the turn."""
+    import numpy as np
+    return (6000 * np.sin(2 * np.pi * 220 * np.arange(int(seconds * 48000)) / 48000)).astype(np.int16)
+
+
+def _loud_is_speech(monkeypatch):
+    """Silero hears every loud frame as speech, the way it hears a room full of people talking."""
+    import numpy as np
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    monkeypatch.setattr(SileroVADAnalyzer, "voice_confidence",
+                        lambda self, buf: 1.0 if np.abs(np.frombuffer(buf, np.int16)).max(initial=0) > 1000 else 0.0)
+
+
+def test_a_tap_ends_the_turn_at_once_when_the_pc_never_hears_a_pause(monkeypatch):
+    """Owner's request 2026-10-20: "when I'm around people I can just tap it and then it knows I'm done
+    talking". The VAD hears speech for 12 s without a pause; the phone sends "done" at 3 s: the turn ends
+    then (no pause, no Smart Turn), is answered, and is timed from the tap."""
+    _needs_pipecat()
+    _loud_is_speech(monkeypatch)
+    asked = []
+
+    async def answer(text, language, number, speaker):
+        asked.append((text, number, time.monotonic()))
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    voice = FakeVoice()
+    phone = asyncio.run(_call(answer, voice=voice, speech=_steady(14.0), later=((3.0, {"type": "done"}, "speech"),),
+                              wait_for=lambda p: bool(asked), timeout=10))
+    assert [(text, n) for text, n, _ in asked] == [(voice.text, 1)], phone.events
+    assert not phone.mic.ends or asked[0][2] < phone.mic.ends[0], "answered while the sound still goes on"
+    assert asked[0][2] - phone.sent[0][0] < 2.5, "answered right after the tap"
+    assert voice.heard == 1                                  # written down once, at the tap
+    transcript = next(e for e in phone.events if e.get("type") == "transcript")
+    assert transcript["ended"] == "tap"
+    assert transcript["server"]["vad_ms"] == 0               # no pause waited for: timed from the tap
+    kinds = [e.get("type") for e in phone.events]
+    assert kinds.index("speech") < kinds.index("transcript")  # the phone knew a turn was going on
+
+
+def test_a_tapped_turn_still_goes_through_the_speaker_check(monkeypatch):
+    """The tap skips the wait, not the checks: not the owner (or too far away) = no answer."""
+    _needs_pipecat()
+    _loud_is_speech(monkeypatch)
+    asked, checked = [], []
+
+    async def answer(text, language, number, speaker):
+        asked.append(text)
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    async def gate():
+        checked.append(time.monotonic())
+        return False
+
+    phone = asyncio.run(_call(answer, speech=_steady(14.0), later=((3.0, {"type": "done"}, "speech"),), gate=gate,
+                              wait_for=lambda p: bool(checked), timeout=10))
+    assert len(checked) == 1 and checked[0] - phone.sent[0][0] < 2.5, (checked, phone.events)
+    assert asked == []
+    assert not [e for e in phone.events if e.get("type") == "transcript"]
+
+
+def test_a_tap_with_nothing_said_does_nothing_and_the_call_listens_on(monkeypatch):
+    """"done" with no speech since the last turn is ignored (on the phone the tap pauses then); the next
+    turn is heard and ended the usual way (the pause)."""
+    _needs_pipecat()
+    _loud_is_speech(monkeypatch)
+    asked = []
+
+    async def answer(text, language, number, speaker):
+        asked.append((text, number, time.monotonic()))
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    voice = FakeVoice()
+    phone = asyncio.run(_call(answer, voice=voice, speech=_steady(1.5), times=(3.0,),
+                              later=((1.0, {"type": "done"}),), wait_for=lambda p: bool(asked), timeout=10))
+    assert voice.heard == 1 and [(text, n) for text, n, _ in asked] == [(voice.text, 1)], phone.events
+    assert asked[0][2] - phone.mic.ends[0] > 0.1             # ended by the pause after the speech, not by the tap
+    transcript = next(e for e in phone.events if e.get("type") == "transcript")
+    assert "ended" not in transcript
 
 
 # ---------------------------------------------------------------- through the app (/api/rtc/offer)
