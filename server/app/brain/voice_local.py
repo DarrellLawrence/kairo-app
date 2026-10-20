@@ -11,10 +11,11 @@ llama.cpp's prompt cache only has to read the newest words.
 
 from __future__ import annotations
 
-import asyncio
+import ast
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -51,6 +52,195 @@ ASK_KAIRO = {
         },
     },
 }
+
+
+# ---------------------------------------------------------------- tool calls written as text (owner's call 2026-10-20)
+# Some models write their tool calls into the words and llama-server passes them through as content:
+# LFM2 `<|tool_call_start|>[ask_kairo(request="...")]<|tool_call_end|>` (Pythonic), Hermes/Qwen
+# `<tool_call>{"name": ..., "arguments": {...}}</tool_call>`. After "Hello" a call once said the first one
+# out loud. TextCalls takes them out of the stream; nothing of a marker is ever spoken.
+
+_CALL_TAGS = {"<|tool_call_start|>": "<|tool_call_end|>", "<tool_call>": "</tool_call>"}
+_STRAY = ("<|tool_call_end|>", "</tool_call>")
+_SPECIAL = re.compile(r"<\|[^<>|\s]{1,40}\|>")            # any other special token (<|im_end|>, ...)
+_MAYBE_SPECIAL = re.compile(r"<\|[^<>|\s]{0,40}\|?")      # could still become one: wait for more
+_CALL_NAME = re.compile(r"""\s*\[?\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(|\s*\[?\s*\{\s*"name"\s*:\s*"([^"]{1,80})\"""")
+MAX_CALL_CHARS = 4000
+
+
+def _offered(tools: list[dict] | None) -> dict[str, tuple[list[str], list[str]]]:
+    """name -> (its parameters in order, the required ones), for the tools offered on this turn."""
+    out = {}
+    for t in tools or []:
+        fn = t.get("function") or t
+        params = fn.get("parameters") or {}
+        if fn.get("name"):
+            out[fn["name"]] = (list((params.get("properties") or {}).keys()), list(params.get("required") or []))
+    return out
+
+
+def _safe(name: str) -> str:
+    return re.sub(r"[^\w.\-]", "", str(name or ""))[:40] or "?"
+
+
+def check_call(name: str, args, offered: dict) -> str | None:
+    """None when the call may run; else why not. Valid only if the tool was offered on this turn and every
+    required argument is there and not empty (ask_kairo without request text is no call)."""
+    if name not in offered:
+        return "not offered on this turn"
+    if not isinstance(args, dict):
+        return "arguments are not an object"
+    for key in offered[name][1]:
+        v = args.get(key)
+        if v is None or (isinstance(v, str) and not v.strip()) or v in ([], {}):
+            return f"no {key}"
+    return None
+
+
+def _parse_body(body: str, offered: dict) -> list[tuple[str, dict | None]]:
+    """[(name, args or None when unreadable)] from what was between the tags. Pythonic calls are read with
+    ast (literals only: ast.literal_eval, never eval); JSON with json."""
+    b = body.strip()
+    if not b or len(b) > MAX_CALL_CHARS:
+        return [("?", None)]
+    if re.match(r"\[?\s*\{", b):
+        try:
+            data = json.loads(b)
+        except ValueError:
+            return [("?", None)]
+        out = []
+        for d in data if isinstance(data, list) else [data]:
+            if not isinstance(d, dict):
+                out.append(("?", None))
+                continue
+            args = d.get("arguments", d.get("parameters", {}))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args or "{}")
+                except ValueError:
+                    args = None
+            out.append((str(d.get("name") or "?"), args if isinstance(args, dict) else None))
+        return out
+    try:
+        tree = ast.parse(b, mode="eval").body
+    except (SyntaxError, ValueError):
+        return [("?", None)]
+    out = []
+    for node in tree.elts if isinstance(tree, (ast.List, ast.Tuple)) else [tree]:
+        if not isinstance(node, ast.Call) or not isinstance(node.func, (ast.Name, ast.Attribute)):
+            out.append(("?", None))
+            continue
+        name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        params = offered.get(name, ([], []))[0]
+        try:
+            args = {kw.arg: ast.literal_eval(kw.value) for kw in node.keywords if kw.arg}
+            if any(kw.arg is None for kw in node.keywords) or len(node.args) > len(params):
+                raise ValueError("unnamed arguments")
+            for key, value in zip(params, node.args):
+                args.setdefault(key, ast.literal_eval(value))
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            out.append((name, None))
+            continue
+        out.append((name, args))
+    return out
+
+
+class TextCalls:
+    """Takes tool calls written as text out of the streamed words. feed()/flush() give events: text (safe to
+    speak: never a piece of a marker), tool_start (the call's name is known and it was offered: the holding
+    line can start), tool_call (complete and valid; arguments as a JSON string, like the OpenAI-style path).
+    Invalid or not-offered calls are dropped without a word: only the tool's name and the reason are logged."""
+
+    def __init__(self, tools: list[dict] | None):
+        self.offered = _offered(tools)
+        self.buf = ""
+        self.closer: str | None = None       # inside a call: the tag that ends it
+        self.started = False                 # tool_start given for the call being written
+        self.n = 0
+
+    def feed(self, delta: str) -> list[dict]:
+        self.buf += delta or ""
+        out: list[dict] = []
+        while self.buf:
+            if self.closer is not None:
+                j = self.buf.find(self.closer)
+                if j < 0:
+                    self._early_start(out)
+                    if len(self.buf) > MAX_CALL_CHARS:          # runaway: keep only what could hold the end tag
+                        self.buf = self.buf[-len(self.closer):]
+                    return out
+                body, self.buf = self.buf[:j], self.buf[j + len(self.closer):]
+                self._early_start(out, body)
+                self._finish(body, out)
+                continue
+            i = self.buf.find("<")
+            if i < 0:
+                self._text(self.buf, out)
+                self.buf = ""
+                return out
+            if i:
+                self._text(self.buf[:i], out)
+                self.buf = self.buf[i:]
+            rest = self.buf
+            opener = next((o for o in _CALL_TAGS if rest.startswith(o)), None)
+            if opener is not None:
+                self.closer, self.started, self.buf = _CALL_TAGS[opener], False, rest[len(opener):]
+                continue
+            stray = next((s for s in _STRAY if rest.startswith(s)), None)
+            if stray is not None:
+                self.buf = rest[len(stray):]
+                continue
+            if any(t.startswith(rest) for t in (*_CALL_TAGS, *_STRAY)):
+                return out                                      # could still be a tag: wait for more
+            m = _SPECIAL.match(rest)
+            if m:
+                self.buf = rest[m.end():]                        # a special token: never spoken
+                continue
+            if _MAYBE_SPECIAL.fullmatch(rest):
+                return out
+            self._text("<", out)                                 # a plain "<" in the words
+            self.buf = rest[1:]
+        return out
+
+    def flush(self) -> list[dict]:
+        out = self.feed("")
+        if self.closer is not None:                              # cut off before its end tag (max tokens)
+            log.info("voice model: a tool call was dropped (%s: not finished)", self._name(self.buf))
+        elif self.buf and not any(t.startswith(self.buf) for t in (*_CALL_TAGS, *_STRAY)) \
+                and not _MAYBE_SPECIAL.fullmatch(self.buf):
+            self._text(self.buf, out)
+        self.buf, self.closer = "", None
+        return out
+
+    def _text(self, text: str, out: list[dict]) -> None:
+        if text:
+            out.append({"kind": "text", "text": text})
+
+    def _name(self, body: str) -> str:
+        m = _CALL_NAME.match(body)
+        return _safe((m.group(1) or m.group(2)) if m else "?")
+
+    def _early_start(self, out: list[dict], body: str | None = None) -> None:
+        if self.started:
+            return
+        m = _CALL_NAME.match(self.buf if body is None else body)
+        name = (m.group(1) or m.group(2)) if m else None
+        if name in self.offered:
+            self.started = True
+            out.append({"kind": "tool_start", "name": name})
+
+    def _finish(self, body: str, out: list[dict]) -> None:
+        self.closer = None
+        for name, args in _parse_body(body, self.offered):
+            why = "unreadable arguments" if args is None else check_call(name, args, self.offered)
+            if why:
+                log.info("voice model: a tool call was dropped (%s: %s)", _safe(name), why)
+                continue
+            props = self.offered[name][0]
+            out.append({"kind": "tool_call", "id": f"call_text{self.n}", "name": name,
+                        "arguments": json.dumps({k: v for k, v in args.items() if not props or k in props},
+                                                ensure_ascii=False)})
+            self.n += 1
 
 
 def server_args(model: Path, *, port: int = PORT, context: int = 8192) -> list[str]:
@@ -255,10 +445,13 @@ class VoiceModel:
 
     async def stream(self, messages: list[dict], *, tools: list[dict] | None = None, temperature: float = 0.6,
                      max_tokens: int = 300) -> AsyncIterator[dict]:
-        """Events: {"kind": "text", "text"} as it is written; {"kind": "tool_call", "id", "name", "arguments"}
-        once a call is complete; {"kind": "done", "finish", "first_token_ms", "timings", "usage"} at the end.
-        Closing the generator (talked over) closes the connection, and the server stops writing."""
+        """Events: {"kind": "text", "text"} as it is written; {"kind": "tool_start", "name"} when an offered
+        tool's call begins; {"kind": "tool_call", "id", "name", "arguments"} once a valid call is complete
+        (OpenAI-style deltas or written as text, TextCalls); {"kind": "done", "finish", "first_token_ms",
+        "timings", "usage"} at the end. Closing the generator (talked over) closes the connection, and the
+        server stops writing."""
         self.turns += 1
+        texts = TextCalls(tools)
         body = {"messages": messages, "stream": True, "temperature": temperature, "max_tokens": max_tokens,
                 "cache_prompt": True, "stream_options": {"include_usage": True},
                 "chat_template_kwargs": {"enable_thinking": False}}
@@ -287,7 +480,8 @@ class VoiceModel:
                         if delta.get("content"):
                             if first is None:
                                 first = int((time.monotonic() - started) * 1000)
-                            yield {"kind": "text", "text": delta["content"]}
+                            for ev in texts.feed(delta["content"]):
+                                yield ev
                         for tc in delta.get("tool_calls") or []:
                             if first is None:
                                 first = int((time.monotonic() - started) * 1000)
@@ -296,11 +490,21 @@ class VoiceModel:
                             fn = tc.get("function") or {}
                             slot["name"] += fn.get("name") or ""
                             slot["arguments"] += fn.get("arguments") or ""
-                            if fn.get("name"):
+                            if fn.get("name") and slot["name"] in texts.offered:   # no holding line for a tool it can't use
                                 yield {"kind": "tool_start", "name": slot["name"]}
                         finish = ch.get("finish_reason") or finish
+        for ev in texts.flush():
+            yield ev
         for i in sorted(calls):
             call = calls[i]
+            try:
+                args = json.loads(call["arguments"] or "{}")
+            except ValueError:
+                args = None
+            why = "unreadable arguments" if args is None else check_call(call["name"], args, texts.offered)
+            if why:
+                log.info("voice model: a tool call was dropped (%s: %s)", _safe(call["name"]), why)
+                continue
             yield {"kind": "tool_call", "id": call["id"] or f"call_{i}", "name": call["name"], "arguments": call["arguments"]}
         yield {"kind": "done", "finish": finish, "first_token_ms": first, "timings": timings or {}, "usage": usage or {}}
 

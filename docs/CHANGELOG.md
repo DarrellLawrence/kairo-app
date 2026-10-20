@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-10-20 — build: calls sound like a person (owner's calls on the iPhone)
+- After "Hello" a call said `<|tool_call_start|>[ask_kairo()]<|tool_call_end|>` out loud: the voice model writes its tool calls as text and the PC passed them on as words. Now they are taken out before anything is said (never even half), read as real calls, and a call is only run when Kairo offered that tool on the turn and it has what it needs; anything else is dropped without a word. "Hello" gets "Hey <your first name>." at once, without the voice model; a reply that was only a dropped call still says a short line ("Okay.", or "Sorry, can you say that again?").
+- Claude's notes are no longer read out ("The owner mentioned…", "L23 (urgent, loop)", "Let me check the bring-up list", numbered lists). Claude is asked for plain sentences to you, and everything a call says or shows goes through one clean-up as a safety net: ids and tags out, thinking out loud dropped, a list becomes at most two short sentences. The chat keeps what Claude wrote.
+- Bring-ups: at most one a call, only after you asked or said something real (never after "hello", "thanks", small talk or noise), and never both said on the call and pushed: one pushed in the last 6 hours isn't said, and one said on the call isn't pushed as well.
+- Acceptance test 43: call answers are plain speech (automated, with the real Claude). Acceptance 39 and 41 now say one bring-up a call.
+- Removed: the "two bring-ups a call, urgent not counted" cap.
+- Past deadlines read "overdue since Fri" everywhere (Today, the card the voice reads, the brief, the recap, calls), never "due Fri"; snoozing an overdue item works again.
+- Personal to-dos come back in the evening at home (17:30 on, weekends too), never on the commute or during a call, each with one concrete next step; every skip brings the next one sooner and more directly, after 3 a smaller first step.
+- The orange line on the call screen only shows when something is wrong, not because the local voice is your choice.
+- Setup: the iPhone sync step says where the Device ID and the address go in Mobius Sync.
+
 ## 2026-10-19 — build: your profile only in the vault (your decision)
 - Your profile file is out of the repo and out of the release. Kairo imported it once on your PC (Run diagnosis showed it); it lives only in the vault there (10 Profile/), which every chat reads. `private/` is ignored by git, and a test fails if it ever comes back.
 - On the next update your PC also deletes the copy inside the older Kairo versions it keeps for going back.

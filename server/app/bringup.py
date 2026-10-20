@@ -4,9 +4,14 @@ The voice model only talks; Claude's proactive side decides what is worth raisin
 voice model gets a short list straight from Kairo's data (urgent open loops first, questions Kairo
 still has, quick questions from captures, a test coming up), so it never waits; Claude then picks and
 phrases the list (questions, reminders, pushback, with priority) in the background, and the voice
-model gets the new list with the owner's next words. It raises them at a good moment: at most two a
-call unless one is urgent. When the owner answers one, the voice model passes the answer to Claude
-with ask_kairo (item = its id), and Claude records it as today (closes the loop, saves the answer).
+model gets the new list with the owner's next words. It raises them at a good moment. When the owner
+answers one, the voice model passes the answer to Claude with ask_kairo (item = its id), and Claude
+records it as today (closes the loop, saves the answer).
+
+Owner's rules 2026-10-20: a bring-up only after the owner asked or said something real, never as the
+reply to small talk, a greeting or noise; at most ONE a call (urgent included); and never both said on
+the call and pushed: a loop pushed in the last PUSHED_RECENTLY isn't on the call's list (for_call), and
+one said on the call counts as raised (mark_delivered), so the loops job doesn't push it as well.
 
 The wait (owner's request 2026-10-16): while Claude works on a question, Kairo says a short holding line
 and, when one is worth it, ONE item from the list in Claude's own words (pick_for_wait: urgent first,
@@ -27,7 +32,8 @@ from sqlmodel import Session, select
 from .tools import untrusted
 
 MAX_ITEMS = 5
-MAX_PER_CALL = 2           # not counting urgent ones
+MAX_PER_CALL = 1           # owner's rule 2026-10-20: one a call, urgent ones included
+PUSHED_RECENTLY = dt.timedelta(hours=6)   # a loop pushed this recently isn't said on a call too
 
 
 @dataclass
@@ -272,11 +278,47 @@ def agenda_job(ctx, profile, now: dt.datetime) -> str:
 
 
 def for_call(s: Session, profile, now: dt.datetime) -> list[Item]:
-    """At call start: Claude's pick for what is still open, plus anything urgent it didn't see."""
+    """At call start: Claude's pick for what is still open, plus anything urgent it didn't see; never what
+    was pushed to the phone in the last PUSHED_RECENTLY (said or pushed, never both)."""
     live = candidates(s, profile, now)
+    pushed = pushed_recently(s, [i.id for i in live], now)
+    live = [i for i in live if i.id not in pushed]
     ids = {i.id for i in live}
     picked = [Item(**d) for d in stored(s).get("items") or [] if isinstance(d, dict) and d.get("id") in ids]
     if not picked:
         return live
     seen = {i.id for i in picked}
     return (picked + [i for i in live if i.priority == "urgent" and i.id not in seen])[:MAX_ITEMS]
+
+
+def _loop_id(item_id: str) -> int | None:
+    m = re.fullmatch(r"L(\d{1,9})", item_id or "")
+    return int(m.group(1)) if m else None
+
+
+def pushed_recently(s: Session, item_ids: list[str], now: dt.datetime) -> set[str]:
+    """The items among these that went to the phone as a push (sent, or held for the morning) in the last
+    PUSHED_RECENTLY. Only open loops are pushed one by one (loops.py: url /#loops/<id>)."""
+    from .db import PushLog
+    urls = {f"/#loops/{n}": i for i in item_ids if (n := _loop_id(i)) is not None}
+    if not urls:
+        return set()
+    since = (now - PUSHED_RECENTLY).astimezone(dt.timezone.utc)
+    rows = s.exec(select(PushLog.url).where(PushLog.url.in_(sorted(urls))).where(PushLog.status.in_(("sent", "held")))
+                  .where(PushLog.ts >= since)).all()
+    return {urls[u] for u in rows}
+
+
+def mark_delivered(s: Session, item_id: str, now: dt.datetime, tz, times: dict) -> bool:
+    """Kairo said this item on a call: for an open loop that is a raise like a push or the brief (loops.
+    mark_raised), so the loops job doesn't push it as well. True when something was marked."""
+    from . import loops
+    from .audit import audit
+    from .db import OpenLoop
+    n = _loop_id(item_id)
+    loop = s.get(OpenLoop, n) if n is not None else None
+    if loop is None or loop.status != "open":
+        return False
+    loops.mark_raised(s, loop, now, tz, times)
+    audit(s, actor="backend", action="voice.bringup", outcome=f"loop #{loop.id} said on a call")
+    return True

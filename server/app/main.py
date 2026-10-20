@@ -39,7 +39,7 @@ from . import loop_send as loop_send_mod
 from . import conversation
 from . import memory
 from . import turns
-from . import voicelink
+from . import speech, voicelink
 from . import selftest as selftest_mod
 from . import semantic
 from . import tool_sites
@@ -1182,7 +1182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _warm_openers() -> None:
         lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.LATER[lang], voicelink.filler(lang),
-                        _greeting())
+                        voicemouth.NEUTRAL[lang], voicemouth.AGAIN[lang], _greeting())
                  for lang in ("en", "de")}
         lines["en"] += (voicelink.SLOW_LINE,)
         threading.Thread(target=lambda: _openers().warm(lines), name="voice-openers", daemon=True).start()
@@ -1190,8 +1190,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _greeting() -> str:
         """Owner's request 2026-10-17: the call opens at once with "Hey <first name>." (from the profile on
         the PC; made once, played from the cache)."""
-        first = (profile.name or "").split()[0] if (profile.name or "").split() else ""
-        return f"Hey {first}." if first else "Hey."
+        return voicemouth.greeting_for(profile.name)
 
     def _rtc_ready() -> str | None:
         """Why a call can't go over WebRTC right now (the phone then uses /ws/voice), or None."""
@@ -1407,17 +1406,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if _mouth_ok(call_id) and await _mouth_turn(line, speaker, text, language, number, stt_ms):
             await speaker.done()
             return
+        if voicemouth.greeting_only(text):         # "hello" on the old line too: the cached greeting, never Claude
+            greeting = _greeting()
+            _rt_said("owner", text)
+            speaker.say(greeting)
+            await line.send({"type": "delta", "text": greeting, "turn": number})
+            await line.send({"type": "done", "text": greeting, "model": "greeting", "interrupted": False, "turn": number,
+                             "server": {"stt_ms": stt_ms}})
+            _rt_said("kairo", greeting)
+            speaker.finish()
+            await speaker.done()
+            return
+
+        clean = speech.PlainStream()               # owner's call 2026-10-20: plain speech, never Claude's notes
 
         async def sink(frame) -> None:
             kind = frame.get("type") if isinstance(frame, dict) else None
             if line.writing == number and number <= line.stopped:
                 line.interrupt()                   # talked over before the brain had started
             if kind == "delta":
+                frame = {**frame, "text": clean.feed(frame.get("text") or "")}
                 speaker.feed(frame["text"])
             elif kind == "model" and frame.get("escalated"):
                 speaker.say(voicelink.filler(language))
             elif kind == "done":
                 line.writing = None
+                rest = clean.flush()
+                if rest and not frame.get("interrupted"):
+                    speaker.feed(rest)
+                    await line.send({"type": "delta", "text": rest, "turn": number})
+                text = str(frame.get("text") or "")
+                hang = " [[hang up]]" if "[[hang up]]" in text else ""
+                frame = {**frame, "text": (speech.plain(text.replace("[[hang up]]", " ")) + hang).strip()}
                 if frame.get("interrupted"):
                     speaker.stop()
                 else:
@@ -1470,7 +1490,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
-                      context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer)
+                      context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
+                      greeting=_greeting(), delivered=_delivered)
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
@@ -1561,6 +1582,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.exception("voice: saving a late answer")
         app.state.pusher.notify("Kairo", answer[:300], "/#chat", source="voice")
 
+    def _delivered(item) -> None:
+        """Owner's rule 2026-10-20: an item said on the call is delivered, so it isn't pushed as well (an open
+        loop counts as raised, like a push). Beside the call: never delays it."""
+        def work() -> None:
+            try:
+                with session_for(engine) as s_:
+                    bringup.mark_delivered(s_, item.id, dt.datetime.now(profile.tz), profile.tz,
+                                           loops.good_times(app.state.jobs.schedule))
+            except Exception:
+                log.exception("voice: marking %s delivered", item.id)
+        task = asyncio.get_running_loop().create_task(asyncio.to_thread(work))
+        _turns.add(task)
+        task.add_done_callback(_turns.discard)
+
     def _report_live(item, said: str, reply: str) -> None:
         """On the call: what the owner said to an item Kairo raised goes to Claude now (done, later, new info),
         so the next questions on this call get the new state. Their own words only. Never spoken."""
@@ -1594,10 +1629,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await _rt_ask(request, lines, own=own)
 
     def _refresh_items(mouth: "Mouth") -> None:
-        """Something on the list got done during the call (a loop closed): it comes off."""
+        """Something on the list got done during the call (a loop closed), or was just pushed to the phone
+        (said or pushed, never both): it comes off."""
         try:
             with session_for(engine) as s_:
-                live = {i.id for i in bringup.candidates(s_, profile, dt.datetime.now(profile.tz))}
+                now_ = dt.datetime.now(profile.tz)
+                live = {i.id for i in bringup.candidates(s_, profile, now_)}
+                live -= bringup.pushed_recently(s_, [i.id for i in mouth.items], now_)
         except Exception:
             return
         if any(i.id not in live for i in mouth.items):
@@ -1931,6 +1969,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         out.reply = out.reply or "".join(parts).strip()
         return out
 
+    async def acceptance_call_ask(request: str) -> str:
+        """Test 43: ask_kairo as a call asks it, what the call would say of the answer; not in the one conversation."""
+        text, error, _ = await _call_turn(request, [f"Owner: {request}"], session_id=None, thread_id=None,
+                                          purpose="acceptance")
+        if error is not None:
+            raise RuntimeError(error.text or "Claude failed")
+        return realtime.spoken_answer(text)[0]
+
     def acceptance_classify(mail: dict) -> list[dict]:
         ask = lambda prompt, system: app.state.jobs.ask_brain(prompt, system, purpose="triage")   # noqa: E731
         return triage.classify([mail], ask, today=dt.datetime.now(profile.tz).date(), language=profile.default_language)
@@ -1982,7 +2028,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             share=acceptance_share, runner=runner, health=app.state.health, data_dir=settings.data_dir,
             knowledge=app.state.knowledge, recap=app.state.recap, gauntlet=app.state.gauntlet,
             ask=lambda prompt, system, purpose="summary", images=None: app.state.jobs.ask_brain(
-                prompt, system, images=images, purpose=purpose))
+                prompt, system, images=images, purpose=purpose), call_ask=acceptance_call_ask)
 
     async def run_acceptance(ids: list[int] | None = None) -> dict:
         if app.state.acceptance_running:
@@ -3315,20 +3361,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.add(thread)
                 s.commit()
             sid, tid = thread.brain_session_id, thread.id
-        said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
-        parts: list[str] = []
-        final, error, new_sid = None, None, None
-        async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=sid, thread_id=tid, purpose="call",
-                                      model=model, own=request if own is None else own,
-                                      language=conversation.message_language(said) if said else None):
-            if event.kind is EventKind.session and event.session_id:
-                new_sid = event.session_id
-            elif event.kind is EventKind.text:
-                parts.append(event.text)
-            elif event.kind is EventKind.result:
-                final, new_sid = event.text or "".join(parts), event.session_id or new_sid
-            elif event.kind is EventKind.error:
-                error, new_sid = event, event.session_id or new_sid
+        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
+                                                model=model, own=own)
         if new_sid:
             with session_for(engine) as s:
                 thread = s.get(ChatThread, tid)
@@ -3339,8 +3373,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fold_memory_soon()
         if error is not None:
             return f"I couldn't get that done: {clip_text(error.text, 160)}", False
-        answer = (final or "".join(parts)).strip()
-        return answer.replace("[[hang up]]", "").strip() or "Done.", "[[hang up]]" in answer
+        return realtime.spoken_answer(text)   # plain speech, on every voice line
+
+    async def _call_turn(request: str, lines: list[str], *, session_id, thread_id, purpose: str,
+                         model: str | None = None, own: str | None = None):
+        """ask_kairo's turn for Claude, as on any call: the call's wrapper (realtime.brain_prompt), routed on the
+        owner's request (own), never on the wrapper's wording (owner's rule 2026-10-19), in the language of the
+        owner's words on the call. (Claude's whole answer, the error or None, the brain session.) Acceptance
+        test 43 runs it too."""
+        said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
+        parts: list[str] = []
+        final, error, new_sid = None, None, None
+        async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=session_id, thread_id=thread_id,
+                                      purpose=purpose, model=model, own=request if own is None else own,
+                                      language=conversation.message_language(said) if said else None):
+            if event.kind is EventKind.session and event.session_id:
+                new_sid = event.session_id
+            elif event.kind is EventKind.text:
+                parts.append(event.text)
+            elif event.kind is EventKind.result:
+                final, new_sid = event.text or "".join(parts), event.session_id or new_sid
+            elif event.kind is EventKind.error:
+                error, new_sid = event, event.session_id or new_sid
+        return (final or "".join(parts)).strip(), error, new_sid
 
     @app.get("/api/voice/realtime")
     def realtime_get():

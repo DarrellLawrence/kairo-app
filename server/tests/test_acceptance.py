@@ -184,7 +184,7 @@ def test_a_crashing_test_is_a_failed_test(migrated):
 def test_app_report_manual_and_diagnosis(migrated):
     with TestClient(create_app(migrated)) as c:
         rep = c.get("/api/acceptance").json()
-        assert [t["id"] for t in rep["tests"]] == list(range(1, 43))
+        assert [t["id"] for t in rep["tests"]] == list(range(1, 44))
         assert rep["tests"][11]["result"]["by"] == "ci" and "CI" in rep["tests"][11]["result"]["detail"]
         assert c.post("/api/acceptance/15/manual", json={"ok": True, "note": "silent switch on: heard"}).status_code == 200
         assert c.post("/api/acceptance/1/manual", json={"ok": True}).status_code == 400          # automated, not tappable
@@ -494,3 +494,62 @@ def test_recipient_picker(migrated):
     assert r["ok"], r
     with Session(ctx.engine) as s:
         assert s.exec(select(OpenLoop)).all() == [] and s.exec(select(Approval)).all() == []
+
+
+# ---------------------------------------------------------------- 43 Call answers are plain speech (owner's call 2026-10-20)
+
+LEAKY = ("Let me check the bring-up list. The owner mentioned two things.\n"
+         "1. L23 (urgent, loop): KAIRO-TEST hand in the lab report\n2. #12 KAIRO-TEST return the library book\n"
+         "3. K4: KAIRO-TEST ask about the trip")
+
+
+def _call_ctx(migrated, answer, *, sanitize=True):
+    from app import realtime
+    seen = []
+
+    async def call_ask(request):
+        seen.append(request)
+        return realtime.spoken_answer(answer)[0] if sanitize else answer      # the call's own answer handling
+    ctx = ctx_for(migrated)
+    ctx.call_ask = call_ask
+    return ctx, seen
+
+
+def test_call_answers_are_plain_speech_passes_through_the_calls_path_and_cleans_up(migrated):
+    from app.db import OpenLoop
+    ctx, seen = _call_ctx(migrated, LEAKY)
+    r = run(acceptance.t_call_speech(ctx))
+    assert r["ok"], r
+    assert MARK in seen[0] and "lab report" in r["detail"]
+    with Session(ctx.engine) as s:
+        assert s.exec(select(OpenLoop)).all() == []                              # the test loops are gone
+
+
+@pytest.mark.parametrize("answer, failing", [
+    (LEAKY, "no ids"),
+    ("Here you go:\n1. Hand in the lab report\n2. Return the library book", "no list or numbering"),
+    ("The owner still has to hand in the lab report.", "never \"the owner\""),
+    ("Let me check. You still have to hand in the lab report.", "no thinking out loud"),
+    ("", "an answer to say"),
+])
+def test_call_answers_are_plain_speech_fails_when_notes_get_through(migrated, answer, failing):
+    ctx, _ = _call_ctx(migrated, answer, sanitize=False)                       # a path that says Claude's words as they are
+    r = run(acceptance.t_call_speech(ctx))
+    assert not r["ok"] and r["checks"][failing] is False
+
+
+def test_call_answers_are_plain_speech_without_the_call_path_is_a_failed_test(migrated):
+    r = run(acceptance.t_call_speech(ctx_for(migrated)))
+    assert not r["ok"] and "call" in r["detail"]
+
+
+def test_the_call_path_in_the_app_answers_like_a_call_and_stays_out_of_the_conversation(migrated):
+    app = create_app(migrated)
+    with TestClient(app):
+        with Session(make_engine(migrated.db_url)) as s:
+            before = len(s.exec(select(ChatMessage)).all())
+        said = asyncio.run(app.state.acceptance_ctx().call_ask(f"what is open with {MARK} L23 (urgent, loop)?"))
+        assert said.startswith(f"echo: (spoken, on a call) what is open with {MARK}")   # the fake CLI: the call's wrapper
+        assert "L23" not in said and "(urgent, loop)" not in said and "the owner" not in said.lower()
+        with Session(make_engine(migrated.db_url)) as s:
+            assert len(s.exec(select(ChatMessage)).all()) == before

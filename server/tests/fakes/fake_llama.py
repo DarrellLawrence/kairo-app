@@ -4,15 +4,18 @@ server (checked against the real one built from the Oct 2026 source: content del
 deltas {index, id, type, function{name, arguments}}, a last chunk with usage and timings).
 
 The "model": a question the Today card in the system prompt answers (weather, the next train, what's
-next) -> "From your card: <that line>" (FAKE_LLAMA_NO_CARD=1: it ignores the card). A user message
-about the owner's data (calendar, remind, mail, list, test, Kalender, erinner, Liste, Prüfung, ...)
-with tools offered -> one ask_kairo call with the message as request. A tool result or a note that an
+next) -> "From your card: <that line>" (FAKE_LLAMA_NO_CARD=1: it ignores the card). The owner's words (not a
+<kairo-note> in front of them) about their data (calendar, remind, mail, list, test, Kalender, erinner,
+Liste, Prüfung, ...) with tools offered -> one ask_kairo call with the message as request. A tool result or a note that an
 answer is here -> "Okay. <the answer>". Anything else -> "Sure, happy to help with that." in pieces.
 
 FAKE_LLAMA_LOAD_S: seconds of 503 on /health before the model is "loaded".
 FAKE_LLAMA_TOKEN_MS: delay between pieces (default 5). FAKE_LLAMA_FIRST_MS: before the first piece.
 FAKE_LLAMA_RECORD: every request body is appended there as one JSON line.
 FAKE_LLAMA_NO_TOOLS=1: never calls the tool (a model that ignores tools). FAKE_LLAMA_ALWAYS_TOOL=1: always calls it.
+FAKE_LLAMA_TEXT_TOOLS=1: tool calls are written into the words, like LFM2 through llama-server
+(<|tool_call_start|>[ask_kairo(request="...")]<|tool_call_end|> as content); with FAKE_LLAMA_ALWAYS_TOOL=1 it
+writes `[ask_kairo()]` even when no tool is offered (what the owner heard after "Hello", 2026-10-20).
 """
 
 from __future__ import annotations
@@ -111,10 +114,15 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 said = text
             pieces = ["Okay. "] + [w + " " for w in str(said).split()]
-        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text)):
+        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
             call = json.dumps({"request": text}, ensure_ascii=False)
+        elif os.environ.get("FAKE_LLAMA_TEXT_TOOLS") and os.environ.get("FAKE_LLAMA_ALWAYS_TOOL"):
+            pieces = ["<|tool_", "call_start|>[ask_kairo(", ")]<|tool_call_end|>"]   # no tool offered, no request
         else:
             pieces = ["Sure, ", "happy ", "to ", "help ", "with ", "that."]
+        if call is not None and os.environ.get("FAKE_LLAMA_TEXT_TOOLS"):
+            said = "<|tool_call_start|>[ask_kairo(request=" + json.dumps(json.loads(call)["request"]) + ")]<|tool_call_end|>"
+            pieces, call = [said[i:i + 7] for i in range(0, len(said), 7)], None
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()

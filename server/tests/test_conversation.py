@@ -224,3 +224,11 @@ def test_each_message_is_answered_in_its_own_language(migrated, monkeypatch, tmp
     turns = json.loads(rec.read_text())["turns"]
     assert "answer in German" in turns[0] and "answer in English" in turns[1] and "answer in German" not in turns[1]
     assert conversation.LEAVE_IT_RULE in turns[2] and conversation.LEAVE_IT_RULE not in turns[1]
+
+
+def test_spoken_turns_are_answered_as_plain_speech_to_the_owner():
+    """Owner's call 2026-10-20: ids, numbered lists and thinking out loud were read out on calls."""
+    from app.conversation import TURN_RULES
+    rules = " ".join(TURN_RULES.split())
+    for rule in ('to the owner as "you"', "no lists, numbering or markdown", "no ids", "no thinking out loud"):
+        assert rule in rules, rule
