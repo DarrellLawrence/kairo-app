@@ -15,6 +15,9 @@
 - Voice speed lists ignored turns ("ignored: not you", "ignored: too quiet / far") with time and score, never the words, and the speaker check's device and time per turn; Run diagnosis has the counts. Acceptance test 43.
 - Found while building it: ONNX Runtime 1.24 (the PC's version) computes this model wrong with its graph optimizations on. Kairo checks every way of running it against the plain one when it loads and uses the first that agrees.
 - Updates: a voice model file the previous voice-model folder already has (same checksum) is copied, not downloaded again.
+- Check-ins don't stack up any more: one open per kind (daily, weekly…); a newer one closes the older as missed (it still counts against the streak), a daily one expires at the end of its next day, and the pile already on the PC is cleaned up once.
+- Mail a machine sent (no-reply / notification / newsletter senders, mailing lists, auto-replies, what triage calls automatic) never causes a push: not as "suspicious mail", not as a reply loop, not in the brief. It is still labelled and listed. Mail from people notifies as before. A suspicious mail from a machine is labelled Kairo/Suspicious in Gmail, without a push.
+- The morning brief now sees the open loops (people waiting, promises), so an urgent one can make the top 3.
 
 ## 2026-10-19 — build: your profile only in the vault (your decision)
 - Your profile file is out of the repo and out of the release. Kairo imported it once on your PC (Run diagnosis showed it); it lives only in the vault there (10 Profile/), which every chat reads. `private/` is ignored by git, and a test fails if it ever comes back.

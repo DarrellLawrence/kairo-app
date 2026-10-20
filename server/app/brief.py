@@ -259,7 +259,9 @@ def _data_for_model(data: dict) -> str:
                "summary": m["summary"], "deadline": m["deadline"]} for m in data["needs_reply"]],
                "school_portal_new": [{"course": n["course"], "kind": n["kind"], "title": n["title"], "text": n["snippet"]}
                                      for n in data.get("school_news") or []],
-               "mails_maybe_needing_reply": [{"from": m["from"], "subject": m["subject"]} for m in data.get("maybe_reply") or []]}
+               "mails_maybe_needing_reply": [{"from": m["from"], "subject": m["subject"]} for m in data.get("maybe_reply") or []],
+               # people waiting, promises: the prompt says an urgent one belongs in the top 3 (their text comes from mail)
+               "open_loops": [{k: lp.get(k) for k in ("who", "what", "when", "urgency")} for lp in data.get("open_loops") or []]}
     return ("Kairo's own data:\n" + json.dumps(own, ensure_ascii=False, default=str) + "\n\n"
             + untrusted("calendar and mail", outside))
 

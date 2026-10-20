@@ -480,3 +480,17 @@ def test_shared_files_are_filed_under_their_name_in_files(env):
     # Files/ and anything over 20 MB stay on the PC.
     stignore = (env["vault"] / ".stignore").read_text(encoding="utf-8")
     assert "/Files" in stignore and "#include .stignore-kairo-large" in stignore
+
+
+def test_the_brief_model_sees_the_open_loops_inside_the_untrusted_block():
+    """The prompt says an urgent open loop belongs in the top 3; the model was never given them. Their text
+    comes from mail, so they sit with the mail, inside the untrusted block."""
+    from app import brief as brief_mod
+    data = {k: [] for k in ("overdue", "next7", "other_tasks", "school", "approvals", "place_tasks", "patterns",
+                            "chores_due", "people", "calendar", "needs_reply")}
+    data.update(checkin=None, health=None, open_loops=[{"id": 7, "who": "Sam Example", "what": "send the photos",
+                                                         "when": "overdue since Fri", "urgency": "urgent", "phrase": "x"}])
+    text = brief_mod._data_for_model(data)
+    own, outside = text.split("\n\n", 1)
+    assert "send the photos" not in own and "send the photos" in outside and '"urgency": "urgent"' in outside
+    assert '"id"' not in outside.split("open_loops")[1]          # no ids for the model to read out
