@@ -413,3 +413,40 @@ def test_the_old_voice_says_plain_speech_and_the_chat_keeps_claudes_words(local)
     assert said.startswith("echo: (spoken, on a call) Note and card for me")
     last = local.get("/api/chat/messages").json()["messages"][-1]
     assert last["role"] == "kairo" and "L23 (urgent, loop)" in last["text"]   # the conversation keeps what Claude wrote
+
+
+
+# ---------------------------------------------------------------- bring-ups: said or pushed, never both (owner's rule 2026-10-20)
+
+def test_an_item_pushed_recently_is_not_said_on_the_call(local):
+    import datetime as dt
+    from app.db import PushLog
+    item = seed_urgent(local)
+    with Session(make_engine(local.settings.db_url)) as s:
+        s.add(PushLog(ts=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1), source="loops", title="Kairo",
+                      body="Sign the school form", url=f"/#loops/{item.id[1:]}", key="k", status="sent"))
+        s.commit()
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws, limit=400)
+    deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+    assert deltas.startswith("Sec, checking.") and "school form" not in deltas and "echo:" in deltas
+
+
+def test_an_item_said_on_the_call_is_not_pushed_too(local):
+    import datetime as dt
+    from app import loops
+    from app.db import OpenLoop
+    item = seed_urgent(local)
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws, limit=400)
+    assert "school form" in "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+    row = None
+    for _ in range(100):
+        with Session(make_engine(local.settings.db_url)) as s:
+            row = s.get(OpenLoop, int(item.id[1:]))
+        if row.raised:
+            break
+        time.sleep(0.05)
+    assert row.raised == 1 and loops.aware(row.next_at) > dt.datetime.now(dt.timezone.utc)   # delivered: no push now

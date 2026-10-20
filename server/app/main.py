@@ -1443,7 +1443,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
-                      greeting=_greeting())
+                      greeting=_greeting(), delivered=_delivered)
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
@@ -1509,6 +1509,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.exception("voice: saving a late answer")
         app.state.pusher.notify("Kairo", answer[:300], "/#chat", source="voice")
 
+    def _delivered(item) -> None:
+        """Owner's rule 2026-10-20: an item said on the call is delivered, so it isn't pushed as well (an open
+        loop counts as raised, like a push). Beside the call: never delays it."""
+        def work() -> None:
+            try:
+                with session_for(engine) as s_:
+                    bringup.mark_delivered(s_, item.id, dt.datetime.now(profile.tz), profile.tz,
+                                           loops.good_times(app.state.jobs.schedule))
+            except Exception:
+                log.exception("voice: marking %s delivered", item.id)
+        task = asyncio.get_running_loop().create_task(asyncio.to_thread(work))
+        _turns.add(task)
+        task.add_done_callback(_turns.discard)
+
     def _report_live(item, said: str, reply: str) -> None:
         """On the call: what the owner said to an item Kairo raised goes to Claude now (done, later, new info),
         so the next questions on this call get the new state. Their own words only. Never spoken."""
@@ -1540,10 +1554,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await _rt_ask(request, lines)
 
     def _refresh_items(mouth: "Mouth") -> None:
-        """Something on the list got done during the call (a loop closed): it comes off."""
+        """Something on the list got done during the call (a loop closed), or was just pushed to the phone
+        (said or pushed, never both): it comes off."""
         try:
             with session_for(engine) as s_:
-                live = {i.id for i in bringup.candidates(s_, profile, dt.datetime.now(profile.tz))}
+                now_ = dt.datetime.now(profile.tz)
+                live = {i.id for i in bringup.candidates(s_, profile, now_)}
+                live -= bringup.pushed_recently(s_, [i.id for i in mouth.items], now_)
         except Exception:
             return
         if any(i.id not in live for i in mouth.items):

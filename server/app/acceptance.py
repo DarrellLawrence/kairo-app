@@ -126,7 +126,7 @@ SPECS = [
     Spec(39, "Voice like a person", "manual", "Voice lab run first; then on the iPhone, English and German: 10+ call turns "
                                            "and 5 with the voice button: end of speech → first audio p50 <= 0.65 s, p95 <= 1.0 s; "
                                            "never cut off; talking over stops it; a data question gets a filler, then Claude's "
-                                           "answer; \"email someone\" gives a card; at most two topics brought up; with the voice "
+                                           "answer; \"email someone\" gives a card; at most one topic brought up; with the voice "
                                            "model off the old voice answers.", "LV"),
     Spec(40, "Today card", "manual", "Voice lab: answers from the Today card >= 70%, wrong <= 10%. On a call: the next "
                                      "event, what's left today, the weather and the next train are answered at once (no "
@@ -134,9 +134,10 @@ SPECS = [
                                      "next question; a mail question still goes to Claude. Voice lab shows the split.", "TC"),
     Spec(41, "Using the wait", "manual", "A question Claude must look up: a holding line, then one bring-up item that fits, "
                                          "then the answer right after the current sentence; a fast answer comes without it; "
-                                         "an urgent item comes before the answer; never the same item twice, two a call at "
-                                         "most; nothing worth it: only the holding line; your answer to it is recorded during "
-                                         "the call (a later question on the same call gets the new state).", "TC"),
+                                         "an urgent item comes before the answer; one a call at most, never after small talk, "
+                                         "a greeting or noise, and never one that was just pushed (one said on the call isn't "
+                                         "pushed too); nothing worth it: only the holding line; your answer to it is recorded "
+                                         "during the call (a later question on the same call gets the new state).", "TC"),
     Spec(42, "Voice on the GPU", "manual", "More -> System -> Voice speed after a restart of the PC: Whisper, Kokoro and the "
                                            "voice model say GPU (none red), the last call turn says WebRTC; \"hello\" on a call "
                                            "is answered without Claude; a question Claude needs longer than 8 s for gets "

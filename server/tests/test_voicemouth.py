@@ -165,16 +165,19 @@ def test_the_conversation_only_grows_at_the_end_so_the_cache_holds():
         assert b["messages"][:len(a["messages"])] == a["messages"]   # every request starts like the one before
 
 
-def test_bring_up_markers_are_never_spoken_and_two_is_enough():
-    m = Model(text("Sure. [[rai", "sed:L1]] By the way, Lea asked about Friday."), text("[[raised:K2]] Quick one: when does training end?"),
-              text("Okay."))
+def test_bring_up_markers_are_never_spoken_and_one_is_enough():
+    """Owner's rule 2026-10-20: at most one bring-up a call."""
+    m = Model(text("Sure. [[rai", "sed:L1]] By the way, Lea asked about Friday."),
+              text("Next week is quiet. [[raised:K2]] Quick one: when does training end?"), text("Okay."))
     mo = mouth(m)
     sp = Speaker()
-    r1 = run(mo.turn("ok", "en", sp))
+    r1 = run(mo.turn("what's my week like?", "en", sp))
     assert "[[" not in sp.heard and r1.raised == ["L1"] and "Lea asked" in sp.heard
-    run(mo.turn("cool", "en", Speaker()))
-    run(mo.turn("yes", "en", Speaker()))
-    assert "Enough brought up" in m.calls[2]["messages"][-1]["content"]     # after two, the model is told
+    sp2 = Speaker()
+    r2 = run(mo.turn("and next week?", "en", sp2))
+    assert r2.raised == [] and sp2.heard == "Next week is quiet. " and "training" not in r2.text   # never half said
+    assert "Enough brought up" in m.calls[1]["messages"][-1]["content"]     # after one, the model is told
+    assert "[[raised:K2]]" not in mo.messages[-1]["content"]               # it sees what was said
 
 
 def test_an_answer_to_an_item_goes_to_claude_with_what_it_was():
@@ -275,8 +278,7 @@ def test_one_item_per_wait_never_twice_and_the_cap_holds():
         sp = Speaker()
         run(mo.turn(q, "en", sp))
         said.append(sp.said[1:])
-    assert len(said[0]) == 1 and len(said[1]) == 1 and said[0] != said[1]   # one each, never the same
-    assert said[2] == []                                                    # two per call: then just the holding line
+    assert len(said[0]) == 1 and said[1] == [] and said[2] == []            # one a call: then just the holding line
 
 
 def test_nothing_worth_saying_means_only_the_holding_line():
@@ -349,6 +351,59 @@ def test_talked_over_in_the_wait_the_answer_still_comes_in_the_next_turn():
         assert "is here: Tom replied: he's in." in m.calls[2]["messages"][-1]["content"]
         assert mo.reports()[0][2] == "Yes I answered Lea." and mo.pending == []
     run(go())
+
+
+# ---------------------------------------------------------------- when a bring-up may come (owner's rules 2026-10-20)
+
+RAISES = "Sure. [[raised:L1]] By the way, Lea asked about Friday. Anything else?"
+
+
+@pytest.mark.parametrize("owner", ["ok cool", "thanks", "hmm", "uh", "yes", "bye", "hey how are you?"])
+def test_no_bring_up_in_reply_to_small_talk_greetings_or_noise(owner):
+    m, sp = Model(text(RAISES)), Speaker()
+    r = run(mouth(m).turn(owner, "en", sp))
+    assert r.raised == [] and "Lea" not in sp.heard and sp.heard == "Sure. Anything else?"
+
+
+def test_a_greeting_never_brings_anything_up():
+    m, sp = Model(text(RAISES)), Speaker()
+    r = run(mouth(m, items=[FORM, LEA]).turn("hello", "en", sp))
+    assert r.raised == [] and sp.said == ["Hey Sam."] and m.calls == []
+
+
+def test_the_wait_brings_nothing_up_when_the_owner_only_said_yes():
+    """ "Should I add milk?" "Yes." goes to Claude, but "yes" is not something real to answer with a bring-up."""
+    for items in ([LEA], [FORM]):
+        m = Model(text("Should I add milk to your list?"), tool("add milk to the list"), text("Done, it's on the list."))
+        mo = mouth(m, Brain(answer="Added milk.", delay=0.2), items=items, wait_after_s=0.02)
+        run(mo.turn("I'm out of milk", "en", Speaker()))
+        sp = Speaker()
+        r = run(mo.turn("yes", "en", sp))
+        assert r.asked == ["add milk to the list"] and sp.said == [FILLERS["en"][0]] and r.raised == []
+
+
+def test_an_item_that_is_not_on_the_list_is_never_raised():
+    m, sp = Model(text("[[raised:L9]] Did you call the plumber? Anyway, Friday is free.")), Speaker()
+    r = run(mouth(m, items=[LEA]).turn("is Friday free?", "en", sp))
+    assert r.raised == [] and sp.heard == "Anyway, Friday is free."
+
+
+def test_a_raised_item_is_delivered_once_so_it_is_not_pushed_too():
+    got = []
+    m = Model(tool("is Friday free?"), text("Free after 4."), tool("and Saturday?"), text("Saturday too."))
+    mo = mouth(m, Brain(delay=0.2), items=[LEA, CASE], wait_after_s=0.02, delivered=got.append)
+    run(mo.turn("Is Friday free?", "en", Speaker()))
+    run(mo.turn("And Saturday?", "en", Speaker()))
+    assert got == [LEA]
+    got2 = []
+    run(mouth(Model(text(RAISES)), delivered=got2.append).turn("what's new?", "en", Speaker()))
+    assert [i.id for i in got2] == ["L1"]
+
+
+def test_small_talk_whose_whole_reply_was_a_bring_up_still_gets_a_line():
+    m, sp = Model(text("[[raised:L1]] By the way, Lea asked about Friday.")), Speaker()
+    r = run(mouth(m).turn("thanks", "en", sp))
+    assert r.raised == [] and sp.said == ["Okay."] and sp.heard == ""
 
 
 # ---------------------------------------------------------------- the Today card

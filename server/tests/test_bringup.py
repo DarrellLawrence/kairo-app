@@ -7,10 +7,10 @@ import datetime as dt
 import json
 import types
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
-from app import bringup, knowledge
-from app.db import OpenLoop, SchoolEvent, make_engine
+from app import bringup, knowledge, loops
+from app.db import OpenLoop, PushLog, SchoolEvent, make_engine
 from tests.test_pa import PROFILE
 
 NOW = dt.datetime(2026, 10, 16, 14, 0, tzinfo=PROFILE.tz)
@@ -70,3 +70,42 @@ def test_the_owners_answer_reaches_claude_with_what_it_was():
     items = [bringup.Item("K2", "question", "When does training end on Tuesdays?")]
     assert bringup.describe("K2", items) == "bring-up item K2 (question: When does training end on Tuesdays?)"
     assert bringup.describe("K9", items) == ""
+
+
+
+# ---------------------------------------------------------------- never said and pushed both (owner's rule 2026-10-20)
+
+def _own(s):
+    return s.exec(select(OpenLoop).where(OpenLoop.source == "chat")).one()       # the owner's own: always shown
+
+
+def _pushed(s, loop_id, ago_h, status="sent"):
+    s.add(PushLog(ts=(NOW - dt.timedelta(hours=ago_h)).astimezone(dt.timezone.utc), source="reply", title="Kairo",
+                  body="KAIRO-TEST buy a bike lock", url=f"/#loops/{loop_id}", key=f"k{ago_h}{status}", status=status))
+    s.commit()
+
+
+def test_a_loop_pushed_recently_is_not_brought_up_on_a_call(migrated):
+    with Session(make_engine(migrated.db_url)) as s:
+        seed(s)
+        own = _own(s)
+        assert f"L{own.id}" in {i.id for i in bringup.for_call(s, PROFILE, NOW)}
+        _pushed(s, own.id, 9)                                                     # long ago: it may come up
+        _pushed(s, own.id, 0.5, status="dropped")                                 # never reached the phone
+        assert f"L{own.id}" in {i.id for i in bringup.for_call(s, PROFILE, NOW)}
+        _pushed(s, own.id, 1)
+        assert f"L{own.id}" not in {i.id for i in bringup.for_call(s, PROFILE, NOW)}
+        assert bringup.pushed_recently(s, [f"L{own.id}", "K1", "T2"], NOW) == {f"L{own.id}"}
+
+
+def test_said_on_a_call_means_delivered_so_it_is_not_pushed_as_well(migrated):
+    with Session(make_engine(migrated.db_url)) as s:
+        seed(s)
+        own = _own(s)
+        assert bringup.mark_delivered(s, f"L{own.id}", NOW, PROFILE.tz, loops.good_times({})) is True
+        s.refresh(own)
+        assert own.raised == 1 and loops.aware(own.next_at) > NOW and loops.aware(own.last_raised_at) == NOW
+        due = [x.id for x in loops.shown_loops(s, profile=PROFILE) if x.next_at is None or loops.aware(x.next_at) <= NOW]
+        assert own.id not in due                                                  # the loops job won't push it now
+        assert bringup.mark_delivered(s, "K1", NOW, PROFILE.tz, {}) is False      # nothing else is pushed per item
+        assert bringup.mark_delivered(s, "L999999", NOW, PROFILE.tz, {}) is False

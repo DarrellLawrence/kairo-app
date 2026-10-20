@@ -4,9 +4,9 @@ server (checked against the real one built from the Oct 2026 source: content del
 deltas {index, id, type, function{name, arguments}}, a last chunk with usage and timings).
 
 The "model": a question the Today card in the system prompt answers (weather, the next train, what's
-next) -> "From your card: <that line>" (FAKE_LLAMA_NO_CARD=1: it ignores the card). A user message
-about the owner's data (calendar, remind, mail, list, test, Kalender, erinner, Liste, Prüfung, ...)
-with tools offered -> one ask_kairo call with the message as request. A tool result or a note that an
+next) -> "From your card: <that line>" (FAKE_LLAMA_NO_CARD=1: it ignores the card). The owner's words (not a
+<kairo-note> in front of them) about their data (calendar, remind, mail, list, test, Kalender, erinner,
+Liste, Prüfung, ...) with tools offered -> one ask_kairo call with the message as request. A tool result or a note that an
 answer is here -> "Okay. <the answer>". Anything else -> "Sure, happy to help with that." in pieces.
 
 FAKE_LLAMA_LOAD_S: seconds of 503 on /health before the model is "loaded".
@@ -114,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 said = text
             pieces = ["Okay. "] + [w + " " for w in str(said).split()]
-        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text)):
+        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
             call = json.dumps({"request": text}, ensure_ascii=False)
         elif os.environ.get("FAKE_LLAMA_TEXT_TOOLS") and os.environ.get("FAKE_LLAMA_ALWAYS_TOOL"):
             pieces = ["<|tool_", "call_start|>[ask_kairo(", ")]<|tool_call_end|>"]   # no tool offered, no request
