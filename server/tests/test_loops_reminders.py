@@ -199,3 +199,13 @@ def test_a_reply_someone_waits_for_is_not_held_for_the_evening(env):  # noqa: F8
         triaged(s, days_ago=0)
         out = run(env, s, LoopCtx(s, DRAFT), WED, pushes)
         assert out["raised"] is not None and "Reply" in pushes.sent[0][1]
+
+
+def test_the_evening_is_the_evening_at_weekends_too():
+    """Owner's words: "evening at home". A Saturday morning at home is not it."""
+    loop = OpenLoop(kind="task", source="manual", what="Buy a birthday present for Sam", urgency="normal")
+    sat_morning = dt.datetime(2026, 10, 17, 11, 0, tzinfo=TZ)
+    assert loops.moment(loop, sat_morning, TZ, TIMES, where="home", on_call=False) == "not evening yet"
+    assert loops.moment(loop, sat_morning.replace(hour=18), TZ, TIMES, where="home", on_call=False) is None
+    back = loops.next_good_time(dt.datetime(2026, 10, 16, 20, 0, tzinfo=TZ), TZ, TIMES, days=1, evening=True)
+    assert (back.weekday(), back.strftime("%H:%M")) == (5, TIMES["after_work"])

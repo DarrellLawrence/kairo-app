@@ -154,13 +154,16 @@ def good_times(schedule: dict | None) -> dict:
     return t
 
 
-def next_good_time(now: dt.datetime, tz, times: dict, *, days: int = 1, morning: bool = False) -> dt.datetime:
-    """`days` days from today (0 = later today if still ahead), at the good time of that day."""
+def next_good_time(now: dt.datetime, tz, times: dict, *, days: int = 1, morning: bool = False,
+                   evening: bool = False) -> dt.datetime:
+    """`days` days from today (0 = later today if still ahead), at the good time of that day (evening: the
+    after-work time on every day, weekends too)."""
     local = now.astimezone(tz)
     day = local.date() + dt.timedelta(days=days)
     while True:
         weekend = day.weekday() >= 5
-        key = ("morning_weekend" if weekend else "morning") if morning else ("weekend" if weekend else "after_work")
+        key = ("morning_weekend" if weekend else "morning") if morning else (
+            "after_work" if evening or not weekend else "weekend")
         at = dt.datetime.combine(day, _hm(times[key]), tzinfo=tz)
         if at > local:
             return at
@@ -199,7 +202,7 @@ def come_back(loop: OpenLoop, step: int, now: dt.datetime, tz, times: dict) -> d
     """When a loop comes back after its `step`-th deferral. A personal to-do that can wait: on a later
     day's good time, sooner with each skip (low: in 3 days, then 2, then daily), never twice a day."""
     if personal(loop) and not pressing(loop, now, tz):
-        return next_good_time(now, tz, times, days=max(1, PERSONAL_DAYS.get(loop.urgency, 1) - step))
+        return next_good_time(now, tz, times, days=max(1, PERSONAL_DAYS.get(loop.urgency, 1) - step), evening=True)
     return schedule_after(loop.urgency, step, now, tz, times)
 
 
@@ -215,7 +218,7 @@ def moment(loop: OpenLoop, now: dt.datetime, tz, times: dict, *, where: str | No
     if where == "out":
         return "not at home"
     local = now.astimezone(tz)
-    if local.time() < _hm(times["weekend" if local.weekday() >= 5 else "after_work"]):
+    if local.time() < _hm(times["after_work"]):          # the evening, at weekends too (owner's words)
         return "not evening yet"
     return None
 
