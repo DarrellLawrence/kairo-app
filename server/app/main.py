@@ -1148,7 +1148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _warm_openers() -> None:
         lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.LATER[lang], voicelink.filler(lang),
-                        _greeting())
+                        voicemouth.NEUTRAL[lang], voicemouth.AGAIN[lang], _greeting())
                  for lang in ("en", "de")}
         lines["en"] += (voicelink.SLOW_LINE,)
         threading.Thread(target=lambda: _openers().warm(lines), name="voice-openers", daemon=True).start()
@@ -1156,8 +1156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _greeting() -> str:
         """Owner's request 2026-10-17: the call opens at once with "Hey <first name>." (from the profile on
         the PC; made once, played from the cache)."""
-        first = (profile.name or "").split()[0] if (profile.name or "").split() else ""
-        return f"Hey {first}." if first else "Hey."
+        return voicemouth.greeting_for(profile.name)
 
     def _rtc_ready() -> str | None:
         """Why a call can't go over WebRTC right now (the phone then uses /ws/voice), or None."""
@@ -1433,7 +1432,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
-                      context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer)
+                      context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
+                      greeting=_greeting())
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)

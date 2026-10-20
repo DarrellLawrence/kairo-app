@@ -22,9 +22,11 @@ from tests.test_voicelink import PCM, FakeVoice, frames_until, utter
 
 
 @pytest.fixture
-def local(migrated, tmp_path, monkeypatch):
+def local(migrated, tmp_path, monkeypatch, request):
     record = tmp_path / "llama.jsonl"
     monkeypatch.setenv("FAKE_LLAMA_RECORD", str(record))
+    for key in (request.node.get_closest_marker("llama_env").args if request.node.get_closest_marker("llama_env") else ()):
+        monkeypatch.setenv(key, "1")                       # the fake voice model's behaviour (before it starts)
     app = create_app(migrated)
     app.state.voice = FakeVoice()
     model = tmp_path / "lfm.gguf"
@@ -350,3 +352,47 @@ def test_the_voice_model_off_the_gpu_counts_too(local, monkeypatch):
             break
         time.sleep(0.05)
     assert "voice model: 0/31 layers on the GPU" in pushes[0][1]
+
+
+# ---------------------------------------------------------------- tool calls written as text (owner's call 2026-10-20)
+
+def _all_text(fr) -> str:
+    return " ".join(str(f.get("text") or "") for f in fr if isinstance(f, dict))
+
+
+@pytest.mark.llama_env("FAKE_LLAMA_TEXT_TOOLS")
+def test_a_model_that_writes_its_tool_call_as_text_still_reaches_claude_and_no_marker_is_said(local):
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)                                                              # "Remind me to call the dentist tomorrow"
+        fr = frames_until(ws, limit=400)
+    deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+    assert deltas.startswith("Sec, checking.") and "echo: (spoken, on a call) Remind me" in deltas
+    said = " ".join(t for t, _ in local.voice.spoken)
+    for raw in ("<|", "|>", "tool_call", "ask_kairo"):
+        assert raw not in _all_text(fr) and raw not in said, raw
+
+
+@pytest.mark.llama_env("FAKE_LLAMA_TEXT_TOOLS", "FAKE_LLAMA_ALWAYS_TOOL")
+def test_hello_on_a_call_is_the_greeting_at_once_and_never_the_voice_model(local):
+    local.voice.text = "Hello"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"].startswith("Hey") and done["text"].endswith(".") and len(done["text"].split()) <= 2
+    assert local.voice.spoken[0][0] == done["text"] and "<|" not in _all_text(fr)
+    assert [r["max_tokens"] for r in requests_seen(local)] == [1]            # only the call's priming read
+
+
+@pytest.mark.llama_env("FAKE_LLAMA_TEXT_TOOLS", "FAKE_LLAMA_ALWAYS_TOOL")
+def test_small_talk_answered_with_only_a_raw_call_gets_a_short_line_not_silence(local):
+    from app.voicemouth import NEUTRAL
+    local.voice.text = "thanks"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"] == NEUTRAL["en"] and [t for t, _ in local.voice.spoken] == [NEUTRAL["en"]]
+    assert "<|" not in _all_text(fr) and "tools" not in requests_seen(local)[-1]
+    msgs = [(m["role"], m["text"]) for m in local.get("/api/chat/messages").json()["messages"]]
+    assert msgs == [("owner", "(spoken, on a call) thanks"), ("kairo", NEUTRAL["en"])]      # Claude never ran

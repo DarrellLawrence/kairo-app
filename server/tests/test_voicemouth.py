@@ -145,15 +145,15 @@ def test_small_talk_never_goes_to_claude():
     for said in ("hey what's on tomorrow?", "remind me to call mom", "thanks, and when is my train?", "ok add milk",
                  "hello can you check my mail", ""):
         assert not small_talk(said), said
-    m, brain = Model(text("Hey! All good.")), Brain()
-    r = run(mouth(m, brain).turn("hello", "en", Speaker()))
+    m, brain = Model(text("Anytime!")), Brain()
+    r = run(mouth(m, brain).turn("thanks a lot", "en", Speaker()))
     assert m.calls[0]["tools"] is None and brain.asked == [] and r.route == "talk"
 
 
 def test_the_conversation_only_grows_at_the_end_so_the_cache_holds():
-    m = Model(text("Hi!"), tool("tasks"), text("You have two tasks."), text("Bye!"))
+    m = Model(text("Good, you?"), tool("tasks"), text("You have two tasks."), text("Bye!"))
     mo = mouth(m)
-    run(mo.turn("hi", "en", Speaker()))
+    run(mo.turn("how's it going", "en", Speaker()))
     run(mo.turn("what are my tasks?", "en", Speaker()))
     run(mo.turn("thanks, bye", "en", Speaker()))
     for a, b in zip(m.calls, m.calls[1:]):
@@ -179,9 +179,9 @@ def test_an_answer_to_an_item_goes_to_claude_with_what_it_was():
 
 
 def test_claudes_new_bring_up_list_comes_with_the_next_words():
-    m = Model(text("Hi."), text("Sure."))
+    m = Model(text("Good, you?"), text("Sure."))
     mo = mouth(m)
-    run(mo.turn("hi", "en", Speaker()))
+    run(mo.turn("how are you", "en", Speaker()))
     mo.update_items([bringup.Item("L1", "loop", "x", "urgent", say="Lea needs an answer today.")])
     run(mo.turn("what's up?", "en", Speaker()))
     last = m.calls[1]["messages"][-1]["content"]
@@ -436,6 +436,63 @@ def test_talking_on_drops_the_speculation_and_a_changed_card_does_too():
     r = run(go())
     assert mo.speculation_used == 0 and len(m.calls) == 3 and r.text == "C"
     assert "rain at 15:00" in m.calls[2]["messages"][-1]["content"]
+
+
+# ---------------------------------------------------------------- greetings and dropped calls (owner's call 2026-10-20)
+
+def test_hello_gets_the_greeting_at_once_without_the_model_or_claude():
+    """ "Hello" was answered by a raw tool call: now it never even reaches the voice model. The greeting is
+    one of the cached lines, so it plays at once."""
+    m, brain = Model(text("Sure.")), Brain()
+    mo = mouth(m, brain, greeting="Hey Sam.")
+    for said in ("Hello", "hey!", "hi Kairo", "Hallo?", "[14:05] hey there"):
+        sp = Speaker()
+        r = run(mo.turn(said, "en", sp))
+        assert sp.said == ["Hey Sam."] and sp.fed == [] and r.text == "Hey Sam." and r.route == "talk", said
+        assert r.first_text_ms is not None and r.raised == [] and r.asked == []
+    assert m.calls == [] and brain.asked == []
+    assert [x["role"] for x in mo.messages[-2:]] == ["user", "assistant"] and mo.messages[-1]["content"] == "Hey Sam."
+    assert not mo.speculate("hello")                                    # nothing runs ahead for it either
+    before = json.loads(json.dumps(mo.messages))
+    run(mo.turn("cool, what's on tomorrow?", "en", Speaker()))
+    assert m.calls[0]["messages"][:len(before)] == before                # the conversation only grew at the end
+
+
+def test_the_greeting_defaults_to_the_first_name():
+    sp = Speaker()
+    run(Mouth(Model(), ask=Brain(), context="", items=[], name="Sam Rivera").turn("hey", "en", sp))
+    assert sp.said == ["Hey Sam."]
+
+
+def test_a_reply_that_was_only_a_dropped_call_never_leaves_the_owner_in_silence():
+    """The voice model's whole reply was a tool call that was dropped (not offered, no request): nothing
+    came out of the stream. Small talk gets a short neutral line, a real question a short ask-again."""
+    from app.voicemouth import AGAIN, NEUTRAL
+    sp = Speaker()
+    r = run(mouth(Model([]), items=[]).turn("thanks", "en", sp))
+    assert sp.said == [NEUTRAL["en"]] and r.text == NEUTRAL["en"]
+    sp = Speaker()
+    run(mouth(Model([]), items=[]).turn("hey Kairo how are you?", "en", sp))
+    assert sp.said == ["Hey Sam."]                                      # small talk that greets: the greeting
+    sp = Speaker()                                                        # a real question: holding line, then no call
+    r = run(mouth(Model([{"kind": "tool_start", "name": "ask_kairo"}]), items=[]).turn("what's on tomorrow?", "de", sp))
+    assert sp.said == [FILLERS["de"][0], AGAIN["de"]] and r.asked == []
+    mo = mouth(Model([]), items=[])
+    run(mo.turn("thanks", "en", Speaker()))
+    assert mo.messages[-1] == {"role": "assistant", "content": NEUTRAL["en"]}   # what was said is what it sees
+
+
+def test_claudes_answer_is_said_even_when_the_voice_model_then_says_nothing():
+    m, sp = Model(tool("what's on tomorrow?"), []), Speaker()
+    r = run(mouth(m, Brain(answer="School at 8, training at 18:00."), items=[]).turn("What's on tomorrow?", "en", sp))
+    assert sp.said == [FILLERS["en"][0], "School at 8, training at 18:00."] and r.asked == ["what's on tomorrow?"]
+
+
+def test_the_first_tool_call_of_a_round_is_the_one_used():
+    two = tool("first") + [{"kind": "tool_call", "id": "c2", "name": "ask_kairo", "arguments": json.dumps({"request": "second"})}]
+    brain = Brain()
+    run(mouth(Model(two, text("Ok.")), brain, items=[]).turn("do the first thing", "en", Speaker()))
+    assert [a[0] for a in brain.asked] == ["first"]
 
 
 def test_yes_to_a_question_kairo_asked_keeps_the_tool():

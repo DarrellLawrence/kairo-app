@@ -38,6 +38,10 @@ FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Mom
 ASK_CALL_TIMEOUT_S = 8.0
 LATER = {"en": "I'll get back to you.", "de": "Ich melde mich gleich."}
 FAILED = {"en": "I couldn't reach Kairo's brain just now.", "de": "Ich komme gerade nicht an Kairos Gehirn."}
+# Owner's call 2026-10-20: a reply that was only a dropped tool call left the line silent. Then Kairo says
+# one of these (both made at start with the other short lines: they play at once). NEUTRAL is a cached opener.
+NEUTRAL = {"en": "Okay.", "de": "Okay."}
+AGAIN = {"en": "Sorry, can you say that again?", "de": "Sorry, kannst du das nochmal sagen?"}
 MARK = re.compile(r"\[\[raised:([A-Za-z]\d{1,8})\]\]\s*")
 STAMP = re.compile(r"^\s*\[\d{1,2}:\d{2}\]\s*")
 MAX_REPLY_TOKENS = 160
@@ -61,11 +65,32 @@ _CONFIRM = re.compile(r"(?:(?:yes|yeah|yep|sure|ok(?:ay)?|no|nope|ja|nein|klar|g
                       r"mach das|mach)(?:[\s,.!?]+|$))+", re.I)
 
 
+def _bare(text: str) -> str:
+    return _NAME.sub(" ", STAMP.sub("", text or "")).strip(" ,.!?").lower()
+
+
 def small_talk(text: str, after_question: bool = False) -> bool:
-    t = _NAME.sub(" ", STAMP.sub("", text or "")).strip(" ,.!?").lower()
+    t = _bare(text)
     if not t or len(t.split()) > 8 or SMALL_TALK.fullmatch(t + " ") is None:
         return False
     return not (after_question and _CONFIRM.fullmatch(t + " ") is not None)
+
+
+# Owner's call 2026-10-20: "hello" gets the greeting from the cache at once ("Hey <first name>."), never the model.
+_GREET = r"(?:hi|hey|hello|hallo|hoi|servus|grüezi|salut|yo|moin|good (?:morning|afternoon|evening)|guten (?:morgen|tag|abend))"
+GREETING = re.compile(rf"(?:{_GREET}(?: there| you| du)?(?:[\s,.!?]+|$))+", re.I)
+_GREETS = re.compile(rf"{_GREET}\b", re.I)
+
+
+def greeting_only(text: str) -> bool:
+    """The whole utterance (name left out) is a greeting: "hello", "hey Kairo!", "hi there"."""
+    t = _bare(text)
+    return bool(t) and len(t.split()) <= 4 and GREETING.fullmatch(t + " ") is not None
+
+
+def greeting_for(name: str | None) -> str:
+    first = (name or "").split()[0] if (name or "").split() and name != "the owner" else ""
+    return f"Hey {first}." if first else "Hey."
 
 
 QUESTION = re.compile(r"\?\s*$|^\s*(what|when|where|who|which|how|is|are|do|does|did|can|will|was|wann|wo|was|wer|"
@@ -160,8 +185,10 @@ class _Said:
     def __init__(self) -> None:
         self.parts: list[str] = []
         self._streaming = False
+        self.streamed = False               # the model's (or Claude's) own words were said, not only Kairo's lines
 
     def stream(self, piece: str) -> None:
+        self.streamed = self.streamed or bool(piece.strip())
         if self._streaming and self.parts:
             self.parts[-1] += piece
         else:
@@ -225,8 +252,9 @@ class Mouth:
                  ask_timeout_s: float = ASK_CALL_TIMEOUT_S, filler_index: int = 0, wait_after_s: float = 0.8,
                  clock: Callable | None = None, place: Callable[[], str | None] | None = None,
                  context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None,
-                 late: Callable[[str, str], None] | None = None):
+                 late: Callable[[str, str], None] | None = None, greeting: str | None = None):
         self.model, self.ask = model, ask
+        self.greeting = greeting or greeting_for(name)   # "Hey <first name>.": the cached line, said at once
         self.temperature, self.language_mode = temperature, language_mode
         self.max_tool_rounds, self.ask_timeout_s, self.wait_after_s = max_tool_rounds, ask_timeout_s, wait_after_s
         self.clock, self.place, self.context_tokens, self.report = clock, place, context_tokens, report
@@ -328,6 +356,8 @@ class Mouth:
         owner_text = (owner_text or "").strip()
         if not owner_text or self.prompt_tokens + MAX_ANSWER_TOKENS * 3 >= int(self.context_tokens * 0.8):
             return False                                   # nothing to say, or the turn compacts first
+        if greeting_only(owner_text):
+            return False                                   # the greeting needs no model
         msgs = self.messages + [{"role": "user", "content": self._content(owner_text)}]
         tools = [ASK_KAIRO] if self.max_tool_rounds > 0 and not small_talk(owner_text, self._asked_last()) else None
         spec = _Spec(_key(msgs) + ("|tools" if tools else "|talk"))
@@ -380,7 +410,8 @@ class Mouth:
         content = self._content(owner_text)
         self.notes = []
         self.messages.append({"role": "user", "content": content})
-        chat_only = small_talk(owner_text, self._asked_last())   # hello, thanks, bye: never Claude
+        greet = greeting_only(owner_text)                        # "hello": the cached greeting, at once
+        chat_only = greet or small_talk(owner_text, self._asked_last())   # hello, thanks, bye: never Claude
         early = self._take_speculation(self.max_tool_rounds > 0 and not chat_only)   # started at the pause
         result_early = early is not None
         self.lines.append(f"Owner: {owner_text}")
@@ -390,13 +421,20 @@ class Mouth:
         started = time.monotonic()
         said = _Said()
         try:
+            last: dict | None = None                           # the turn's final assistant message
+            answer: str | None = None                          # Claude's answer this turn, if any
+            if greet:
+                self._line(self.greeting, speaker, result, said, started)
+                last = {"role": "assistant", "content": self.greeting}
+                self.messages.append(last)
             rounds = 0
-            while True:
+            while not greet:
                 tools = [ASK_KAIRO] if rounds < self.max_tool_rounds and not chat_only else None
                 raw, call = await self._round(tools, MAX_ANSWER_TOKENS if rounds else MAX_REPLY_TOKENS, speaker,
                                               result, said, started, lang, source=early if not rounds else None)
                 if not isinstance(call, dict) or call.get("name") != "ask_kairo":
-                    self.messages.append({"role": "assistant", "content": raw.strip()})
+                    last = {"role": "assistant", "content": raw.strip()}
+                    self.messages.append(last)
                     break
                 rounds += 1
                 request, item = _args(call.get("arguments"), owner_text)
@@ -414,6 +452,12 @@ class Mouth:
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
                                       "content": json.dumps({"answer": answer}, ensure_ascii=False)})
             await self._deliver_pending(speaker, result, said, started, lang)
+            if not said.streamed and not greet and not result.deferred:   # never a silent line (owner's call 2026-10-20)
+                line = (answer if answer is not None else
+                        (self.greeting if _GREETS.match(_bare(owner_text)) else NEUTRAL[lang]) if chat_only else AGAIN[lang])
+                self._line(line, speaker, result, said, started)
+                if last is not None and not (last.get("content") or "").strip():
+                    last["content"] = line
         except asyncio.CancelledError:
             result.interrupted = True
             spoken = said.text()
@@ -444,7 +488,8 @@ class Mouth:
             if result.text:
                 self.lines.append(f"Kairo (voice): {result.text}")
                 self.transcript = (self.transcript + [f"Kairo (voice): {result.text}"])[-40:]
-            result.route = "claude" if result.asked else ("card" if QUESTION.search(owner_text or "") else "talk")
+            result.route = "claude" if result.asked else ("card" if QUESTION.search(owner_text or "") and not greet
+                                                          else "talk")
         return result
 
     async def _round(self, tools, max_tokens: int, speaker, result: Turn, said: _Said, started: float, lang: str,
@@ -478,7 +523,7 @@ class Mouth:
                         said.line(filler)
                     if result.first_text_ms is None:
                         result.first_text_ms = int((time.monotonic() - started) * 1000)
-                elif ev["kind"] == "tool_call":
+                elif ev["kind"] == "tool_call" and not isinstance(call, dict):   # one call a round: the first
                     call = ev
                 elif ev["kind"] == "done":
                     done = ev
@@ -492,6 +537,14 @@ class Mouth:
         if isinstance(usage.get("prompt_tokens"), int):
             self.prompt_tokens = usage["prompt_tokens"] + int(usage.get("completion_tokens") or 0)
         return raw, call
+
+    @staticmethod
+    def _line(text: str, speaker, result: Turn, said: _Said, started: float) -> None:
+        """One of Kairo's own lines (no model): said as it is."""
+        speaker.say(text)
+        said.line(text)
+        if result.first_text_ms is None:
+            result.first_text_ms = int((time.monotonic() - started) * 1000)
 
     async def _ask(self, request: str, item: str | None, lang: str, speaker, result: Turn, said: _Said) -> str:
         """Claude works; Kairo uses the wait. Shielded: a talk-over doesn't lose the answer."""
