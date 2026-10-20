@@ -247,7 +247,8 @@ function Connect-Sync($P, $Svc) {
     if ($laptop.Trim()) { try { Add-SyncDevice $P $laptop 'Laptop'; Write-Ok 'Laptop added; accept the folder on the laptop' } catch { Write-Bad $_.Exception.Message } }
     Write-Note 'iPhone (once): Tailscale app ON.'
     Write-Note '  1. App Store: install "Mobius Sync" (Syncthing for iPhone) and Obsidian.'
-    Write-Note "  2. Mobius Sync -> Devices -> + -> paste the ID above; Addresses: $addr"
+    Write-Note "  2. Mobius Sync -> Remote Devices -> +: in Device ID paste this PC's ID (the long one above, not the tcp:// line)."
+    Write-Note "     Then tap the new device -> Addresses: replace dynamic with $addr"
     Write-Note '  3. Mobius Sync -> This Device: copy its ID and paste it here.'
     Write-Note '  4. Accept "Kairo vault"; choose a folder inside Obsidian''s folder (On My iPhone -> Obsidian).'
     Write-Note '  5. Obsidian -> Open folder as vault -> that folder. Open Mobius Sync now and then to sync.'
