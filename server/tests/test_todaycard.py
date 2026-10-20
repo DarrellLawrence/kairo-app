@@ -29,7 +29,7 @@ def test_tasks_due_today_or_overdue_soonest_first():
     t = lambda title, due: types.SimpleNamespace(title=title, due=due)
     rows = [t("later", NOW + dt.timedelta(days=2)), t("bike lock", NOW.replace(hour=17, minute=0)),
             t("form", NOW - dt.timedelta(days=1)), t("undated", None)]
-    assert todaycard.tasks_lines(rows, NOW).splitlines() == ["- form by 14:05 (overdue)", "- bike lock by 17:00"]
+    assert todaycard.tasks_lines(rows, NOW).splitlines() == ["- form (overdue since yesterday)", "- bike lock by 17:00"]
     assert todaycard.tasks_lines([], NOW) == "(nothing due today)"
 
 

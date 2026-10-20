@@ -17,7 +17,7 @@ import logging
 from sqlmodel import Session, select
 
 from .portal.olat import mark_briefed as portal_mark_briefed, news as portal_news
-from . import life, location, triage, vault
+from . import dues, life, location, triage, vault
 from .db import Approval, Brief, Capture, Checkin, OpenLoop, Review, SchoolEvent, Task
 from .google.client import GoogleError, GoogleNotConnected
 from .jobkit import JOB_RULES, clip, extract_json
@@ -92,8 +92,9 @@ class BriefMaker:
         approvals = s.exec(select(Approval).where(Approval.status == "open")).all()
         open_reviews = s.exec(select(Review).where(Review.status == "open")).all()
 
-        def task(t: Task) -> dict:
-            return {"id": t.id, "title": t.title, "due": due_local(t).isoformat() if t.due else None, "priority": t.priority}
+        def task(t: Task) -> dict:   # when: the words for the due on the brief's day (dues.py)
+            return {"id": t.id, "title": t.title, "due": due_local(t).isoformat() if t.due else None,
+                    "when": dues.words(t.due, day_start, tz) if t.due else None, "priority": t.priority}
 
         return {
             "calendar": events, "calendar_error": cal_error,
@@ -145,7 +146,7 @@ class BriefMaker:
         from . import loops
         now = dt.datetime.now(self.profile.tz)
         return [{k: v for k, v in loops.as_dict(l, now, self.profile.tz).items()
-                 if k in ("id", "kind", "who", "what", "since", "due", "waiting_days", "urgency", "phrase", "offer")}
+                 if k in ("id", "kind", "who", "what", "since", "due", "when", "waiting_days", "urgency", "phrase", "offer")}
                 for l in loops.shown_loops(s, profile=self.profile)[:2]]
 
     def _mark_loops_raised(self, s: Session, shown: list[dict], ctx) -> None:
@@ -156,6 +157,8 @@ class BriefMaker:
         for d in shown:
             row = s.get(OpenLoop, d["id"])
             if row is not None and row.status == "open":
+                if loops.personal(row) and not loops.pressing(row, now, self.profile.tz):
+                    continue          # said in the brief; its reminder still comes at a good moment (2026-10-20)
                 loops.mark_raised(s, row, now, self.profile.tz, times)
 
     # ---------------------------------------------------------------- write
@@ -168,8 +171,7 @@ class BriefMaker:
         if data["needs_reply"]:
             bits.append(f"{len(data['needs_reply'])} mail{'s' if len(data['needs_reply']) != 1 else ''} to answer")
         picks = data["overdue"] + data["next7"] + data["other_tasks"]
-        top3 = [{"title": t["title"], "why": "overdue" if t in data["overdue"] else ("due " + t["due"][:10] if t["due"] else "high priority")}
-                for t in picks[:3]]
+        top3 = [{"title": t["title"], "why": t.get("when") or "high priority"} for t in picks[:3]]
         if len(top3) < 3:
             top3 += [{"title": f"Reply: {m['subject']}", "why": m["summary"] or "needs a reply"} for m in data["needs_reply"][: 3 - len(top3)]]
         return {"headline": "Today: " + ", ".join(bits) + ".", "top3": top3}

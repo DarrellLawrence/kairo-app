@@ -562,7 +562,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine=engine, profile=profile, schedule=app.state.jobs.schedule, google_read=google_read, calendar=_calendar_week,
         pusher=pusher, vault_dir=settings.vault_dir, config_dir=settings.config_dir,
         checker=loop_check.LoopChecker(profile=profile, google_read=google_read, calendar=_calendar_week, hold=_own_hold,
-                                       tell=_tell), hold=_own_hold, tell=_tell)
+                                       tell=_tell), hold=_own_hold, tell=_tell,
+        on_call=lambda: runner._lines > 0)   # a call (WebRTC or the voice line) is on: a personal reminder waits
     from . import prefs as prefs_mod
 
     def _apply_prefs() -> None:

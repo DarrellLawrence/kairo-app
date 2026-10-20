@@ -370,7 +370,7 @@ export default function Today({ go, onboarding }) {
                   </motion.span>
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span className="k-task-title" style={{ display: 'block' }}>{t.title}</span>
-                    {t.why && <span className={t.why === 'overdue' ? 'k-task-why overdue' : 'k-task-why'}>{t.why}</span>}
+                    {t.why && <span className={t.overdue ? 'k-task-why overdue' : 'k-task-why'}>{t.why}</span>}
                   </span>
                 </motion.button>
               )

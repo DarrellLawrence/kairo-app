@@ -14,6 +14,7 @@ import re
 
 from sqlmodel import Session, select
 
+from . import dues
 from .db import OpenLoop, PortalItem, SettingKV, Task
 from .jobkit import clip
 
@@ -45,8 +46,9 @@ class Recap:
                  if l.closed_at and _aware(l.closed_at) >= start and l.kind not in PRIVATE_KINDS]
         open_loops = [l.what for l in s.exec(select(OpenLoop).where(OpenLoop.status == "open")).all()
                       if l.kind not in PRIVATE_KINDS][:4]
-        overdue = [t.title for t in s.exec(select(Task).where(Task.status.in_(["open", "doing"]))).all()
-                   if t.due and _aware(t.due) < now][:3]
+        overdue = [f"{t.title} ({dues.words(t.due, now, self.tz)})"   # by the day: a date-only due today isn't late yet
+                   for t in s.exec(select(Task).where(Task.status.in_(["open", "doing"]))).all()
+                   if dues.overdue(t.due, now, self.tz)][:3]
         try:
             events, _ = self.calendar(local.date() + dt.timedelta(days=1))
         except Exception as exc:   # calendar down: the recap still goes out
@@ -62,7 +64,7 @@ class Recap:
         lines = []
         if done:
             lines += ["Done today:", *[f"- {clip(x, 120)}" for x in done[:8]], ""]
-        still = open_loops + [f"{t} (overdue)" for t in overdue]
+        still = open_loops + overdue
         if still:
             lines += ["Still open:", *[f"- {clip(x, 120)}" for x in still], ""]
         if tomorrow:

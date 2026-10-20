@@ -15,6 +15,11 @@ Each time it comes back a little more direct. Sending still goes through an
 approval: the owner's tap on Send in the app is that approval; the backend
 executes the stored text.
 
+Personal to-dos (only the owner does them, owner's request 2026-10-20): at a good
+moment (the evening at home; never on the commute or during a call), with one next
+step made once by the cheap model, at most once a day and sooner with each skip,
+then a smaller first step. What is due today keeps the urgent rules.
+
 Pings: at most `proactive.max_per_day` (default 6) a day, most urgent first,
 never in quiet hours, normal/low ones not while a calendar event is running.
 """
@@ -30,7 +35,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from . import vault
+from . import dues, vault
 from .audit import audit
 from .db import AuditLog, OpenLoop, Person, ReplySender, SchoolEvent, SettingKV, Task, TriagedEmail, utcnow
 from .jobkit import JOB_RULES, clip, extract_json
@@ -76,6 +81,14 @@ The owner's calendar, next 7 days (every calendar):
 {calendar}
 
 {message}"""
+
+STEP_PROMPT = """The owner keeps a to-do open (below). Give the ONE concrete next step that gets it moving: a single
+action the owner can start right away, e.g. "open the shop's site and download the card template", and how many
+minutes it takes (at most 30). Also an even smaller first step for a day with no energy (at most 5 minutes).
+Short, starting with a verb, in {language}. Only what the to-do says: never invent names, shops, prices or facts.
+Return JSON only: {{"step": "...", "minutes": 5, "smaller": "...", "smaller_minutes": 2}}
+
+{todo}"""
 
 PROMISE_PROMPT = """These are mails the owner sent recently, and the promises Kairo already tracks.
 The owner is {owner}. A promise is always to someone else on the mail, never to the owner.
@@ -163,6 +176,50 @@ def schedule_after(urgency: str, step: int, now: dt.datetime, tz, times: dict) -
     return next_good_time(now, tz, times, days=1)
 
 
+# ---------------------------------------------------------------- personal to-dos (owner's request 2026-10-20)
+# A to-do only the owner does keeps coming back, at a good moment (the evening at home), with one next step,
+# and each skip makes the next one sooner and more direct, then a smaller first step. What can't wait (due
+# today, or tomorrow first thing) keeps the urgent rules and only waits out the commute and calls.
+
+PERSONAL_KINDS = ("task", "deadline")
+PERSONAL_DAYS = {"low": 3, "normal": 1, "urgent": 1}   # days to the next one; one fewer per skip, at least 1
+SMALLER_AFTER = 3                                      # skipped this often: a smaller first step
+
+
+def personal(loop: OpenLoop) -> bool:
+    return loop.kind in PERSONAL_KINDS and action_of(loop) == "remind"
+
+
+def pressing(loop: OpenLoop, now: dt.datetime, tz) -> bool:
+    """Urgent and the deadline not gone yet (by the day): it can't wait for the evening."""
+    return loop.urgency == "urgent" and not dues.overdue(loop.due, now, tz)
+
+
+def come_back(loop: OpenLoop, step: int, now: dt.datetime, tz, times: dict) -> dt.datetime:
+    """When a loop comes back after its `step`-th deferral. A personal to-do that can wait: on a later
+    day's good time, sooner with each skip (low: in 3 days, then 2, then daily), never twice a day."""
+    if personal(loop) and not pressing(loop, now, tz):
+        return next_good_time(now, tz, times, days=max(1, PERSONAL_DAYS.get(loop.urgency, 1) - step))
+    return schedule_after(loop.urgency, step, now, tz, times)
+
+
+def moment(loop: OpenLoop, now: dt.datetime, tz, times: dict, *, where: str | None, on_call: bool) -> str | None:
+    """Why now is not a good moment to remind the owner of a personal to-do, or None (quiet hours: the job
+    doesn't run). where: location.whereabouts ("home", "out", "commute", None = unknown)."""
+    if on_call:
+        return "on a call"
+    if where == "commute":
+        return "on the way"
+    if pressing(loop, now, tz):
+        return None
+    if where == "out":
+        return "not at home"
+    local = now.astimezone(tz)
+    if local.time() < _hm(times["weekend" if local.weekday() >= 5 else "after_work"]):
+        return "not evening yet"
+    return None
+
+
 ACT_TODAY_BEFORE = dt.time(10, 0)   # due tomorrow before this: it has to be done today
 
 
@@ -199,17 +256,6 @@ def _ago(since: dt.datetime, now: dt.datetime, tz) -> str:
     return "last week" if days < 14 else f"{days} days ago"
 
 
-def _when(due: dt.datetime, now: dt.datetime, tz) -> str:
-    days = (due.astimezone(tz).date() - now.astimezone(tz).date()).days
-    if days < 0:
-        return f"{-days} day{'s' if days != -1 else ''} overdue" if days < -1 else "overdue since yesterday"
-    if days == 0:
-        return "due today"
-    if days == 1:
-        return "due tomorrow"
-    return f"due {due.astimezone(tz):%A}" if days < 7 else f"due {due.astimezone(tz):%d %b}"
-
-
 def phrase(loop: OpenLoop, now: dt.datetime, tz) -> str:
     """What Kairo says. A little more direct each time it comes back."""
     since = aware(loop.since)
@@ -223,14 +269,30 @@ def phrase(loop: OpenLoop, now: dt.datetime, tz) -> str:
             return f"{who} is still waiting for your answer: {loop.what}."
         return f"{who} asked {_ago(since, now, tz)}: {loop.what}."
     if loop.kind == "promise":
-        by = f" ({_when(aware(loop.due), now, tz)})" if loop.due else ""
+        by = f" ({dues.words(loop.due, now, tz)})" if loop.due else ""
         if again:
             return f"You promised {loop.who or 'it'} {_ago(since, now, tz)}: {loop.what}. Still open{by}."
         return f"You told {loop.who or 'someone'} you'd {loop.what}{by}."
     if loop.kind in PA_KINDS:   # the PA engine writes the whole sentence
         return f"Still open: {loop.what}" if again else loop.what
-    due = f", {_when(aware(loop.due), now, tz)}" if loop.due else ""
+    due = f", {dues.words(loop.due, now, tz)}" if loop.due else ""
+    step = step_of(loop) if personal(loop) else None
+    if step:
+        return _with_step(loop, due, step)
     return f"{loop.what}{due}. Still not done." if again else f"{loop.what}{due}."
+
+
+def _with_step(loop: OpenLoop, due: str, step: dict) -> str:
+    """A personal to-do with its next step: more direct with each skip, then a smaller first step."""
+    n, nxt = loop.snoozed, f"{step['text']}, {step['minutes']} min"
+    if n >= SMALLER_AFTER and step.get("smaller"):
+        return (f"{loop.what}{due}: you've put it off {n} times. Start smaller: {step['smaller']}, "
+                f"{step['smaller_minutes']} min. That's all.")
+    if n >= 2:
+        return f"{loop.what}{due}: you've put it off {n} times. Just do the next step now: {nxt}."
+    if n == 1:
+        return f"{loop.what}{due}. Still not done. Next step: {nxt}."
+    return f"{loop.what}{due}. Next step: {nxt}."
 
 
 def draft_of(loop: OpenLoop) -> dict | None:
@@ -238,6 +300,36 @@ def draft_of(loop: OpenLoop) -> dict | None:
         return json.loads(loop.draft_json) if loop.draft_json else None
     except ValueError:
         return None
+
+
+def step_of(loop: OpenLoop) -> dict | None:
+    """A personal to-do's next step ({"text", "minutes", "smaller", "smaller_minutes"}), kept with what
+    Kairo prepared for the loop (draft_json "step")."""
+    step = (draft_of(loop) or {}).get("step")
+    return step if isinstance(step, dict) and step.get("text") else None
+
+
+def _minutes(value, most: int, default: int) -> int:
+    try:
+        return max(1, min(most, round(float(value))))
+    except (TypeError, ValueError):
+        return default
+
+
+def set_step(s: Session, loop: OpenLoop, out) -> dict | None:
+    """Keep the model's next step on the loop, checked and short. None: no step in the answer."""
+    text = clip(str(out.get("step") or "").strip(), 140).rstrip(".") if isinstance(out, dict) else ""
+    if not text:
+        return None
+    step = {"text": text, "minutes": _minutes(out.get("minutes"), 30, 10),
+            "smaller": clip(str(out.get("smaller") or "").strip(), 140).rstrip(".") or None,
+            "smaller_minutes": _minutes(out.get("smaller_minutes"), 5, 2)}
+    d = draft_of(loop) or {}
+    d["step"] = step
+    loop.draft_json = json.dumps(d, ensure_ascii=False)
+    s.add(loop)
+    s.commit()
+    return step
 
 
 def offer(loop: OpenLoop) -> str | None:
@@ -253,6 +345,7 @@ def as_dict(loop: OpenLoop, now: dt.datetime, tz) -> dict:
     since = aware(loop.since)
     return {"id": loop.id, "kind": loop.kind, "source": loop.source, "who": loop.who, "who_email": loop.who_email,
             "what": loop.what, "since": since.isoformat(), "due": aware(loop.due).isoformat() if loop.due else None,
+            "when": dues.words(loop.due, now, tz) if loop.due else None,
             "waiting_days": (now.astimezone(tz).date() - since.astimezone(tz).date()).days,
             "urgency": loop.urgency, "status": loop.status, "raised": loop.raised,
             "next_at": aware(loop.next_at).isoformat() if loop.next_at else None,
@@ -451,8 +544,9 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
     Important things get pushback with the preparation; critical ones can't move (Refused)."""
     loop = _get_open(s, loop_id)
     due = aware(loop.due)
-    ready = " It's ready: just check it." if draft_of(loop) else ""
-    if due is not None and due - now <= CRITICAL_WINDOW:
+    ready = " It's ready: just check it." if set(draft_of(loop) or {}) - {"step"} else ""
+    ahead = due is not None and due > now          # an overdue one can move: its deadline is gone (2026-10-20)
+    if ahead and due - now <= CRITICAL_WINDOW:
         raise Refused(f"No, this one can't move: {loop.what} is due {_hhmm(due, now, tz)}.{ready} Do it now.")
     counted = True
     if at is not None:
@@ -467,11 +561,11 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
         # A Later right after Kairo raised it answers that raise (already counted).
         just_raised = loop.last_raised_at and now - aware(loop.last_raised_at) < dt.timedelta(hours=2) and loop.snoozed > 0
         step = loop.snoozed - 1 if just_raised else loop.snoozed
-        nxt = schedule_after(loop.urgency, step, now, tz, times)
+        nxt = come_back(loop, step, now, tz, times)
         counted = not just_raised
     else:
         raise LoopError("when must be later, in_1h or tomorrow")
-    if due is not None and nxt > due - dt.timedelta(minutes=30):
+    if ahead and nxt > due - dt.timedelta(minutes=30):
         nxt = max(now + dt.timedelta(minutes=15), due - dt.timedelta(hours=1))   # never past the deadline
     pushed = loop.snoozed
     if counted:
@@ -481,8 +575,10 @@ def snooze(s: Session, loop_id: int, *, now: dt.datetime, tz, times: dict, when:
     s.commit()
     s.refresh(loop)
     msg = f"OK, back {_hhmm(nxt, now, tz)}."
-    if due is not None and due - now <= IMPORTANT_WINDOW and pushed >= 2:
+    if ahead and due - now <= IMPORTANT_WINDOW and pushed >= 2:
         msg += f" But it's due {_hhmm(due, now, tz)}.{ready or ' Do it before then.'}"
+    elif due is not None and not ahead and pushed >= 2:
+        msg += f" But it's {dues.words(due, now, tz)}.{ready}"
     return loop, msg
 
 
@@ -531,7 +627,7 @@ def _close(loop: OpenLoop, reason: str, now: dt.datetime) -> None:
 
 def mark_raised(s: Session, loop: OpenLoop, now: dt.datetime, tz, times: dict) -> None:
     """Raised (pinged or in the brief). If nothing happens it comes back by the rules."""
-    loop.next_at = schedule_after(loop.urgency, loop.snoozed, now, tz, times)
+    loop.next_at = come_back(loop, loop.snoozed, now, tz, times)
     loop.snoozed += 1
     loop.raised += 1
     loop.last_raised_at = now
@@ -767,11 +863,12 @@ class LoopEngine:
     """Job body 'open_loops' (every 15 minutes in the day): sync, then raise the most urgent one."""
 
     def __init__(self, *, engine, profile, schedule, google_read, calendar, pusher, vault_dir, config_dir, checker=None,
-                 hold=None, tell=None):
+                 hold=None, tell=None, on_call=None):
         """calendar(start: date) -> calendar_read.CalendarRead for the 7 days from start.
         checker: loop_check.LoopChecker, run before anything is raised (loops block L).
-        hold/tell: the owner's own calendar and one line to the owner (the daily timetable check)."""
-        self.checker, self.hold, self.tell = checker, hold, tell
+        hold/tell: the owner's own calendar and one line to the owner (the daily timetable check).
+        on_call() -> bool: the owner is on a call right now (a personal reminder waits)."""
+        self.checker, self.hold, self.tell, self.on_call = checker, hold, tell, on_call
         self.engine, self.profile, self.schedule = engine, profile, schedule or {}
         self.google_read, self.calendar, self.pusher = google_read, calendar, pusher
         self.vault_dir, self.config_dir = vault_dir, config_dir
@@ -824,9 +921,18 @@ class LoopEngine:
         if pings_today(s, now, tz) >= max_pings(self.schedule):
             due = fresh_replies
         busy = self._busy(now)
-        pick = next((l for l in due if l.urgency == "urgent" or l in fresh_replies or not busy), None)
+        waits: dict[int, str] = {}     # personal to-dos held for a good moment: they stay due, nothing is dropped
+        if any(personal(l) for l in due):
+            where, on_call = self._where(s, now), bool(self.on_call and self.on_call())
+            for l in due:
+                why = moment(l, now, tz, self.times, where=where, on_call=on_call) if personal(l) else None
+                if why:
+                    waits[l.id] = why
+        pick = next((l for l in due if l.id not in waits and (
+            (l.urgency == "urgent" and (not personal(l) or pressing(l, now, tz))) or l in fresh_replies or not busy)), None)
         if pick is None:
-            return json.dumps({**counts, "raised": None, "why": "in a calendar event"})
+            why = "in a calendar event" if len(waits) < len(due) else f"waiting for a good moment ({next(iter(waits.values()))})"
+            return json.dumps({**counts, "raised": None, "why": why})
         if pick.kind == "reply" and pick.source == "email" and self._is_bulk(pick):
             _close(pick, "automated", now)          # a newsletter or notification after all: never a ping
             s.add(pick)
@@ -837,6 +943,11 @@ class LoopEngine:
                 self.draft(ctx, pick)
             except Exception as exc:   # no model right now: raise it anyway, without a ready answer
                 log.info("no draft for loop %s: %s", pick.id, exc)
+        if personal(pick) and step_of(pick) is None:   # one next step, made once: never again for the next reminder
+            try:
+                self.next_step(ctx, pick, now)
+            except Exception as exc:   # no model right now: the reminder comes anyway, the step next time
+                log.info("no next step for loop %s: %s", pick.id, exc)
         body = phrase(pick, now, tz)
         if offer(pick):
             body += " " + offer(pick)
@@ -907,6 +1018,29 @@ class LoopEngine:
         except Exception:
             return False
         return automated_headers({k.lower(): v for k, v in _headers(msg).items()})
+
+    def _where(self, s: Session, now: dt.datetime) -> str | None:
+        """Home, out or on the way, from the location events (home: the places of kind home); None: unknown."""
+        from . import location, prefs
+        try:
+            home = {"home"} | {p.name.lower() for p in prefs.places(s) if p.kind == "home"}
+            return location.whereabouts(s, now, home=home)
+        except Exception as exc:   # never stops the loops: then only the time decides
+            log.info("whereabouts: %s", exc)
+            return None
+
+    def next_step(self, ctx: JobContext, loop: OpenLoop, now: dt.datetime) -> dict | None:
+        """The one next step for a personal to-do (cheap model), kept on the loop. The to-do is data."""
+        when = f" ({dues.words(loop.due, now, self.profile.tz)})" if loop.due else ""
+        prompt = STEP_PROMPT.format(language=self.profile.default_language,
+                                    todo=untrusted("the owner's to-do", f"{loop.what}{when}"))
+        answer = ctx.ask(prompt, JOB_RULES, purpose="reminder")
+        if not answer.ok:
+            raise RuntimeError(answer.error or answer.status)
+        step = set_step(ctx.session, loop, extract_json(answer.text))
+        if step is None:
+            raise ValueError("no next step in the answer")
+        return step
 
     def _busy(self, now: dt.datetime) -> bool:
         try:

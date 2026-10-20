@@ -148,6 +148,27 @@ def places(s: Session) -> list[str]:
     return sorted(set(s.exec(select(LocationEvent.place)).all()))
 
 
+COMMUTE = dt.timedelta(minutes=90)   # left a place this recently and not arrived anywhere yet: on the way
+
+
+def whereabouts(s: Session, now: dt.datetime, home=("home",)) -> str | None:
+    """"home", "out" or "commute" from the last location event (a personal reminder waits for a good moment,
+    owner's request 2026-10-20). None when Kairo can't tell: no events, paused, or the last one is old.
+    home: the names of the owner's home places (lower case)."""
+    if is_paused(s):
+        return None
+    last = s.exec(select(LocationEvent).where(LocationEvent.ts <= now.astimezone(dt.timezone.utc))
+                  .order_by(LocationEvent.ts.desc())).first()
+    if last is None or now - _aware(last.ts) > dt.timedelta(hours=16):
+        return None
+    at_home = last.place.lower() in home
+    if last.event == "arrive":
+        return "home" if at_home else "out"
+    if now - _aware(last.ts) <= COMMUTE:
+        return "commute"
+    return "out" if at_home else None   # left home and never came back; left school: maybe home, unsaid
+
+
 # ---------------------------------------------------------------- reminders
 
 def tasks_for(s: Session, place: str) -> list[Task]:

@@ -45,7 +45,7 @@ def test_home_is_built_from_real_data(migrated):
     assert [d["state"] for d in h["streak"]["week"]] == ["done", "done", "today", "future", "future", "future", "future"]
     assert {x["label"]: x["value"] for x in h["snapshot"]} == {"Done today": 1, "Events": 2, "Sleep": 5.8}   # "Next week" is not today
     assert [t["title"] for t in h["top3"]] == ["Lab report", "Call dentist", "Someday thing"]
-    assert h["top3"][0]["why"] == "overdue"
+    assert h["top3"][0]["why"] == "overdue since yesterday" and h["top3"][0]["overdue"] is True
     assert h["next_up"]["title"] == "Berufsschule" and h["next_up"]["in_minutes"] == 120
     texts = [c["text"] for c in h["suggestions"]]
     assert texts[0] == "Draft a reply to Mr. Keller" and "Prep me for Berufsschule" in texts

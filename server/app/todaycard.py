@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Callable
 
+from . import dues
 from .tools import untrusted
 
 log = logging.getLogger("kairo.todaycard")
@@ -92,6 +93,9 @@ def events_lines(events: list[dict] | None, now: dt.datetime, *, n: int = 3, unr
     return "\n".join(out[:n]) or "(nothing more today or tomorrow: the calendar was read)"
 
 
+DATE_ONLY = ((0, 0), (12, 0), (23, 59))   # a due without a time of day (a date alone is stored as noon: tools._due)
+
+
 def tasks_lines(tasks: list, now: dt.datetime, *, n: int = 5) -> str:
     """Open tasks due today or overdue, soonest first."""
     end = dt.datetime.combine(now.date(), dt.time.max, tzinfo=now.tzinfo)
@@ -100,19 +104,22 @@ def tasks_lines(tasks: list, now: dt.datetime, *, n: int = 5) -> str:
         due = _local(getattr(t, "due", None), now.tzinfo)
         if due is None or due > end:
             continue
-        late = " (overdue)" if due < now and due.date() < now.date() else ""
-        at = "" if (due.hour, due.minute) in ((0, 0), (23, 59)) else f" by {due:%H:%M}"
-        rows.append((due, f"- {getattr(t, 'title', '')[:120]}{at}{late}"))
+        if dues.overdue(due, now, now.tzinfo):
+            when = f" ({dues.words(due, now, now.tzinfo)})"
+        else:
+            when = "" if (due.hour, due.minute) in DATE_ONLY else f" by {due:%H:%M}"
+        rows.append((due, f"- {getattr(t, 'title', '')[:120]}{when}"))
     rows.sort(key=lambda r: r[0])
     return "\n".join(line for _, line in rows[:n]) or "(nothing due today)"
 
 
-def loops_lines(loops: list, tz, *, n: int = 3) -> str:
+def loops_lines(loops: list, tz, *, n: int = 3, now: dt.datetime | None = None) -> str:
+    now = now or dt.datetime.now(tz)
     out = []
     for lp in (loops or [])[:n]:
         who = f" ({lp.who})" if getattr(lp, "who", None) else ""
-        due = _local(getattr(lp, "due", None), tz)
-        when = f", due {due:%a %H:%M}" if due else ""
+        due = getattr(lp, "due", None)
+        when = f", {dues.words(due, now, tz)}" if due else ""
         urgent = " [urgent]" if getattr(lp, "urgency", None) == "urgent" else ""
         out.append(f"- {lp.kind}: {lp.what[:140]}{who}{when}{urgent}")
     return "\n".join(out) or "(no open loops)"

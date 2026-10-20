@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
-from . import vault
+from . import dues, vault
 from .db import CalendarTag, Task, utcnow
 from .gate import Decision
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
@@ -446,7 +446,7 @@ class ToolRunner:
         loops, tz, now, _ = self._loop_env()
         with Session(self.engine) as s:
             rows = [loops.as_dict(l, now, tz) for l in loops.shown_loops(s, profile=self.profile)]
-        keep = ("id", "kind", "who", "what", "since", "due", "waiting_days", "urgency", "next_at", "phrase")
+        keep = ("id", "kind", "who", "what", "since", "due", "when", "waiting_days", "urgency", "next_at", "phrase")
         return json.dumps([{k: r[k] for k in keep} for r in rows if a["include_snoozed"] or not r["next_at"] or r["next_at"] <= now.isoformat()],
                           default=str, ensure_ascii=False)
 
@@ -481,10 +481,12 @@ class ToolRunner:
             a["reason"], "Dropped. It won't come back.")
 
 
-def _task(t: Task, tz) -> dict:
+def _task(t: Task, tz, now: datetime | None = None) -> dict:
+    """when: the words for the due (dues.py), so the model never says "due Fri" for a Friday that passed."""
     due = t.due.replace(tzinfo=t.due.tzinfo or timezone.utc).astimezone(tz).isoformat() if t.due else None
-    return {"id": t.id, "title": t.title, "due": due, "priority": t.priority, "status": t.status, "project_id": t.project_id,
-            "place": t.place}
+    when = dues.words(t.due, now or datetime.now(tz), tz) if t.due else None
+    return {"id": t.id, "title": t.title, "due": due, "when": when, "priority": t.priority, "status": t.status,
+            "project_id": t.project_id, "place": t.place}
 
 
 def _place(value):
