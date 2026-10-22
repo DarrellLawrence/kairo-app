@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 from app.settings import REPO_ROOT
 from tests.test_privacy_scan import HOOKS, NAME, SCRIPT, clean_env, git, make_repo, no_leak, write
@@ -55,3 +56,67 @@ def test_the_hooks_stop_a_commit_with_a_term_and_let_a_clean_one_through(tmp_pat
     msg = subprocess.run(["git", "commit", "-q", "-m", f"met {NAME}"], cwd=repo, env=env, capture_output=True, text=True)
     assert msg.returncode != 0 and "personal term #1" in msg.stdout + msg.stderr      # the commit-msg hook
     no_leak(msg.stdout + msg.stderr, NAME)
+
+
+def workflow() -> dict:
+    return yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+
+
+def test_ci_has_a_privacy_job_with_full_history_the_terms_secret_and_a_pinned_gitleaks():
+    job = workflow()["jobs"]["privacy"]
+    steps = job["steps"]
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert checkout["with"]["fetch-depth"] == 0
+    text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "secrets.PERSONAL_TERMS" in text
+    scan_step = next(s for s in steps if "privacy_scan.py" in s.get("run", ""))
+    assert "--ci" in scan_step["run"] and "--history" in scan_step["run"]
+    assert scan_step["env"]["KAIRO_PERSONAL_TERMS"] == "${{ secrets.PERSONAL_TERMS }}"
+    gl = "\n".join(s.get("run", "") for s in steps) + str(job.get("env", ""))
+    assert "gitleaks" in gl and "sha256sum -c" in gl                      # the download is verified
+    assert any(len(str(v)) == 64 and set(str(v)) <= set("0123456789abcdef") for v in job.get("env", {}).values())
+    assert "latest" not in gl.lower().replace("--log-opts", "")           # a pinned release, never "latest"
+
+
+def test_ci_build_scans_the_release_zip_before_the_artifact_is_uploaded():
+    steps = workflow()["jobs"]["build"]["steps"]
+    names = [s.get("name", "") + s.get("uses", "") for s in steps]
+    scan_i = next(i for i, s in enumerate(steps) if "privacy_scan.py" in s.get("run", "") and "--zip" in s.get("run", ""))
+    upload_i = next(i for i, n in enumerate(names) if "upload-artifact" in n)
+    assert scan_i < upload_i
+    assert steps[scan_i]["env"]["KAIRO_PERSONAL_TERMS"] == "${{ secrets.PERSONAL_TERMS }}"
+
+
+def test_existing_ci_jobs_are_still_there():
+    jobs = set(workflow()["jobs"])
+    assert {"build", "server", "voice", "voice-windows", "voice-install-windows", "memory", "browser", "release-tools",
+            "web", "windows-install", "release", "privacy"} <= jobs
+
+
+def test_build_release_scans_the_zip_and_removes_it_if_it_fails():
+    sh = (REPO_ROOT / "scripts" / "build-release.sh").read_text(encoding="utf-8")
+    assert "privacy_scan.py --zip" in sh
+    assert sh.index("privacy_scan.py --zip") < sh.index('echo "$version" > "$out/VERSION"')
+    assert 'rm -f "$zip"' in sh
+
+
+def test_gitignore_keeps_personal_data_out():
+    lines = {ln.strip() for ln in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    for must in ("private/", "data/", "devdata/", "*.local.*", ".env", "*.sqlite"):
+        assert must in lines, must
+    assert "!.env.example" in lines
+
+
+def test_gitleaks_config_extends_the_defaults_and_every_exception_names_its_rule():
+    import tomllib
+    cfg = tomllib.loads((REPO_ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+    assert cfg["extend"]["useDefault"] is True
+    assert "allowlist" not in cfg                          # no exception that covers every rule
+    for entry in cfg.get("allowlists", []):
+        assert entry.get("targetRules"), entry.get("description")
+
+
+def test_contributing_documents_the_hook_setup():
+    for doc in ("README.md", "CONTRIBUTING.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        assert "git config core.hooksPath scripts/hooks" in text, doc

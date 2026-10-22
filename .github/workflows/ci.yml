@@ -19,6 +19,14 @@ jobs:
           node-version: "22"
       - name: Build setup zip (with its release check)
         run: scripts/build-release.sh
+      # Owner's master prompt 0.6: the zip that may be published holds no personal term, no secret and no
+      # private/, data/ or .env path. build-release.sh already scanned it without the owner's terms; this adds
+      # them from the PERSONAL_TERMS secret. Not --ci on purpose: a missing secret is reported as an error on
+      # main by the privacy job below, it does not stop the build.
+      - name: Privacy scan of the setup zip
+        env:
+          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
+        run: python scripts/privacy_scan.py --zip dist/Kairo-Setup-*.zip
       - uses: actions/upload-artifact@v4
         with:
           name: setup-zip
@@ -28,6 +36,38 @@ jobs:
             dist/VERSION
           if-no-files-found: error
           retention-days: 30
+
+  # Owner's master prompt 0.6 (the code may become public; all personal data lives on the PC only): the whole
+  # history, every branch and tag, must hold no personal term, secret or private/ data/ .env path. Two scanners:
+  # scripts/privacy_scan.py with the owner's terms from the PERSONAL_TERMS secret (names are never printed, only
+  # file:line and the rule number) and a pinned, checksum-verified gitleaks. Without the secret this job is an
+  # error on main (so it is noticed) and a warning elsewhere (pull requests from forks never get secrets).
+  privacy:
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_VERSION: "8.30.0"
+      GITLEAKS_SHA256: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"   # gitleaks_8.30.0_linux_x64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Personal terms, secrets and forbidden paths in the whole history
+        env:
+          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
+        run: python scripts/privacy_scan.py --ci --history
+      - name: Get gitleaks (pinned release, checksum verified)
+        if: ${{ !cancelled() }}
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+      - name: gitleaks on the whole history
+        if: ${{ !cancelled() }}
+        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --verbose --log-opts="--all" .'
 
   server:
     strategy:
