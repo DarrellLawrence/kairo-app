@@ -657,6 +657,7 @@ def test_ci_mode_writes_github_annotations_without_the_term(tmp_path):
     code, out = scan(tmp_path, "--ci", "--tree", "t", terms=[NAME], GITHUB_ACTIONS="true", GITHUB_REF="refs/heads/main")
     assert code == 1
     assert "::error file=" in out and "line=2" in out
+    assert "%3A" not in out and "%2C" not in out          # only the file= property is escaped that way
     no_leak(out, NAME)
 
 

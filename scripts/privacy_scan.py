@@ -613,15 +613,17 @@ class Scanner:
             added, _deleted, path_b = _dec(rec).split("\t", 2)
             path = path_b
             self.check_path(path)
-            if added == "-":                                         # binary: the whole file counts
-                self.scan_blob(path, _git(repo, "cat-file", "blob", f":{path}"), path_checked=True)
-                continue
-            diff = _git(repo, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
-                        "--", f":(literal){path}")
-            lines = _added_lines(_dec(diff))
-            if not lines:
-                continue
-            self.scan_blob(path, _git(repo, "cat-file", "blob", f":{path}"), only_lines=lines, path_checked=True)
+            try:
+                if added == "-":                                     # binary: the whole file counts
+                    self.scan_blob(path, _git(repo, "cat-file", "blob", f":{path}"), path_checked=True)
+                    continue
+                diff = _git(repo, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--no-renames",
+                            "--", f":(literal){path}")
+                lines = _added_lines(_dec(diff))
+                if lines:
+                    self.scan_blob(path, _git(repo, "cat-file", "blob", f":{path}"), only_lines=lines, path_checked=True)
+            except GitError:                                         # a submodule bump has no file to read
+                self.report.warnings.append(f"{self.safe(path)}: no file content to scan (a submodule?)")
 
     def scan_message_file(self, path: Path) -> None:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -646,11 +648,11 @@ class Scanner:
                 objects.setdefault(sha, path)
         types = self._object_types(repo, list(objects))
         # 2. the contents of blobs and annotated tags, each once
-        want = [sha for sha, (typ, size) in types.items() if typ in ("blob", "tag")]
+        want = [sha for sha, (typ, _size) in types.items() if typ in ("blob", "tag")]
         paths_seen: set[str] = set()
         flagged: list[str] = []
         before = len(self.report.findings)
-        for sha, typ, data in self._read_objects(repo, want, types):
+        for sha, typ, data in self._read_objects(repo, want):
             path = objects.get(sha) or ""
             label = path if typ == "blob" and path else f"annotated tag {sha[:7]}"
             if data is None:
@@ -706,8 +708,7 @@ class Scanner:
                 out[parts[0]] = (parts[1], int(parts[2]))
         return out
 
-    def _read_objects(self, repo: Path, shas: list[str], types: dict[str, tuple[str, int]]
-                      ) -> Iterator[tuple[str, str, bytes | None]]:
+    def _read_objects(self, repo: Path, shas: list[str]) -> Iterator[tuple[str, str, bytes | None]]:
         if not shas:
             return
         with tempfile.TemporaryFile() as f:
@@ -806,8 +807,14 @@ def _tree_files(root: Path) -> Iterator[str]:
 
 # ---------------------------------------------------------------- command line
 
+def _escape_data(s: str) -> str:
+    """The message of a GitHub Actions workflow command."""
+    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def _escape_property(s: str) -> str:
-    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A").replace(":", "%3A").replace(",", "%2C")
+    """A property (file=...) of a GitHub Actions workflow command."""
+    return _escape_data(s).replace(":", "%3A").replace(",", "%2C")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -897,11 +904,11 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     if args.ci and env.get("GITHUB_ACTIONS") == "true":
         for f in findings[:MAX_ANNOTATIONS]:
             if f.line:
-                print(f"::error file={_escape_property(f.where)},line={f.line}::{_escape_property(f.rule)}")
+                print(f"::error file={_escape_property(f.where)},line={f.line}::{_escape_data(f.rule)}")
             else:
-                print(f"::error::{_escape_property(f.where + ': ' + f.rule)}")
+                print(f"::error::{_escape_data(f.where + ': ' + f.rule)}")
         for e in config_errors:
-            print(f"::error::{_escape_property(e)}")
+            print(f"::error::{_escape_data(e)}")
     terms_note = f"personal terms: {source.origin}" if source.terms else "personal terms: not checked"
     if findings:
         print(f"privacy_scan: {len(findings)} finding(s) ({terms_note})")

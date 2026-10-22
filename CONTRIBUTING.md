@@ -52,6 +52,12 @@ python scripts/privacy_scan.py --zip dist/Kairo-Setup-*.zip   # a release zip (s
 
 Exit codes: 0 clean, 1 findings, 2 the check could not run (bad list, no list on `main` in CI, shallow clone in CI).
 
+## What it cannot see
+
+Text files, source, config, SQLite files, office files (`.docx`, `.xlsx` are zips of XML) and zips inside zips are
+searched. Images, fonts, audio, PDFs and other compressed or packed binaries cannot be searched; only their names
+are checked. Keep such files out of the repo if they could hold anything personal.
+
 ## Secrets
 
 Besides the terms, the scanner flags private-key blocks, Google/GitHub/Tailscale/OpenAI/AWS keys, JSON web tokens and
