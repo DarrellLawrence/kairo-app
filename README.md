@@ -67,6 +67,9 @@ the lines a commit adds, a directory, the whole git history and the release zip 
 git config core.hooksPath scripts/hooks
 ```
 
+The hooks above cover branches that contain `scripts/hooks`. To protect every branch and worktree of the clone (also old
+branches), run `python scripts/privacy_scan.py --install-hooks` as well.
+
 Details (the terms list, CI, gitleaks) are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status

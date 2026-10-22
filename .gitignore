@@ -18,7 +18,14 @@ private/
 !.env.example
 data/
 *.local.*
-*.sqlite3
-*.sqlite-wal
-*.sqlite-shm
 personal-terms*.txt
+*.sqlite*
+*.db
+*.db3
+secrets/
+vault/
+.private/
+*.env
+.envrc
+.env-*
+capture-token*

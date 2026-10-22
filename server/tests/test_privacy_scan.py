@@ -7,12 +7,23 @@ come out clean."""
 
 from __future__ import annotations
 
+import base64
+import bz2
+import gzip
 import importlib.util
+import io
+import json
+import lzma
 import os
+import quopri
 import shutil
+import struct
 import subprocess
 import sys
+import tarfile
+import urllib.parse
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -124,6 +135,36 @@ def stage(repo: Path, tmp_path: Path, *paths: str) -> None:
     git(repo, tmp_path, "add", "-f", *paths)
 
 
+def png_with_text(key: bytes, text: bytes, compressed: bool = False) -> bytes:
+    def chunk(t: bytes, d: bytes) -> bytes:
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)
+    meta = chunk(b"zTXt", key + b"\x00\x00" + zlib.compress(text)) if compressed else chunk(b"tEXt", key + b"\x00" + text)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + meta + chunk(b"IDAT", zlib.compress(b"\x00\x00")) + chunk(b"IEND", b"")
+
+
+def wav_with_info(text: bytes) -> bytes:
+    fmt = struct.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)
+    data = b"\x00\x00" * 8
+    inam = b"INAM" + struct.pack("<I", len(text) + 1) + text + b"\x00"
+    if len(inam) % 2:
+        inam += b"\x00"
+    lst = b"LIST" + struct.pack("<I", 4 + len(inam)) + b"INFO" + inam
+    body = b"WAVE" + b"fmt " + struct.pack("<I", 16) + fmt + b"data" + struct.pack("<I", len(data)) + data + lst
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def pdf_with(author: str | None, content: bytes | None = None) -> bytes:
+    """A small PDF: the author in the (plain) Info dictionary, text in a Flate content stream (b"BT [(Jor)-20(dan)] TJ ET")."""
+    stream = b""
+    if content:
+        packed = zlib.compress(content)
+        stream = b"4 0 obj << /Length %d /Filter /FlateDecode >>\nstream\n" % len(packed) + packed + b"\nendstream endobj\n"
+    info = b"3 0 obj << /Author (" + author.encode() + b") >> endobj\n" if author else b""
+    return (b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+            b"2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj\n" + info + stream + b"trailer << /Root 1 0 R /Info 3 0 R >>\n%%EOF\n")
+
+
 def no_leak(out: str, *secrets: str) -> None:
     low = out.lower()
     for s in secrets:
@@ -143,7 +184,7 @@ def test_fold_umlauts_case_and_accents(ps):
 @pytest.mark.parametrize("term,text", [
     (UML, UML), (UML, UML.lower()), (UML, UML.upper()), (UML, UML_ASCII), (UML, UML_ASCII.upper()),
     (UML_ASCII, UML),
-    (STRASSE, STRASSE_ASCII), (STRASSE, STRASSE_ASCII.upper()), (STRASSE_ASCII, STRASSE), (STRASSE, "Ma\u00dftal"),
+    (STRASSE, STRASSE_ASCII), (STRASSE, STRASSE_ASCII.upper()), (STRASSE_ASCII, STRASSE), (STRASSE, j("Ma", chr(0xDF), "tal")),
     (j("Bä", "renau"), "Baerenau"), (j("Jö", "rgsen"), "JOERGSEN"),
 ])
 def test_umlaut_folded_matching(ps, term, text):
@@ -326,10 +367,16 @@ def test_terms_list_in_the_data_folder_and_in_the_home_config(tmp_path):
     assert code == 1 and "a.txt:1: personal term #1" in out
 
 
-def test_a_missing_terms_file_falls_back_to_the_env_list_with_a_warning(tmp_path):
+def test_a_terms_file_named_on_purpose_that_is_missing_is_an_error(tmp_path):
+    """A typo must not switch the check off (build-release.sh, the hooks)."""
     write(tmp_path / "t" / "a.txt", f"about {PLACE}\n")
     code, out = scan(tmp_path, "--tree", "t", terms=[PLACE], KAIRO_PERSONAL_TERMS_FILE=str(tmp_path / "nope.txt"))
-    assert code == 1 and "warning" in out.lower()
+    assert code == 2 and "does not exist" in out and "clean" not in out
+    code, out = scan(tmp_path, "--tree", "t", "--terms-file", str(tmp_path / "nope.txt"))
+    assert code == 2 and "does not exist" in out
+    empty = write(tmp_path / "empty.txt", "# nothing yet\n")
+    code, out = scan(tmp_path, "--tree", "t", "--terms-file", str(empty))
+    assert code == 2 and "no terms" in out
 
 
 def test_an_empty_list_counts_as_no_list(tmp_path):
@@ -390,11 +437,13 @@ def test_tree_flags_forbidden_paths_anywhere(tmp_path):
     assert ".env.example" not in out
 
 
-def test_tree_scans_binary_files_that_hold_text_but_not_pictures(tmp_path):
+def test_tree_reads_the_strings_of_binary_files_whatever_their_extension(tmp_path):
     write(tmp_path / "t" / "store.dat", b"\x00\x01\x02 " + NAME.encode() + b" \x00\xff\x00")
-    write(tmp_path / "t" / "pic.png", b"\x89PNG\r\n\x1a\n\x00" + NAME.encode() + b"\x00")
+    write(tmp_path / "t" / "pic.png", b"\x89PNG\r\n\x1a\n\x00" + NAME.encode() + b"\x00")      # not a real PNG
+    write(tmp_path / "t" / "clean.png", png_with_text(b"Comment", b"nothing personal here"))
     code, out = scan(tmp_path, "--tree", "t", terms=[NAME])
-    assert code == 1 and "store.dat" in out and "pic.png" not in out
+    assert code == 1 and "store.dat" in out and "pic.png" in out and "clean.png" not in out
+    no_leak(out, NAME)
 
 
 def test_tree_looks_inside_office_files_and_zips(tmp_path):
@@ -433,10 +482,15 @@ def test_tree_flags_secrets_with_file_and_line_and_without_the_value(tmp_path):
     no_leak(out, GH_PAT, GH_PAT[10:], "MIIBOgIBAAJBAKj34")
 
 
-def test_files_with_the_allow_pragma_pass_the_secret_check(tmp_path):
-    write(tmp_path / "t" / "cfg.txt", f"key = {GH_PAT}  # privacy-scan: allow\n")
+def test_files_with_the_allow_pragma_pass_the_secret_check_only_where_fakes_live(tmp_path):
+    write(tmp_path / "t" / "server" / "tests" / "cfg.txt", f"key = {GH_PAT}  # privacy-scan: allow\n")
+    write(tmp_path / "t" / "docs" / "cfg.md", f"key = {GH_PAT}  # privacy-scan: allow\n")
     code, out = scan(tmp_path, "--tree", "t", terms=[NAME])
     assert code == 0, out
+    # a pull request cannot excuse a real secret anywhere else
+    write(tmp_path / "t" / "server" / "app" / "cfg.py", f"key = {GH_PAT}  # privacy-scan: allow\n")
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME])
+    assert code == 1 and "server/app/cfg.py:1: secret: GitHub token" in out
 
 
 # ---------------------------------------------------------------- staged
@@ -677,6 +731,7 @@ def test_the_repo_itself_is_clean_with_a_made_up_list(tmp_path):
     code, out = scan(tmp_path, "--tree", str(REPO_ROOT), terms=[NAME, PLACE, UML, STRASSE, "regex:" + ZORB + r"\d+"],
                      cwd=REPO_ROOT)
     assert code == 0, out
+    assert "not scanned" not in out
 
 
 def test_the_repos_own_fake_test_secrets_are_not_flagged(ps):
@@ -685,3 +740,773 @@ def test_the_repos_own_fake_test_secrets_are_not_flagged(ps):
         for line, rule in ps.scan_secrets(p.read_text(encoding="utf-8")):
             offenders.append(f"{p.name}:{line}: {rule}")
     assert offenders == []
+
+
+# ======================================================================================================
+# Hardening after the adversarial review. Every hole the attackers found has a test below (made-up data only;
+# every name is built from pieces or at run time, so that this file stays clean for the scan of the whole repo).
+# ======================================================================================================
+
+REVERSED = ", ".join(reversed(NAME.split()))                  # "Last, First"
+PHONE = j("079 555 ", "12 34")                                # made up (555)
+IBAN = j("CH44 3199 9123 ", "0008 8901 2")                    # the example IBAN of the standard
+U = chr(0xFC)                                                 # the u-umlaut, written as a number so no escape is in the source
+
+
+def b64(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
+
+
+def hit(tmp_path: Path, content: str | bytes, name: str = "a.txt", terms: list[str] | None = None, **env) -> tuple[int, str]:
+    """Scan one file with --tree."""
+    d = tmp_path / "t"
+    if d.exists():
+        shutil.rmtree(d)
+    write(d / name, content)
+    return scan(tmp_path, "--tree", "t", terms=terms if terms is not None else [NAME, UML, PLACE], **env)
+
+
+# text -> (rule number in [NAME, UML, PLACE], line of the hit)
+ENCODED: dict[str, tuple[str | bytes, int, int]] = {
+    "json-ascii": (json.dumps({"street": UML + " 5"}), 2, 1),
+    "json-escaped-space": (json.dumps({"n": NAME}).replace(" ", "\\u0020"), 1, 1),
+    "json-literal-backslash-n-between-words": (json.dumps({"n": NAME.replace(" ", "\n")}), 1, 1),
+    "js-hex-escape": ('var s = "' + UML.replace(U, "\\xfc") + '";', 2, 1),
+    "js-utf8-bytes": ('var s = "' + "".join(f"\\x{b:02x}" for b in UML.encode()) + '";', 2, 1),
+    "js-brace-escape": ("var s = '" + UML.replace(U, "\\u{fc}") + "';", 2, 1),
+    "python-N-escape": ('s = "' + UML.replace(U, "\\N{LATIN SMALL LETTER U WITH DIAERESIS}") + '"', 2, 1),
+    "surrogate-pair": ("x\n" + json.dumps({"n": NAME[:3] + chr(0x1F600) + NAME[3:]}).replace(chr(0x1F600), "") + "\n" + json.dumps(NAME + chr(0x1F600)), 1, 2),
+    "url-utf8": ("https://x.example/?q=" + urllib.parse.quote(UML), 2, 1),
+    "url-space": ("https://x.example/?q=" + urllib.parse.quote(NAME), 1, 1),
+    "url-plus": ("https://x.example/?q=" + NAME.replace(" ", "+"), 1, 1),
+    "html-named": ("<p>" + UML.replace(U, "&uuml;") + "</p>", 2, 1),
+    "html-decimal": ("<p>" + UML.replace(U, "&#252;") + "</p>", 2, 1),
+    "html-hex": ("<p>" + UML.replace(U, "&#xFC;") + "</p>", 2, 1),
+    "html-nbsp": ("<p>" + NAME.replace(" ", "&nbsp;") + "</p>", 1, 1),
+    "quoted-printable": (quopri.encodestring(UML.encode()).decode(), 2, 1),
+    "quoted-printable-soft-line-break": ("ok\n" + quopri.encodestring(UML.encode()).decode().replace("hausen", "=\nhausen"), 2, 2),
+    "rfc2047-base64": ("From: =?utf-8?B?" + b64(UML) + "?= <a@example.org>", 2, 1),
+    "rfc2047-q": ("Subject: =?utf-8?Q?" + quopri.encodestring(UML.encode(), header=True).decode().strip() + "?=", 2, 1),
+    "rfc2047-one-word-each": ("From: " + " ".join(f"=?utf-8?B?{b64(w)}?=" for w in NAME.split()) + " <a@x.example>", 1, 1),
+    "base64-in-json": (json.dumps({"blob": b64(f"{NAME}, {PLACE}")}), 1, 1),
+    "base64-url-safe-no-padding": (json.dumps({"blob": base64.urlsafe_b64encode(UML.encode()).decode().rstrip("=")}), 2, 1),
+    "base64-twice": (b64(b64(NAME)), 1, 1),
+    "url-inside-json": (json.dumps({"u": urllib.parse.quote(NAME)}), 1, 1),
+    "last-comma-first": (REVERSED, 1, 1),
+    "csv-last-first": (f"Name;Vorname\n{';'.join(reversed(NAME.split()))}\n", 1, 2),
+    "words-run-together": (NAME.replace(" ", ""), 1, 1),
+    "camel-case-file-name-stem": ("see " + "".join(w.capitalize() for w in NAME.split()) + ".md", 1, 1),
+    "email-local-part": (NAME.replace(" ", "").lower() + "@example.org", 1, 1),
+    "email-dotted-and-underscored": (NAME.replace(" ", ".").lower() + "@example.org\n" + NAME.replace(" ", "_") + "@x.example", 1, 1),
+    "umlaut-written-as-plain-u": ("a " + UML.replace(U, "u"), 2, 1),
+    "umlaut-written-as-ue": ("a " + UML.replace(U, "ue"), 2, 1),
+    "umlaut-decomposed": ("a " + UML.replace(U, "u" + chr(0x308)), 2, 1),
+    "soft-hyphen-inside-a-word": (PLACE[:4] + chr(0xAD) + PLACE[4:], 3, 1),
+    "zero-width-space-inside-a-word": (PLACE[:4] + chr(0x200B) + PLACE[4:], 3, 1),
+    "fullwidth-letters": (PLACE.translate({ord(c): ord(c) + 0xFEE0 for c in "abcdefghijklmnopqrstuvwxyz"}), 3, 1),
+    "cyrillic-look-alike-letter": (NAME.replace("o", chr(0x43E)), 1, 1),
+    "utf-16-le-without-bom": (NAME.encode("utf-16-le") + "\n".encode("utf-16-le"), 1, 1),
+    "utf-16-le-with-bom": (NAME.encode("utf-16"), 1, 1),
+    "utf-32-with-bom": (NAME.encode("utf-32"), 1, 1),
+    "utf-16-be-without-bom": ("x\n".encode("utf-16-be") + NAME.encode("utf-16-be"), 1, 2),
+    "latin-1-bytes": (UML.encode("latin-1"), 2, 1),
+}
+
+
+@pytest.mark.parametrize("label", sorted(ENCODED))
+def test_every_spelling_of_a_term_is_found(tmp_path, label):
+    content, rule_no, line = ENCODED[label]
+    code, out = hit(tmp_path, content)
+    assert code == 1 and f"a.txt:{line}: personal term #{rule_no}" in out, out
+    no_leak(out, NAME, UML, PLACE)
+
+
+@pytest.mark.parametrize("label", ["json-ascii", "html-named", "words-run-together", "last-comma-first", "quoted-printable"])
+def test_the_spellings_are_found_in_the_other_modes_too(tmp_path, label):
+    content, rule_no, _line = ENCODED[label]
+    terms = [NAME, UML, PLACE]
+    # --staged
+    repo = make_repo(tmp_path)
+    write(repo / "a.txt", content)
+    stage(repo, tmp_path, "a.txt")
+    code, out = scan(tmp_path, "--staged", terms=terms, cwd=repo)
+    assert code == 1 and f"a.txt:1: personal term #{rule_no}" in out, out
+    # --history (the file is gone at HEAD)
+    commit(repo, tmp_path, "add")
+    commit(repo, tmp_path, "remove", remove=["a.txt"])
+    code, out = scan(tmp_path, "--history", terms=terms, cwd=repo)
+    assert code == 1 and f"a.txt:1: personal term #{rule_no}" in out, out
+    # --zip, in a source map of the web build
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/app/web/dist/assets/index.js.map": content if isinstance(content, bytes) else content.encode()})
+    code, out = scan(tmp_path, "--zip", str(z), terms=terms)
+    assert code == 1 and f"index.js.map:1: personal term #{rule_no}" in out, out
+    no_leak(out, NAME, UML, PLACE)
+
+
+def test_a_source_map_with_the_sharp_s_spelled_both_ways_in_a_release_zip(tmp_path):
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/app/web/dist/assets/index.js.map":
+                                       json.dumps({"sourcesContent": ["const a = " + repr(STRASSE)]})})
+    code, out = scan(tmp_path, "--zip", str(z), terms=[STRASSE])
+    assert code == 1 and "index.js.map:1: personal term #1" in out
+
+
+def test_decoding_and_looser_matching_do_not_turn_ordinary_text_into_hits(tmp_path):
+    ordinary = "\n".join([
+        'print("a\\nb\\tc \\x00 100%% &amp; =3D x%20y")', "color: #fff; width: 50%; margin: 0 auto;",
+        "a=b&c=d&e=f; q=1;", "Jordanian Testpersonal", j("Example", "towns and the Example", "township"), "kodak mueller",
+        "see https://example.org/path/%7Euser/file.txt and mailto:someone@example.org", "=?utf-8?B?aGVsbG8gd29ybGQ=?=",
+    ])
+    code, out = hit(tmp_path, ordinary, terms=[NAME, UML, PLACE])
+    assert code == 0, out
+
+
+def test_a_term_with_digits_matches_any_grouping_and_the_country_code(tmp_path):
+    lines = ["call " + x for x in ("0795551234", "079 555 1234", "079-555-12-34", "+41 79 555 12 34", "0041795551234",
+                                   "+41 (0) 79 555 12 34".replace("(0) ", ""))]
+    lines += ["IBAN CH4431999123000889012", "IBAN ch44-3199-9123-0008-8901-2"]
+    code, out = hit(tmp_path, "\n".join(lines) + "\n", terms=[PHONE, IBAN])
+    assert code == 1
+    for n in range(1, 9):
+        assert f"a.txt:{n}: personal term #{1 if n <= 6 else 2}" in out, (n, out)
+    no_leak(out, PHONE, "5551234", "3199")
+
+
+def test_numbers_keep_their_edges_against_other_digits_only(tmp_path):
+    digits = PHONE.replace(" ", "")
+    code, out = hit(tmp_path, "id 1" + digits + "\nid " + digits + "5\nref 12" + PHONE + "\n", terms=[PHONE])
+    assert code == 0, out
+    code, out = hit(tmp_path, "tel" + digits + "\n" + digits + "ext\nID" + PHONE + "\n", terms=[PHONE])       # letters glued to a number are fine
+    assert code == 1 and out.count("a.txt:") == 3, out
+
+
+def test_a_single_name_still_needs_its_word_edges_in_every_spelling(tmp_path):
+    code, out = hit(tmp_path, "Jordanian\nTestpersonal\nmyjordan\nunTestperson\n", terms=[NAME.split()[0], NAME.split()[1]])
+    assert code == 0, out
+
+
+# ---------------------------------------------------------------- the files the old scanner never read
+
+def test_png_chunks_wav_tags_and_pdf_metadata_are_read(tmp_path):
+    d = tmp_path / "t"
+    write(d / "a.png", png_with_text(b"Comment", NAME.encode()))
+    write(d / "b.png", png_with_text(b"Comment", NAME.encode(), compressed=True))
+    write(d / "c.wav", wav_with_info(NAME.encode()))
+    write(d / "d.dat", pdf_with(NAME))
+    write(d / "e.dat", pdf_with(None, b"BT /F1 12 Tf [(Jor)-20(dan)-250(Test)-5(person)] TJ ET"))
+    write(d / "f.dat", pdf_with(None, b"BT (" + NAME.encode() + b") Tj ET"))
+    write(d / "g.dat", pdf_with(None, b"BT [<FEFF" + NAME.encode("utf-16-be").hex().upper().encode() + b">] TJ ET"))
+    write(d / "h.png", b"\x00" + NAME.encode() + b" lives in " + PLACE.encode() + b"\n")          # text renamed .png, NUL first
+    write(d / "i.dat", b"\x00\x01" + UML.encode("latin-1") + b"\x00")                               # latin-1 bytes in a binary
+    write(d / "j.dat", b"\x00\x01" + NAME.encode("utf-16-le") + b"\x00\x00")                        # UTF-16 inside a binary
+    write(d / "k.dat", b"\x00\x01\x02" + b"\x89\xfe\xdd" * 300 + b"nothing personal in this binary" + b"\x00\xff")
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME, UML, PLACE])
+    assert code == 1, out
+    import re
+    for f in "abcdefghij":
+        ext = "png" if f in "abh" else "wav" if f == "c" else "dat"
+        assert re.search(rf"^{f}\.{ext}(:\d+)?: personal term #", out, re.M), (f, out)
+    assert "k.dat" not in out
+    no_leak(out, NAME, UML, PLACE)
+
+
+def test_a_pdf_or_a_photo_is_not_allowed_outside_the_icon_folder(tmp_path):
+    for rel in ("tests/fixtures/letter.pdf", "docs/photo.JPG", "x/scan.heic", "x/sheet.xlsx", "x/mail.pst", "x/a.docx"):
+        write(tmp_path / "t" / rel, "x\n")
+    write(tmp_path / "t" / "web" / "public" / "paper.pdf", "x\n")
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME])
+    assert code == 1
+    for rel in ("tests/fixtures/letter.pdf", "docs/photo.JPG", "x/scan.heic", "x/sheet.xlsx", "x/mail.pst", "x/a.docx"):
+        assert f"{rel}: forbidden path: document or photo file" in out, rel
+    assert "web/public/paper.pdf" not in out
+
+
+def test_a_database_is_found_by_its_header_and_a_secret_store_by_its_magic(tmp_path):
+    d = tmp_path / "t"
+    write(d / "fixtures" / "kairo", b"SQLite format 3\x00" + b"\x00" * 100)
+    secrets_json = json.dumps({"token": j("ya", "29.", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6"),
+                               "client_secret": GOCSPX})
+    write(d / "fixtures" / "google.dat", b"KAIRO-DEV1\n" + base64.b64encode(secrets_json.encode()))
+    write(d / "fixtures" / "win.dat", b"KAIRO-DPAPI1\n" + b"\x01\x00\x00\x00\xd0\x8c\x9d\xdf")
+    write(d / "fixtures" / "plain.dat", b"hello\n")
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME])
+    assert code == 1
+    assert "kairo: forbidden content: SQLite database" in out
+    assert "google.dat: forbidden content: Kairo secret store" in out and "win.dat: forbidden content: Kairo secret store" in out
+    assert "google.dat:1: secret: Google OAuth token" in out or "google.dat:2: secret: Google OAuth token" in out   # decoded base64
+    assert "plain.dat" not in out
+    no_leak(out, GOCSPX)
+
+
+# ---------------------------------------------------------------- archives
+
+TEXT = f"hello\nmet {NAME} at {PLACE}\n"
+
+
+def zbytes(entries: dict[str, str | bytes]) -> bytes:
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, c in entries.items():
+            z.writestr(n, c)
+    return b.getvalue()
+
+
+def tar_bytes(entries: dict[str, bytes], mode: str = "w") -> bytes:
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode=mode) as t:
+        for n, c in entries.items():
+            info = tarfile.TarInfo(n)
+            info.size = len(c)
+            t.addfile(info, io.BytesIO(c))
+    return b.getvalue()
+
+
+def nested_zip(levels: int, payload: dict[str, str | bytes]) -> bytes:
+    data = zbytes(payload)
+    for i in range(levels - 1):
+        data = zbytes({f"level{i}.zip": data})
+    return data
+
+
+ARCHIVES: dict[str, tuple[str, bytes]] = {
+    "gzip": ("app/notes.txt.gz", gzip.compress(TEXT.encode())),
+    "tar.gz": ("app/bundle.tar.gz", tar_bytes({"private/seed.md": TEXT.encode()}, "w:gz")),
+    "tgz": ("app/bundle.tgz", tar_bytes({"seed.md": TEXT.encode()}, "w:gz")),
+    "plain tar": ("app/bundle.tar", tar_bytes({"seed.md": TEXT.encode()})),
+    "bzip2": ("app/notes.txt.bz2", bz2.compress(TEXT.encode())),
+    "xz": ("app/notes.txt.xz", lzma.compress(TEXT.encode())),
+    "gzip without a name that says so": ("app/blob.bin", gzip.compress(TEXT.encode())),
+    "zip with a byte in front": ("app/inner.bin", b"X" + zbytes({"notes.txt": TEXT})),
+    "zip behind an installer stub": ("app/setup.exe", b"MZ" + b"\x90" * 600 + zbytes({"notes.txt": TEXT})),
+    "zip in zip, six deep": ("app/inner.zip", nested_zip(6, {"notes.txt": TEXT})),
+    "office file": ("app/letter.docx", zbytes({"word/document.xml": f"<w:t>{NAME}</w:t>"})),
+    "gzip inside a tar inside a zip": ("app/x.zip", zbytes({"y.tar": tar_bytes({"z.txt.gz": gzip.compress(TEXT.encode())})})),
+}
+
+
+@pytest.mark.parametrize("label", sorted(ARCHIVES))
+def test_archives_are_opened_whatever_they_are_called_and_however_deep(tmp_path, label):
+    name, data = ARCHIVES[label]
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/" + name: data})
+    code, out = scan(tmp_path, "--zip", str(z), terms=[NAME, PLACE])
+    assert "personal term #" in out and code == 1, out
+    no_leak(out, NAME, PLACE)
+
+
+def test_a_zip_with_a_damaged_directory_or_odd_names_is_read_from_its_local_headers(tmp_path):
+    raw = bytearray(zbytes({"cafe.txt": TEXT}))
+    raw[30 + 3] = 0xE9                                       # the name is now latin-1 ...
+    raw[6] |= 0x08                                           # ... but flagged UTF-8 (local header)
+    central = raw.index(b"PK\x01\x02")
+    raw[central + 8 + 1] |= 0x08                             # (central directory entry)
+    raw[central + 46 + 3] = 0xE9
+    with pytest.raises(UnicodeDecodeError):
+        zipfile.ZipFile(io.BytesIO(bytes(raw)))              # the standard library gives up on it
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/app/inner.zip": bytes(raw)})
+    code, out = scan(tmp_path, "--zip", str(z), terms=[NAME, PLACE])
+    assert code == 1 and "inner.zip!/caf" in out and "personal term #" in out, out
+
+
+def test_archives_nested_too_deep_and_archives_that_cannot_be_opened_are_errors_in_a_zip_scan(tmp_path):
+    cases = {
+        "nested too deep": ("app/deep.zip", nested_zip(12, {"notes.txt": TEXT})),
+        "zstd": ("app/pack.zst", b"\x28\xb5\x2f\xfd" + b"\x00" * 64),
+        "7z": ("app/pack.7z", b"7z\xbc\xaf\x27\x1c" + b"\x00" * 64),
+        "rar": ("app/pack.rar", b"Rar!\x1a\x07\x00" + b"\x00" * 64),
+        "truncated gzip": ("app/cut.gz", gzip.compress(TEXT.encode() * 100)[:40]),
+    }
+    for label, (name, data) in cases.items():
+        z = make_zip(tmp_path / f"rel-{label.replace(' ', '-')}.zip", {"Kairo-Setup-1/" + name: data})
+        code, out = scan(tmp_path, "--zip", str(z), terms=[NAME, PLACE])
+        assert code == 2 and "not scanned" in out, (label, out)
+        # outside a release scan it is only a warning
+        write(tmp_path / "t" / name, data)
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME, PLACE])
+    assert code == 0 and "warning" in out and "not scanned" in out, out
+    code, out = scan(tmp_path, "--tree", "t", "--ci", terms=[NAME, PLACE])
+    assert code == 2, out
+    code, out = scan(tmp_path, "--tree", "t", "--strict", terms=[NAME, PLACE])
+    assert code == 2, out
+
+
+def _patch_zip(raw: bytes, local: dict[int, bytes], central: dict[int, bytes]) -> bytes:
+    b = bytearray(raw)
+    for off, val in local.items():
+        b[off: off + len(val)] = val
+    c = b.index(b"PK\x01\x02")
+    for off, val in central.items():
+        b[c + off: c + off + len(val)] = val
+    return bytes(b)
+
+
+def test_zip_members_that_cannot_be_read_are_errors_not_silence_and_never_a_crash(tmp_path):
+    raw = zbytes({"app/notes.txt": TEXT * 20})
+    cases = {
+        "deflate64": _patch_zip(raw, {8: struct.pack("<H", 9)}, {10: struct.pack("<H", 9)}),
+        "bad crc": _patch_zip(raw, {14: b"\x00\x00\x00\x00"}, {16: b"\x00\x00\x00\x00"}),
+        "encrypted": _patch_zip(raw, {6: b"\x01"}, {8: b"\x01"}),
+        "corrupt stream": _patch_zip(raw, {40: b"\xde\xad\xbe\xef\xde\xad\xbe\xef"}, {}),
+    }
+    for label, data in cases.items():
+        p = write(tmp_path / f"{label.replace(' ', '-')}.zip", data)
+        code, out = scan(tmp_path, "--zip", str(p), terms=[NAME, PLACE])
+        assert code == 2 and "not scanned" in out and "Traceback" not in out, (label, out)
+    # the same inside a release zip (a zip in a zip)
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/app/inner.zip": cases["corrupt stream"]})
+    code, out = scan(tmp_path, "--zip", str(z), terms=[NAME, PLACE])
+    assert code == 2 and "Traceback" not in out
+
+
+def test_zip_comments_and_the_zip_files_own_name_are_checked(tmp_path):
+    p = tmp_path / ("Kairo-Setup-" + NAME.replace(" ", "-") + ".zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("app/a.txt", "fine\n")
+        z.comment = NAME.encode()
+        z.getinfo("app/a.txt").comment = PLACE.encode()
+    code, out = scan(tmp_path, "--zip", str(p), terms=[NAME, PLACE])
+    assert code == 1
+    assert "personal term #1 (list line 1) in the name" in out                       # the file name of the zip itself
+    assert "(zip comment)" in out and "(entry comment)" in out
+    no_leak(out, NAME, NAME.replace(" ", "-"), PLACE)
+    write(tmp_path / ("bad-" + NAME.replace(" ", "-") + ".zip"), "not a zip")
+    code, out = scan(tmp_path, "--zip", str(tmp_path / ("bad-" + NAME.replace(" ", "-") + ".zip")), terms=[NAME])
+    assert code == 1 or code == 2
+    no_leak(out, NAME, NAME.replace(" ", "-"), "testperson")
+
+
+# ---------------------------------------------------------------- what cannot be scanned is not silently passed
+
+def run_main(ps, capsys, monkeypatch, tmp_path, *argv, terms=None, env=None):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "nohome"))
+    e = {"KAIRO_PERSONAL_TERMS": "\n".join(terms if terms is not None else [NAME, PLACE]), "KAIRO_DATA_DIR": str(tmp_path / "nodata")}
+    e.update(env or {})
+    code = ps.main(list(argv), env=e)
+    cap = capsys.readouterr()
+    return code, cap.out + cap.err
+
+
+def test_a_file_over_the_size_limit_is_an_error_in_ci_and_in_a_zip_scan_and_a_warning_otherwise(ps, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(ps, "MAX_BYTES", 4000)
+    write(tmp_path / "t" / "big.log", NAME + "\n" + "x" * 5000)
+    code, out = run_main(ps, capsys, monkeypatch, tmp_path, "--tree", str(tmp_path / "t"))
+    assert code == 0 and "warning" in out and "not scanned" in out
+    code, out = run_main(ps, capsys, monkeypatch, tmp_path, "--tree", str(tmp_path / "t"), "--ci")
+    assert code == 2 and "error" in out and "not scanned" in out
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/app/big.js": NAME + "\n" + "x" * 5000})
+    code, out = run_main(ps, capsys, monkeypatch, tmp_path, "--zip", str(z))
+    assert code == 2 and "not scanned" in out
+
+
+def test_a_big_text_is_scanned_in_pieces_with_the_right_line_numbers(ps, tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(ps, "CHUNK_BYTES", 3000)
+    monkeypatch.setattr(ps, "CHUNK_OVERLAP", 200)
+    lines = ["line %04d filler filler filler filler" % n for n in range(400)]            # about 15 KB
+    lines[120] = "here: " + NAME
+    lines[250] = NAME.split()[0] + "\n" + NAME.split()[1]                                 # the name is split over two lines
+    lines[399] = "last line " + PLACE
+    write(tmp_path / "t" / "export.json", "\n".join(lines) + "\n")
+    code, out = run_main(ps, capsys, monkeypatch, tmp_path, "--tree", str(tmp_path / "t"), "--ci")
+    assert code == 1, out
+    assert "export.json:121: personal term #1" in out
+    assert "export.json:251: personal term #1" in out or "export.json:252: personal term #1" in out
+    assert "export.json:401: personal term #2" in out or "export.json:400: personal term #2" in out
+    assert "not scanned" not in out
+    no_leak(out, NAME, PLACE)
+
+
+def test_a_big_file_with_a_term_in_the_first_line_is_reported_not_skipped(ps, tmp_path, capsys, monkeypatch):
+    """The old limit was 32 MB and a bigger file only got a warning. Now it is read, in pieces."""
+    monkeypatch.setattr(ps, "CHUNK_BYTES", 100_000)
+    write(tmp_path / "t" / "big.log", NAME + "\n" + ("x" * 99 + "\n") * 3000)
+    code, out = run_main(ps, capsys, monkeypatch, tmp_path, "--tree", str(tmp_path / "t"), "--ci")
+    assert code == 1 and "big.log:1: personal term #1" in out
+
+
+def test_the_terms_check_can_be_left_out_on_purpose_and_says_so(tmp_path):
+    write(tmp_path / "t" / "a.txt", f"{NAME}\n{GH_PAT}\n")
+    code, out = scan(tmp_path, "--tree", "t", "--secrets-only", "--ci", GITHUB_REF="refs/heads/main")
+    assert code == 1 and "a.txt:2: secret: GitHub token" in out and "a.txt:1" not in out
+    assert "--secrets-only" in out and "PERSONAL_TERMS" not in out
+
+
+# ---------------------------------------------------------------- the terms list
+
+def test_a_list_on_one_line_is_an_error_not_a_single_useless_rule(tmp_path):
+    write(tmp_path / "t" / "a.txt", f"{NAME} was in {PLACE}\n")
+    for bad in (f"{NAME}, {PLACE}", f"{NAME}; {PLACE}"):
+        code, out = scan(tmp_path, "--ci", "--tree", "t", GITHUB_REF="refs/heads/main", KAIRO_PERSONAL_TERMS=bad)
+        assert code == 2 and "personal term #1" in out and "comma or semicolon" in out and "clean" not in out
+        no_leak(out, NAME, PLACE)
+
+
+def test_a_literal_backslash_n_in_the_secret_means_a_line_break(tmp_path):
+    """gh secret set --body 'a\\nb' stores the two characters."""
+    write(tmp_path / "t" / "a.txt", f"{NAME} was in {PLACE}\n")
+    code, out = scan(tmp_path, "--ci", "--tree", "t", GITHUB_REF="refs/heads/main",
+                     KAIRO_PERSONAL_TERMS=NAME + "\\n" + PLACE)
+    assert code == 1 and "2 rules" in out and "a.txt:1: personal term #1" in out and "a.txt:1: personal term #2" in out
+    assert "literal" in out                                                    # and the owner is told to fix the secret
+    code, out = scan(tmp_path, "--ci", "--tree", "t", KAIRO_PERSONAL_TERMS=NAME + "\\r\\n" + PLACE)
+    assert code == 1 and "2 rules" in out
+
+
+def test_a_list_saved_by_windows_powershell_is_read(tmp_path):
+    write(tmp_path / "t" / "a.txt", f"{UML} and {NAME}\n")
+    lists = {
+        "utf-8": (UML + "\r\n" + NAME + "\r\n").encode("utf-8"),
+        "utf-8-bom": b"\xef\xbb\xbf" + (UML + "\r\n" + NAME + "\r\n").encode("utf-8"),
+        "windows-1252 (Set-Content)": (UML + "\r\n" + NAME + "\r\n").encode("cp1252"),
+        "utf-16-le-bom (Out-File, >)": (UML + "\r\n" + NAME + "\r\n").encode("utf-16"),
+        "utf-16-be-bom": b"\xfe\xff" + (UML + "\r\n" + NAME + "\r\n").encode("utf-16-be"),
+        "utf-16-le-no-bom": (UML + "\r\n" + NAME + "\r\n").encode("utf-16-le"),
+        "utf-16-one-line-no-newline": (UML + "\r\n" + NAME).encode("utf-16"),
+    }
+    for label, data in lists.items():
+        f = write(tmp_path / "terms.txt", data)
+        code, out = scan(tmp_path, "--tree", "t", "--terms-file", str(f))
+        assert code == 1 and "a.txt:1: personal term #1" in out and "a.txt:1: personal term #2" in out, (label, out)
+        assert "2 rules" in out, (label, out)
+        no_leak(out, NAME, UML)
+    f = write(tmp_path / "terms.txt", (UML + "\r\n").encode("cp1252"))
+    code, out = scan(tmp_path, "--tree", "t", "--terms-file", str(f))
+    assert "Windows-1252" in out and "UTF-8" in out                                  # and the owner is told to save it as UTF-8
+
+
+def test_a_list_with_broken_text_is_an_error_not_a_rule_that_matches_nothing(tmp_path):
+    write(tmp_path / "t" / "a.txt", "x\n")
+    f = write(tmp_path / "terms.txt", b"first\r\n\x81\x8d\x90 broken\r\n")           # bytes that are nothing in cp1252
+    code, out = scan(tmp_path, "--tree", "t", "--terms-file", str(f))
+    assert code == 2 and "personal term #2" in out and "UTF-8" in out
+
+
+def test_error_messages_never_show_a_term(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    bogus = "1234567890" * 4
+    write(repo / ".git" / "refs" / "heads" / f"fix-{PLACE.lower()}-notes", bogus + "\n")          # a ref to a missing object
+    code, out = scan(tmp_path, "--history", "--ci", terms=[PLACE], cwd=repo, GITHUB_ACTIONS="true")
+    assert code == 2 and "error" in out, out
+    no_leak(out, PLACE)
+    code, out = scan(tmp_path, "--history", "--repo", str(tmp_path / "nowhere" / PLACE), "--ci", terms=[PLACE],
+                     GITHUB_ACTIONS="true")
+    assert code == 2
+    no_leak(out, PLACE)
+
+
+def test_redacted_names_are_numbered_not_hashed(tmp_path):
+    import hashlib
+    name = f"docs/{PLACE}/{NAME.replace(' ', '-')}.md"
+    write(tmp_path / "t" / name, "x\n")
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME, PLACE])
+    assert code == 1 and "<redacted name #1>" in out
+    for digest in (hashlib.sha256(name.encode()).hexdigest()[:8], hashlib.sha1(name.encode()).hexdigest()[:8],
+                   hashlib.md5(name.encode()).hexdigest()[:8]):
+        assert digest not in out
+    no_leak(out, NAME, PLACE, "testperson")
+
+
+# ---------------------------------------------------------------- secrets
+
+def _key(name_start: str, name_end: str, value: str, sep: str = "=") -> str:
+    """name_start + name_end is the variable; split so that this file does not hold a whole assignment."""
+    return j(name_start, name_end, sep, value)
+
+
+RND43 = "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6kL9nP2Q"                      # 43 characters like a base64url P-256 key
+RND32 = "q7Xk2Lm9Vb4Zr8Tn3Wp5Hs6Jd1Fg0Ac4"
+B2 = j("K00", "5aB3dE6gH9jK2mN5pQ8sT1vW4yZ7b")
+
+
+@pytest.mark.parametrize("text", [
+    "ENCRYPTION_K" + "EY = '" + RND43 + "'",
+    "SIGNING_K" + "EY=" + j("3f9a", "c27d41b65e08a9d3c1f7b2e45a6d8c90b3e1f4a72d5c8b60e9a1f3d7c2b4e58"),
+    "signingK" + "ey: " + RND43,
+    "B2_ACCOUNT_K" + "EY=" + B2,
+    "SHARED_SECR" + "ET=" + RND43,
+    "client_k" + "ey = \"" + RND32 + "Xy\"",
+    "ap" + "p_secret_k" + "ey: " + RND43,
+    "VAPID_PRIV" + "ATE=" + RND43,
+    "VAPID_PRIV" + "ATE_KEY=" + RND43,
+    '{"vapid": {"priv' + 'ate": "' + RND43 + '"}}',
+    json.dumps({"kty": "EC", "crv": "P-256", "x": RND43, "y": RND43[::-1], "d": RND43.swapcase()}),
+    "{'kty': 'EC', 'd': '" + RND43 + "'}",
+    "https://kairo:" + j("m1m8KJDovRzW", "2hwrrD94Mvmh") + "@backup.invalid/repo",
+    "sess" + "ion=" + RND43,
+    "Set-Cookie: sess" + "ion_id=" + RND43 + "; HttpOnly",
+    "HEALTHCHECK_URL=https://hc-pi" + "ng.com/ef11de8b-fbe8-43e6-bfa4-8bdf25079b98",
+], ids=["encryption-key", "signing-key-hex", "camel-signing-key", "b2-account-key", "shared-secret", "client-key", "app-secret-key",
+        "vapid-private", "vapid-private-key", "vapid-nested-json", "jwk-json", "jwk-python-dict", "password-in-url", "session-cookie",
+        "set-cookie", "healthchecks-url"])
+def test_more_shapes_of_secrets_are_found(ps, text):
+    found = ps.scan_secrets("first\n" + text + "\nlast\n")
+    assert found and found[0][0] == 2, (text, found)
+
+
+@pytest.mark.parametrize("text", [
+    "sha_k" + "ey = '" + RND43 + "'", "public_k" + "ey = '" + RND43 + "'", "PUBLIC_K" + "EY=" + RND43,
+    "CACHE_K" + "EY = 'loops.cleanup.2026-10-19'", "SEEN_K" + "EY = 'loops.sent_seen'", "idempotency_k" + "ey = 'create-task-0001-abcdef'",
+    "fingerprint_k" + "ey = '" + RND43 + "'", "hashed_secr" + "et = '" + RND43 + "'", "KEY = '" + RND43 + "'",
+    "k" + "ey: value", "monkey_patch = 'abcdefghijklmnopqrstuvwx0123'",
+    json.dumps({"kty": "EC", "crv": "P-256", "x": RND43}),                       # a public JWK has no d
+    json.dumps({"d": RND43}),                                                      # a d without kty is not a key
+    "sess" + "ion = requests.Session()", "sess" + "ion_id = get_session_id_for_the_current_request()", "cookie_jar = CookieJar()",
+    "https://user:pass@example.org/", "https://example.org:8080/path", "hc-pi" + "ng.com/00000000-0000-0000-0000-000000000000",
+], ids=["sha-key", "public-key", "public-key-upper", "dotted-cache-key", "seen-key", "idempotency-key", "fingerprint-key",
+        "hashed-secret", "bare-key", "key-word", "monkey", "public-jwk", "d-without-kty", "session-object", "session-id-call",
+        "cookie-jar", "short-url-password", "port-in-url", "zero-uuid"])
+def test_names_that_say_it_is_not_a_secret_are_left_alone(ps, text):
+    assert ps.scan_secrets(text + "\n") == [], text
+
+
+def test_a_shared_secret_is_not_taken_for_a_hash(ps):
+    """The old rule skipped any name that contained 'sha', so SHAred_secret passed."""
+    assert ps.scan_secrets("SHARED_SECR" + "ET = '" + RND43 + "'\n")
+    assert ps.scan_secrets("shared_secr" + "et = '" + RND43 + "'\n")
+    assert not ps.scan_secrets("secret_sha256 = '" + RND43 + "'\n")
+
+
+def test_forbidden_paths_new_shapes(ps):
+    for path in ("server/vault/10 Profile/ABOUT_ME.md", "secrets/google_token.json", "data/secrets/logins/x.bin", "db/kairo.db",
+                 "db/kairo.db3", "backups/kairo.sqlite.bak", "prod.env", "config/kairo.env", ".envrc", ".env-prod", ".env ",
+                 ".env.", ".private/notes.md", "capture-token.txt", "x/capture-token", "Secrets/x", "x/Vault/y.md",
+                 "a/b/c.PDF", "photos/me.JPEG", "fernet.key", "keys/server.KEY"):
+        assert ps.forbidden_path(path), path
+    for path in ("server/app/vault.py", "server/app/secretbox.py", "docs/vaults.md", "server/tests/test_vault.py",
+                 ".env.example", "environment.yaml", "server/app/secrets_check.py", "web/public/x.pdf", "x/web/dist/y.pdf"):
+        assert ps.forbidden_path(path) == [], path
+
+
+# ---------------------------------------------------------------- git: staged, history, messages
+
+def test_staged_reads_the_staged_blob_by_id_so_a_colon_in_a_name_changes_nothing(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("a colon cannot be in a file name on Windows")
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "start", {"notes.txt": "clean\n"})
+    write(repo / "0:notes.txt", f"{NAME}, {PLACE}\n")
+    write(repo / "1:other.txt", f"{NAME}\n")
+    write(repo / "2:x.txt", f"{PLACE}\n")
+    stage(repo, tmp_path, "0:notes.txt", "1:other.txt", "2:x.txt")
+    code, out = scan(tmp_path, "--staged", terms=[NAME, PLACE], cwd=repo)
+    assert code == 1
+    assert "0:notes.txt:1: personal term #1" in out and "1:other.txt:1: personal term #1" in out
+    assert "2:x.txt:1: personal term #2" in out
+    assert "no file content" not in out
+    no_leak(out, NAME, PLACE)
+
+
+def test_staged_is_not_fooled_by_a_diff_driver_that_hides_lines(tmp_path):
+    repo = make_repo(tmp_path)
+    write(repo / ".gitattributes", "*.txt diff=hide\n")
+    commit(repo, tmp_path, "attrs")
+    git(repo, tmp_path, "config", "diff.hide.textconv", "sh -c 'true' #")
+    write(repo / "a.txt", f"{NAME}\n")
+    stage(repo, tmp_path, "a.txt")
+    code, out = scan(tmp_path, "--staged", terms=[NAME], cwd=repo)
+    assert code == 1 and "a.txt:1: personal term #1" in out, out
+
+
+def test_staged_catches_a_match_that_starts_on_an_old_line_and_ends_on_a_new_one(tmp_path):
+    repo = make_repo(tmp_path)
+    first, last = NAME.split()
+    commit(repo, tmp_path, "one", {"a.txt": f"name: {first}\n"})
+    write(repo / "a.txt", f"name: {first}\n{last} from the school\n")
+    stage(repo, tmp_path, "a.txt")
+    code, out = scan(tmp_path, "--staged", terms=[NAME], cwd=repo)
+    assert code == 1 and "a.txt:1: personal term #1" in out, out
+    # a key block whose header was committed earlier and whose body is pasted in now
+    commit(repo, tmp_path, "template", {"k.pem.txt": "-----BEGIN " + "PRIVATE KEY-----\nPASTE THE KEY HERE\n-----END " + "PRIVATE KEY-----\n"})
+    code, out = scan(tmp_path, "--staged", terms=[NAME], cwd=repo)
+    git(repo, tmp_path, "reset", "-q")
+    write(repo / "k.pem.txt", "-----BEGIN " + "PRIVATE KEY-----\n" + PEM_RSA.split("\n")[1] + "\n-----END " + "PRIVATE KEY-----\n")
+    stage(repo, tmp_path, "k.pem.txt")
+    code, out = scan(tmp_path, "--staged", terms=[NAME], cwd=repo)
+    assert code == 1 and "k.pem.txt:1: secret: private key" in out, out
+    no_leak(out, "MIIBOgIBAAJBAKj34")
+
+
+def test_staged_still_ignores_a_hit_that_is_entirely_on_old_lines(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "old", {"a.txt": f"first\n{NAME}\nlast\n"})
+    write(repo / "a.txt", f"first\n{NAME}\nlast\nadded\n")
+    stage(repo, tmp_path, "a.txt")
+    code, out = scan(tmp_path, "--staged", terms=[NAME], cwd=repo)
+    assert code == 0, out
+
+
+def test_staged_names_binaries_archives_documents_and_symlinks(tmp_path):
+    repo = make_repo(tmp_path)
+    write(repo / "pic.png", png_with_text(b"Comment", NAME.encode()))
+    write(repo / "seed.tar.gz", tar_bytes({"x/seed.md": TEXT.encode()}, "w:gz"))
+    write(repo / "letter.pdf", pdf_with(NAME))
+    write(repo / f"{NAME.replace(' ', '')}.md", "hello\n")
+    write(repo / "kairo", b"SQLite format 3\x00" + b"\x00" * 50)
+    stage(repo, tmp_path, "pic.png", "seed.tar.gz", "letter.pdf", f"{NAME.replace(' ', '')}.md", "kairo")
+    code, out = scan(tmp_path, "--staged", terms=[NAME, PLACE], cwd=repo)
+    assert code == 1
+    assert "pic.png: personal term #1" in out and "seed.tar.gz!/seed.tar!/x/seed.md:2: personal term #1" in out
+    assert "letter.pdf: forbidden path: document or photo" in out
+    assert "personal term #1 (list line 1) in the name" in out
+    assert "kairo: forbidden content: SQLite" in out
+    no_leak(out, NAME, PLACE, NAME.replace(" ", ""))
+
+
+def test_history_finds_files_added_by_a_merge_even_when_their_content_is_not_new(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "hello\n", "pkg/__init__.py": ""})
+    git(repo, tmp_path, "switch", "-q", "-c", "side")
+    commit(repo, tmp_path, "side", {"s.txt": "side\n"})
+    git(repo, tmp_path, "switch", "-q", "main")
+    commit(repo, tmp_path, "main work", {"m.txt": "main\n"})
+    git(repo, tmp_path, "merge", "-q", "--no-commit", "--no-ff", "side")
+    write(repo / (NAME.replace(" ", "_").lower() + ".txt"), "hello\n")                    # the blob of a.txt
+    write(repo / (PLACE.lower() + "_notes.txt"), "")                                      # the empty blob of __init__.py
+    write(repo / "private" / "a.txt", "hello\n")
+    git(repo, tmp_path, "add", "-A", "-f")
+    git(repo, tmp_path, "commit", "-q", "-m", "merge")
+    code, out = scan(tmp_path, "--history", terms=[NAME, PLACE], cwd=repo)
+    assert code == 1, out
+    assert out.count("personal term #1 (list line 1) in the name") == 1
+    assert "personal term #2 (list line 2) in the name" in out
+    assert "private/a.txt: forbidden path: private/ folder" in out or "private/: forbidden path: private/ folder" in out
+    no_leak(out, NAME, PLACE, NAME.replace(" ", "_"))
+
+
+def _commit_object(repo: Path, tmp_path: Path, extra_header: str, message: str = "clean message\n") -> str:
+    tree = git(repo, tmp_path, "rev-parse", "HEAD^{tree}").strip()
+    parent = git(repo, tmp_path, "rev-parse", "HEAD").strip()
+    body = (f"tree {tree}\nparent {parent}\nauthor Dev <dev@example.com> 1700000000 +0000\n"
+            f"committer Dev <dev@example.com> 1700000000 +0000\n{extra_header}\n{message}")
+    p = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=repo, input=body.encode(), capture_output=True,
+                       env=clean_env(tmp_path))
+    assert p.returncode == 0, p.stderr
+    sha = p.stdout.decode().strip()
+    git(repo, tmp_path, "update-ref", "refs/heads/main", sha)
+    return sha
+
+
+def test_history_reads_the_whole_commit_object_including_extra_headers(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    _commit_object(repo, tmp_path, f"x-origin {NAME}\n")
+    code, out = scan(tmp_path, "--history", terms=[NAME], cwd=repo)
+    assert code == 1 and "header x-origin: personal term #1" in out, out
+    no_leak(out, NAME)
+
+
+def test_history_sees_the_tag_that_a_signed_merge_carries_in_its_mergetag_header(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    head = git(repo, tmp_path, "rev-parse", "HEAD").strip()
+    mergetag = (f"mergetag object {head}\n type commit\n tag v1\n tagger Dev <dev@example.com> 1700000000 +0000\n \n"
+                f" released by {NAME}\n")
+    _commit_object(repo, tmp_path, mergetag)
+    code, out = scan(tmp_path, "--history", terms=[NAME], cwd=repo)
+    assert code == 1 and "header mergetag: personal term #1" in out, out
+    no_leak(out, NAME)
+
+
+def test_history_survives_control_characters_in_a_message_and_cannot_be_fooled_by_them(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    write(tmp_path / "m1.txt", b"subject\x1ejunk\n")
+    git(repo, tmp_path, "commit", "-q", "--allow-empty", "-F", str(tmp_path / "m1.txt"), "--cleanup=verbatim")
+    write(tmp_path / "m2.txt", b"Fix\x1e" + f"{NAME} lives in {PLACE}".encode() + b"\x1fa\x1fb\x1fc\x1fd\x1fok\n")
+    git(repo, tmp_path, "commit", "-q", "--allow-empty", "-F", str(tmp_path / "m2.txt"), "--cleanup=verbatim")
+    code, out = scan(tmp_path, "--history", terms=[NAME, PLACE], cwd=repo)
+    assert code == 1 and "Traceback" not in out and "message:1: personal term #1" in out, out
+    no_leak(out, NAME, PLACE)
+
+
+def test_history_reads_archives_in_old_commits(tmp_path):
+    repo = make_repo(tmp_path)
+    seed = tar_bytes({"private/profile/ABOUT_ME.md": TEXT.encode(), "deploy.ps1": (j('$t = "', GH_PAT, '"\r\n')).encode()}, "w:gz")
+    commit(repo, tmp_path, "oops", {"backup/seed.tar.gz": seed, "backup/client.json.gz": gzip.compress(json.dumps({"s": GOCSPX}).encode())})
+    commit(repo, tmp_path, "cleanup", remove=["backup/seed.tar.gz", "backup/client.json.gz"])
+    code, out = scan(tmp_path, "--history", terms=[NAME, PLACE], cwd=repo)
+    assert code == 1
+    assert "private/ folder" in out and "secret: GitHub token" in out and "secret: Google OAuth client secret" in out
+    assert "personal term #1" in out
+    no_leak(out, NAME, PLACE, GH_PAT, GOCSPX)
+
+
+def test_tree_checks_the_names_of_symlinks_and_what_they_point_to(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("symlinks need rights on Windows")
+    t = tmp_path / "t"
+    (t / "private").mkdir(parents=True)
+    os.symlink("/etc/hostname", t / (NAME.replace(" ", "_") + ".txt"))
+    os.symlink("/etc/hostname", t / "private" / "profile.md")
+    os.symlink("../x", t / ".env")
+    os.symlink(f"/home/{PLACE.lower()}/notes", t / "link")
+    code, out = scan(tmp_path, "--tree", "t", terms=[NAME, PLACE])
+    assert code == 1
+    assert "personal term #1 (list line 1) in the name" in out
+    assert "private/profile.md: forbidden path: private/ folder" in out
+    assert ".env: forbidden path" in out
+    assert "link: personal term #2" in out
+    no_leak(out, NAME, PLACE)
+
+
+def test_a_gitleaks_report_is_printed_without_the_matched_text(tmp_path):
+    report = [{"RuleID": "generic-api-key", "Description": "x", "StartLine": 7, "EndLine": 7,
+               "Match": f"token_for_{PLACE.lower()} = SECRETVALUE1  # {NAME}", "Secret": "SECRETVALUE1", "File": f"{PLACE}/{NAME}.py",
+               "Commit": "0123456789abcdef0123456789abcdef01234567", "Author": NAME, "Email": f"{PLACE.lower()}@example.org",
+               "Message": f"{NAME} added this", "Fingerprint": "x"},
+              {"RuleID": "aws-access-token", "StartLine": 2, "File": "server/app/x.py", "Commit": "abcdef0123456789",
+               "Author": NAME, "Match": "AKIA...", "Secret": "SECRETVALUE2"}]
+    f = write(tmp_path / "gl.json", json.dumps(report))
+    code, out = scan(tmp_path, "--gitleaks-report", str(f), terms=[NAME, PLACE])
+    assert code == 1
+    assert "<redacted name #1>:7: gitleaks: generic-api-key [commit 0123456]" in out
+    assert "server/app/x.py:2: gitleaks: aws-access-token [commit abcdef0]" in out
+    no_leak(out, NAME, PLACE, "SECRETVALUE", "AKIA")
+    write(tmp_path / "gl.json", "[]")
+    code, out = scan(tmp_path, "--gitleaks-report", str(tmp_path / "gl.json"), terms=[NAME])
+    assert code == 0
+
+
+def test_a_commit_message_in_latin_1_is_read(tmp_path):
+    f = write(tmp_path / "m.txt", b"subject\n\n" + UML.encode("latin-1") + b" 5\n")
+    code, out = scan(tmp_path, "--message-file", str(f), terms=[UML])
+    assert code == 1 and "commit message:3: personal term #1" in out
+    no_leak(out, UML)
+
+
+def test_history_is_not_hidden_by_a_replace_ref(tmp_path):
+    """refs/replace/ shows another object in place of one; what gets pushed is the real one."""
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "first", {"a.txt": f"{NAME}\n"})
+    old = git(repo, tmp_path, "rev-parse", "HEAD").strip()
+    commit(repo, tmp_path, "second", {"a.txt": "clean\n"})
+    git(repo, tmp_path, "replace", old, "HEAD")
+    assert NAME not in git(repo, tmp_path, "show", f"{old}:a.txt")                 # (git shows the replacement)
+    code, out = scan(tmp_path, "--history", terms=[NAME], cwd=repo)
+    assert code == 1 and "a.txt:1: personal term #1" in out, out
+
+
+def test_history_finds_a_name_run_together_in_author_and_committer_emails(tmp_path):
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "one", {"a.txt": "1\n"}, GIT_AUTHOR_EMAIL=NAME.replace(" ", "").lower() + "@example.org")
+    commit(repo, tmp_path, "two", {"b.txt": "2\n"},
+           GIT_COMMITTER_EMAIL="".join(w.capitalize() for w in NAME.split()) + "@users.noreply.example.org")
+    code, out = scan(tmp_path, "--history", terms=[NAME], cwd=repo)
+    assert code == 1 and "author email: personal term #1" in out and "committer email: personal term #1" in out, out
+    no_leak(out, NAME, NAME.replace(" ", ""))
+
+
+def test_a_zip_member_named_after_a_person_without_a_separator_is_found(tmp_path):
+    z = make_zip(tmp_path / "rel.zip", {"Kairo-Setup-1/app/" + NAME.replace(" ", "") + ".txt": "hello\n"})
+    code, out = scan(tmp_path, "--zip", str(z), terms=[NAME])
+    assert code == 1 and "in the name" in out
+    no_leak(out, NAME, NAME.replace(" ", ""))
+
+
+def test_a_zip_member_name_written_by_an_old_windows_tool_is_read_the_way_it_was_written(tmp_path):
+    """No UTF-8 flag: zipfile reads the name as DOS (cp437), where the byte of the u-umlaut is a different letter."""
+    plain = UML.replace(U, "x")
+    raw = zbytes({plain + ".txt": "hello\n"}).replace(plain.encode(), UML.encode("latin-1"))
+    assert raw.count(UML.encode("latin-1")) == 2                                       # local header and central directory
+    z = write(tmp_path / "rel.zip", raw)
+    code, out = scan(tmp_path, "--zip", str(z), terms=[UML])
+    assert code == 1 and "personal term #1 (list line 1) in the name" in out, out
+    no_leak(out, UML, UML.replace(U, "ue"))

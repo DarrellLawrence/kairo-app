@@ -25,3 +25,11 @@ regexes = ['''^ANTHROPIC_API_KEY=$''']
 description = "fake values that test scripts/privacy_scan.py"
 targetRules = ["generic-api-key"]
 paths = ['''server/tests/test_privacy_scan\.py$''']
+
+# A VAPID (Web Push) private key as a raw base64url value (VAPID_PRIVATE=..., {"vapid": {"private": "..."}}): the default
+# rules know PEM keys and *_KEY names, not this shape.
+[[rules]]
+id = "kairo-vapid-private-key"
+description = "A VAPID (Web Push) private key written as a raw base64url value"
+regex = '''(?i)vapid[\s\S]{0,100}?private["']?\s*[:=]\s*["']?[A-Za-z0-9_\-+/=]{40,}'''
+keywords = ["vapid"]

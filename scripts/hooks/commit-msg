@@ -1,23 +1,27 @@
 #!/bin/sh
 # Kairo commit-msg: a personal term or a secret in a commit message stays in the history for good, so it is
 # checked here too. Turn it on with:   git config core.hooksPath scripts/hooks
+# Every line of the message is scanned: git keeps lines that start with # unless it runs in its "strip" mode, and
+# -m and -F do not strip. Only when an editor was opened (prepare-commit-msg left a note) is git's own comment
+# block at the end of the file ignored.
+
+here=$(cd "$(dirname "$0")" && pwd) || exit 1
+. "$here/_common.sh" || exit 1
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root" || exit 1
+gd=$(git rev-parse --git-dir) || exit 1
+kairo_find_python commit-msg || exit 1
+kairo_find_scanner commit-msg "$root" "$here" || exit 1
 
-py=
-for cand in python3 python py; do
-  if command -v "$cand" >/dev/null 2>&1 \
-     && "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
-    py=$cand
-    break
-  fi
-done
-if [ -z "$py" ]; then
-  echo "commit-msg: Python 3 was not found, so the privacy scan cannot run. Install Python 3, or commit with --no-verify." >&2
-  exit 1
-fi
+src=$(cat "$gd/kairo-msg-source" 2>/dev/null)
+rm -f "$gd/kairo-msg-source"
+flag=
+case "$src" in
+  editor|template|merge|squash) flag=--message-editor ;;
+esac
 
-"$py" scripts/privacy_scan.py --message-file "$1" || {
+# shellcheck disable=SC2086
+"$py" "$scan" --message-file "$1" $flag || {
   echo "commit-msg: the privacy scan found something in the commit message. Nothing was committed." >&2
   exit 1
 }

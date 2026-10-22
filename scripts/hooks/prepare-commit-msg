@@ -1,0 +1,6 @@
+#!/bin/sh
+# Kairo prepare-commit-msg: only notes how this commit's message is made (an editor, -m/-F, a merge ...), for the
+# commit-msg hook. It never blocks a commit.
+gd=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+printf '%s' "${2:-editor}" > "$gd/kairo-msg-source" 2>/dev/null
+exit 0

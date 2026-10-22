@@ -19,14 +19,12 @@ jobs:
           node-version: "22"
       - name: Build setup zip (with its release check)
         run: scripts/build-release.sh
-      # Owner's master prompt 0.6: the zip that may be published holds no personal term, no secret and no
-      # private/, data/ or .env path. build-release.sh already scanned it without the owner's terms; this adds
-      # them from the PERSONAL_TERMS secret. Not --ci on purpose: a missing secret is reported as an error on
-      # main by the privacy job below, it does not stop the build.
-      - name: Privacy scan of the setup zip
-        env:
-          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
-        run: python scripts/privacy_scan.py --zip dist/Kairo-Setup-*.zip
+      # Owner's master prompt 0.6: the zip that may be published holds no secret and no private/, data/, secrets/ or
+      # .env path. build-release.sh already scanned it; this is the same check as a visible step. The owner's personal
+      # terms are NOT given to this job (it runs npm install scripts): the job privacy-zip checks them on exactly
+      # this file, and the release waits for it.
+      - name: Privacy scan of the setup zip (secrets and paths)
+        run: python scripts/privacy_scan.py --secrets-only --zip dist/Kairo-Setup-*.zip
       - uses: actions/upload-artifact@v4
         with:
           name: setup-zip
@@ -40,24 +38,61 @@ jobs:
   # Owner's master prompt 0.6 (the code may become public; all personal data lives on the PC only): the whole
   # history, every branch and tag, must hold no personal term, secret or private/ data/ .env path. Two scanners:
   # scripts/privacy_scan.py with the owner's terms from the PERSONAL_TERMS secret (names are never printed, only
-  # file:line and the rule number) and a pinned, checksum-verified gitleaks. Without the secret this job is an
-  # error on main (so it is noticed) and a warning elsewhere (pull requests from forks never get secrets).
+  # file:line and the rule number) and a pinned, checksum-verified gitleaks (its output is reduced to rule, file, line
+  # and commit by privacy_scan.py --gitleaks-report: never --verbose, which prints the matched line and the author).
+  # A pull request is checked with the scanner and the gitleaks config of its BASE branch, never with its own copy,
+  # so a pull request cannot weaken the check that judges it.
+  # Pull requests: the commits the pull request adds must be clean (hard); the whole old history is reported but
+  # does not fail the pull request (it holds the old private/ file until the history is rewritten, task 97).
+  # Pushes to main: the whole history, hard. Without the secret this job is an error on main (so it is noticed) and
+  # a warning elsewhere (pull requests from forks never get secrets). The release does not wait for this job
+  # (it is red until the rewrite); it waits for privacy-zip, which checks what actually ships.
   privacy:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     env:
       GITLEAKS_VERSION: "8.30.0"
       GITLEAKS_SHA256: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"   # gitleaks_8.30.0_linux_x64.tar.gz
+      EVENT: ${{ github.event_name }}
+      BASE_REF: ${{ github.base_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Personal terms, secrets and forbidden paths in the whole history
+      - name: Choose the scanner (a pull request is judged by its base branch's scanner and config)
+        run: |
+          scanner=scripts/privacy_scan.py
+          config=.gitleaks.toml
+          if [ "$EVENT" = "pull_request" ]; then
+            trusted="$RUNNER_TEMP/trusted"
+            mkdir -p "$trusted"
+            if git show "origin/${BASE_REF}:scripts/privacy_scan.py" > "$trusted/privacy_scan.py" 2>/dev/null \
+               && git show "origin/${BASE_REF}:.gitleaks.toml" > "$trusted/gitleaks.toml" 2>/dev/null; then
+              scanner="$trusted/privacy_scan.py"
+              config="$trusted/gitleaks.toml"
+              echo "Using the scanner and the gitleaks config of ${BASE_REF}, not the ones in this pull request."
+            else
+              echo "::warning::${BASE_REF} has no privacy scanner yet (this is the pull request that adds it): this run uses the pull request's own copy."
+            fi
+          fi
+          echo "SCANNER=$scanner" >> "$GITHUB_ENV"
+          echo "GITLEAKS_CONFIG=$config" >> "$GITHUB_ENV"
+      - name: Personal terms, secrets and forbidden paths in the commits this pull request adds
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
-        run: python scripts/privacy_scan.py --ci --history
+        run: python "$SCANNER" --ci --history "origin/${BASE_REF}..HEAD"
+      - name: Personal terms, secrets and forbidden paths in the whole history
+        if: ${{ !cancelled() }}
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        env:
+          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
+        run: python "$SCANNER" --ci --history
       - name: Get gitleaks (pinned release, checksum verified)
         if: ${{ !cancelled() }}
         run: |
@@ -65,9 +100,85 @@ jobs:
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
           mkdir "$RUNNER_TEMP/gitleaks"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
-      - name: gitleaks on the whole history
+      - name: gitleaks on the whole history (archives up to 3 deep; only rule, file, line and commit are printed)
         if: ${{ !cancelled() }}
-        run: '"$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --verbose --log-opts="--all" .'
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        env:
+          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
+        run: |
+          rc=0
+          "$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --max-archive-depth 3 --config "$GITLEAKS_CONFIG" \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" --log-opts="--all" . || rc=$?
+          python "$SCANNER" --gitleaks-report "$RUNNER_TEMP/gitleaks.json" || true
+          exit $rc
+
+  # What actually ships (owner's master prompt 0.6): exactly the zip the build job made, with the owner's terms from
+  # the PERSONAL_TERMS secret, then gitleaks on the unpacked zip. --ci makes a missing secret an error on main and
+  # anything that could not be scanned an error. The release job needs this job, so a release is never published
+  # without the terms check. The secret is only given to the scanner's step, in a job that runs no project code.
+  privacy-zip:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_VERSION: "8.30.0"
+      GITLEAKS_SHA256: "79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e"   # gitleaks_8.30.0_linux_x64.tar.gz
+      EVENT: ${{ github.event_name }}
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Choose the scanner (a pull request is judged by its base branch's scanner and config)
+        run: |
+          scanner=scripts/privacy_scan.py
+          config=.gitleaks.toml
+          if [ "$EVENT" = "pull_request" ]; then
+            trusted="$RUNNER_TEMP/trusted"
+            mkdir -p "$trusted"
+            if git show "origin/${BASE_REF}:scripts/privacy_scan.py" > "$trusted/privacy_scan.py" 2>/dev/null \
+               && git show "origin/${BASE_REF}:.gitleaks.toml" > "$trusted/gitleaks.toml" 2>/dev/null; then
+              scanner="$trusted/privacy_scan.py"
+              config="$trusted/gitleaks.toml"
+              echo "Using the scanner and the gitleaks config of ${BASE_REF}, not the ones in this pull request."
+            else
+              echo "::warning::${BASE_REF} has no privacy scanner yet (this is the pull request that adds it): this run uses the pull request's own copy."
+            fi
+          fi
+          echo "SCANNER=$scanner" >> "$GITHUB_ENV"
+          echo "GITLEAKS_CONFIG=$config" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          name: setup-zip
+          path: dist
+      - name: Personal terms, secrets and forbidden paths in the setup zip
+        env:
+          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
+        run: python "$SCANNER" --ci --zip dist/Kairo-Setup-*.zip
+      - name: Get gitleaks (pinned release, checksum verified)
+        if: ${{ !cancelled() }}
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+      - name: gitleaks on the unpacked setup zip (archives up to 3 deep; only rule, file and line are printed)
+        if: ${{ !cancelled() }}
+        env:
+          KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
+        run: |
+          mkdir "$RUNNER_TEMP/unpacked"
+          unzip -q dist/Kairo-Setup-*.zip -d "$RUNNER_TEMP/unpacked"
+          rc=0
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir --redact --no-banner --max-archive-depth 3 --config "$GITLEAKS_CONFIG" \
+            --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" "$RUNNER_TEMP/unpacked" || rc=$?
+          python "$SCANNER" --gitleaks-report "$RUNNER_TEMP/gitleaks.json" || true
+          exit $rc
 
   server:
     strategy:
@@ -287,7 +398,7 @@ jobs:
   # kairo-home installs (fix P2.11/12): every job must succeed; a skipped one blocks the release.
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [build, server, voice, voice-windows, voice-install-windows, browser, web, release-tools, windows-install]
+    needs: [build, privacy-zip, server, voice, voice-windows, voice-install-windows, browser, web, release-tools, windows-install]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
