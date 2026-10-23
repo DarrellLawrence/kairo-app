@@ -40,6 +40,10 @@ SECTIONS = {   # key -> title, in card order
     "about": "About the owner",
     "lately": "What Kairo remembers lately",
 }
+# The order the voice model reads the card in (g3.constant_tools): what changes least first, the clock last, so a new
+# call's prompt starts the same as the last one's for as long as possible (measured on the same card two hours later:
+# 73 % of the prompt already cached, 37 % in SECTIONS order). SECTIONS itself stays: the app and the realtime card use it.
+MOUTH_ORDER = ("about", "lately", "weather", "events", "tasks", "loops", "trip", "now")
 DATA = {"events": "the calendar", "tasks": "tasks", "loops": "open loops"}   # other people's words: data
 LIMITS = {"now": 160, "events": 700, "tasks": 600, "loops": 600, "weather": 200, "trip": 360, "about": 1000, "lately": 500}
 LOCAL = ("now", "tasks", "loops")    # Kairo's own data: cheap to read again
@@ -163,10 +167,12 @@ def trip_lines(conns: list[dict] | None, frm: str | None, to: str | None, tz) ->
     return "\n".join(out)
 
 
-def render(sections: dict[str, str], only=None) -> str:
-    """The card (or only some sections of it) as the voice model reads it."""
+def render(sections: dict[str, str], only=None, order=None) -> str:
+    """The card (or only some sections of it) as the voice model reads it. order: the section keys in the order to
+    write them (MOUTH_ORDER); default: SECTIONS."""
     parts = []
-    for key, title in SECTIONS.items():
+    for key in [k for k in (order or SECTIONS) if k in SECTIONS]:
+        title = SECTIONS[key]
         if only is not None and key not in only:
             continue
         body = (sections.get(key) or "").strip()[:LIMITS[key]]

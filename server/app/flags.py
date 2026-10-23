@@ -26,9 +26,12 @@ FLAGS: dict[str, tuple[bool, str]] = {
                              "grew about 33 MiB with every call. Applies the next time the voice model starts."),
     "g3.gemma_markup": (True, "Gemma's tool-call markup (<|tool_call>...<tool_call|>) is taken out of what Kairo says on a call, "
                               "like the other models' markers; without it the voice would read it out when Gemma talks."),
-    "g3.constant_tools": (False, "The voice model gets the same tool list with every request (a turn that must not call it says "
-                                 "'none'), so its cached prompt is never read again when a turn switches between small talk and "
-                                 "a question. Waits for the voice lab before/after on the PC. Applies from the next call."),
+    "g3.constant_tools": (False, "The voice model's start of every call stays the same: its system text and tool list never change "
+                                 "(a turn that must not call the tool says 'none'), and today's card and the bring-up list "
+                                 "come in the first message instead, slowest-changing first. Less of the prompt is read again at "
+                                 "the start of a call and when a turn switches between small talk and a question. Waits for the "
+                                 "voice lab before/after on the PC (the card moves from the system role to a user message). "
+                                 "Applies from the next call."),
     "g3.swa_full": (False, "Gemma's cache kept whole (--swa-full): +280 MiB of graphics-card memory, so the cached start of the "
                            "prompt survives from one turn to the next. Wait for the PC check (the card's memory) before "
                            "turning it on. Applies the next time the voice model starts."),

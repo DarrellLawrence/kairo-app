@@ -82,8 +82,8 @@ def test_the_voice_lab_talks_with_the_call_layout_the_switch_says(migrated, tmp_
 
     class Spy(real):
         def __init__(self, *a, **kw):
-            made.append(kw.get("constant_tools"))
+            made.append((kw.get("constant_tools"), kw.get("context_block")))
             super().__init__(*a, **kw)
     monkeypatch.setattr(voicelab, "Mouth", Spy)
     the_lab._models({"models": {}}, "auto")
-    assert made and set(made) == {on}
+    assert made and set(made) == {(on, on)}

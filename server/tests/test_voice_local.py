@@ -177,6 +177,23 @@ def test_small_talk_on_a_call_sends_the_tools_with_none_only_when_the_switch_is_
         assert "tools" not in last and "tool_choice" not in last
 
 
+def test_with_the_switch_on_a_call_starts_with_a_system_prompt_that_never_changes(local):
+    """g3.constant_tools, end to end: the call's first read of the prompt and its first turn share the whole start
+    (the system message, the tools and the <kairo-context> block); nothing of the card is in the system message."""
+    assert local.put("/api/flags/g3.constant_tools", json={"on": True}).status_code == 200
+    local.voice.text = "hey how are you"
+    with local.websocket_connect("/ws/voice") as ws:
+        time.sleep(0.5)
+        utter(ws)
+        frames_until(ws)
+    prime, first = requests_seen(local)[:2]
+    assert prime["max_tokens"] == 1 and prime["tools"] == first["tools"] and [t["function"]["name"] for t in prime["tools"]] == ["ask_kairo"]
+    assert prime["messages"][0] == first["messages"][0] and "## Right now" not in prime["messages"][0]["content"]
+    ctx = prime["messages"][1]["content"].removesuffix("Hi")
+    assert ctx.startswith("<kairo-context>\n# Today card") and first["messages"][1]["content"].startswith(ctx)
+    assert first["tool_choice"] == "none"                                      # small talk: same prompt, no call
+
+
 # ---------------------------------------------------------------- smart endpointing (owner's request 2026-10-16)
 
 class Turny:
@@ -276,6 +293,24 @@ def test_a_card_question_is_answered_on_the_pc_without_claude(local):
     with Session(make_engine(local.settings.db_url)) as s:
         assert voicestats.summary(s)["card"] == 1
     assert local.get("/api/voice/lab").json()["live"]["on_pc_pct"] == 100
+
+
+def test_with_the_switch_on_a_card_question_is_still_answered_on_the_pc_and_a_data_question_reaches_claude(local):
+    """The card moved from the system message to the first user message (g3.constant_tools): the answers are the same."""
+    assert local.put("/api/flags/g3.constant_tools", json={"on": True}).status_code == 200
+    card(local, weather="Home: now 12°C, cloudy")
+    local.voice.text = "What's the weather like?"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+        done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+        assert done["text"] == "From your card: Home: now 12°C, cloudy" and done["server"]["tool_ms"] is None
+        local.voice.text = "Remind me to call the dentist tomorrow"
+        utter(ws, turn=2)
+        fr = frames_until(ws, limit=400)
+    assert "echo: (spoken, on a call) Remind me to call the dentist" in " ".join(str(f.get("text")) for f in fr if isinstance(f, dict))
+    asks = [r for r in requests_seen(local) if r.get("tool_choice") == "auto"]
+    assert asks and all(r["tools"] for r in asks)
 
 
 def test_after_claude_did_something_the_card_is_read_again(local):

@@ -1531,7 +1531,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
         line.mouth = mouth
         try:
-            gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
+            gen = app.state.voice_llm.stream(mouth.prime_messages(), max_tokens=1, **mouth.prime_args())
             async for _ in gen:
                 pass
         except Exception as exc:   # the first turn reads it then

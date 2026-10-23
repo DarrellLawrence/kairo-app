@@ -49,11 +49,17 @@ CARD = [(re.compile(r"weather|wetter|\bwarm|\brain\b|regn|temperat|\bcold|kalt",
 DATA = re.compile(r"calendar|remind|mail|list|test|exam|note|task|send|move|kalender|erinner|liste|prüfung|notiz|aufgabe|schick", re.I)
 
 
+def owner_words(text: str) -> str:
+    """What the owner said: after the card block and the notes Kairo puts in front of it (g3.constant_tools)."""
+    return re.sub(r"^\s*\[\d{1,2}:\d{2}\]\s*", "", text.rsplit("</kairo-note>", 1)[-1].rsplit("</kairo-context>", 1)[-1])
+
+
 def from_card(system: str, text: str) -> str | None:
-    """The whole card section the question is about (the facts are somewhere in it)."""
+    """The whole card section the question is about (the facts are somewhere in it). The card is in the system
+    message, or (g3.constant_tools) in a <kairo-context> block of a user message: `system` is then both."""
     if os.environ.get("FAKE_LLAMA_NO_CARD") or "# Today card" not in system:
         return None
-    text = re.sub(r"^\s*\[\d{1,2}:\d{2}\]\s*", "", text.rsplit("</kairo-note>", 1)[-1])
+    text = owner_words(text)
     for rx, header in CARD:
         if rx.search(text) and header in system:
             lines = []
@@ -106,14 +112,17 @@ class Handler(BaseHTTPRequestHandler):
         msgs = body.get("messages") or []
         last = msgs[-1] if msgs else {}
         text = str(last.get("content") or "")
-        tools = body.get("tools") and not os.environ.get("FAKE_LLAMA_NO_TOOLS")
+        tools = body.get("tools") and body.get("tool_choice") != "none" and not os.environ.get("FAKE_LLAMA_NO_TOOLS")
         pieces, call = [], None
         system = str(msgs[0].get("content") or "") if msgs and msgs[0].get("role") == "system" else ""
+        for m in msgs[1:2]:                                  # the first user message may hold the card
+            if m.get("role") == "user" and "<kairo-context>" in str(m.get("content") or ""):
+                system += "\n" + str(m["content"]).split("</kairo-context>", 1)[0]
         card = from_card(system, text) if last.get("role") == "user" else None
         here = re.search(r"is here: (.*?)\nSay it now", text, re.S)
         if here:
             pieces = ["Okay. "] + [w + " " for w in here.group(1).split()]
-        elif card and not (tools and DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
+        elif card and not (tools and DATA.search(owner_words(text))):
             pieces = ["From ", "your ", "card: "] + [w + " " for w in card.split()]
         elif last.get("role") == "tool":
             try:
@@ -121,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 said = text
             pieces = ["Okay. "] + [w + " " for w in str(said).split()]
-        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
+        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(owner_words(text))):
             call = json.dumps({"request": text}, ensure_ascii=False)
         elif os.environ.get("FAKE_LLAMA_TEXT_TOOLS") and os.environ.get("FAKE_LLAMA_ALWAYS_TOOL"):
             pieces = (["<|tool_", "call>call:ask_kairo{", "}<tool_call|>", "<|tool_response>"] if GEMMA else
