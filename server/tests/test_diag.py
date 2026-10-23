@@ -466,3 +466,13 @@ def test_the_embeddings_start_with_the_first_search_but_must_not_run_on_the_cpu(
     assert by_id["embeddings.device"]["status"] == "PASS"
     monkeypatch.setattr(semantic.Embedder, "installed", lambda self: False)
     assert run(pc, live=voice_parts())[1]["embeddings.installed"]["status"] == "FAIL"
+
+
+def test_the_page_opens_at_diag_voice_even_when_the_phone_reloads_that_address(migrated, tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>Kairo app shell</title>", encoding="utf-8")
+    with TestClient(create_app(migrated.model_copy(update={"web_dist_dir": dist}))) as c:
+        page = c.get("/diag/voice")
+        assert page.status_code == 200 and "Kairo app shell" in page.text         # the app's route, not a 404
+        assert c.get("/api/diag/voice").headers["content-type"].startswith("application/json")   # and the API is not shadowed by it
