@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 import yaml
@@ -11,11 +12,14 @@ from sqlmodel import Session, select
 
 from app import flags, router
 from app.brain import BrainEvent, EventKind
+from app.brain import local_llm
 from app.brain.local_llm import LocalAnswer
 from app.chat import AskResult, BrainRunner
-from app.db import RouteLog, make_engine
-from app.scheduler import Jobs, Skipped
+from app.db import JobRun, RouteLog, TriagedEmail, make_engine
+from app.scheduler import JobContext, Jobs, Skipped
 from tests.test_jobs import PROFILE, Pushes
+from tests.test_local_llm import FakeModel, reply_prompt
+from tests.test_loops import WED, engine_for, env, mail  # noqa: F401  (env is a fixture)
 
 LAB = {"providers": {"claude": {"class": "R1", "enabled": True}, "local": {"class": "R0", "enabled": True}},
        "local": {"purposes": ["reply_check"], "lab_model_hash": "abc"}}
@@ -179,6 +183,76 @@ def test_a_job_double_without_a_model_argument_still_works_with_the_router_on(en
     jobs = Jobs(engine=engine, pusher=Pushes(), profile=PROFILE, ask=lambda p, s_: AskResult("plain"),
                 router=router.Router(engine, tmp_path))
     assert jobs.ask_brain("p", "s").text == "plain" and log(engine)[0].purpose == "summary"
+
+
+# ---------------------------------------------------------------- the real adapter and its answer check (review of G11)
+
+def real_local(*pieces, model="abc"):
+    return local_llm.LocalLLM(FakeModel(pieces=pieces), identify=lambda: model)
+
+
+def test_a_right_shaped_local_answer_is_used_and_costs_no_claude_run(engine, tmp_path):
+    answer = '{"m1": "yes", "m2": "no", "m3": "unsure"}'
+    jobs, rt, claude = setup(engine, tmp_path, local=real_local(answer))
+    res = jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check")
+    assert res.ok and res.text == answer and claude.calls == [] and runs_today(engine, jobs) == 0
+    assert [r.route for r in log(engine)] == ["local"] and rt.fails() == 0
+
+
+@pytest.mark.parametrize("answer", ["[]", "{}", '{"foo": 1}', '{"m1": "yes"}', '{"m1": "maybe", "m2": "no", "m3": "no"}',
+                                    '{"m1": "yes", "m2": "no", "m3": "no", "zzz": "yes"}',
+                                    'sure! here you go: {"m1": "yes", "m2": "no", "m3": "no"}'])
+def test_a_local_answer_of_the_wrong_shape_goes_to_claude_and_counts_as_a_failure(engine, tmp_path, answer):
+    jobs, rt, claude = setup(engine, tmp_path, local=real_local(answer))
+    res = jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check")
+    assert res.text == "from claude" and claude.calls == [("reply_check", "haiku")] and runs_today(engine, jobs) == 1
+    got = log(engine)
+    assert [(r.route, r.fallback_from) for r in got] == [("local", None), ("claude", "local")]
+    assert "answer refused" in got[1].reason or "not valid JSON" in got[1].reason
+    assert rt.fails() == 1
+
+
+def test_three_wrong_local_answers_in_a_row_open_the_breaker_so_the_fourth_job_does_not_ask_the_model(engine, tmp_path):
+    model = FakeModel(pieces=("{}",))
+    jobs, rt, claude = setup(engine, tmp_path, local=local_llm.LocalLLM(model, identify=lambda: "abc"))
+    for _ in range(3):
+        jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check")
+    assert len(model.calls) == 3 and rt.breaker_open()
+    jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check")
+    assert len(model.calls) == 3 and len(claude.calls) == 4
+
+
+def test_a_purpose_without_an_answer_check_is_never_asked_locally(engine, tmp_path, monkeypatch):
+    monkeypatch.delitem(local_llm.ANSWER_CHECKS, "reply_check")
+    model = FakeModel(pieces=('{"m1": "yes", "m2": "no", "m3": "no"}',))
+    jobs, rt, claude = setup(engine, tmp_path, local=local_llm.LocalLLM(model, identify=lambda: "abc"))
+    assert jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check").text == "from claude"
+    assert model.calls == [] and claude.calls == [("reply_check", "haiku")]
+    assert "no answer check" in log(engine)[-1].reason
+
+
+def check_replies(env, tmp_path, local, claude):
+    """The real reply check (loops.check_replies) on two mails, asking through the real Jobs, router and adapter."""
+    with Session(env["engine"]) as s:
+        mail(s, "anna", "Anna Meier <anna@example.com>", "Project review", "Asks if Thursday works")
+        mail(s, "ben", "Ben Muster <ben@example.com>", "Notes", "Can you send me the ABU notes?")
+        jobs, rt, claude = setup(env["engine"], tmp_path, local=local, claude=claude)
+        ctx = JobContext(session=s, run=JobRun(job="loops.check"), forced=True, jobs=jobs)
+        engine_for(env, Pushes()).check_replies(ctx)
+        return jobs, rt, claude, {m: s.get(TriagedEmail, m).personal_reply for m in ("anna", "ben")}
+
+
+def test_end_to_end_an_empty_local_answer_does_not_decide_the_reply_check_but_claude_does(env, tmp_path):
+    """Review of G11: a local answer of {} used to set personal_reply=False for every mail in the batch."""
+    claude = Claude(json.dumps({"anna": "yes", "ben": "no"}))
+    jobs, rt, claude, got = check_replies(env, tmp_path, real_local("{}"), claude)
+    assert got == {"anna": True, "ben": False} and claude.calls == [("reply_check", "haiku")] and rt.fails() == 1
+
+
+def test_end_to_end_a_good_local_answer_decides_the_reply_check_and_costs_no_claude_run(env, tmp_path):
+    jobs, rt, claude, got = check_replies(env, tmp_path, real_local('{"anna": "yes", "ben": "unsure"}'), None)
+    assert got == {"anna": True, "ben": False} and claude.calls == [] and rt.fails() == 0
+    assert runs_today(env["engine"], jobs) == 0
 
 
 # ---------------------------------------------------------------- owner turns

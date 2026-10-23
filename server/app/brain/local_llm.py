@@ -4,21 +4,22 @@ OFF everywhere until the owner turns g11.local_route on and the router lab has p
 
 This file has no network code of its own. It reaches the model only through brain/voice_local.VoiceModel.stream(),
 which talks to 127.0.0.1 and nothing else, so it is not in outbound.MODULES. It cannot be given tools or images
-(a job with either never goes local, see router.decide), and it accepts an answer only when it is complete and valid
-JSON. Anything else is refused with a reason and the job goes to Claude as before (Router.escalate).
+(a job with either never goes local, see router.decide), and it accepts an answer only when it is complete, is valid
+JSON (nothing around it) and passes the purpose's own check (ANSWER_CHECKS: the right shape, every item answered, only
+allowed values). Anything else is refused with a reason and the job goes to Claude as before (Router.escalate).
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import re
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
-
-from ..jobkit import extract_json
+from typing import Any, Callable
 
 MAX_PROMPT_CHARS = 12_000       # about 3-4k tokens: the voice model's server runs a small context (8192 by default)
 MAX_TOKENS = 700
@@ -46,6 +47,64 @@ def fingerprint(model_id: str | None, path: Path | None) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
+Check = Callable[[str, Any], "str | None"]       # (the prompt, the parsed answer) -> why it is refused, or None
+
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.S)
+
+
+def strict_json(text: str) -> Any:
+    """The answer as JSON, only when the whole text is JSON (alone or in one code fence). A small model that talks
+    around its JSON has drifted; Claude gets the job then. ValueError otherwise."""
+    s = text.strip()
+    fence = _FENCE.fullmatch(s)
+    return json.loads(fence.group(1) if fence else s)
+
+
+# ---- the answer checks, one per purpose that may run locally (router.LOCAL_ELIGIBLE; a test keeps the two equal)
+
+_UNTRUSTED_START, _UNTRUSTED_END = "<<<UNTRUSTED DATA", "<<<END UNTRUSTED DATA>>>"
+VERDICTS = ("yes", "no", "unsure")
+
+
+def asked_ids(prompt: str) -> list[str] | None:
+    """The ids of the items the prompt asks about: the "id" of each object in its one untrusted block (tools.untrusted
+    writes a JSON list there; JSON puts no raw line break inside a string, so no mail can fake a marker line). None
+    when the prompt has no such block: then the answer cannot be checked."""
+    lines = prompt.split("\n")
+    starts = [i for i, ln in enumerate(lines) if ln.startswith(_UNTRUSTED_START)]
+    ends = [i for i, ln in enumerate(lines) if ln.startswith(_UNTRUSTED_END)]
+    if len(starts) != 1 or len(ends) != 1 or ends[0] <= starts[0]:
+        return None
+    try:
+        items = json.loads("\n".join(lines[starts[0] + 1:ends[0]]))
+    except ValueError:
+        return None
+    if not isinstance(items, list) or not items or not all(isinstance(i, dict) and isinstance(i.get("id"), str) for i in items):
+        return None
+    return [i["id"] for i in items]
+
+
+def check_verdicts(prompt: str, value: Any) -> str | None:
+    """reply_check: one JSON object, every asked id exactly once, each mapped to "yes", "no" or "unsure". The reasons
+    say what is wrong and never quote the mail."""
+    ids = asked_ids(prompt)
+    if not ids:
+        return "the prompt has no list of mails to check the answer against (which mails were asked about is unknown)"
+    if not isinstance(value, dict):
+        return "not a JSON object of verdicts"
+    asked = set(ids)
+    if set(value) - asked:
+        return "an answer for an id that was not asked"
+    if asked - set(value):
+        return f"missing {len(asked - set(value))} of {len(asked)} ids"
+    if not all(isinstance(v, str) and v.lower() in VERDICTS for v in value.values()):
+        return "a verdict that is not yes, no or unsure"
+    return None
+
+
+ANSWER_CHECKS: dict[str, Check] = {"reply_check": check_verdicts}
+
+
 class LocalLLM:
     def __init__(self, model, identify: Callable[[], str] | None = None) -> None:
         """model: brain.voice_local.VoiceModel (anything with ready() and an async stream(messages, ...)).
@@ -65,7 +124,9 @@ class LocalLLM:
         except Exception:
             return False
 
-    def ask(self, prompt: str, system: str, *, timeout_s: float, max_tokens: int = MAX_TOKENS) -> LocalAnswer:
+    def ask(self, prompt: str, system: str, *, timeout_s: float, check: Check, max_tokens: int = MAX_TOKENS) -> LocalAnswer:
+        """check(prompt, answer) -> why the parsed answer is refused, or None. There is no way to ask without one: a
+        local answer that nothing looked at is the failure mode this route must not have."""
         started = time.monotonic()
 
         def done(ok: bool, text: str, reason: str) -> LocalAnswer:
@@ -85,11 +146,17 @@ class LocalLLM:
         if not text.strip():
             return done(False, "", "empty answer")
         try:
-            value = extract_json(text)
+            value = strict_json(text)
         except ValueError:
             return done(False, "", "not valid JSON")
         if not isinstance(value, (dict, list)):
             return done(False, "", "not valid JSON")
+        try:
+            why = check(prompt, value)
+        except Exception as exc:       # a check that breaks is a refusal, never an accepted answer
+            why = f"the answer check failed ({type(exc).__name__})"
+        if why:
+            return done(False, "", f"answer refused: {why}")
         return done(True, text, "ok")
 
     async def _collect(self, messages: list[dict], max_tokens: int) -> tuple[str, str | None]:

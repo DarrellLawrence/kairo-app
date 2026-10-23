@@ -32,7 +32,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select
 
 from . import killswitch, reviews
-from .brain.local_llm import LocalAnswer
+from .brain.local_llm import ANSWER_CHECKS, LocalAnswer
 from .chat import AskResult
 from .db import JobRun, SettingKV, utcnow
 from .router import LOCAL_KIND
@@ -243,9 +243,13 @@ class Jobs:
     def _route_local(self, prompt: str, system: str, decision, model: str):
         """Run a job the router sent to the local model. (the answer, decision) when it is accepted; (None, the
         next decision) when it is refused, and the job goes to Claude."""
+        check = ANSWER_CHECKS.get(decision.purpose)
         try:
-            kind = LOCAL_KIND.get(decision.purpose, "small")
-            got = self.local.ask(prompt, system, timeout_s=self.router.rules.timeout_s[kind])
+            if check is None:        # cannot happen (a test keeps ANSWER_CHECKS and LOCAL_ELIGIBLE equal); if it does, Claude takes the job
+                got = LocalAnswer(False, "", "no answer check for this purpose", 0)
+            else:
+                kind = LOCAL_KIND.get(decision.purpose, "small")
+                got = self.local.ask(prompt, system, timeout_s=self.router.rules.timeout_s[kind], check=check)
         except Exception as exc:
             got = LocalAnswer(False, "", f"{type(exc).__name__} from the local model", 0)
         if got.ok:
