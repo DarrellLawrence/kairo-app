@@ -53,3 +53,25 @@ def test_a_webrtc_call_decodes_in_the_language_the_owner_chose(local, monkeypatc
     local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
     asyncio.run(_app_call(local, seconds=8.0))
     assert seen and set(seen) == {expected}, seen
+
+
+def test_a_call_on_the_old_line_tells_the_voice_it_started(local):
+    started = []
+    local.voice.call_started = lambda s: started.append(s)
+    local.voice.text = "hey how are you"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        frames_until(ws)
+    assert len(started) == 1 and hasattr(started[0], "exec")          # with a database session: it reads the switches there
+
+
+def test_a_webrtc_call_tells_the_voice_it_started(local, monkeypatch):
+    _needs_pipecat()
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    started = []
+    local.voice.call_started = lambda s: started.append(s)
+    local.voice.text = "hey how are you"
+    local.app.state.voice = ToneVoice(local.voice)
+    local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
+    asyncio.run(_app_call(local, seconds=6.0))
+    assert len(started) == 1 and hasattr(started[0], "exec")

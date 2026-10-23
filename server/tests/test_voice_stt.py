@@ -61,6 +61,12 @@ def put_models(root, *names):
 
 
 @pytest.fixture
+def db(migrated):
+    with Session(make_engine(migrated.db_url)) as s:
+        yield s
+
+
+@pytest.fixture
 def voice(tmp_path, whisper):
     put_models(tmp_path, voice_mod.WHISPER_GPU, voice_mod.WHISPER_CPU)
     return Voice(tmp_path)
@@ -238,3 +244,128 @@ def test_the_latency_harness_records_the_compute_type_the_pc_reported():
     assert bench_voice.config_info(comps)["stt_compute_type"] == "int8_float16"
     comps["components"]["whisper"].pop("compute_type")            # an older Kairo that does not say: as before
     assert bench_voice.config_info(comps)["stt_compute_type"] == "float16"
+
+
+# ---------------------------------------------------------------- warm-up at start and at each call connect
+
+class Voices:
+    """speak() with a tone for each language, as Kairo's own voices would; .said records the requests."""
+
+    def __init__(self, v, *, de=True):
+        import io
+        import math
+        import wave
+        self.said, self.de = [], de
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"".join(int(6000 * math.sin(i / 7)).to_bytes(2, "little", signed=True) for i in range(24000 * 2)))
+        self.wav = buf.getvalue()
+        v.speak = self.speak
+
+    def speak(self, text, language=None):
+        self.said.append((text, language))
+        return self.wav, ("en" if language == "de" and not self.de else language)
+
+
+def test_warm_at_connect_is_a_fix_so_it_is_on_until_the_owner_says_otherwise(tmp_path):
+    assert flags.FLAGS["g2.warm_at_connect"][0] is True and Voice(tmp_path).tuning.warm_at_connect is True
+
+
+def test_a_call_connecting_warms_whisper_with_one_sentence_in_each_language_through_the_call_path(voice, whisper, db):
+    voices = Voices(voice)
+    voice.call_started(db).join(20)
+    assert [kw["language"] for kw in whisper.calls] == ["en", "de"]
+    assert all(kw["vad_filter"] is True and kw["beam_size"] == 1 and kw["temperature"] == 0.0 for kw in whisper.calls)
+    assert [lang for _, lang in voices.said] == ["en", "de"]
+    assert voice.warm_ms["whisper"] >= 0
+
+
+def test_the_warm_sentences_are_made_once_and_not_again_at_the_next_call(voice, whisper):
+    voices = Voices(voice)
+    voice.warm_call()
+    voice._last_decode = 0.0                                # long ago: the next call warms again, from the same audio
+    voice.warm_call()
+    assert len(voices.said) == 2 and len(whisper.calls) == 4
+
+
+def test_a_call_that_connects_right_after_a_decode_does_not_warm_again(voice, whisper):
+    Voices(voice)
+    voice.transcribe_pcm(PCM, "en")
+    whisper.calls.clear()
+    voice.warm_call()
+    assert whisper.calls == []                              # the GPU just worked: it is warm
+
+
+def test_the_owner_already_talking_comes_first(voice, whisper):
+    Voices(voice)
+    voice._active = 1                                       # a real sentence is being written down
+    voice.warm_call()
+    assert whisper.calls == []
+
+
+def test_without_the_german_voice_only_english_is_warmed(voice, whisper):
+    Voices(voice, de=False)
+    voice.warm_call()
+    assert [kw["language"] for kw in whisper.calls] == ["en"]
+
+
+def test_without_any_voice_a_second_of_noise_still_warms_the_kernels(voice, whisper):
+    voice.speak = lambda text, language=None: (_ for _ in ()).throw(NotInstalled("no voice"))
+    voice.warm_call()
+    assert [kw["language"] for kw in whisper.calls] == ["en"] and whisper.calls[0]["vad_filter"] is False
+
+
+def test_warm_at_connect_off_leaves_the_model_cold_until_the_first_sentence(voice, whisper, db):
+    Voices(voice)
+    flags.set_flag(db, "g2.warm_at_connect", False)
+    assert voice.call_started(db) is None and voice.tuning.warm_at_connect is False
+    assert whisper.calls == [] and whisper.made == []
+
+
+def test_the_start_up_warm_up_uses_speech_and_the_call_path_too(voice, whisper, monkeypatch):
+    voices = Voices(voice)
+    monkeypatch.setattr(voice, "_load_kokoro", lambda: None)
+    voice.warm()
+    assert [kw["language"] for kw in whisper.calls] == ["en", "de"] and whisper.calls[0]["vad_filter"] is True
+    assert voice.warm_ms["whisper"] >= 0 and ("Hi.", "en") in voices.said
+
+
+def test_flipping_the_compute_flag_loads_the_model_again_at_the_next_call(voice, whisper, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    Voices(voice)
+    voice.transcribe_pcm(PCM, "en")
+    voice.tuning = voice_mod.Tuning(int8_float16=True)        # what read_flags does after the owner flips it
+    voice.warm_call()
+    assert [m["compute"] for m in whisper.made] == ["float16", "int8_float16"]
+    assert voice.devices()["whisper"]["compute_type"] == "int8_float16"
+    voice.warm_call()
+    assert len(whisper.made) == 2                            # not again while nothing changed
+
+
+def test_a_compute_that_fell_back_to_float16_is_not_reloaded_at_every_call(voice, whisper, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    whisper.fail_on = {("cuda", "int8_float16")}
+    voice.tuning = voice_mod.Tuning(int8_float16=True)
+    Voices(voice)
+    voice.warm_call()
+    voice.warm_call()
+    assert [m["compute"] for m in whisper.made] == ["float16"]
+
+
+def test_a_call_connecting_after_the_owner_flipped_the_compute_flag_loads_the_model_again(voice, whisper, db, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    Voices(voice)
+    voice.transcribe_pcm(PCM, "en")
+    flags.set_flag(db, "g2.int8_float16", True)
+    voice.call_started(db).join(20)
+    assert [m["compute"] for m in whisper.made] == ["float16", "int8_float16"]
+    assert voice.devices()["whisper"]["compute_type"] == "int8_float16"
+
+
+def test_a_database_that_cannot_be_read_never_stops_a_call(voice, whisper):
+    thread = voice.call_started(object())                    # the last switches stay (warm-up on by default)
+    assert thread is not None and voice.tuning == voice_mod.Tuning()
+    thread.join(20)

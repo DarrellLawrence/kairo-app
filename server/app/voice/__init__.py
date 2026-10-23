@@ -37,6 +37,11 @@ KOKORO_FILES = {
 KOKORO_VOICE = os.environ.get("KAIRO_KOKORO_VOICE", "af_heart")
 PIPER_DE = os.environ.get("KAIRO_PIPER_VOICE", "de_DE-thorsten-medium")
 RETRY_LOAD_AFTER = 600   # seconds before a failed model load is tried again
+WARM_FRESH_S = 15        # a call connecting this soon after a decode finds Whisper warm: no warm-up
+# What Whisper warms up on: Kairo's own voices say these (made-up sentences, about 4 s each), so the first
+# real sentence of a call meets kernels that already ran with speech of that length.
+WARM_TEXT = {"en": "Remind me to call the dentist tomorrow at three in the afternoon.",
+             "de": "Erinnere mich morgen um drei Uhr nachmittags an den Zahnarzt."}
 GPU_RUNTIME = re.compile(r"cuda|cublas|cudnn|\.dll|library", re.I)
 MAX_AUDIO = 15 * 1024 * 1024
 MAX_SPEAK = 3000
@@ -60,6 +65,23 @@ def language_of(text: str) -> str:
         return "en"
     de = sum(1 for w in words if w in _DE_WORDS) + 2 * len(re.findall(r"[äöüß]", text.lower()))
     return "de" if de / max(1, len(words)) > 0.12 else "en"
+
+
+def _samples(pcm: bytes):
+    import numpy as np
+    return np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
+
+
+def _wav_16k(wav: bytes) -> bytes:
+    """A WAV's samples as 16 kHz 16-bit mono PCM (what the phone sends), by linear interpolation."""
+    import numpy as np
+    with wave.open(io.BytesIO(wav), "rb") as w:
+        rate, channels = w.getframerate(), w.getnchannels()
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32)
+    x = x.reshape(-1, channels).mean(axis=1) if channels > 1 else x
+    if rate != 16000:
+        x = np.interp(np.linspace(0, len(x) - 1, int(len(x) * 16000 / rate)), np.arange(len(x)), x)
+    return x.astype("<i2").tobytes()
 
 
 def _package_version(name: str) -> str | None:
@@ -200,6 +222,7 @@ class Tuning:
     temperature_zero: bool = True
     offline_models: bool = True
     int8_float16: bool = False
+    warm_at_connect: bool = True
 
 
 class Voice:
@@ -213,6 +236,12 @@ class Voice:
         self._stt_why: str | None = None     # why Whisper is not on the GPU (None: it is, or not loaded yet)
         self._stt_compute: str | None = None  # the compute type the loaded model really runs in (ctranslate2's word for it)
         self._stt_compute_note: str | None = None   # a compute type that was asked for but did not load
+        self._stt_compute_asked: str | None = None  # what _compute_wanted() said when the model was loaded
+        self._active = 0                     # speech to text runs going on right now
+        self._count = threading.Lock()
+        self._last_decode = float("-inf")    # when the last one ended (monotonic)
+        self._warming = threading.Lock()     # one warm-up at a time
+        self._warm_audio: dict[str, bytes] | None = None
         self._stt_failed = 0.0
         self._tts_device = None
         self._tts_why: str | None = None
@@ -321,6 +350,7 @@ class Voice:
             _add_cuda_dlls(self.site_dir)
             self._stt_model = WHISPER_GPU
             path, compute = self._local_model(WHISPER_GPU), self._compute_wanted()
+            self._stt_compute_asked = compute
             try:
                 model = WhisperModel(path, device="cuda", compute_type=compute, download_root=root, local_files_only=offline)
             except Exception as exc:
@@ -367,7 +397,8 @@ class Voice:
 
     def warm(self) -> None:
         """Load the models once, at start, and run each once (CUDA kernels, cuDNN plans), so no turn
-        ever waits for a model load. Called in the background when Kairo starts."""
+        ever waits for a model load. Called in the background when Kairo starts. Whisper runs last, on
+        speech made by Kairo's own voice, through the call path."""
         for name, load in (("whisper", self._load_stt), ("kokoro", self._load_kokoro)):
             try:
                 with self._lock:
@@ -375,19 +406,89 @@ class Voice:
             except Exception as exc:   # reported by status(); the request itself will say why
                 log.info("voice warm-up: %s", exc)
                 continue
+            if name == "whisper":
+                continue
             t0 = time.monotonic()
             try:
-                if name == "whisper":
-                    import numpy as np
-                    noise = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32)
-                    segs, _ = self._stt.transcribe(noise, language="en", beam_size=1, vad_filter=False,
-                                                   without_timestamps=True, condition_on_previous_text=False)
-                    list(segs)
-                else:
-                    self.speak("Hi.", "en")
+                self.speak("Hi.", "en")
                 self.warm_ms[name] = int((time.monotonic() - t0) * 1000)
             except Exception as exc:
                 log.warning("voice warm-up run (%s): %s", name, exc)
+        if self._stt is not None:
+            self._warm_whisper()
+
+    def call_started(self, s) -> threading.Thread | None:
+        """A call or the voice button connects (s: a database session). The owner's switches are read now, once;
+        the last call's language is forgotten; Whisper is warmed in the background (the card is cold after
+        minutes of idle) and loaded again if the owner changed the compute type. Returns that thread."""
+        try:
+            self.read_flags(s)
+        except Exception as exc:   # a database hiccup must not stop a call: the last switches stay
+            log.warning("voice: the g2 switches could not be read (%s); the last ones stay", exc)
+        if not (self.tuning.warm_at_connect or self._compute_changed()):
+            return None
+        thread = threading.Thread(target=self.warm_call, name="whisper-warm", daemon=True)
+        thread.start()
+        return thread
+
+    def _compute_changed(self) -> bool:
+        return self._stt is not None and self._stt_device == "cuda" and self._compute_wanted() != self._stt_compute_asked
+
+    def warm_call(self) -> None:
+        """What call_started runs in the background: load the model again when the compute type changed, then
+        warm it. One at a time; never in front of a real sentence."""
+        if not self._warming.acquire(blocking=False):
+            return
+        try:
+            with self._lock:
+                if self._compute_changed():
+                    log.info("Whisper: loading again in %s", self._compute_wanted())
+                    self._stt = None
+                try:
+                    self._load_stt()
+                except Exception as exc:   # reported by devices(); the first sentence says why
+                    log.info("voice warm-up: %s", exc)
+                    return
+            if self.tuning.warm_at_connect:
+                self._warm_whisper()
+        finally:
+            self._warming.release()
+
+    def _warm_clips(self) -> dict[str, bytes]:
+        """One sentence per language in Kairo's own voices, 16 kHz 16-bit mono; made once. A language whose
+        voice is not ready is left out."""
+        if not self._warm_audio:
+            clips = {}
+            for lang, text in WARM_TEXT.items():
+                try:
+                    wav, said = self.speak(text, lang)
+                    if said == lang:
+                        clips[lang] = _wav_16k(wav)
+                except Exception as exc:
+                    log.info("voice warm-up: no %s sentence (%s)", lang, exc)
+            self._warm_audio = clips or None
+        return self._warm_audio or {}
+
+    def _warm_whisper(self) -> None:
+        """Write down each warm sentence the way a call would. Skipped when the card just worked or the owner
+        is already talking. Without any voice: a second of quiet noise, so the kernels still run."""
+        if time.monotonic() - self._last_decode < WARM_FRESH_S:
+            return
+        t0 = time.monotonic()
+        try:
+            clips = self._warm_clips()
+            if clips:
+                for lang, pcm in clips.items():
+                    if self._active:
+                        break
+                    self._stt_run(lambda pcm=pcm: _samples(pcm), lang, **self._call_options())
+            else:
+                import numpy as np
+                noise = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32)
+                self._stt_run(lambda: noise, "en", vad_filter=False, **self._call_options())
+            self.warm_ms["whisper"] = int((time.monotonic() - t0) * 1000)
+        except Exception as exc:
+            log.warning("voice warm-up run (whisper): %s", exc)
 
     def devices(self) -> dict:
         """Owner's request 2026-10-17: where each part of the voice runs, never a silent CPU fallback.
@@ -439,21 +540,23 @@ class Voice:
             raise VoiceError("no audio")
         if len(pcm) > MAX_AUDIO:
             raise VoiceError("recording too long")
-
-        def samples():
-            import numpy as np
-            return np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
-        tuning = self.tuning
-        opts = {"beam_size": 1, "condition_on_previous_text": False, "without_timestamps": True}
-        if tuning.temperature_zero:
-            opts["temperature"] = 0.0      # one decode, no random re-tries (Whisper's default list goes up to 1.0)
         fixed = language if language not in (None, "", "auto") else None
-        return self._stt_run(samples, fixed, **opts)
+        return self._stt_run(lambda: _samples(pcm), fixed, **self._call_options())
+
+    def _call_options(self) -> dict:
+        """What a spoken turn asks Whisper for (the plan's call path): one greedy decode; no previous-text
+        prompt; no timestamps."""
+        opts = {"beam_size": 1, "condition_on_previous_text": False, "without_timestamps": True}
+        if self.tuning.temperature_zero:
+            opts["temperature"] = 0.0      # one decode, no random re-tries (Whisper's default list goes up to 1.0)
+        return opts
 
     def _stt_run(self, audio, language: str | None, vad_filter: bool = True, **opts) -> Transcript:
         with self._lock:
             model = self._load_stt()
         t = time.monotonic()
+        with self._count:
+            self._active += 1
         try:
             segments, info = model.transcribe(audio(), language=language, vad_filter=vad_filter, **opts)
             text = " ".join(s.text.strip() for s in segments).strip()
@@ -470,6 +573,10 @@ class Voice:
                 return self._stt_run(audio, language, vad_filter, **opts)
             self.last_error = f"transcribe: {exc}"
             raise VoiceError(f"could not understand the audio ({type(exc).__name__})") from exc
+        finally:
+            with self._count:
+                self._active -= 1
+            self._last_decode = time.monotonic()
         return Transcript(text=text, language=info.language, seconds=round(info.duration, 1), took=round(time.monotonic() - t, 2))
 
     # ---------------------------------------------------------------- text to speech

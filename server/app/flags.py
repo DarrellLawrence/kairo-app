@@ -26,6 +26,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g2.int8_float16": (False, "Whisper runs in a lighter number format on the graphics card (int8_float16): about 0.8 GB less "
                                "graphics memory, speed the same. Wait for the PC test (speed and word errors on your voice) "
                                "before you switch it on. Takes effect at the next call."),
+    "g2.warm_at_connect": (True, "When a call or the voice button connects, Whisper writes down two short test sentences "
+                                 "(English, German) in the background, so your first real sentence does not meet a cold "
+                                 "graphics card."),
 
     # -- G3 mouth
 

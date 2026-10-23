@@ -1068,6 +1068,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         with session_for(engine) as s_:              # English only or German only: Whisper skips finding the language
             line.stt_language = {"en": "en", "de": "de"}.get(realtime.load_settings(s_).get("language"))
+            if hasattr(app.state.voice, "call_started"):
+                app.state.voice.call_started(s_)     # the call's switches (g2.*) are read once, Whisper is warmed
         line.smart, line.endpointed = app.state.smart_turn.available(), False
         if line.smart:
             await line.send({"type": "hello", "endpoint": "smart", "pause_ms": 200, "end_ms": 1500})
@@ -1318,6 +1320,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         with session_for(engine) as s_:
             language_mode = realtime.load_settings(s_).get("language", "auto")
+            if hasattr(app.state.voice, "call_started"):
+                app.state.voice.call_started(s_)     # the call's switches (g2.*) are read once, Whisper is warmed
         if _mouth_ok(call_id):
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         _warm_openers()
