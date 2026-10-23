@@ -14,7 +14,7 @@ from app.db import Person, RouteLog, make_engine, utcnow
 from app.settings import REPO_ROOT
 
 LAB = {"providers": {"claude": {"class": "R1", "enabled": True}, "local": {"class": "R0", "enabled": True}},
-       "local": {"purposes": ["triage", "reply_check"], "lab_model_hash": "abc"}}
+       "local": {"purposes": ["reply_check"], "lab_model_hash": "abc"}}
 
 
 class Clock:
@@ -119,43 +119,43 @@ def test_a_router_that_breaks_never_stops_the_subscription(engine, tmp_path, mon
 def test_the_local_route_needs_its_own_flag_the_lab_and_a_running_model(engine, tmp_path):
     r = make(engine, tmp_path, LAB)
     set_flags(engine, router=True)
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "claude"       # g11.local_route is off
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "claude"       # g11.local_route is off
     set_flags(engine, local_route=True)
-    assert r.route("triage", "mail", local_ready=False, local_model="abc").route == "claude"
-    d = r.route("triage", "mail", local_ready=True, local_model="abc")
+    assert r.route("reply_check", "mail", local_ready=False, local_model="abc").route == "claude"
+    d = r.route("reply_check", "mail", local_ready=True, local_model="abc")
     assert (d.route, d.tier, d.model) == ("local", "R0", "local")
     assert r.route("chat", "hello", local_ready=True, local_model="abc", mode="owner", tools=True).route == "claude"
     set_flags(engine, router=False)                                            # no router, no local
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "claude"
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "claude"
 
 
 def test_three_failures_in_ten_minutes_open_a_breaker_for_ten_minutes(engine, tmp_path):
     clock = Clock()
     set_flags(engine, router=True, local_route=True)
     r = make(engine, tmp_path, LAB, clock=clock)
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "local"
     for _ in range(2):
         r.local_failed()
         clock.t += 60
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"        # two are not enough
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "local"        # two are not enough
     r.local_failed()
-    d = r.route("triage", "mail", local_ready=True, local_model="abc")
+    d = r.route("reply_check", "mail", local_ready=True, local_model="abc")
     assert d.route == "claude" and "not running" in d.reason
     clock.t += 9 * 60
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "claude"
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "claude"
     clock.t += 2 * 60
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "local"
     r.local_failed()
     clock.t += 11 * 60                                                          # old failures age out
     r.local_failed()
     r.local_failed()
-    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"
+    assert r.route("reply_check", "mail", local_ready=True, local_model="abc").route == "local"
 
 
 def test_a_rejected_local_answer_is_logged_and_goes_to_the_subscription(engine, tmp_path):
     set_flags(engine, router=True, local_route=True)
     r = make(engine, tmp_path, LAB)
-    first = r.route("triage", "mail", local_ready=True, local_model="abc", model="haiku")
+    first = r.route("reply_check", "mail", local_ready=True, local_model="abc", model="haiku")
     second = r.escalate(first, "not valid JSON", model="haiku")
     assert (first.route, second.route, second.fallback_from) == ("local", "claude", "local")
     got = rows(engine)
@@ -166,7 +166,7 @@ def test_a_rejected_local_answer_is_logged_and_goes_to_the_subscription(engine, 
 
 def test_escalating_with_the_router_off_is_the_subscription_without_a_log(engine, tmp_path):
     r = make(engine, tmp_path, LAB)
-    d = r.escalate(router.Decision("local", "R0", "triage", "job", "personal", "x"), "bad", model="haiku")
+    d = r.escalate(router.Decision("local", "R0", "reply_check", "job", "personal", "x"), "bad", model="haiku")
     assert d.route == "claude" and rows(engine) == []
 
 
@@ -198,7 +198,7 @@ def test_the_view_lists_routes_and_why_and_the_rules_in_force(engine, tmp_path):
     names = {p["name"]: p for p in v["providers"]}
     assert names["claude"]["status"] == "on" and names["local"]["status"].startswith("off") and "g11.local_route" in names["local"]["status"]
     assert names["groq"]["status"] == "off: switched off in routing.yaml"
-    assert v["local"] == {"purposes": [], "lab_model_hash_set": False, "could_run": ["reply_check", "triage"],
+    assert v["local"] == {"purposes": [], "lab_model_hash_set": False, "could_run": ["reply_check"],
                           "running_model": "", "running_model_is_lab_model": False}
     assert len(v["ceilings"]) == 33 and v["ceilings"]["selftest"] == "public" and v["ceilings"]["money"] == "secret"
 

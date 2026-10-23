@@ -24,7 +24,7 @@ const base = () => ({
     { name: 'local', tier: 'R0', enabled: true, status: 'off: g11.local_route is off' },
     { name: 'groq', tier: 'R2', enabled: false, status: 'off: switched off in routing.yaml' },
   ],
-  local: { purposes: [], lab_model_hash_set: false, could_run: ['reply_check', 'triage'], running_model: '', running_model_is_lab_model: false },
+  local: { purposes: [], lab_model_hash_set: false, could_run: ['reply_check'], running_model: '', running_model_is_lab_model: false },
   recent: [
     { ts: '2026-10-23T14:03:00', purpose: 'triage', mode: 'job', content: 'secret', hits: ['email'], route: 'claude', tier: 'R1', model: 'haiku',
       reason: 'the subscription: the default for every purpose', fallback_from: null },

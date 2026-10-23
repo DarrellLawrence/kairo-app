@@ -78,11 +78,15 @@ _PERSONAL = ("triage", "capture", "brief", "reminder", "promises", "reply_check"
 CEILINGS: dict[str, str] = {**{p: "secret" for p in _SECRET}, **{p: "personal" for p in _PERSONAL}, "selftest": "public"}
 UNKNOWN_PURPOSE = "personal"
 
-# The only purposes that can ever run on the local model: Haiku jobs that read mail and answer a small JSON, no
-# dates or times (a small model got 8 of 39 reminders exactly right), no tools, no images. routing.yaml local.purposes
-# can only choose among these. "summary" is not here: it is the catch-all purpose and the memory fold writes prose.
-LOCAL_ELIGIBLE = frozenset({"triage", "reply_check"})
-LOCAL_KIND = {"triage": "batch", "reply_check": "small"}      # which timeout: 4 s for a small ask, 15 s for a batch
+# The only purposes that can ever run on the local model: a Haiku job that reads mail and answers a small JSON of
+# yes/no/unsure per id. Nothing in the answer is a date or a time (a small model got 8 of 39 reminders exactly right) and
+# nothing is a safety judgment. No tools, no images. routing.yaml local.purposes can only choose among these.
+# Not here, and why: "triage" returns a deadline (it becomes a task's due date) and the "suspicious" flag (the
+# prompt-injection check: a weak model must not hold that defence); "summary" is the catch-all purpose and the memory
+# fold writes prose. A purpose is added only with a prompt that has none of that (tests/test_router.py lists it) and
+# an answer check in brain/local_llm.ANSWER_CHECKS.
+LOCAL_ELIGIBLE = frozenset({"reply_check"})
+LOCAL_KIND = {"reply_check": "small"}                          # which timeout: 4 s for a small ask, 15 s for a batch
 assert not (LOCAL_ELIGIBLE & NEVER_HAIKU)
 
 

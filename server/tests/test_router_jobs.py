@@ -18,7 +18,7 @@ from app.scheduler import Jobs, Skipped
 from tests.test_jobs import PROFILE, Pushes
 
 LAB = {"providers": {"claude": {"class": "R1", "enabled": True}, "local": {"class": "R0", "enabled": True}},
-       "local": {"purposes": ["triage"], "lab_model_hash": "abc"}}
+       "local": {"purposes": ["reply_check"], "lab_model_hash": "abc"}}
 
 
 class FakeLocal:
@@ -78,16 +78,16 @@ def runs_today(engine, jobs):
 def test_with_the_router_flag_off_a_job_goes_to_claude_exactly_as_before(engine, tmp_path):
     local = FakeLocal()
     jobs, _, claude = setup(engine, tmp_path, flags_on=())
-    assert jobs.ask_brain("a mail", "rules", purpose="triage").text == "from claude"
-    assert claude.calls == [("triage", "haiku")] and local.calls == [] and log(engine) == []
+    assert jobs.ask_brain("a mail", "rules", purpose="reply_check").text == "from claude"
+    assert claude.calls == [("reply_check", "haiku")] and local.calls == [] and log(engine) == []
     assert runs_today(engine, jobs) == 1
 
 
 def test_with_the_router_on_a_job_is_logged_and_still_goes_to_claude_by_default(engine, tmp_path):
     jobs, _, claude = setup(engine, tmp_path, doc={"providers": {"claude": {"class": "R1", "enabled": True}}}, local=FakeLocal())
-    assert jobs.ask_brain("a mail from anna.example@mail.example", "rules", purpose="triage").text == "from claude"
+    assert jobs.ask_brain("a mail from anna.example@mail.example", "rules", purpose="reply_check").text == "from claude"
     (row,) = log(engine)
-    assert (row.purpose, row.mode, row.route, row.tier, row.model) == ("triage", "job", "claude", "R1", "haiku")
+    assert (row.purpose, row.mode, row.route, row.tier, row.model) == ("reply_check", "job", "claude", "R1", "haiku")
     assert "anna" not in " ".join(str(v) for v in row.model_dump().values()) and row.hits == "email"
     assert runs_today(engine, jobs) == 1
 
@@ -95,21 +95,21 @@ def test_with_the_router_on_a_job_is_logged_and_still_goes_to_claude_by_default(
 def test_a_lab_passed_job_runs_on_the_local_model_and_costs_no_claude_run(engine, tmp_path):
     local = FakeLocal()
     jobs, _, claude = setup(engine, tmp_path, local=local)
-    res = jobs.ask_brain("a mail", "rules", purpose="triage")
+    res = jobs.ask_brain("a mail", "rules", purpose="reply_check")
     assert res.ok and res.text == '{"ok": true}' and claude.calls == []
-    assert local.calls == [("a mail", "rules", 15.0)]                              # the batch timeout
+    assert local.calls == [("a mail", "rules", 4.0)]                               # the small-ask timeout
     assert runs_today(engine, jobs) == 0
     (row,) = log(engine)
     assert (row.route, row.tier, row.model) == ("local", "R0", "local")
-    assert jobs.ask_brain("a mail", "rules", purpose="reply_check").text == "from claude"   # not listed: Claude
+    assert jobs.ask_brain("a mail", "rules", purpose="triage").text == "from claude"   # not listed: Claude
     assert local.calls[-1][0] == "a mail" and len(local.calls) == 1
 
 
 def test_a_refused_local_answer_goes_to_claude_and_is_logged_with_why(engine, tmp_path):
     local = FakeLocal(LocalAnswer(False, "", "not valid JSON", 20))
     jobs, rt, claude = setup(engine, tmp_path, local=local)
-    assert jobs.ask_brain("a mail", "rules", purpose="triage").text == "from claude"
-    assert claude.calls == [("triage", "haiku")] and runs_today(engine, jobs) == 1
+    assert jobs.ask_brain("a mail", "rules", purpose="reply_check").text == "from claude"
+    assert claude.calls == [("reply_check", "haiku")] and runs_today(engine, jobs) == 1
     got = log(engine)
     assert [(r.route, r.fallback_from) for r in got] == [("local", None), ("claude", "local")]
     assert "not valid JSON" in got[1].reason and rt.fails() == 1
@@ -120,7 +120,7 @@ def test_a_local_model_that_raises_is_a_refused_answer_not_a_failed_job(engine, 
         def ask(self, *a, **k):
             raise RuntimeError("segfault")
     jobs, _, claude = setup(engine, tmp_path, local=Boom())
-    assert jobs.ask_brain("a mail", "rules", purpose="triage").text == "from claude"
+    assert jobs.ask_brain("a mail", "rules", purpose="reply_check").text == "from claude"
     assert [r.route for r in log(engine)] == ["local", "claude"] and "RuntimeError" in log(engine)[1].reason
 
 
@@ -130,8 +130,8 @@ def test_the_local_model_is_not_used_unless_everything_holds(engine, tmp_path, w
     local = None if what == "no_local" else FakeLocal(ready=what != "not_ready", model=model)
     on = ("router",) if what == "flag_off" else () if what == "router_off" else ("router", "local_route")
     jobs, _, claude = setup(engine, tmp_path, flags_on=on, local=local, call_open=what == "call_open")
-    assert jobs.ask_brain("a mail", "rules", purpose="triage").text == "from claude"
-    assert claude.calls == [("triage", "haiku")]
+    assert jobs.ask_brain("a mail", "rules", purpose="reply_check").text == "from claude"
+    assert claude.calls == [("reply_check", "haiku")]
     if local is not None:
         assert local.calls == []
 
@@ -139,8 +139,8 @@ def test_the_local_model_is_not_used_unless_everything_holds(engine, tmp_path, w
 def test_a_job_with_images_never_goes_local(engine, tmp_path):
     local = FakeLocal()
     jobs, _, claude = setup(engine, tmp_path, local=local)
-    jobs.ask_brain("a mail", "rules", purpose="triage", images=[(b"png", "image/png")])
-    assert local.calls == [] and claude.calls == [("triage", "haiku")]
+    jobs.ask_brain("a mail", "rules", purpose="reply_check", images=[(b"png", "image/png")])
+    assert local.calls == [] and claude.calls == [("reply_check", "haiku")]
 
 
 def test_when_claude_is_paused_a_lab_passed_job_still_runs_locally_and_the_rest_wait(engine, tmp_path):
@@ -148,19 +148,19 @@ def test_when_claude_is_paused_a_lab_passed_job_still_runs_locally_and_the_rest_
     jobs, _, claude = setup(engine, tmp_path, local=local)
     with Session(engine) as s:
         jobs._set_kv(s, "brain_paused_until", "2999-01-01T00:00:00+00:00")
-    assert jobs.ask_brain("a mail", "rules", purpose="triage").ok and claude.calls == []
+    assert jobs.ask_brain("a mail", "rules", purpose="reply_check").ok and claude.calls == []
     with pytest.raises(Skipped, match="model paused .usage limit. until"):               # the same words as before
-        jobs.ask_brain("a mail", "rules", purpose="reply_check")
-    assert [(r.route, r.purpose) for r in log(engine)] == [("local", "triage"), ("none", "reply_check")]
+        jobs.ask_brain("a mail", "rules", purpose="triage")
+    assert [(r.route, r.purpose) for r in log(engine)] == [("local", "reply_check"), ("none", "triage")]
     assert "paused" in log(engine)[1].reason
 
 
 def test_the_daily_budget_still_stops_claude_jobs_with_the_old_words(engine, tmp_path):
     jobs, _, claude = setup(engine, tmp_path, local=FakeLocal(), schedule={"brain": {"max_runs_per_day": 1}})
-    assert jobs.ask_brain("m", "r", purpose="reply_check").ok
+    assert jobs.ask_brain("m", "r", purpose="triage").ok
     with pytest.raises(Skipped, match="daily model budget of 1 runs reached"):
-        jobs.ask_brain("m", "r", purpose="reply_check")
-    assert jobs.ask_brain("m", "r", purpose="triage").ok                              # local: free, no budget
+        jobs.ask_brain("m", "r", purpose="triage")
+    assert jobs.ask_brain("m", "r", purpose="reply_check").ok                              # local: free, no budget
     assert len(claude.calls) == 1
 
 
@@ -168,7 +168,7 @@ def test_a_file_that_switches_the_subscription_off_stops_the_job_and_says_so(eng
     doc = {"providers": {"claude": {"class": "R1", "enabled": False}}}
     jobs, _, claude = setup(engine, tmp_path, doc=doc)
     with pytest.raises(Skipped, match="no model route is allowed.*switched off in routing.yaml"):
-        jobs.ask_brain("m", "r", purpose="triage")
+        jobs.ask_brain("m", "r", purpose="reply_check")
     assert claude.calls == [] and log(engine)[0].route == "none"
 
 
@@ -241,11 +241,11 @@ def test_a_file_that_switches_the_subscription_off_answers_the_owner_in_words_an
 
 
 def test_an_owner_turn_that_is_a_job_by_origin_still_never_goes_local(engine, tmp_path):
-    local_doc = {**LAB, "local": {"purposes": ["triage"], "lab_model_hash": "abc"}}
+    local_doc = {**LAB, "local": {"purposes": ["reply_check"], "lab_model_hash": "abc"}}
     r, brain = runner_with(engine, tmp_path, doc=local_doc)
     with Session(engine) as s:
         flags.set_flag(s, "g11.local_route", True)
-    owner(r, "x", purpose="triage", tools=[], origin="job", model="haiku")
+    owner(r, "x", purpose="reply_check", tools=[], origin="job", model="haiku")
     assert brain.runs == 1 and log(engine)[0].route == "claude"
 
 

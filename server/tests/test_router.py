@@ -5,13 +5,14 @@ that is off. Made-up data only."""
 from __future__ import annotations
 
 import itertools
+import re
 import time
 from pathlib import Path
 
 import pytest
 import yaml
 
-from app import models, outbound, router
+from app import loops, models, outbound, router, triage
 from app.settings import REPO_ROOT
 
 SHIPPED = REPO_ROOT / "config"
@@ -50,10 +51,38 @@ def test_an_unknown_purpose_counts_as_personal_and_only_the_selftest_is_below_pe
 
 
 def test_only_a_few_purposes_can_ever_run_locally_and_none_of_them_is_about_dates_or_judgment():
-    assert router.LOCAL_ELIGIBLE == {"triage", "reply_check"}
+    assert router.LOCAL_ELIGIBLE == {"reply_check"}
     assert not router.LOCAL_ELIGIBLE & models.NEVER_HAIKU
-    for dated in ("reminder", "capture", "letters", "promises", "brief", "draft", "chat", "call"):
-        assert dated not in router.LOCAL_ELIGIBLE
+    for dated in ("triage", "reminder", "capture", "letters", "promises", "brief", "draft", "chat", "call"):
+        assert dated not in router.LOCAL_ELIGIBLE, dated
+    assert set(router.LOCAL_KIND) == router.LOCAL_ELIGIBLE                   # a timeout for each, and for no other
+
+
+# The prompt of every purpose that may run locally. A purpose cannot become eligible without its prompt being listed
+# here, and the words below keep dates and safety judgments out of it (voice recipe 13: a 2.6B model got 8 of 39
+# dates exactly right; review of G11: triage asks for a deadline and for the prompt-injection flag).
+LOCAL_PROMPTS = {"reply_check": loops.REPLY_CHECK_PROMPT}
+_DATE_OR_SAFETY = re.compile(r"\b(dates?|dated|deadlines?|due|YYYY\S*|times?|today|tomorrow|suspicious|inject\w*|instruct\w*|"
+                             r"forward|invite|reveal)\b", re.I)
+
+
+def test_every_purpose_that_may_run_locally_has_a_prompt_without_dates_or_safety_flags():
+    assert set(LOCAL_PROMPTS) == set(router.LOCAL_ELIGIBLE)                  # add the prompt here when adding a purpose
+    for purpose, prompt in LOCAL_PROMPTS.items():
+        assert _DATE_OR_SAFETY.findall(prompt) == [], purpose
+
+
+def test_triage_never_runs_locally_because_it_returns_a_deadline_and_the_injection_flag(tmp_path):
+    assert "YYYY-MM-DD" in triage.PROMPT and '"suspicious"' in triage.PROMPT      # why: the mail's date becomes a task, the flag is a defence
+    assert _DATE_OR_SAFETY.findall(triage.PROMPT)                                  # the check above would catch it
+    assert "triage" not in router.LOCAL_ELIGIBLE and "triage" not in router.LOCAL_KIND
+    rules = router.load_rules(SHIPPED)
+    ok = dict(content="personal", local_flag=True, local_ready=True, local_model="abc")
+    lab = {"providers": {"claude": {"class": "R1", "enabled": True}, "local": {"class": "R0", "enabled": True}},
+           "local": {"purposes": ["triage"], "lab_model_hash": "abc"}}
+    listed = rules_from(tmp_path, yaml.safe_dump(lab))
+    assert listed.local_purposes == frozenset() and any("triage" in p for p in listed.problems)
+    assert router.decide(listed, "triage", **ok).route == "claude" and router.decide(rules, "triage", **ok).route == "claude"
 
 
 # ---------------------------------------------------------------- the scanner
@@ -188,8 +217,8 @@ def test_the_local_provider_must_be_on_this_pc(tmp_path):
 
 
 def test_purposes_that_may_never_run_locally_are_ignored_in_the_file(tmp_path):
-    rules = rules_from(tmp_path, "providers:\n  claude: { class: R1, enabled: true }\nlocal:\n  purposes: [triage, reminder, chat]\n  lab_model_hash: h\n")
-    assert rules.local_purposes == {"triage"} and len(rules.problems) == 2
+    rules = rules_from(tmp_path, "providers:\n  claude: { class: R1, enabled: true }\nlocal:\n  purposes: [reply_check, triage, reminder, chat]\n  lab_model_hash: h\n")
+    assert rules.local_purposes == {"reply_check"} and len(rules.problems) == 3 and any("triage" in x for x in rules.problems)
 
 
 def test_enabled_must_be_exactly_true(tmp_path):
@@ -218,33 +247,33 @@ def test_the_local_route_is_off_for_every_purpose_even_when_the_flag_is_on_and_t
     for purpose in ALL_PURPOSES:
         d = router.decide(rules, purpose, content=router.ceiling_of(purpose), local_flag=True, local_ready=True)
         assert d.route == "claude", purpose                                  # no purpose is listed, the lab has not passed
-    d = router.decide(rules, "triage", content="personal", local_flag=False)
+    d = router.decide(rules, "reply_check", content="personal", local_flag=False)
     assert "g11.local_route is off" in d.reason
-    d = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True)
+    d = router.decide(rules, "reply_check", content="personal", local_flag=True, local_ready=True)
     assert "router lab has not passed" in d.reason
 
 
 def lab_passed(tmp_path):
     return rules_from(tmp_path, "providers:\n  claude: { class: R1, enabled: true }\n  local: { class: R0, enabled: true }\n"
-                                "local:\n  purposes: [triage]\n  lab_model_hash: abc\n")
+                                "local:\n  purposes: [reply_check]\n  lab_model_hash: abc\n")
 
 
 def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
     rules = lab_passed(tmp_path)
     ok = dict(content="personal", local_flag=True, local_ready=True, local_model="abc")
-    assert router.decide(rules, "triage", **ok).route == "local"
-    assert router.decide(rules, "triage", **ok).tier == "R0"
+    assert router.decide(rules, "reply_check", **ok).route == "local"
+    assert router.decide(rules, "reply_check", **ok).tier == "R0"
     for change, why in [({"local_flag": False}, "g11.local_route is off"), ({"local_ready": False}, "not running"),
                         ({"call_open": True}, "call is open"), ({"tools": True}, "no tools"), ({"images": True}, "no tools"),
                         ({"mode": "owner"}, "background jobs"), ({"mode": "call"}, "background jobs")]:
-        d = router.decide(rules, "triage", **{**ok, **change})
+        d = router.decide(rules, "reply_check", **{**ok, **change})
         assert d.route == "claude" and why in d.reason, (change, d.reason)
-    for purpose, why in [("reply_check", "router lab has not passed"), ("summary", "may never"), ("reminder", "may never"), ("chat", "may never")]:
+    for purpose, why in [("triage", "may never"), ("summary", "may never"), ("reminder", "may never"), ("chat", "may never")]:
         d = router.decide(rules, purpose, **ok)
         assert d.route == "claude", purpose
     # no hash, no local
-    bare = rules_from(tmp_path, "providers:\n  claude: { class: R1, enabled: true }\n  local: { class: R0, enabled: true }\nlocal:\n  purposes: [triage]\n")
-    assert router.decide(bare, "triage", **ok).route == "claude"
+    bare = rules_from(tmp_path, "providers:\n  claude: { class: R1, enabled: true }\n  local: { class: R0, enabled: true }\nlocal:\n  purposes: [reply_check]\n")
+    assert router.decide(bare, "reply_check", **ok).route == "claude"
 
 
 def test_the_lab_passes_one_model_and_only_that_model_runs_locally(tmp_path):
@@ -252,17 +281,17 @@ def test_the_lab_passes_one_model_and_only_that_model_runs_locally(tmp_path):
     different model, an unknown one or none is not that model: the job goes to the subscription."""
     rules = lab_passed(tmp_path)
     ok = dict(content="personal", local_flag=True, local_ready=True)
-    assert router.decide(rules, "triage", local_model="abc", **ok).route == "local"
+    assert router.decide(rules, "reply_check", local_model="abc", **ok).route == "local"
     for running in ("abd", "", "ABC", "abc "):
-        d = router.decide(rules, "triage", local_model=running, **ok)
+        d = router.decide(rules, "reply_check", local_model=running, **ok)
         assert d.route == "claude" and "not the model the router lab passed" in d.reason, running
-    assert router.decide(rules, "triage", **ok).route == "claude"                      # nothing said: not that model
+    assert router.decide(rules, "reply_check", **ok).route == "claude"                      # nothing said: not that model
 
 
 def test_a_rejected_local_answer_goes_to_the_subscription_with_the_reason(tmp_path):
     rules = lab_passed(tmp_path)
-    first = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True, local_model="abc", model="haiku")
-    again = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True, local_model="abc", model="haiku",
+    first = router.decide(rules, "reply_check", content="personal", local_flag=True, local_ready=True, local_model="abc", model="haiku")
+    again = router.decide(rules, "reply_check", content="personal", local_flag=True, local_ready=True, local_model="abc", model="haiku",
                           exclude=frozenset({"local"}), fallback_from="local")
     assert first.route == "local" and again.route == "claude" and again.fallback_from == "local"
     assert again.reason.startswith("local did not work out")
@@ -271,10 +300,10 @@ def test_a_rejected_local_answer_goes_to_the_subscription_with_the_reason(tmp_pa
 def test_when_the_subscription_is_paused_a_lab_passed_job_still_runs_locally_and_the_rest_wait(tmp_path):
     rules = lab_passed(tmp_path)
     ok = dict(local_flag=True, local_ready=True, local_model="abc", claude_hold="paused (usage limit)")
-    assert router.decide(rules, "triage", content="personal", **ok).route == "local"
-    d = router.decide(rules, "reply_check", content="personal", **ok)
+    assert router.decide(rules, "reply_check", content="personal", **ok).route == "local"
+    d = router.decide(rules, "triage", content="personal", **ok)
     assert d.route == "none" and "paused (usage limit)" in d.reason
-    assert router.decide(router.load_rules(SHIPPED), "triage", content="personal", claude_hold="paused (usage limit)").route == "none"
+    assert router.decide(router.load_rules(SHIPPED), "reply_check", content="personal", claude_hold="paused (usage limit)").route == "none"
 
 
 def test_switching_the_subscription_off_in_the_file_stops_everything_that_needs_it(tmp_path):
