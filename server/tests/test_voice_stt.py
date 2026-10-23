@@ -328,13 +328,37 @@ def test_warm_at_connect_is_a_fix_so_it_is_on_until_the_owner_says_otherwise(tmp
     assert flags.FLAGS["g2.warm_at_connect"][0] is True and Voice(tmp_path).tuning.warm_at_connect is True
 
 
-def test_a_call_connecting_warms_whisper_with_one_sentence_in_each_language_through_the_call_path(voice, whisper, db):
+def test_a_call_connecting_warms_whisper_with_one_sentence_through_the_call_path(voice, whisper, db):
+    # one, not two: a sentence of the owner's that arrives while a warm-up decode runs waits for that decode
+    # (CTranslate2 cannot be interrupted), so a connect warms with exactly one
     voices = Voices(voice)
     voice.call_started(db).join(20)
-    assert [kw["language"] for kw in whisper.calls] == ["en", "de"]
-    assert all(kw["vad_filter"] is True and kw["beam_size"] == 1 and kw["temperature"] == 0.0 for kw in whisper.calls)
-    assert [lang for _, lang in voices.said] == ["en", "de"]
+    (kw,) = whisper.calls
+    assert kw["language"] == "en" and kw["vad_filter"] is True and kw["beam_size"] == 1 and kw["temperature"] == 0.0
+    assert voices.said == [(voice_mod.WARM_TEXT["en"], "en")]                    # and only that sentence is made
     assert voice.warm_ms["whisper"] >= 0
+
+
+def test_a_call_warms_with_the_sentence_in_the_language_the_last_call_ended_in(voice, whisper, db):
+    voices = Voices(voice)
+    voice._last_language = "de"
+    voice.call_started(db).join(20)
+    assert [kw["language"] for kw in whisper.calls] == ["de"] and voices.said == [(voice_mod.WARM_TEXT["de"], "de")]
+    assert voice._last_language is None                                          # the new call still starts clean
+
+
+def test_the_start_up_warm_up_keeps_both_languages_nobody_is_talking_then(voice, whisper, monkeypatch):
+    Voices(voice)
+    monkeypatch.setattr(voice, "_load_kokoro", lambda: None)
+    voice.warm()
+    assert [kw["language"] for kw in whisper.calls] == ["en", "de"]
+
+
+def test_on_the_cpu_there_is_no_cold_card_so_a_connect_warms_nothing_and_blocks_nobody(voice, whisper, db):
+    whisper.fail_on = {("cuda", "float16")}                                      # the PC's card is not usable: the small model on the CPU
+    Voices(voice)
+    voice.call_started(db).join(20)
+    assert whisper.made[-1]["device"] == "cpu" and whisper.calls == [] and "whisper" not in voice.warm_ms
 
 
 def test_the_warm_sentences_are_made_once_and_not_again_at_the_next_call(voice, whisper):
@@ -342,7 +366,7 @@ def test_the_warm_sentences_are_made_once_and_not_again_at_the_next_call(voice, 
     voice.warm_call()
     voice._last_decode = 0.0                                # long ago: the next call warms again, from the same audio
     voice.warm_call()
-    assert len(voices.said) == 2 and len(whisper.calls) == 4
+    assert len(voices.said) == 1 and len(whisper.calls) == 2
 
 
 def test_a_call_that_connects_right_after_a_decode_does_not_warm_again(voice, whisper):
@@ -360,9 +384,9 @@ def test_the_owner_already_talking_comes_first(voice, whisper):
     assert whisper.calls == []
 
 
-def test_without_the_german_voice_only_english_is_warmed(voice, whisper):
+def test_without_the_german_voice_a_german_call_is_warmed_in_english(voice, whisper):
     Voices(voice, de=False)
-    voice.warm_call()
+    voice.warm_call("de")
     assert [kw["language"] for kw in whisper.calls] == ["en"]
 
 

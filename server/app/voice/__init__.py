@@ -248,7 +248,7 @@ class Voice:
         self._count = threading.Lock()
         self._last_decode = float("-inf")    # when the last one ended (monotonic)
         self._warming = threading.Lock()     # one warm-up at a time
-        self._warm_audio: dict[str, bytes] | None = None
+        self._warm_audio: dict[str, bytes] = {}   # the warm sentences made so far, by language
         self._last_language: str | None = None   # the language of the last turn with words (this call)
         self._single_failed: str | None = None   # why the one-pass language finding was given up (None: working)
         self.loops_dropped = 0               # call-path segments dropped because they only repeated themselves
@@ -459,25 +459,29 @@ class Voice:
 
     def call_started(self, s) -> threading.Thread | None:
         """A call or the voice button connects (s: a database session). The owner's switches are read now, once;
-        the last call's language is forgotten; Whisper is warmed in the background (the card is cold after
-        minutes of idle) and loaded again if the owner changed the compute type. Returns that thread."""
-        self._last_language = None
+        the last call's language is forgotten (it only picks the warm-up sentence); Whisper is warmed in the
+        background (the card is cold after minutes of idle) and loaded again if the owner changed the compute
+        type. Returns that thread."""
+        language, self._last_language = self._last_language, None
         try:
             self.read_flags(s)
         except Exception as exc:   # a database hiccup must not stop a call: the last switches stay
             log.warning("voice: the g2 switches could not be read (%s); the last ones stay", exc)
         if not (self.tuning.warm_at_connect or self._compute_changed()):
             return None
-        thread = threading.Thread(target=self.warm_call, name="whisper-warm", daemon=True)
+        thread = threading.Thread(target=self.warm_call, args=(language,), name="whisper-warm", daemon=True)
         thread.start()
         return thread
 
     def _compute_changed(self) -> bool:
         return self._stt is not None and self._stt_device == "cuda" and self._compute_wanted() != self._stt_compute_asked
 
-    def warm_call(self) -> None:
+    def warm_call(self, language: str | None = None) -> None:
         """What call_started runs in the background: load the model again when the compute type changed, then
-        warm it. One at a time; never in front of a real sentence."""
+        warm it with one sentence (language: the last call's, else English). One at a time. It is not started
+        while a decode is running, but CTranslate2 cannot be interrupted: a sentence of the owner's that arrives
+        during this one decode waits for it (the plan estimates 0.3 to 1.4 s on the card; the exact cost of that
+        first turn is P2 on the PC). On the CPU there is no cold card to warm, so nothing is decoded."""
         if not self._warming.acquire(blocking=False):
             return
         try:
@@ -490,34 +494,45 @@ class Voice:
                 except Exception as exc:   # reported by devices(); the first sentence says why
                     log.info("voice warm-up: %s", exc)
                     return
-            if self.tuning.warm_at_connect:
-                self._warm_whisper()
+            if self.tuning.warm_at_connect and self._stt_device == "cuda":
+                self._warm_whisper(language or "en")
         finally:
             self._warming.release()
 
-    def _warm_clips(self) -> dict[str, bytes]:
-        """One sentence per language in Kairo's own voices, 16 kHz 16-bit mono; made once. A language whose
-        voice is not ready is left out."""
-        if not self._warm_audio:
-            clips = {}
-            for lang, text in WARM_TEXT.items():
-                try:
-                    wav, said = self.speak(text, lang)
-                    if said == lang:
-                        clips[lang] = _wav_16k(wav)
-                except Exception as exc:
-                    log.info("voice warm-up: no %s sentence (%s)", lang, exc)
-            self._warm_audio = clips or None
-        return self._warm_audio or {}
+    def _warm_clip(self, lang: str) -> bytes | None:
+        """The warm sentence in Kairo's own voice for this language (16 kHz 16-bit mono), made once. None when
+        that voice is not ready; that is tried again at the next call."""
+        if lang not in self._warm_audio:
+            try:
+                wav, said = self.speak(WARM_TEXT[lang], lang)
+                if said == lang:
+                    self._warm_audio[lang] = _wav_16k(wav)
+            except Exception as exc:
+                log.info("voice warm-up: no %s sentence (%s)", lang, exc)
+        return self._warm_audio.get(lang)
 
-    def _warm_whisper(self) -> None:
-        """Write down each warm sentence the way a call would. Skipped when the card just worked or the owner
-        is already talking. Without any voice: a second of quiet noise, so the kernels still run."""
+    def _warm_clips(self, one: str | None = None) -> dict[str, bytes]:
+        """The warm sentences: every language that has a voice, or with one the first of [one, then the others]
+        that has a voice."""
+        order = [one, *WARM_TEXT] if one in WARM_TEXT else list(WARM_TEXT)
+        clips = {}
+        for lang in dict.fromkeys(order):
+            clip = self._warm_clip(lang)
+            if clip:
+                clips[lang] = clip
+                if one:
+                    break
+        return clips
+
+    def _warm_whisper(self, one: str | None = None) -> None:
+        """Write down the warm sentence(s) the way a call would: all of them at start-up (nobody is talking),
+        one at a call connect. Skipped when the card just worked or the owner is already talking. Without any
+        voice: a second of quiet noise, so the kernels still run."""
         if time.monotonic() - self._last_decode < WARM_FRESH_S:
             return
         t0 = time.monotonic()
         try:
-            clips = self._warm_clips()
+            clips = self._warm_clips(one)
             if clips:
                 for lang, pcm in clips.items():
                     if self._active:
