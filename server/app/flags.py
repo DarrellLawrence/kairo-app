@@ -31,6 +31,16 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G7 phone
 
     # -- G8 Windows
+    "g8.embed_batch4": (True, "The memory search reads your notes 4 pieces at a time instead of 16. While it works it keeps about half "
+                              "the main memory (1.4 GB instead of 2.9 GB on the processor, measured on a test machine) and gives the "
+                              "same answers and about the same indexing speed. Takes effect the next time the memory model starts."),
+    "g8.stagger_boot": (True, "When Kairo starts, the voice model, then Whisper and Kokoro, then the memory model load one after the other "
+                              "instead of all at once, and the free graphics memory is read in between and logged. Before, the memory "
+                              "model checked the card before the voice model had taken its share and could pick the GPU when it did not "
+                              "fit. Takes effect the next time Kairo starts."),
+    "g8.sysmem_readback": (False, "Kairo's voice report also shows NVIDIA's driver setting 'CUDA sysmem fallback' as Kairo's own account sees it "
+                                  "(1 = a full graphics card is an error, anything else = the driver may quietly spill into slow shared "
+                                  "memory). Off until the read has been proven on the PC: `kairo diag` reads it itself either way."),
 
     # -- G9 speech text
 

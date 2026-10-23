@@ -27,12 +27,17 @@ from pathlib import Path
 GPU_PREFS = ["onnx/model_fp16.onnx"]
 CPU_PREFS = ["onnx/model_quantized.onnx", "onnx/model_int8.onnx", "onnx/model_uint8.onnx", "onnx/model.onnx"]
 QUERY_TASK = "Given a question about the owner's life, retrieve the notes that answer it"
-MAX_TOKENS = 512
-BATCH = 16
+MAX_TOKENS = 512           # 256 would cut German chunks (281 tokens per 900 characters)
+BATCH = 4                  # 16 kept 2.9 GB of main memory in use on the CPU path, 4 keeps 1.4 GB (voice recipe 9)
+
+
+def clamp_batch(n: int) -> int:
+    return max(1, min(int(n), 64))
 
 
 class Model:
-    def __init__(self, models_dir: Path, cpu_only: bool = False) -> None:
+    def __init__(self, models_dir: Path, cpu_only: bool = False, batch: int = BATCH) -> None:
+        self.batch = clamp_batch(batch)
         import onnxruntime as ort
         from tokenizers import Tokenizer
         tok = models_dir / "tokenizer.json"
@@ -78,7 +83,7 @@ class Model:
         import numpy as np
         if query:
             texts = [f"Instruct: {QUERY_TASK}\nQuery:{t}" for t in texts]
-        out = [self._run(texts[i:i + BATCH]) for i in range(0, len(texts), BATCH)]
+        out = [self._run(texts[i:i + self.batch]) for i in range(0, len(texts), self.batch)]
         return np.concatenate(out) if out else np.zeros((0, 0), dtype=np.float32)
 
     def _run(self, batch: list[str]):
@@ -135,12 +140,17 @@ class Model:
         return [[int(ids[i]), round(float(sims[i]), 4)] for i in np.argsort(-sims)[:n] if sims[i] >= minimum]
 
 
-def main() -> int:
+def parse(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", required=True)
     ap.add_argument("--site", default="")
     ap.add_argument("--cpu", action="store_true")
-    a = ap.parse_args()
+    ap.add_argument("--batch", type=int, default=BATCH, help="pieces through the model at once")
+    return ap.parse_args(argv)
+
+
+def main() -> int:
+    a = parse()
     out = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
     os.dup2(2, 1)                           # stray prints (onnxruntime's included) go to stderr
     sys.stdout = sys.stderr
@@ -152,7 +162,7 @@ def main() -> int:
         out.flush()
 
     try:
-        model = Model(Path(a.models), cpu_only=a.cpu)
+        model = Model(Path(a.models), cpu_only=a.cpu, batch=a.batch)
     except Exception as exc:
         say({"ready": False, "error": f"{type(exc).__name__}: {exc}"[:400]})
         return 1

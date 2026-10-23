@@ -230,6 +230,30 @@ $diagJson = $null
 try { $diagJson = ($diagRaw -join "`n") | ConvertFrom-Json } catch { }
 Check ($null -ne $diagJson -and $diagJson.schema -eq 1 -and @($diagJson.checks).Count -gt 10) 'kairo diag --json --local prints its report'
 Check (@(0, 1) -contains $diagExit) "kairo diag exits 0 or 1 (it exited $diagExit; 2 would mean the tool itself broke)"
+# ---- G8: NVIDIA's CUDA sysmem fallback policy: read by kairo diag, written only on the owner's say (this runner has no NVIDIA card)
+$sysmemCheck = @($diagJson.checks | Where-Object { $_.id -eq 'system.sysmem' })
+Check ($sysmemCheck.Count -eq 1 -and $sysmemCheck[0].status -ne 'FAIL') "kairo diag has the CUDA sysmem fallback check ($($sysmemCheck[0].status): $($sysmemCheck[0].detail))"
+$nvScript = Join-Path $Root 'app\current\server\app\nvsettings.py'
+$nvPython = Join-Path $Root 'app\current\venv\Scripts\python.exe'
+$nvOut = @(& $nvPython -I $nvScript get)
+Check (@(0, 3) -contains $LASTEXITCODE -and ($nvOut -join "`n") -match '^policy=') "nvsettings.py runs as a script under isolated Python and answers on one line ($($nvOut -join ' '))"
+$hasNvidia = Test-Path (Join-Path $env:SystemRoot 'System32\nvapi64.dll')
+if ($hasNvidia) {
+    Write-Host 'SKIP: this runner has an NVIDIA driver; Set-CudaSysmemPolicy is not run here (it would change the runner''s driver setting)'
+} else {
+    $nvTest = Join-Path $work 'nvtest.ps1'
+    @'
+param([string]$Installer, [string]$Python, [string]$NvScript)
+Import-Module (Join-Path $Installer 'Kairo.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Installer 'KairoSetup.psm1') -Force -DisableNameChecking
+$done = Set-CudaSysmemPolicy $Python $NvScript
+$missing = Set-CudaSysmemPolicy $Python (Join-Path $Installer 'no-such-nvsettings.py')
+Write-Host "driver: $done, missing script: $missing"
+if (($done -eq $false) -and ($missing -eq $false)) { exit 0 } else { exit 1 }
+'@ | Set-Content -Path $nvTest -Encoding ASCII
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $nvTest -Installer (Join-Path $Root 'installer') -Python $nvPython -NvScript $nvScript | Out-Host
+    Check ($LASTEXITCODE -eq 0) 'Set-CudaSysmemPolicy without an NVIDIA driver (or without the script) is a warning and returns false, it does not throw'
+}
 Check ((Invoke-Install $s1) -eq 0) 'running the same version again is harmless'
 
 # ---- config in layers (fix P0.4): new actions arrive, the owner's edit stays, older versions keep a full copy
@@ -247,6 +271,8 @@ $cu = Get-Content -Raw (Join-Path $Root 'data\updates\config-update.json') | Con
 Check ($cu.message -match '^Config updated: 2 new actions') "one note for the iPhone: $($cu.message)"
 $envText = Get-Content -Raw (Join-Path $Root 'data\kairo.env')
 Check ($envText -match 'KAIRO_CONFIG_OVERRIDES=.*data\\config\r?\n' -and $envText -match 'KAIRO_CONFIG_DIR=.*config-legacy') 'kairo.env: owner changes for this version, the full copy for older ones'
+Check ($envText -match '(?m)^HF_HUB_OFFLINE=1\r?$') 'kairo.env: HF_HUB_OFFLINE=1, so a model load never waits for Hugging Face'
+Check (-not $env:HF_HUB_OFFLINE) "the installer's own environment has no HF_HUB_OFFLINE (it downloads the voice models through huggingface_hub)"
 
 # ---- Kairo has hands (fix P0): the self-test the installer ran after the switch, as kairo-svc
 $stj = Get-Content -Raw (Join-Path $Root 'status\selftest.json') | ConvertFrom-Json
@@ -301,11 +327,11 @@ Import-Module (Join-Path $Installer 'KairoSetup.psm1') -Force -DisableNameChecki
 $P = Get-KairoPaths $TestRoot
 [void](New-Item -ItemType Directory -Force (Split-Path $P.EnvFile))
 Set-Content -Path $P.EnvFile -Encoding ASCII -Value @('PYTHONPATH=C:\evil', 'KAIRO_WHISPER_MODEL=small', 'KAIRO_KOKORO_VOICE=x & calc',
-    'KAIRO_DATA_DIR=C:\elsewhere', 'KAIRO_DB_URL=sqlite:///C:/Windows/x.db')
+    'KAIRO_DATA_DIR=C:\elsewhere', 'KAIRO_DB_URL=sqlite:///C:/Windows/x.db', 'HF_HUB_OFFLINE=1')
 $env:PYTHONSTARTUP = 'C:\evil.py'
 Use-KairoEnv $P
 $envOk = (-not $env:PYTHONPATH) -and (-not $env:PYTHONSTARTUP) -and $env:KAIRO_WHISPER_MODEL -eq 'small' -and
-    (-not $env:KAIRO_KOKORO_VOICE) -and $env:KAIRO_DATA_DIR -eq $P.Data -and (-not $env:KAIRO_DB_URL)
+    (-not $env:KAIRO_KOKORO_VOICE) -and $env:KAIRO_DATA_DIR -eq $P.Data -and (-not $env:KAIRO_DB_URL) -and (-not $env:HF_HUB_OFFLINE)
 $good = Join-Path $P.Tools 'claude\9.9.9\claude.exe'
 $bad = Join-Path $P.Data 'claude.exe'
 foreach ($f in @($good, $bad)) { [void](New-Item -ItemType Directory -Force (Split-Path $f)); Set-Content -Path $f -Value 'x' }

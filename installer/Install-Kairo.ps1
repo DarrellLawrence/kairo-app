@@ -5,12 +5,19 @@
 #   -Update   called by "Update Kairo": no questions, no logins
 #   -CI       automated test on a build server: no downloads, no logins,
 #             no changes to power, Windows Update or BitLocker
+#   -CudaSysmemPolicy
+#             your choice, off unless you give it (an interactive install only,
+#             never an update or CI): sets NVIDIA's "CUDA - Sysmem Fallback
+#             Policy" to 1 ("prefer no sysmem fallback"). A full graphics card is
+#             then an out-of-memory error instead of a silent, much slower voice.
+#             It is read back from the driver to prove it. Undo: see CHANGELOG.
 param(
     [string]$Root = 'C:\Kairo',
     [switch]$Logins,
     [switch]$Update,
     [switch]$CI,
     [switch]$Force,
+    [switch]$CudaSysmemPolicy,
     [string]$ClaudeBin = ''
 )
 
@@ -34,6 +41,7 @@ try {
     if ($Update) { $passArgs += '-Update' }
     if ($CI) { $passArgs += '-CI' }
     if ($Force) { $passArgs += '-Force' }
+    if ($CudaSysmemPolicy) { $passArgs += '-CudaSysmemPolicy' }
     if ($ClaudeBin) { $passArgs += @('-ClaudeBin', "`"$ClaudeBin`"") }
     Assert-Admin $PSCommandPath $passArgs
 
@@ -90,7 +98,11 @@ try {
         # 3. Settings file. Config: release defaults + data\config (owner changes only);
         #    KAIRO_CONFIG_DIR is for releases from before that (see Save-LegacyConfig).
         #    Written inside the data lock with the rights and the sync settings (step 5).
+        # HF_HUB_OFFLINE=1 only here, in kairo.env: Kairo and the programs it starts never ask Hugging Face for a model (a
+        # missing one is an error at once, not a 1.5 GB download inside a request). Never in this installer's own environment:
+        # it downloads the voice models through huggingface_hub (Use-KairoEnv passes on only the model names).
         $envValues = @{
+            HF_HUB_OFFLINE    = '1'
             KAIRO_DATA_DIR    = $P.Data
             KAIRO_STATUS_DIR  = $P.Status
             KAIRO_CONFIG_DIR  = $P.ConfigLegacy
@@ -118,6 +130,7 @@ try {
             Set-AlwaysOnPower
             Set-WindowsUpdatePolicy
             if ($interactive) { Enable-BitLockerIfPossible $logFile }
+            if ($CudaSysmemPolicy -and $interactive) { [void](Set-CudaSysmemPolicy $python (Join-Path $sourceApp 'server\app\nvsettings.py')) }
         }
 
         # 5. Kairo itself (backup, switch, migrate, health check, auto-rollback), running as kairo-svc
