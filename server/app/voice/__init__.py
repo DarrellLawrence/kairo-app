@@ -183,6 +183,7 @@ class Tuning:
     when a call connects (Voice.read_flags), never per audio frame. The defaults are the flags' defaults: a
     fix is on, what waits for an owner decision or a measurement on the PC is off."""
     temperature_zero: bool = True
+    offline_models: bool = True
 
 
 class Voice:
@@ -272,21 +273,34 @@ class Voice:
 
     # ---------------------------------------------------------------- speech to text
 
-    def _local_model(self, name: str) -> str:
-        """The downloaded model folder, so loading needs no Hugging Face lookup (network, lock files);
-        the plain name only when Update Kairo hasn't fetched it yet."""
+    def model_folder(self, name: str) -> Path | None:
+        """The downloaded model's folder (Update Kairo put it there), or None. Never raises: the checks use it."""
         found = sorted((self.models_dir / "whisper").glob(f"models--*--faster-whisper-{name}/snapshots/*/model.bin"))
-        return str(found[-1].parent) if found else name
+        return found[-1].parent if found else None
+
+    def _local_model(self, name: str) -> str:
+        """What WhisperModel loads: the downloaded folder, so loading needs no Hugging Face lookup (network,
+        lock files). Not downloaded yet: NotInstalled (the installer downloads, never a call: the model is
+        1.5 GB). With g2.offline_models off, the plain name as before, which downloads on the spot."""
+        folder = self.model_folder(name)
+        if folder is not None:
+            return str(folder)
+        if self.tuning.offline_models:
+            raise NotInstalled(f"The speech model {name} is not downloaded on the PC (run Update Kairo).")
+        return name
 
     def _make_stt(self, device: str):
         from faster_whisper import WhisperModel
         root = str(self.models_dir / "whisper")
+        offline = self.tuning.offline_models
         if device == "cuda":
             _add_cuda_dlls(self.site_dir)
             self._stt_model = WHISPER_GPU
-            return WhisperModel(self._local_model(WHISPER_GPU), device="cuda", compute_type="float16", download_root=root)
+            return WhisperModel(self._local_model(WHISPER_GPU), device="cuda", compute_type="float16", download_root=root,
+                                local_files_only=offline)
         self._stt_model = WHISPER_CPU
-        return WhisperModel(self._local_model(WHISPER_CPU), device="cpu", compute_type="int8", download_root=root)
+        return WhisperModel(self._local_model(WHISPER_CPU), device="cpu", compute_type="int8", download_root=root,
+                            local_files_only=offline)
 
     def _load_stt(self):
         if self._stt is not None:

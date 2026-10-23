@@ -207,9 +207,15 @@ def test_owner_calls_kairo(client):
 
 
 def _fake_whisper(monkeypatch, tmp_path, behave):
-    """A stand-in faster_whisper module: behave(device, path) builds or raises."""
+    """A stand-in faster_whisper module: behave(device, path) builds or raises. Both models are 'downloaded'
+    (Whisper loads only what the installer put there)."""
     import sys
     import types
+    from app.voice import WHISPER_CPU, WHISPER_GPU
+    for name in (WHISPER_GPU, WHISPER_CPU):
+        snap = tmp_path / "whisper" / f"models--Systran--faster-whisper-{name}" / "snapshots" / "abc"
+        snap.mkdir(parents=True, exist_ok=True)
+        (snap / "model.bin").write_bytes(b"x")
     mod = types.ModuleType("faster_whisper")
     made = []
 

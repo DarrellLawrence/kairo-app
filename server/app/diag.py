@@ -186,8 +186,8 @@ def _whisper(ctx: Ctx) -> list[Check]:
     from .voice import WHISPER_GPU
     first = package(ctx, "whisper", "faster-whisper", "faster_whisper")
     if first is None:
-        weights = Path(ctx.voice._local_model(WHISPER_GPU)) / "model.bin"     # the downloaded model, else just its name
-        size = weights.stat().st_size / 1024 ** 2 if weights.is_file() else None
+        folder = ctx.voice.model_folder(WHISPER_GPU)                        # the downloaded model, else None
+        size = (folder / "model.bin").stat().st_size / 1024 ** 2 if folder is not None else None
         first = (ok("whisper.installed", "installed", f"faster-whisper found; model {WHISPER_GPU} ({mb(size)})", round(size), "MB")
                  if size is not None else bad("whisper.installed", "installed", f"the model {WHISPER_GPU} isn't downloaded (run Update Kairo)"))
     return [first] + live_checks(ctx, "whisper", "whisper", gpu_required=True)

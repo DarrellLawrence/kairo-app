@@ -21,6 +21,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G2 Whisper
     "g2.temperature_zero": (True, "On calls, Whisper writes each sentence down once and never retries with random variation "
                                   "when it is unsure: the same words every time, and no slow second pass."),
+    "g2.offline_models": (True, "Whisper only loads the model files the installer already downloaded and never goes online to look "
+                                "for them while Kairo runs. A missing model is reported, not fetched in the middle of a sentence."),
 
     # -- G3 mouth
 

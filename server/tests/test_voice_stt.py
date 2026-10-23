@@ -120,3 +120,46 @@ def test_an_explicit_language_is_passed_to_whisper_and_auto_is_left_to_it(voice,
 
 def test_german_comes_back_as_german(voice, whisper):
     assert voice.transcribe_pcm(PCM, "de").language == "de"
+
+
+# ---------------------------------------------------------------- the model files (offline at run time)
+
+def test_the_models_load_from_the_installers_folder_and_never_go_online(voice, whisper):
+    voice.transcribe_pcm(PCM, "en")
+    (made,) = whisper.made
+    assert made["local_files_only"] is True and made["path"].replace("\\", "/").endswith("snapshots/abc")
+    assert made["device"] == "cuda"
+
+
+def test_a_model_the_installer_did_not_download_is_reported_not_fetched_in_the_middle_of_a_turn(tmp_path, whisper):
+    v = Voice(tmp_path)                                    # no model folders at all
+    with pytest.raises(NotInstalled) as e:
+        v.transcribe_pcm(PCM, "en")
+    assert "Update Kairo" in str(e.value)
+    assert whisper.made == []                              # nothing was asked for by name: no download
+
+
+def test_with_only_the_small_model_downloaded_the_call_runs_on_the_cpu_and_says_why(tmp_path, whisper):
+    put_models(tmp_path, voice_mod.WHISPER_CPU)
+    v = Voice(tmp_path)
+    assert v.transcribe_pcm(PCM, "en").text == "hello"
+    assert [m["device"] for m in whisper.made] == ["cpu"]
+    w = v.devices()["whisper"]
+    assert w["ok"] is False and "not downloaded" in w["reason"] and voice_mod.WHISPER_GPU in w["reason"]
+
+
+def test_the_folder_lookup_never_raises_for_the_report(tmp_path, voice):
+    assert voice.model_folder(voice_mod.WHISPER_GPU).name == "abc"
+    assert Voice(tmp_path / "nowhere").model_folder(voice_mod.WHISPER_GPU) is None
+
+
+def test_offline_models_is_a_fix_so_it_is_on_until_the_owner_says_otherwise(tmp_path):
+    assert flags.FLAGS["g2.offline_models"][0] is True and Voice(tmp_path).tuning.offline_models is True
+
+
+def test_with_offline_models_off_a_missing_model_is_asked_for_by_name_as_before(tmp_path, whisper):
+    v = Voice(tmp_path)
+    v.tuning = voice_mod.Tuning(offline_models=False)
+    v.transcribe_pcm(PCM, "en")
+    (made,) = whisper.made
+    assert made["path"] == voice_mod.WHISPER_GPU and made["local_files_only"] is False
