@@ -567,9 +567,23 @@ def run(mock: bool, url: str | None, out_dir: Path, **kw) -> dict:
     return _sync(execute(mock, url, Path(out_dir), **kw))[0]
 
 
-def main(argv: list[str] | None = None) -> int:
+def prepare(env_file: Path | None) -> None:
+    """`kairo bench` (installer/bat/kairo.cmd) runs outside the server, as an administrator: the server's own
+    settings come from kairo.env, and the voice packages (tools\\voice-<hash>) go on the path before the fake
+    phone imports aiortc."""
+    if env_file is None:
+        return
+    from .serve import load_env_file
+    from .voice import use_site
+    load_env_file(env_file)
+    get_settings.cache_clear()                     # the settings now come from kairo.env
+    site = os.environ.get("KAIRO_VOICE_SITE")
+    use_site(Path(site) if site else None)
+
+
+def parser():
     import argparse
-    ap = argparse.ArgumentParser(prog="python -m app.bench_voice", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="kairo bench", description=__doc__.split("\n\n")[0])
     ap.add_argument("--mock", action="store_true", help="the same client and pipeline with fake models of known speed (no Kairo needed)")
     ap.add_argument("--url", default=None, help="Kairo's address (default http://127.0.0.1:$KAIRO_PORT); only this PC or its own .ts.net")
     ap.add_argument("--clips", type=int, default=None, metavar="N", help=f"a balanced N clips (default: all; --mock: {MOCK_CLIPS})")
@@ -578,7 +592,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--warmup", type=int, default=1, help="turns played first and not measured (default 1)")
     ap.add_argument("--force", action="store_true", help="call even if a call looks to be under way (it will be replaced)")
     ap.add_argument("--strict", action="store_true", help="exit 1 when the run fails its targets")
-    args = ap.parse_args(argv)
+    ap.add_argument("--env-file", type=Path, default=None, help="kairo.env written by the installer (the server's own settings)")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    prepare(args.env_file)
     data_dir = args.data_dir or get_settings().data_dir
     notes: list[str] = []
     try:

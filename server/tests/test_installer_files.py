@@ -72,10 +72,13 @@ def test_kairo_cmd_runs_the_diag_module_with_kairos_own_python_and_only_reads():
     # the release's venv, from the folder the server runs in (the `app` package is found from there)
     assert r'set "KAIRO_PY=%KAIRO_ROOT%\app\current\venv\Scripts\python.exe"' in text
     assert r'pushd "%KAIRO_ROOT%\app\current\server"' in text and "popd" in text
-    assert r'"%KAIRO_PY%" -m app.diag --env-file "%KAIRO_ROOT%\data\kairo.env" %KAIRO_ARGS%' in text
+    assert r'"%KAIRO_PY%" -m %KAIRO_MOD% --env-file "%KAIRO_ROOT%\data\kairo.env" %KAIRO_ARGS%' in text
+    # two verbs: diag (the checks) and bench (the voice speed test); anything else is the usage text
+    assert 'if /i "%~1"=="diag" set "KAIRO_MOD=app.diag"' in text and 'if /i "%~1"=="bench" set "KAIRO_MOD=app.bench_voice"' in text
+    assert 'if not defined KAIRO_MOD goto usage' in text and 'set "KAIRO_MOD="' in text
     assert 'set "KAIRO_ROOT=%%~fI"' in text and "setlocal EnableExtensions DisableDelayedExpansion" in text
     assert "PYTHONDONTWRITEBYTECODE=1" in text                      # run by an administrator: no .pyc files in the release
-    assert "exit /b %KAIRO_RC%" in text and "if /i not \"%~1\"==\"diag\" goto usage" in text
+    assert "exit /b %KAIRO_RC%" in text
     # no administrator rights, nothing installed or changed
     for forbidden in ("fltmc", "RunAs", "Set-ExecutionPolicy", "reg add", "icacls", "netsh", "schtasks", "pip "):
         assert forbidden.lower() not in text.lower(), forbidden
@@ -88,13 +91,16 @@ def test_kairo_cmd_runs_the_diag_module_with_kairos_own_python_and_only_reads():
                     assert line[:i].count('"') % 2 == 1, f"unquoted {var}: {line}"
 
 
-def test_kairo_cmds_usage_names_exactly_the_flags_diag_has():
+def test_kairo_cmds_usage_names_exactly_the_flags_of_diag_and_bench():
     import re
 
-    from app import diag
-    usage = re.findall(r"^echo\s+(--[a-z-]+)", (INSTALLER / "bat" / "kairo.cmd").read_text("ascii"), re.M)
-    flags = {a for a in diag.parser()._option_string_actions if a.startswith("--")} - {"--help", "--env-file"}
-    assert set(usage) == flags
+    from app import bench_voice, diag
+    text = (INSTALLER / "bat" / "kairo.cmd").read_text("ascii")
+    diag_part, bench_part = text.split("echo usage: kairo bench", 1)
+    for part, ap in ((diag_part, diag.parser()), (bench_part, bench_voice.parser())):
+        usage = re.findall(r"^echo\s+(--[a-z-]+)", part, re.M)
+        flags = {a for a in ap._option_string_actions if a.startswith("--")} - {"--help", "--env-file", "--data-dir", "--out"}
+        assert set(usage) == flags, ap.prog
 
 
 def test_the_installer_places_kairo_cmd_in_bin_on_the_machine_path_and_the_uninstaller_takes_it_away():

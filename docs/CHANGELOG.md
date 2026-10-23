@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-10-23 — build: the voice latency harness (owner's spec)
+- On the PC: open a Command Prompt and type `kairo bench` (like `kairo diag`; add `--clips 12` for a quick run). It uses Kairo's own settings and voice packages and only calls Kairo itself.
 - New: a harness that times the call the way you hear it, on the real pipeline: `python -m app.bench_voice` (in server/). A fake phone (aiortc) calls Kairo's own /api/rtc/offer like the iPhone, plays 46 short English and German lines at real time (questions, statements, requests that only read, "mhm" and "okay", noises, other people's voices) and measures from the exact end of each line to the first audible reply frame. Per turn it adds the steps from the server's own timing for that turn (the VAD pause, the turn decision, Whisper, the first word, the first audio) and what is left as the network.
 - Rates: does a backchannel or a noise stop Kairo while it talks (it must have been heard by the PC's VAD and the voice must go silent), how many real questions got no reply in 5 s, how often the speaker check lets a stranger's voice through (not known when the check is off).
 - One JSON per run in data\bench\results (the fields and how to read them: bench/results/README.md); pass = p95 within 1.0 s, no missed turn, at most 5 % false interrupts. `run(mock, url, out_dir)` and `latest(results_dir)` are there for `kairo diag`.

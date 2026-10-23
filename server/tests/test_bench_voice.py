@@ -644,3 +644,24 @@ def test_the_fake_phone_measures_a_call_through_the_app_s_own_offer_endpoint(loc
     assert all(st[k] is not None for k in bv.STAGES), st                                      # the app's own timing event, every stage
     assert st["vad_stop"] == 200 and sum(st.values()) == pytest.approx(rec["total_ms"], abs=4)
     assert bv.validate(bv.build_result([rec], mode="live", version="x", git_sha="y", machine=MACHINE, config=CONFIG)) == []
+
+
+def test_kairo_bench_uses_the_servers_settings_and_its_voice_packages(tmp_path, monkeypatch):
+    """`kairo bench` runs as an administrator outside the server: it reads kairo.env and puts the voice
+    packages (tools\\voice-<hash>) on the path before the fake phone imports aiortc."""
+    import sys
+
+    from app import bench_voice
+    site = tmp_path / "voice-abc"
+    site.mkdir()
+    env = tmp_path / "kairo.env"
+    env.write_text(f"KAIRO_VOICE_SITE={site}\nKAIRO_PORT=8123\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.delenv("KAIRO_VOICE_SITE", raising=False)
+    monkeypatch.delenv("KAIRO_PORT", raising=False)
+    bench_voice.prepare(env)
+    assert str(site) in sys.path
+    import os
+    assert os.environ["KAIRO_PORT"] == "8123"
+    bench_voice.prepare(None)                                   # no file: nothing changes, nothing breaks
+    assert bench_voice.parser().parse_args(["--env-file", str(env)]).env_file == env
