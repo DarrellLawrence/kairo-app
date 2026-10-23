@@ -258,13 +258,19 @@ def test_settings_with_overrides_run_on_the_effective_folder(tmp_path, monkeypat
     assert load_settings().config_dir == tmp_path / "legacy" and load_settings().config_overrides is None
 
 
-def test_app_start_builds_config_and_notes_new_actions_once(settings, tmp_path):
+def test_app_start_builds_config_and_notes_new_actions_once(settings, tmp_path, monkeypatch):
+    from collections import namedtuple
+
     from fastapi.testclient import TestClient
+
+    from app import health
 
     from tests.conftest import alembic_config
     from alembic import command
     from app.main import create_app
 
+    # Only the config note may push: a machine with under 10 GB free would add the health watch's disk note.
+    monkeypatch.setattr(health.shutil, "disk_usage", lambda p: namedtuple("U", "total used free")(500e9, 100e9, 400e9))
     o, _ = old_install(tmp_path)
     s = settings.model_copy(update={"config_dir": settings.data_dir / "config-effective", "config_overrides": o})
     command.upgrade(alembic_config(s.db_url), "head")
