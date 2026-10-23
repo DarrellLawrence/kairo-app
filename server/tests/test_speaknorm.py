@@ -318,6 +318,7 @@ def test_english_dates(text, said):
     ("$5.99 oder 5 $ oder £3.50 oder 1,5 CHF.", "fünf Dollar neunundneunzig oder fünf Dollar oder drei Pfund fünfzig oder ein Franken fünfzig."),
     ("Das sind 12 Franken, 100 Euro und 1 Euro.", "Das sind zwölf Franken, einhundert Euro und einen Euro."),   # no decimals: the integer rules
     ("Das sind 12 CHF und 1 CHF und CHF 1.", "Das sind zwölf Franken und ein Franken und ein Franken."),
+    ("Zahlung CHF 250.- bzw. 250.– CHF, später Fr. 1'250.-.", "Zahlung zweihundertfünfzig Franken bzw. zweihundertfünfzig Franken, später eintausendzweihundertfünfzig Franken."),    # Swiss "250.-"
 ])
 def test_german_amounts(text, said):
     assert normalize(text, "de") == said

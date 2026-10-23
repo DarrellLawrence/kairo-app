@@ -159,7 +159,8 @@ _AMT = r"\d[\d'’.,]*\d|\d"
 
 
 def _money_re(words: str) -> re.Pattern:
-    return re.compile(rf"{_BEFORE_WORD}(?:(?P<c1>{_CUR})\s?(?P<a1>{_AMT})|(?P<a2>{_AMT})\s?(?P<c2>{_CUR}{words}))(?![\w]|[.,]\d)")
+    dash = r"(?:\.[–-])?"                                  # Swiss "250.-" and "250.–": whole francs
+    return re.compile(rf"{_BEFORE_WORD}(?:(?P<c1>{_CUR})\s?(?P<a1>{_AMT}){dash}|(?P<a2>{_AMT}){dash}\s?(?P<c2>{_CUR}{words}))(?![\w]|[.,]\d)")
 
 
 _MONEY = {"de": _money_re("|Franken|Euro|Dollar|Pfund"), "en": _money_re("")}
@@ -312,8 +313,8 @@ def _german(t: str) -> str:
     t = _HOUR_RANGE_DE.sub(lambda m: f"{de_cardinal(int(m[1]), 'ein')} bis {de_cardinal(int(m[2]), 'ein')}", t)
     t = _TIME_DE.sub(_time_de, t)
     t = _MONEY["de"].sub(lambda m: _money(m, "de"), t)
-    t = _DEC_DE.sub(lambda m: (_decimal(m, de_cardinal, "Komma", _DE_TO19)), t)
-    t = _INT_DE.sub(lambda m: _integer_de(m), t)
+    t = _DEC_DE.sub(lambda m: _decimal(m, de_cardinal, "Komma", _DE_TO19), t)
+    t = _INT_DE.sub(_integer_de, t)
     return _PERCENT.sub(" Prozent", t)
 
 
