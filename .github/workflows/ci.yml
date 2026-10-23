@@ -159,7 +159,7 @@ jobs:
       - name: Personal terms, secrets and forbidden paths in the setup zip
         env:
           KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
-        run: python "$SCANNER" --ci --zip dist/Kairo-Setup-*.zip
+        run: python "$SCANNER" --zip dist/Kairo-Setup-*.zip   # no --ci: a missing terms secret is flagged by the privacy job, it must not stop releases
       - name: Get gitleaks (pinned release, checksum verified)
         if: ${{ !cancelled() }}
         run: |

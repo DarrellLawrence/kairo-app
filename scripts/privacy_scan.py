@@ -693,15 +693,19 @@ def _placeholder(value: str) -> bool:
             or _trivial(value))
 
 
-_IDENTIFIER = re.compile(r"[a-z0-9]+(?:[._\-][a-z0-9]+)+")
+def _identifier_like(value: str) -> bool:
+    """loops.cleanup.2026-10-19, kairo:calendar:last_sync_token_2026: words joined by punctuation, not a generated key."""
+    segments = [seg for seg in re.split(r"[^A-Za-z0-9]+", value) if seg and not seg.isdigit()]   # dates/versions are neutral
+    words = [seg for seg in segments if seg.isalpha() and len(seg) >= 3]
+    return len(words) >= 2 and len(words) * 2 >= len(segments)
 
 
 def _random_value(value: str) -> bool:
     """A long value that looks like a generated key, not a word, a name, a path or a placeholder."""
     if len(value) < 20 or _placeholder(value) or _UUID.match(value):
         return False
-    if _IDENTIFIER.fullmatch(value) and sum(1 for seg in re.split(r"[._\-]", value) if seg.isalpha() and len(seg) >= 3) >= 2:
-        return False                                     # loops.cleanup.2026-10-19: a dotted name, not a key
+    if _identifier_like(value):
+        return False
     if value[:1] in "/~." or "://" in value or _FILE_VALUE.search(value):
         return False
     digits = sum(c.isdigit() for c in value)

@@ -129,6 +129,9 @@ In tests use made-up names and places only.
   on `main` and nothing is released. The terms secret is given to no other job (the build job runs npm scripts).
 - Job `build`: the setup zip is scanned (secrets and paths) before it is uploaded; `scripts/build-release.sh` deletes a
   zip that fails (it also checks the terms if this machine has a list).
+- Because a pull request is judged by the old scanner, a pull request that changes the scanner and needs a new
+  exception (for example another folder in `DOCUMENT_ALLOWED_DIRS`, or a new fake value) cannot pass its own check: the
+  owner reviews and merges it by hand.
 - To move gitleaks to a newer release, change `GITLEAKS_VERSION` and `GITLEAKS_SHA256` together in both jobs (the
   checksum is in the release's `gitleaks_<version>_checksums.txt`).
 - A branch or tag named after a person or place shows up in the log of `actions/checkout`, which the scanner cannot

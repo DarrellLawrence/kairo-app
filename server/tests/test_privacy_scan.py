@@ -1250,9 +1250,10 @@ def test_more_shapes_of_secrets_are_found(ps, text):
     json.dumps({"d": RND43}),                                                      # a d without kty is not a key
     "sess" + "ion = requests.Session()", "sess" + "ion_id = get_session_id_for_the_current_request()", "cookie_jar = CookieJar()",
     "https://user:pass@example.org/", "https://example.org:8080/path", "hc-pi" + "ng.com/00000000-0000-0000-0000-000000000000",
+    "DB_K" + 'EY = "kairo:calendar:last_sync_token_2026"', "STATE_K" + 'EY = "Kairo.Calendar.LastSync2026.v2"',
 ], ids=["sha-key", "public-key", "public-key-upper", "dotted-cache-key", "seen-key", "idempotency-key", "fingerprint-key",
         "hashed-secret", "bare-key", "key-word", "monkey", "public-jwk", "d-without-kty", "session-object", "session-id-call",
-        "cookie-jar", "short-url-password", "port-in-url", "zero-uuid"])
+        "cookie-jar", "short-url-password", "port-in-url", "zero-uuid", "colon-identifier", "mixed-case-identifier"])
 def test_names_that_say_it_is_not_a_secret_are_left_alone(ps, text):
     assert ps.scan_secrets(text + "\n") == [], text
 

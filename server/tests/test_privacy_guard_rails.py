@@ -327,7 +327,8 @@ def test_the_zip_is_checked_with_the_terms_in_its_own_job_and_the_release_waits_
     assert job["needs"] == "build" and job["permissions"] == {"contents": "read"}
     assert any(str(s.get("uses", "")).startswith("actions/download-artifact") and s["with"]["name"] == "setup-zip" for s in job["steps"])
     scan = next(s for s in job["steps"] if "--zip" in s.get("run", "") and "SCANNER" in s["run"])
-    assert "--ci" in scan["run"] and scan["env"]["KAIRO_PERSONAL_TERMS"] == "${{ secrets.PERSONAL_TERMS }}"
+    # findings stop the release; a missing terms secret does not (the privacy job flags that on main)
+    assert "--ci" not in scan["run"].split("#")[0] and scan["env"]["KAIRO_PERSONAL_TERMS"] == "${{ secrets.PERSONAL_TERMS }}"
     zip_gl = next(r for r in run_steps(job) if "gitleaks/gitleaks" in r and " dir " in r)
     assert "--verbose" not in zip_gl and "--max-archive-depth" in zip_gl and "unzip" in zip_gl
     release = jobs["release"]
