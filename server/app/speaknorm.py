@@ -182,12 +182,15 @@ def _amount(raw: str, lang: str) -> tuple[int, int | None] | None:
 
 def _money(m: re.Match, lang: str) -> str:
     """"12,50 CHF" -> "zwölf Franken fünfzig", "$12.50" -> "twelve dollars fifty". A written-out currency word
-    ("12 Franken") is only taken with cents: the plain integer rules say that already."""
+    ("12 Franken") is only taken with cents: the plain integer rules say that already. "Fr." is also Friday, so
+    "Fr. 14" without cents or the Swiss dash is left to the integer rules ("Fr. vierzehn Uhr")."""
     word = m["c2"] in ("Franken", "Euro", "Dollar", "Pfund")
     parsed = _amount(m["a1"] or m["a2"], lang)
     if parsed is None or (word and parsed[1] is None):
         return m.group(0)
     whole, cents = parsed
+    if m["c1"] == "Fr." and cents is None and m["a1"].isdigit() and not re.search(r"\.[–-]$", m.group(0)):
+        return m.group(0)                      # "Fr. 14 Uhr", "Fr. 3 Termine": Friday; francs only as "Fr. 14.50", "Fr. 14.-"
     unit = _UNITS[lang][_CODE[m["c1"] or m["c2"]]]
     end = "." if m.group(0).endswith(".") and m.end() == len(m.string.rstrip()) else ""     # "... 12.50 Fr." ends the sentence
     if lang == "de":

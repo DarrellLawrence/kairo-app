@@ -374,6 +374,27 @@ def test_english_amounts(text, said):
     assert normalize(text, "en") == said
 
 
+@pytest.mark.parametrize("text,said", [
+    # "Fr." is Friday as often as francs: a bare "Fr. 14" is not an amount
+    ("Das Treffen ist Fr. 14 Uhr.", "Das Treffen ist Fr. vierzehn Uhr."),
+    ("Mo. 9 Uhr, Di. 10 Uhr, Fr. 8 Uhr.", "Mo. neun Uhr, Di. zehn Uhr, Fr. acht Uhr."),
+    ("Fr. 3 Termine, Mo. 2 Termine.", "Fr. drei Termine, Mo. zwei Termine."),
+    ("Am Fr. 14 und Sa. 15 Uhr.", "Am Fr. vierzehn und Sa. fünfzehn Uhr."),
+    ("Fr. 14 Uhr 30", "Fr. vierzehn Uhr dreißig"),
+    ("Fr. 5 Aufgaben offen.", "Fr. fünf Aufgaben offen."),
+    ("Der Kurs läuft Fr. 18-20 Uhr.", "Der Kurs läuft Fr. achtzehn bis zwanzig Uhr."),
+    ("Fr. 14:30 Uhr", "Fr. vierzehn Uhr dreißig"),
+    # with cents, with the Swiss dash, with a thousands mark, or as SFr., it is an amount
+    ("Das kostet Fr. 14.50 im Monat.", "Das kostet vierzehn Franken fünfzig im Monat."),
+    ("Das kostet Fr. 14.- im Monat.", "Das kostet vierzehn Franken im Monat."),
+    ("Das kostet Fr. 1'400 im Jahr.", "Das kostet eintausendvierhundert Franken im Jahr."),
+    ("Das kostet SFr. 14 im Monat.", "Das kostet vierzehn Franken im Monat."),
+    ("Das kostet CHF 14 oder 14 Fr. im Monat.", "Das kostet vierzehn Franken oder vierzehn Franken im Monat."),
+])
+def test_fr_with_a_bare_number_is_a_weekday_not_francs(text, said):
+    assert normalize(text, "de") == said
+
+
 def test_amounts_that_are_unclear_are_left_alone():
     assert normalize("It costs 12,50 francs.", "en") == "It costs 12,50 francs."            # the engine reads this right
     assert normalize("Das sind 12,345 Franken.", "de") == "Das sind zwölf Komma drei vier fünf Franken."   # a decimal, not money
