@@ -339,6 +339,7 @@ def test_a_whole_healthy_stack_exits_zero_with_only_the_expected_warnings(pc, vl
     from app import tailnet
     idle = {"device": None, "loaded": False, "on": False, "ok": True, "reason": "until you teach Kairo your voice"}
     monkeypatch.setattr(diag, "ram", lambda: (8000, 16384))
+    monkeypatch.setattr(diag, "firewall_check", lambda: diag.ok("net.firewall", "rule", "fine"))      # Windows Firewall isn't ours to read in a test
     monkeypatch.setitem(sys.modules, "app.bench_voice", None)                      # the harness is another change's file
     monkeypatch.setattr(tailnet, "status", lambda data_dir: {"peers": [{"os": "iOS", "online": True, "direct": True}], "source": "live"})
     state = {**voice_parts(speaker=idle), "env": {"HF_HUB_OFFLINE": "1"}}

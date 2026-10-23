@@ -72,6 +72,7 @@ function Get-KairoPaths([string]$Root) {
         Current      = Join-Path $app 'current'
         State        = Join-Path $app 'state.json'
         Installer    = Join-Path $Root 'installer'
+        Bin          = Join-Path $Root 'bin'             # kairo.cmd (`kairo diag`), on the machine PATH; only admins can change it
         Updater      = Join-Path $Root 'updater'
         Status       = Join-Path $Root 'status'          # fix F24: what elevated scripts write for Kairo to read
         Vault        = Join-Path $data 'vault'
@@ -1107,6 +1108,30 @@ function Install-StartMenu($P) {
 
 function Remove-StartMenu {
     if (Test-Path $script:StartMenu) { Remove-Item -Recurse -Force $script:StartMenu }
+}
+
+# `kairo diag` from any Command Prompt or PowerShell: kairo.cmd goes to C:\Kairo\bin and that folder onto the
+# machine PATH (once). C:\Kairo gives Kairo's own account read and run rights only, so nothing it runs can put a
+# program into a folder every administrator's PATH points at. Never fails an install: it is a convenience.
+function Install-Launcher($P, [string]$From) {
+    try {
+        if (-not (Test-Path $P.Bin)) { [void](New-Item -ItemType Directory -Path $P.Bin) }
+        Copy-Item -Force -LiteralPath $From -Destination (Join-Path $P.Bin 'kairo.cmd')
+        $path = [string][Environment]::GetEnvironmentVariable('Path', 'Machine')
+        if (@($path -split ';' | Where-Object { $_.TrimEnd('\') -ieq $P.Bin }).Count -eq 0) {
+            [Environment]::SetEnvironmentVariable('Path', ($path.TrimEnd(';') + ';' + $P.Bin), 'Machine')
+        }
+        Write-Ok 'kairo diag: open a new Command Prompt and type "kairo diag"'
+    } catch { Write-Warn "kairo.cmd not set up ($($_.Exception.Message.Trim()))" }
+}
+
+function Remove-Launcher($P) {
+    $path = [string][Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $keep = @($path -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $P.Bin })
+    if ($keep.Count -ne @($path -split ';' | Where-Object { $_ }).Count) {
+        [Environment]::SetEnvironmentVariable('Path', ($keep -join ';'), 'Machine')
+    }
+    if (Test-Path $P.Bin) { Remove-Item -Recurse -Force $P.Bin }
 }
 
 function Unregister-KairoTask {

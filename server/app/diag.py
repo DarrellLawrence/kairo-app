@@ -666,14 +666,18 @@ def render(report: dict) -> str:
     return "\n".join(lines).encode("ascii", "replace").decode("ascii")
 
 
-def main(argv: list[str] | None = None) -> int:
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="kairo diag", description="Is Kairo's voice stack healthy? Exit 0 when nothing FAILs.")
     ap.add_argument("--json", action="store_true", help="print the report as JSON (what /api/diag/voice returns)")
     ap.add_argument("--strict", action="store_true", help="a WARN also makes the exit code 1")
     ap.add_argument("--deep", action="store_true", help="also check the sha256 of the multi-GB model files (slow)")
     ap.add_argument("--local", action="store_true", help="don't ask the running Kairo; check only what this process can see")
     ap.add_argument("--env-file", type=Path, help="kairo.env written by the installer (the server's own settings)")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")

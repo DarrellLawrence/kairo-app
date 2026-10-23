@@ -124,7 +124,8 @@ def test_a_rule_for_tcp_is_only_a_warning_and_an_unreadable_one_asks_for_an_admi
     assert c.status == "WARN" and "administrator" in c.detail
 
 
-def test_the_rule_is_not_a_thing_on_linux():
+def test_the_rule_is_not_a_thing_on_linux(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
     c = diag.firewall_check()
     assert c.status == "PASS" and "not applicable" in c.detail
 
