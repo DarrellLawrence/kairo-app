@@ -142,6 +142,50 @@ def _valid_date(day: int, month: int) -> bool:
     return 1 <= day <= 31 and 1 <= month <= 12
 
 
+_CODE = {"CHF": "CHF", "SFr.": "CHF", "Fr.": "CHF", "EUR": "EUR", "€": "EUR", "USD": "USD", "$": "USD", "GBP": "GBP", "£": "GBP",
+         "Franken": "CHF", "Euro": "EUR", "Dollar": "USD", "Pfund": "GBP"}
+_UNITS = {"de": {"CHF": ("Franken", "Rappen"), "EUR": ("Euro", "Cent"), "USD": ("Dollar", "Cent"), "GBP": ("Pfund", "Pence")},
+          "en": {"CHF": ("franc", "francs", "rappen", "rappen"), "EUR": ("euro", "euros", "cent", "cents"),
+                 "USD": ("dollar", "dollars", "cent", "cents"), "GBP": ("pound", "pounds", "penny", "pence")}}
+_CUR = r"CHF|EUR|USD|GBP|SFr\.|Fr\.|€|\$|£"
+_AMT = r"\d[\d'’.,]*\d|\d"
+
+
+def _money_re(words: str) -> re.Pattern:
+    return re.compile(rf"{_BEFORE_WORD}(?:(?P<c1>{_CUR})\s?(?P<a1>{_AMT})|(?P<a2>{_AMT})\s?(?P<c2>{_CUR}{words}))(?![\w]|[.,]\d)")
+
+
+_MONEY = {"de": _money_re("|Franken|Euro|Dollar|Pfund"), "en": _money_re("")}
+_AMOUNT = {"de": re.compile(r"(\d{1,3}(?:\.\d{3})+|\d+)(?:[,.](\d{1,2}))?"), "en": re.compile(r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?")}
+
+
+def _amount(raw: str, lang: str) -> tuple[int, int | None] | None:
+    """("1'250.50" | "1.250,50" | "12,5") -> (1250, 50) / (12, 50): whole units and cents (None: no cents written).
+    German: the comma is the decimal sign (Swiss writing "12.50" works too), English: the dot."""
+    m = _AMOUNT[lang].fullmatch(re.sub(r"['’]", "", raw))
+    whole = _whole(m[1]) if m else None
+    return None if whole is None else (whole, None if m[2] is None else int(m[2].ljust(2, "0")))
+
+
+def _money(m: re.Match, lang: str) -> str:
+    """"12,50 CHF" -> "zwölf Franken fünfzig", "$12.50" -> "twelve dollars fifty". A written-out currency word
+    ("12 Franken") is only taken with cents: the plain integer rules say that already."""
+    word = m["c2"] in ("Franken", "Euro", "Dollar", "Pfund")
+    parsed = _amount(m["a1"] or m["a2"], lang)
+    if parsed is None or (word and parsed[1] is None):
+        return m.group(0)
+    whole, cents = parsed
+    unit = _UNITS[lang][_CODE[m["c1"] or m["c2"]]]
+    end = "." if m.group(0).endswith(".") and m.end() == len(m.string.rstrip()) else ""     # "... 12.50 Fr." ends the sentence
+    if lang == "de":
+        if whole == 0 and cents:
+            return f"{de_cardinal(cents, 'ein')} {unit[1]}{end}"
+        return f"{de_cardinal(whole, 'ein')} {unit[0]}" + (f" {de_cardinal(cents)}" if cents else "") + end
+    if whole == 0 and cents:
+        return f"{en_cardinal(cents)} {unit[2] if cents == 1 else unit[3]}{end}"
+    return f"{en_cardinal(whole)} {unit[0] if whole == 1 else unit[1]}" + (f" {en_cardinal(cents)}" if cents else "") + end
+
+
 # ---------------------------------------------------------------- German
 
 _FEMININE = re.compile(r"(?:ung|keit|heit|schaft|tion|ität|ik|ur|ie)$|^(?:Stunde|Minute|Sekunde|Woche|Nachricht|Mail|"
@@ -260,6 +304,7 @@ def _german(t: str) -> str:
     t = _CLOCK_RANGE_DE.sub(r"\1 bis ", t)
     t = _HOUR_RANGE_DE.sub(lambda m: f"{de_cardinal(int(m[1]), 'ein')} bis {de_cardinal(int(m[2]), 'ein')}", t)
     t = _TIME_DE.sub(_time_de, t)
+    t = _MONEY["de"].sub(lambda m: _money(m, "de"), t)
     t = _DEC_DE.sub(lambda m: (_decimal(m, de_cardinal, "Komma", _DE_TO19)), t)
     t = _INT_DE.sub(lambda m: _integer_de(m), t)
     return _PERCENT.sub(" Prozent", t)
@@ -325,6 +370,7 @@ def _english(t: str, en_times: str) -> str:
     t = _NUM_DATE_EN.sub(lambda m: _date_en(m, int(m[1]), int(m[2]), int(m[3])), t)
     t = _CLOCK_RANGE_EN.sub(r"\1 to ", t)
     t = _TIME_EN.sub(lambda m: _time_en(m, en_times), t)
+    t = _MONEY["en"].sub(lambda m: _money(m, "en"), t)
     t = _DEC_EN.sub(lambda m: _decimal(m, en_cardinal, "point", _EN_TO19), t)
     t = _SWISS_THOUSANDS.sub(lambda m: re.sub(r"['’]", "", m.group(0)), t)
     return _PERCENT.sub(" percent", t)

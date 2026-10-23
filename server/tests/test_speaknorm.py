@@ -80,10 +80,7 @@ LINES = [
 ]
 
 
-_MONEY_LINES = {"Das kostet 12,50 Franken."}                       # (the amount rules come in the next commit)
-
-
-@pytest.mark.parametrize("digits,spelled", [x for x in LINES if x[0] not in _MONEY_LINES])
+@pytest.mark.parametrize("digits,spelled", LINES)
 def test_the_research_lines_read_as_words(digits, spelled):
     assert normalize(digits, "de") == spelled
 
@@ -307,3 +304,57 @@ def test_an_english_time_that_is_none_is_left_alone():
 ])
 def test_english_dates(text, said):
     assert normalize(text, "en") == said
+
+
+# ---------------------------------------------------------------- amounts
+
+@pytest.mark.parametrize("text,said", [
+    ("Das kostet 12,50 Franken.", "Das kostet zwölf Franken fünfzig."),
+    ("Das sind 12,50 CHF, Fr. 12.50, CHF 12.50 und 12.50 Fr.", "Das sind zwölf Franken fünfzig, zwölf Franken fünfzig, zwölf Franken fünfzig und zwölf Franken fünfzig."),
+    ("Die Rechnung: 1'250.50 CHF.", "Die Rechnung: eintausendzweihundertfünfzig Franken fünfzig."),
+    ("Dazu 1.250,50 € und 12,05 Euro.", "Dazu eintausendzweihundertfünfzig Euro fünfzig und zwölf Euro fünf."),
+    ("Nur 0,50 Franken, 12,00 CHF, € 3,20.", "Nur fünfzig Rappen, zwölf Franken, drei Euro zwanzig."),
+    ("$5.99 oder 5 $ oder £3.50 oder 1,5 CHF.", "fünf Dollar neunundneunzig oder fünf Dollar oder drei Pfund fünfzig oder ein Franken fünfzig."),
+    ("Das sind 12 Franken, 100 Euro und 1 Euro.", "Das sind zwölf Franken, einhundert Euro und einen Euro."),   # no decimals: the integer rules
+    ("Das sind 12 CHF und 1 CHF und CHF 1.", "Das sind zwölf Franken und ein Franken und ein Franken."),
+])
+def test_german_amounts(text, said):
+    assert normalize(text, "de") == said
+
+
+@pytest.mark.parametrize("text,said", [
+    ("It costs $12.50.", "It costs twelve dollars fifty."),
+    ("It costs CHF 12.50 or 12.50 CHF.", "It costs twelve francs fifty or twelve francs fifty."),
+    ("It costs €12.50 or £3.20.", "It costs twelve euros fifty or three pounds twenty."),
+    ("Only $1 or $0.99 or $0.01.", "Only one dollar or ninety-nine cents or one cent."),
+    ("Total $1,250.00 or $1,250.5.", "Total one thousand two hundred fifty dollars or one thousand two hundred fifty dollars fifty."),
+    ("That is 5 USD and 7 EUR.", "That is five dollars and seven euros."),
+])
+def test_english_amounts(text, said):
+    assert normalize(text, "en") == said
+
+
+def test_amounts_that_are_unclear_are_left_alone():
+    assert normalize("It costs 12,50 francs.", "en") == "It costs 12,50 francs."            # the engine reads this right
+    assert normalize("Das sind 12,345 Franken.", "de") == "Das sind zwölf Komma drei vier fünf Franken."   # a decimal, not money
+    assert normalize("Code CHF 1.2.3 gilt.", "de") == "Code CHF 1.2.3 gilt."
+    assert normalize("Das sind 05,50 CHF.", "de") == "Das sind 05,50 CHF."
+    assert normalize("Das sind 1234567890,50 CHF.", "de") == "Das sind 1234567890,50 CHF."
+
+
+# ---------------------------------------------------------------- it never breaks a sentence
+
+def test_whatever_is_thrown_at_it_comes_back_as_text_and_twice_through_is_still_text():
+    """A voice must never fail on a piece of text: random digits, dots, colons, commas, signs and words."""
+    import random
+    rng = random.Random(20261023)
+    atoms = ["0", "1", "7", "12", "24", "59", "60", "99", "2026", "1999", "123456789", "1234567890123", ":", ".", ",", "-", "–", "'", "/", " ", " ",
+             " ", "Uhr", "am", "pm", "a.m.", "CHF", "Fr.", "€", "$", "%", "Mai", "Okt.", "Franken", "noon", "bis", "und", "Stock", "der", "Hallo"]
+    for _ in range(4000):
+        text = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 14)))
+        for lang in ("de", "en", None):
+            once = normalize(text, lang)
+            assert isinstance(once, str)
+            assert isinstance(normalize(once, lang), str)
+    for lang in ("de", "en"):
+        assert isinstance(normalize("1" * 3000, lang), str) and isinstance(normalize("1:" * 3000, lang), str)
