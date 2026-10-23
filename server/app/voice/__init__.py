@@ -62,6 +62,21 @@ def language_of(text: str) -> str:
     return "de" if de / max(1, len(words)) > 0.12 else "en"
 
 
+def _package_version(name: str) -> str | None:
+    try:
+        from importlib.metadata import version
+        return version(name)
+    except Exception:
+        return None
+
+
+def _ct2_version() -> str | None:
+    """CTranslate2's version for devices(): from the library when Whisper has loaded it, else from its metadata
+    (importing it for a status page would load its DLLs)."""
+    ct2 = sys.modules.get("ctranslate2")
+    return getattr(ct2, "__version__", None) or _package_version("ctranslate2")
+
+
 def sound(samples):
     """Never silence or noise from a model that went numerically wrong: no samples or not-a-number is an
     error (said, not sent); audio over full scale is brought back to it, not clipped into noise."""
@@ -184,6 +199,7 @@ class Tuning:
     fix is on, what waits for an owner decision or a measurement on the PC is off."""
     temperature_zero: bool = True
     offline_models: bool = True
+    int8_float16: bool = False
 
 
 class Voice:
@@ -195,6 +211,8 @@ class Voice:
         self._stt_device = None
         self._stt_model = None
         self._stt_why: str | None = None     # why Whisper is not on the GPU (None: it is, or not loaded yet)
+        self._stt_compute: str | None = None  # the compute type the loaded model really runs in (ctranslate2's word for it)
+        self._stt_compute_note: str | None = None   # a compute type that was asked for but did not load
         self._stt_failed = 0.0
         self._tts_device = None
         self._tts_why: str | None = None
@@ -289,18 +307,38 @@ class Voice:
             raise NotInstalled(f"The speech model {name} is not downloaded on the PC (run Update Kairo).")
         return name
 
+    def _compute_wanted(self) -> str:
+        """The GPU model's compute type: KAIRO_WHISPER_COMPUTE when the owner set it, else int8_float16 when
+        g2.int8_float16 is on, else float16 (int8 weights, half-precision maths: ~0.8 GB less graphics memory)."""
+        return os.environ.get("KAIRO_WHISPER_COMPUTE", "").strip() or ("int8_float16" if self.tuning.int8_float16 else "float16")
+
     def _make_stt(self, device: str):
         from faster_whisper import WhisperModel
         root = str(self.models_dir / "whisper")
         offline = self.tuning.offline_models
+        note = None
         if device == "cuda":
             _add_cuda_dlls(self.site_dir)
             self._stt_model = WHISPER_GPU
-            return WhisperModel(self._local_model(WHISPER_GPU), device="cuda", compute_type="float16", download_root=root,
-                                local_files_only=offline)
-        self._stt_model = WHISPER_CPU
-        return WhisperModel(self._local_model(WHISPER_CPU), device="cpu", compute_type="int8", download_root=root,
-                            local_files_only=offline)
+            path, compute = self._local_model(WHISPER_GPU), self._compute_wanted()
+            try:
+                model = WhisperModel(path, device="cuda", compute_type=compute, download_root=root, local_files_only=offline)
+            except Exception as exc:
+                if compute == "float16":
+                    raise
+                # a lighter compute type this GPU or ctranslate2 does not do: float16 on the GPU, not the slow CPU model
+                note = f"{compute} did not load ({type(exc).__name__}: {exc}); float16 is used"[:300]
+                log.error("Whisper: %s", note)
+                compute = "float16"
+                model = WhisperModel(path, device="cuda", compute_type=compute, download_root=root, local_files_only=offline)
+        else:
+            self._stt_model = WHISPER_CPU
+            compute = "int8"
+            model = WhisperModel(self._local_model(WHISPER_CPU), device="cpu", compute_type=compute, download_root=root,
+                                 local_files_only=offline)
+        self._stt_compute = getattr(getattr(model, "model", None), "compute_type", None) or compute
+        self._stt_compute_note = note
+        return model
 
     def _load_stt(self):
         if self._stt is not None:
@@ -357,7 +395,9 @@ class Voice:
         inst = self.installed()
         stt_loaded = self._stt is not None
         whisper = {"device": self._stt_device, "model": self._stt_model, "loaded": stt_loaded,
-                   "load_ms": self.load_ms.get("whisper"), "warm_ms": self.warm_ms.get("whisper")}
+                   "load_ms": self.load_ms.get("whisper"), "warm_ms": self.warm_ms.get("whisper"),
+                   "compute_type": self._stt_compute if stt_loaded else None, "compute_note": self._stt_compute_note,
+                   "ctranslate2": _ct2_version()}
         if not inst["stt"]:
             whisper.update(ok=False, reason="not installed")
         elif not stt_loaded:

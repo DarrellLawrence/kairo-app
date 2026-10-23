@@ -35,6 +35,7 @@ class Whisper:
                     raise ValueError(f"no {compute_type} on {device}")
                 outer.made.append({"path": str(path), "device": device, "compute": compute_type, **kw})
                 self.device, self.compute = device, compute_type
+                self.model = types.SimpleNamespace(compute_type="float16" if compute_type == "default" else compute_type)
 
             def transcribe(self, audio, **kw):
                 outer.calls.append(kw)
@@ -163,3 +164,77 @@ def test_with_offline_models_off_a_missing_model_is_asked_for_by_name_as_before(
     v.transcribe_pcm(PCM, "en")
     (made,) = whisper.made
     assert made["path"] == voice_mod.WHISPER_GPU and made["local_files_only"] is False
+
+
+# ---------------------------------------------------------------- compute type (float16 unless the PC test says otherwise)
+
+def test_int8_float16_waits_for_the_pc_test_so_it_is_off_until_the_owner_says_otherwise(tmp_path):
+    assert flags.FLAGS["g2.int8_float16"][0] is False and Voice(tmp_path).tuning.int8_float16 is False
+
+
+def test_the_gpu_model_is_float16_and_the_cpu_model_int8_by_default(voice, whisper, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    voice.transcribe_pcm(PCM, "en")
+    assert [(m["device"], m["compute"]) for m in whisper.made] == [("cuda", "float16")]
+    whisper.fail_on = {("cuda", "float16")}
+    cpu = Voice(voice.models_dir)
+    cpu.transcribe_pcm(PCM, "en")
+    assert [(m["device"], m["compute"]) for m in whisper.made[1:]] == [("cpu", "int8")]
+
+
+def test_the_flag_asks_the_gpu_for_int8_float16(voice, whisper, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    voice.tuning = voice_mod.Tuning(int8_float16=True)
+    voice.transcribe_pcm(PCM, "en")
+    assert whisper.made[0]["compute"] == "int8_float16"
+    assert voice.devices()["whisper"]["compute_type"] == "int8_float16"
+
+
+def test_the_environment_variable_is_the_owners_explicit_choice_and_wins_over_the_flag(voice, whisper, monkeypatch):
+    monkeypatch.setenv("KAIRO_WHISPER_COMPUTE", "int8_float16")
+    voice.transcribe_pcm(PCM, "en")
+    assert whisper.made[0]["compute"] == "int8_float16"
+    monkeypatch.setenv("KAIRO_WHISPER_COMPUTE", "float16")
+    other = Voice(voice.models_dir)
+    other.tuning = voice_mod.Tuning(int8_float16=True)
+    other.transcribe_pcm(PCM, "en")
+    assert whisper.made[1]["compute"] == "float16"
+
+
+def test_a_gpu_that_cannot_do_int8_float16_keeps_float16_on_the_gpu_and_says_so(voice, whisper, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    whisper.fail_on = {("cuda", "int8_float16")}
+    voice.tuning = voice_mod.Tuning(int8_float16=True)
+    assert voice.transcribe_pcm(PCM, "en").text == "hello"
+    assert [(m["device"], m["compute"]) for m in whisper.made] == [("cuda", "float16")]     # not the slow small CPU model
+    w = voice.devices()["whisper"]
+    assert w["ok"] is True and w["compute_type"] == "float16" and "int8_float16" in w["compute_note"]
+
+
+# ---------------------------------------------------------------- what devices() reports
+
+def test_devices_report_the_compute_type_the_model_runs_in_and_the_ctranslate2_version(voice, whisper, monkeypatch):
+    fake = types.ModuleType("ctranslate2")
+    fake.__version__ = "4.8.3"
+    monkeypatch.setitem(sys.modules, "ctranslate2", fake)
+    monkeypatch.setenv("KAIRO_WHISPER_COMPUTE", "default")           # the model file's own: ctranslate2 says which that is
+    voice.transcribe_pcm(PCM, "en")
+    w = voice.devices()["whisper"]
+    assert w["compute_type"] == "float16" and w["ctranslate2"] == "4.8.3" and w["compute_note"] is None
+
+
+def test_devices_before_the_model_is_loaded_still_name_the_version_without_importing_the_library(tmp_path, monkeypatch):
+    monkeypatch.setattr(Voice, "installed", staticmethod(lambda: {"stt": True, "en": False, "de": False}))
+    monkeypatch.delitem(sys.modules, "ctranslate2", raising=False)
+    monkeypatch.setattr(voice_mod, "_package_version", lambda name: "4.8.3" if name == "ctranslate2" else None)
+    w = Voice(tmp_path).devices()["whisper"]
+    assert w["loaded"] is False and w["compute_type"] is None and w["ctranslate2"] == "4.8.3"
+    assert "ctranslate2" not in sys.modules
+
+
+def test_the_latency_harness_records_the_compute_type_the_pc_reported():
+    from app import bench_voice
+    comps = {"components": {"whisper": {"device": "cuda", "model": "large-v3-turbo", "compute_type": "int8_float16"}}}
+    assert bench_voice.config_info(comps)["stt_compute_type"] == "int8_float16"
+    comps["components"]["whisper"].pop("compute_type")            # an older Kairo that does not say: as before
+    assert bench_voice.config_info(comps)["stt_compute_type"] == "float16"
