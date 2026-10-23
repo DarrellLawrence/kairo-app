@@ -177,6 +177,14 @@ class Transcript:
     took: float
 
 
+@dataclass
+class Tuning:
+    """The owner's switches for the call path's speech to text (app/flags.py, names g2.<field>). Read once
+    when a call connects (Voice.read_flags), never per audio frame. The defaults are the flags' defaults: a
+    fix is on, what waits for an owner decision or a measurement on the PC is off."""
+    temperature_zero: bool = True
+
+
 class Voice:
     def __init__(self, models_dir: Path, site_dir: Path | None = None):
         self.models_dir = Path(models_dir)
@@ -195,6 +203,7 @@ class Voice:
         self._piper = None
         self._lock = threading.Lock()   # one model load at a time
         self.last_error: str | None = None
+        self.tuning = Tuning()
 
     # ---------------------------------------------------------------- status
 
@@ -362,9 +371,16 @@ class Voice:
             raise VoiceError("recording too long")
         return self._stt_run(lambda: io.BytesIO(audio), language, beam_size=5)
 
+    def read_flags(self, s) -> Tuning:
+        """The owner's g2.* switches, read once as a call connects (s: a database session)."""
+        from .. import flags
+        self.tuning = Tuning(**{n[3:]: flags.on(s, n) for n in flags.FLAGS if n.startswith("g2.")})
+        return self.tuning
+
     def transcribe_pcm(self, pcm: bytes, language: str | None = None) -> Transcript:
         """Voice V1: 16 kHz 16-bit mono samples straight from the phone (no file to decode), greedy
-        decoding (beam 1): the fast path for a spoken turn."""
+        decoding (beam 1): the fast path for a spoken turn. language: "en" or "de" (or any Whisper code)
+        decodes in that language; "auto" or None leaves it to Whisper to find (the call's language setting)."""
         if len(pcm) < 3200:   # under 0.1 s
             raise VoiceError("no audio")
         if len(pcm) > MAX_AUDIO:
@@ -373,14 +389,19 @@ class Voice:
         def samples():
             import numpy as np
             return np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
-        return self._stt_run(samples, language, beam_size=1, condition_on_previous_text=False, without_timestamps=True)
+        tuning = self.tuning
+        opts = {"beam_size": 1, "condition_on_previous_text": False, "without_timestamps": True}
+        if tuning.temperature_zero:
+            opts["temperature"] = 0.0      # one decode, no random re-tries (Whisper's default list goes up to 1.0)
+        fixed = language if language not in (None, "", "auto") else None
+        return self._stt_run(samples, fixed, **opts)
 
-    def _stt_run(self, audio, language: str | None, **opts) -> Transcript:
+    def _stt_run(self, audio, language: str | None, vad_filter: bool = True, **opts) -> Transcript:
         with self._lock:
             model = self._load_stt()
         t = time.monotonic()
         try:
-            segments, info = model.transcribe(audio(), language=language, vad_filter=True, **opts)
+            segments, info = model.transcribe(audio(), language=language, vad_filter=vad_filter, **opts)
             text = " ".join(s.text.strip() for s in segments).strip()
         except Exception as exc:
             if self._stt_device == "cuda" and GPU_RUNTIME.search(str(exc)):
@@ -392,7 +413,7 @@ class Voice:
                     except Exception as exc2:
                         self._stt, self.last_error = None, f"load: {type(exc2).__name__}: {exc2}"
                         raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
-                return self._stt_run(audio, language, **opts)
+                return self._stt_run(audio, language, vad_filter, **opts)
             self.last_error = f"transcribe: {exc}"
             raise VoiceError(f"could not understand the audio ({type(exc).__name__})") from exc
         return Transcript(text=text, language=info.language, seconds=round(info.duration, 1), took=round(time.monotonic() - t, 2))
