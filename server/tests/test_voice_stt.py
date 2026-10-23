@@ -42,7 +42,8 @@ class Whisper:
             def transcribe(self, audio, **kw):
                 outer.calls.append(kw)
                 info = types.SimpleNamespace(language=kw.get("language") or outer.language, duration=1.0)
-                return iter([types.SimpleNamespace(text=outer.text)]), info
+                text = outer.text.get(info.language, "") if isinstance(outer.text, dict) else outer.text   # a text per language
+                return iter([types.SimpleNamespace(text=text)]), info
 
         mod.WhisperModel = WhisperModel
         monkeypatch.setitem(sys.modules, "faster_whisper", mod)
@@ -520,3 +521,48 @@ def test_a_database_that_cannot_be_read_at_start_up_does_not_stop_the_warm_up(tm
     monkeypatch.setattr(v, "_load_kokoro", lambda: None)
     v.warm()
     assert v.tuning == voice_mod.Tuning() and whisper.made and whisper.made[0]["compute"] == "float16"
+
+
+# ---------------------------------------------------------------- the self-test: a German round trip through the call path
+
+@pytest.fixture
+def selftest_voice(voice, whisper, monkeypatch):
+    """A Voice whose three voice packages import and whose voices (stand-ins) say something in each language."""
+    for name in ("kokoro_onnx", "piper"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    whisper.text = {"en": " Kairo voice test.", "de": " Guten Morgen, das ist ein Test."}
+    voices = Voices(voice)
+    monkeypatch.setattr(voice_mod, "wav_problems", lambda wav: [])
+    return voice, voices
+
+
+def test_the_self_test_writes_a_german_sentence_down_again_through_the_call_path(selftest_voice, whisper):
+    voice, voices = selftest_voice
+    r = voice.selftest()
+    assert r["ok"] is True and r["german_ok"] is True and "morgen" in r["heard_de"].lower()
+    german = [kw for kw in whisper.calls if kw["language"] == "de"][-1]
+    assert german["vad_filter"] is True and german["beam_size"] == 1 and german["temperature"] == 0.0       # as a call asks
+    assert ("Guten Morgen, das ist ein Test.", "de") in voices.said
+
+
+def test_a_german_sentence_heard_wrong_is_reported_but_never_turns_the_self_test_red(selftest_voice, whisper):
+    """The self-test decides whether an update rolls back; a German sentence a small model misheard must not."""
+    voice, _ = selftest_voice
+    whisper.text = {"en": " Kairo voice test.", "de": " Ruf Mama an."}
+    r = voice.selftest()
+    assert r["ok"] is True and r["german_ok"] is False and r["heard_de"] == "Ruf Mama an."
+    assert any("German" in n and "Ruf Mama an." in n for n in r["notes"])
+
+
+def test_without_the_german_voice_the_round_trip_is_not_run(selftest_voice, whisper):
+    voice, _ = selftest_voice
+    Voices(voice, de=False)
+    r = voice.selftest()
+    assert r["german_ok"] is None and r["heard_de"] is None and r["ok"] is False and "German voice" in r["reason"]
+    assert all(kw["language"] != "de" for kw in whisper.calls)
+
+
+def test_the_self_test_does_not_teach_the_voice_a_language(selftest_voice):
+    voice, _ = selftest_voice
+    voice.selftest()
+    assert voice._last_language is None

@@ -38,6 +38,8 @@ KOKORO_FILES = {
 }
 KOKORO_VOICE = os.environ.get("KAIRO_KOKORO_VOICE", "af_heart")
 PIPER_DE = os.environ.get("KAIRO_PIPER_VOICE", "de_DE-thorsten-medium")
+GERMAN_TEST = "Guten Morgen, das ist ein Test."      # what the self-test has the German voice say, for Whisper to write down
+GERMAN_TEST_WORDS = ("guten", "morgen", "test")        # any one of them counts (a small model may hear the rest wrong)
 RETRY_LOAD_AFTER = 600   # seconds before a failed model load is tried again
 WARM_FRESH_S = 15        # a call connecting this soon after a decode finds Whisper warm: no warm-up
 # What Whisper warms up on: Kairo's own voices say these (made-up sentences, about 4 s each), so the first
@@ -290,7 +292,8 @@ class Voice:
     def selftest(self) -> dict:
         """For the installer and the boot check (fix P0): real imports as Kairo's account, Kokoro says a
         short sentence (~2 s) and Whisper writes it down again; Piper speaks German. {ok, checks, reason}"""
-        checks, problems, heard = {}, [], None
+        checks, problems, heard, notes = {}, [], None, []
+        heard_de = german_ok = None
         for key, module in (("stt_import", "faster_whisper"), ("en_import", "kokoro_onnx"), ("de_import", "piper")):
             try:
                 mod = __import__(module)
@@ -311,18 +314,35 @@ class Voice:
                 checks["stt_roundtrip"] = "test" in t.text.lower()
                 if not checks["stt_roundtrip"]:
                     problems.append(f"Whisper heard {t.text!r}")
-                de, lang = self.speak("Kairo Test.", "de")
+                de, lang = self.speak(GERMAN_TEST, "de")
                 bad = wav_problems(de)
                 checks["tts_de"] = not bad and lang == "de"
                 if lang != "de":
                     problems.append("the German voice didn't speak")
                 problems += [f"German voice: {p}" for p in bad]
+                if lang == "de" and not bad:
+                    heard_de, german_ok = self._german_roundtrip(de)
+                    if not german_ok:
+                        notes.append(f"Whisper heard the German sentence as {heard_de!r}; the update is not stopped for this")
             except Exception as exc:
                 problems.append(f"{type(exc).__name__}: {exc}"[:240])
                 checks.setdefault("tts_en", False)
         ok = not problems and all(checks.values())
         return {"ok": ok, "checks": checks, "reason": "; ".join(problems), "heard": heard,
+                "heard_de": heard_de, "german_ok": german_ok, "notes": notes,
                 "device": self.status().get("stt_device") if heard is not None else None}
+
+    def _german_roundtrip(self, wav: bytes) -> tuple[str | None, bool]:
+        """(what Whisper wrote, whether it is the German sentence): through the call path, German given, as a
+        German call asks. Reported, not a check: the self-test decides whether an update rolls back, and a
+        small model mishearing one sentence is no reason for that. Nothing is learned from it."""
+        try:
+            text = self.transcribe_pcm(_wav_16k(wav), "de").text
+        except Exception as exc:
+            return f"{type(exc).__name__}: {exc}"[:120], False
+        finally:
+            self._last_language = None
+        return text, any(word in text.lower() for word in GERMAN_TEST_WORDS)
 
     # ---------------------------------------------------------------- speech to text
 

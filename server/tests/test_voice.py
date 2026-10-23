@@ -189,6 +189,13 @@ def test_real_voice_round_trip(tmp_path):
     t = v.transcribe(de, language="de")
     print("WHISPER HEARD (de):", t.text)
     assert heard(de_text, t.text), t.text
+    # G2: a German call decodes in German at once (the call path: greedy, temperature 0, voice filter on)
+    from app.voice import _wav_16k
+    t = v.transcribe_pcm(_wav_16k(de), "de")
+    print("WHISPER HEARD (pcm, de):", t.text, t.took, t.language)
+    assert t.language == "de" and heard(de_text, t.text), t.text
+    report = v.selftest()                 # and the self-test's own German round trip (reported, never a rollback)
+    assert report["german_ok"] is True, report
     # Voice V1: the phone streams 16 kHz PCM; the fast path (no file, greedy) hears it too, language found by itself
     import numpy as np
     from app.voicelink import wav_pcm
