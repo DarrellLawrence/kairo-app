@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from sqlmodel import Session
 
 from app import flags, rtcjitter
@@ -208,6 +209,25 @@ def test_the_pinned_library_version_is_one_the_patch_was_checked_against():
     (the numbers in the changelog re-measured, the real-library tests below passing)."""
     pins = re.findall(r"^aiortc==([\w.]+)", (REPO_ROOT / "server" / "requirements-voice.txt").read_text(encoding="utf-8"), re.M)
     assert pins and all(p in rtcjitter.SUPPORTED for p in pins), (pins, rtcjitter.SUPPORTED)
+
+
+VOICE_CI_JOBS = ("voice", "voice-windows")        # the jobs in .github/workflows/ci.yml that install the voice packages
+NEEDS_THE_VOICE_PACKAGES = ("tests/test_rtcjitter.py", "tests/test_rtcjitter_loopback.py")
+
+
+def test_ci_runs_the_tests_that_need_the_real_library_on_linux_and_windows():
+    """The plain `server` job installs no aiortc or pipecat, so every real-library test of this patch skips there.
+    Without these two files in the voice jobs, a bump of the aiortc pin that the patch no longer fits would be
+    green in CI (the check above only compares the version number) and every call would quietly stay on 16/4."""
+    jobs = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    for name in VOICE_CI_JOBS:
+        pytest_steps = [s["run"] for s in jobs[name]["steps"] if "pytest" in s.get("run", "")]
+        assert len(pytest_steps) == 1, (name, pytest_steps)
+        listed = pytest_steps[0].split()
+        for test_file in NEEDS_THE_VOICE_PACKAGES:
+            assert test_file in listed, f"{name} does not run {test_file}"
+        assert "tests/test_voice_rtc.py" in listed                       # (sanity: this is the right step)
+    assert jobs["voice"]["runs-on"].startswith("ubuntu") and jobs["voice-windows"]["runs-on"].startswith("windows")
 
 
 def test_the_patch_module_opens_no_connection_and_imports_nothing_that_could():
