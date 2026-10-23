@@ -552,6 +552,10 @@ class TermList:
         """(line, rule index) for every hit, sorted."""
         return sorted({(a, idx) for a, _b, idx in self.find_spans(text)})
 
+    def anywhere(self, text: str) -> bool:
+        """Is a term in the text, also glued to other letters? For hiding a name or a message: when in doubt, hide."""
+        return bool(self.find(text)) or (self._any is not None and self._any.search(fold(text)) is not None)
+
 
 @dataclass
 class TermsSource:
@@ -939,7 +943,7 @@ def _git(repo: Path | str, *args: str, stdin: bytes | None = None) -> bytes:
         raise GitError("git is not installed or not on PATH") from None
     if p.returncode != 0:
         why = p.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise GitError(f"git {args[0]} failed" + (f": {why[-1][:200]}" if why else ""))
+        raise GitError(f"git {args[0]} failed" + (f": {why[-1]}" if why else ""))         # whole: main() checks, then cuts
     return p.stdout
 
 
@@ -1278,14 +1282,14 @@ class Scanner:
         shown = self._safe_cache.get(raw)
         if shown is None:
             shown = raw
-            if self.terms and self.terms.find(raw):
+            if self.terms and self.terms.anywhere(raw):
                 shown = f"<redacted name #{self._names.setdefault(raw, len(self._names) + 1)}>"
             self._safe_cache[raw] = shown
         return shown
 
     def scrub(self, message: str) -> str:
         """A message of the tool or of git, safe to print: gone if it holds a personal term."""
-        if self.terms and self.terms.find(message):
+        if self.terms and self.terms.anywhere(message):
             return "<message hidden: it contains a personal term>"
         return message
 
@@ -1913,6 +1917,10 @@ def install_hooks(repo: Path) -> str:
 
 # ---------------------------------------------------------------- command line
 
+def _cut(s: str, limit: int = 400) -> str:
+    return s if len(s) <= limit else s[:limit] + " ..."
+
+
 def _escape_data(s: str) -> str:
     """The message of a GitHub Actions workflow command."""
     return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
@@ -2033,8 +2041,9 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     (config_errors if strict else warnings).extend(report.unscanned)
     findings = sorted(report.findings, key=lambda f: (f.where, f.line or 0, f.rule, f.extra))
     for w in notes + warnings:
-        print(f"warning: {scanner.scrub(w)}", file=sys.stderr)
-    config_errors = [scanner.scrub(e) for e in config_errors]
+        print(f"warning: {scanner.scrub(_cut(scanner.scrub(w)))}", file=sys.stderr)
+    # checked for terms whole, then cut, then checked again (a cut can make a term out of a longer word)
+    config_errors = [scanner.scrub(_cut(scanner.scrub(e))) for e in config_errors]
     for e in config_errors:
         print(f"error: {e}", file=sys.stderr)
     for f in findings[:MAX_LINES_PRINTED]:

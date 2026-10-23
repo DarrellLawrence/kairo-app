@@ -70,10 +70,10 @@ Invisible characters (every format character, combining mark and control charact
 characters too), accents and look-alike letters are ignored. A line `regex:<pattern>` is a regular expression instead
 (it sees the text as written and with umlauts folded).
 
-A matched term is never printed, not even in CI logs: the report shows `file:line` and the rule number
-(`personal term #4 (list line 7)`) so you can find the term in your own list. A file name, a ref name or a git error
-message that holds a term is shown as `<redacted name #3>` or hidden. Without a list the check is skipped
-with a warning (exit 0), but in CI on `main` it is an error (exit 2), so a missing secret is noticed.
+A matched term is never printed, not even in CI logs: the report shows `file:line` and the rule number (`personal term
+#4 (list line 7)`) so you can find the term in your own list. A file name, a ref name or a git error message that
+holds a term (also glued to other letters) is shown as `<redacted name #3>` or hidden. Without a list the check is
+skipped with a warning (exit 0), but in CI on `main` it is an error (exit 2), so a missing secret is noticed.
 
 ## Running it by hand
 

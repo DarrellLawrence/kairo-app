@@ -1237,6 +1237,23 @@ def test_error_messages_never_show_a_term(tmp_path):
     no_leak(out, PLACE)
 
 
+def test_a_long_git_error_is_checked_for_terms_before_it_is_cut(tmp_path):
+    """git's message used to be cut to 200 characters first: a term over the cut no longer matched and its first
+    letters were printed."""
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    first, last = NAME.split()
+    for ref in ("x" * 156 + f"-{first}-{last}-notes",            # "fatal: bad object refs/heads/" + 157 = 186: cut in the name
+                "x" * 157 + f"{first}-{last}-notes"):           # glued to other letters it is no word, but it is still hidden
+        (repo / ".git" / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+        for old in (repo / ".git" / "refs" / "heads").glob("x*"):
+            old.unlink()
+        write(repo / ".git" / "refs" / "heads" / ref, "1234567890" * 4 + "\n")
+        code, out = scan(tmp_path, "--history", "--ci", terms=[NAME], cwd=repo, GITHUB_ACTIONS="true")
+        assert code == 2 and "error" in out, out
+        no_leak(out, first, last[:4])
+
+
 def test_redacted_names_are_numbered_not_hashed(tmp_path):
     import hashlib
     name = f"docs/{PLACE}/{NAME.replace(' ', '-')}.md"
