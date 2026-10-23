@@ -302,3 +302,98 @@ def test_the_buffers_delay_in_packets_clean_and_after_one_lost_packet():
     clean, lossy = _lag(patched), _lag(patched_again, lost_at=100)
     assert clean[50] == 1 and clean[-1] == 1                     # 20 ms
     assert max(lossy[95:120]) == 8 and lossy[-1] == 6            # 160 ms just after the loss, 120 ms from then on
+
+
+# ---------------------------------------------------------------- in a call: voicertc.connect and the app's flag
+
+from tests.test_voice_local import local  # noqa: E402,F401  (the app with the fake voice model and Claude)
+
+
+def _needs_pipecat():
+    pytest.importorskip("pipecat")
+    pytest.importorskip("aiortc")
+
+
+def _shape_of(conn) -> list[tuple[int, int]]:
+    """(capacity, prefetch) of each audio receiver's buffer on a call's connection."""
+    return [(t.receiver.__dict__[rtcjitter.SLOT]._capacity, t.receiver.__dict__[rtcjitter.SLOT]._prefetch)
+            for t in conn.pc.getTransceivers() if t.kind == "audio"]
+
+
+async def _phone_offer():
+    """The fake phone: a peer connection with a microphone, and its offer."""
+    from aiortc import RTCConfiguration, RTCPeerConnection
+
+    from tests.test_voice_rtc import _phone_track
+    from app import voicertc
+    voicertc.tailnet_only(allow_loopback=True)
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+    pc.addTrack(_phone_track([0.5]))
+    await pc.setLocalDescription(await pc.createOffer())
+    return pc
+
+
+@pytest.mark.parametrize("patch, shape", [(False, (16, 4)), (True, (8, 1))])
+def test_a_call_connection_has_the_8_and_1_buffer_only_when_asked(patch, shape):
+    """The receivers exist when connect() returns (before build_call), so that is where it has to happen."""
+    _needs_pipecat()
+    from app import voicertc
+
+    async def go():
+        pc = await _phone_offer()
+        conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                      jitter_patch=patch)
+        try:
+            return _shape_of(conn)
+        finally:
+            await conn.disconnect()
+            await pc.close()
+    assert asyncio.run(go()) == [shape]
+
+
+def test_connect_without_the_argument_leaves_the_library_as_it_is():
+    _needs_pipecat()
+    from app import voicertc
+
+    async def go():
+        pc = await _phone_offer()
+        conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
+        try:
+            return _shape_of(conn)
+        finally:
+            await conn.disconnect()
+            await pc.close()
+    assert asyncio.run(go()) == [(16, 4)]
+
+
+def test_the_app_reads_the_flag_at_the_start_of_every_call(local, monkeypatch):
+    """Off by default; the owner turns it on and the next call has the small buffer; off again, the next is stock."""
+    _needs_pipecat()
+    from app import voicertc
+    from aiortc import RTCSessionDescription
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    seen = []
+    real = voicertc.connect
+
+    async def spy(*args, **kwargs):
+        conn = await real(*args, **kwargs)
+        seen.append(_shape_of(conn))
+        return conn
+    monkeypatch.setattr(voicertc, "connect", spy)
+
+    async def call():
+        pc = await _phone_offer()
+        r = await asyncio.to_thread(local.post, "/api/rtc/offer",
+                                    json={"sdp": pc.localDescription.sdp, "type": "offer", "path": "call"})
+        assert r.status_code == 200, r.text
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=r.json()["sdp"], type=r.json()["type"]))
+        await pc.close()
+
+    async def go():
+        await call()                                                    # nothing set: the default
+        assert (await asyncio.to_thread(local.put, "/api/flags/" + FLAG, json={"on": True})).status_code == 200
+        await call()
+        assert (await asyncio.to_thread(local.put, "/api/flags/" + FLAG, json={"on": False})).status_code == 200
+        await call()
+    asyncio.run(go())
+    assert seen == [[(16, 4)], [(8, 1)], [(16, 4)]]

@@ -1280,7 +1280,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         call_id = body.get("call_id") if isinstance(body.get("call_id"), int) else None
         for old in list(_rtc_calls.values()):        # a new call (or a reconnect) replaces the old one
             await old.stop()
-        conn = await voicertc.connect(sdp, "offer")
+        with session_for(engine) as s_:              # the owner's switches, read once at the start of the call
+            jitter_patch = feature_flags.on(s_, "g4.jitter_patch")
+        conn = await voicertc.connect(sdp, "offer", jitter_patch=jitter_patch)
 
         async def send(frame) -> None:
             if isinstance(frame, (bytes, bytearray)):

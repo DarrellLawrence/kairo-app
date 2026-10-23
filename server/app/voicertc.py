@@ -36,6 +36,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import rtcjitter
 from .voicelink import first_clause
 
 log = logging.getLogger("kairo.voicertc")
@@ -131,13 +132,18 @@ def offer_on_tailnet(sdp: str) -> str:
     return "\r\n".join(out) + "\r\n"
 
 
-async def connect(sdp: str, kind: str = "offer", *, allow_loopback: bool = False):
+async def connect(sdp: str, kind: str = "offer", *, allow_loopback: bool = False, jitter_patch: bool = False):
     """The phone's offer in, this PC's answer out: a SmallWebRTCConnection on the tailnet only (no STUN, no
-    TURN: the phone and this PC reach each other over Tailscale, direct or through its relay)."""
+    TURN: the phone and this PC reach each other over Tailscale, direct or through its relay).
+    jitter_patch (flag g4.jitter_patch, read by the caller at the start of the call): the audio jitter buffer
+    gets 8 packets that waits for 1 instead of 16 and 4 (rtcjitter.py). Here, because the library builds its
+    receivers while it takes the offer: build_call comes after, and the first packet after the answer."""
     from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
     tailnet_only(allow_loopback=allow_loopback or ALLOW_LOOPBACK)
     conn = SmallWebRTCConnection(ice_servers=[])
     await conn.initialize(sdp=offer_on_tailnet(sdp), type=kind)
+    if jitter_patch:
+        rtcjitter.install(conn.pc)
     return conn
 
 
