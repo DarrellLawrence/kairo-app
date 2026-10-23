@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { applyFlags, resetFlags } from '../src/flags.js'
 import { makeRtcMeter, readStats } from '../src/rtclink.js'
-import { FakePeer, installPhone, logged } from './phone-fakes.js'
+import { FakePeer, flushLogs, installPhone, logged } from './phone-fakes.js'
 
 function clock(t = 0) {
   return { now: () => t, set: (v) => { t = v } }
@@ -325,4 +325,16 @@ test('readStats: the selected path (round trip, candidate types) and the inbound
   assert.deepEqual(readStats(new Map()), { path: null, inbound: null })
   const noJitterYet = readStats(new Map([['a', { id: 'a', type: 'inbound-rtp', kind: 'audio', packetsReceived: 3 }]]))
   assert.deepEqual(noJitterYet, { path: null, inbound: { received: 3, lost: 0, jitter_ms: null } })
+})
+
+test('g7.call_logs: every line fits what the PC keeps of one (600 characters) with real iOS values', async () => {
+  const { line, rec, micTrack } = await rtcLine({}, { ua: UA, settings: { echoCancellation: false, sampleRate: 48000, volume: 1 } })
+  micTrack.fire('mute')
+  FakePeer.last.stats = [{ type: 'inbound-rtp', kind: 'audio', packetsReceived: 240, packetsLost: 3, jitterBufferDelay: 3, jitterBufferEmittedCount: 100 }]
+  await new Promise((r) => setTimeout(r, 1300))
+  line.close()
+  flushLogs()
+  const mine = rec.logs.filter((e) => /^(mic|audio|rtc)\./.test(e.event))
+  assert.ok(mine.length >= 5, mine.map((e) => e.event).join(' '))
+  for (const e of mine) assert.ok(JSON.stringify(e.data).length <= 600, `${e.event}: ${JSON.stringify(e.data).length}`)
 })

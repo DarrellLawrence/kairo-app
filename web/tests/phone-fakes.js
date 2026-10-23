@@ -129,6 +129,9 @@ export function logged(rec, name) {
   return rec.logs.filter((e) => e.event === name).map((e) => e.data)
 }
 
+/* Everything the page logged so far has reached rec.logs. */
+export function flushLogs() { flushClientLog() }
+
 /* The page may never show 'playback' before 'play-and-record': that flip is what puts the audio outside the
    call route (research §7, refuted claim 4). A 'playback' after the call's mic closed is fine. */
 export function playbackBeforeCall(sessionLog) {
