@@ -772,6 +772,12 @@ def b64(text: str) -> str:
     return base64.b64encode(text.encode()).decode()
 
 
+def mime_b64(text: str) -> str:
+    """A mail body: base64 wrapped at 76 columns."""
+    enc = b64(text)
+    return "\n".join(enc[i: i + 76] for i in range(0, len(enc), 76)) + "\n"
+
+
 def hit(tmp_path: Path, content: str | bytes, name: str = "a.txt", terms: list[str] | None = None, **env) -> tuple[int, str]:
     """Scan one file with --tree."""
     d = tmp_path / "t"
@@ -806,6 +812,10 @@ ENCODED: dict[str, tuple[str | bytes, int, int]] = {
     "base64-in-json": (json.dumps({"blob": b64(f"{NAME}, {PLACE}")}), 1, 1),
     "base64-url-safe-no-padding": (json.dumps({"blob": base64.urlsafe_b64encode(UML.encode()).decode().rstrip("=")}), 2, 1),
     "base64-twice": (b64(b64(NAME)), 1, 1),
+    "base64-right-after-an-equals-sign": ("PROFILE_BLOB=" + b64(f"{NAME}, {PLACE}"), 1, 1),
+    "base64-in-a-query-string": ("https://x.example/load?data=" + b64(f"owner {NAME}"), 1, 1),
+    "base64-mime-wrapped-name-over-the-line-break": (
+        "Content-Transfer-Encoding: base64\n\n" + mime_b64("x" * 53 + f" {NAME} " + "y" * 120), 1, 3),     # the wrap cuts the first name
     "url-inside-json": (json.dumps({"u": urllib.parse.quote(NAME)}), 1, 1),
     "last-comma-first": (REVERSED, 1, 1),
     "csv-last-first": (f"Name;Vorname\n{';'.join(reversed(NAME.split()))}\n", 1, 2),

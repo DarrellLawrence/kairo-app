@@ -176,7 +176,9 @@ _RX_PCT_RUN = re.compile(r"(?:%[0-9a-fA-F]{2})+")
 _RX_QP_RUN = re.compile(r"(?:=[0-9A-Fa-f]{2})+")
 _RX_ENTITY = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
 _RX_RFC2047 = re.compile(r"=\?([A-Za-z0-9_\-]{1,40})\?([bBqQ])\?([^?\s]*)\?=")
-_RX_B64 = re.compile(r"(?<![A-Za-z0-9+/_\-=])[A-Za-z0-9+/_\-]{16,}={0,2}(?![A-Za-z0-9+/_\-])")
+_RX_B64 = re.compile(r"(?<![A-Za-z0-9+/_\-])[A-Za-z0-9+/_\-]{16,}={0,2}(?![A-Za-z0-9+/_\-])")    # also KEY=<base64>
+# base64 wrapped over lines (a mail body at 76 columns, PEM at 64): two or more lines of nothing but base64
+_RX_B64_LINES = re.compile(r"(?m)^[ \t]*[A-Za-z0-9+/]{16,}[ \t]*\r?\n(?:[ \t]*[A-Za-z0-9+/]{2,}={0,2}[ \t]*(?:\r?\n|\Z))+")
 
 
 def _san(s: str) -> str:
@@ -310,7 +312,16 @@ def _base64_view(text: str) -> str | None:
         budget[0] -= len(dec)
         return " " + _san(dec) + " "
 
-    out = _RX_B64.sub(rep, text)
+    def rep_lines(m: re.Match) -> str:                   # decoded as one run; the line breaks stay (line numbers)
+        if budget[0] <= 0:
+            return m[0]
+        dec = _try_base64("".join(m[0].split()))
+        if dec is None:
+            return m[0]
+        budget[0] -= len(dec)
+        return " " + _san(dec) + " " + "\n" * m[0].count("\n")
+
+    out = _RX_B64.sub(rep, _RX_B64_LINES.sub(rep_lines, text) if "\n" in text else text)
     return out if out != text else None
 
 

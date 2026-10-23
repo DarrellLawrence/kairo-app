@@ -60,14 +60,15 @@ empty lines are ignored. **One term per line.** A line with a comma or a semicol
 one line would otherwise be read as one term that matches nothing. (A secret set with a literal `\n` between the terms
 is read as separate terms, with a warning.)
 
-**How a term matches.** Without regard to case; an umlaut also matches its two-letter form and the plain vowel
-(`ü` = `ue` = `u`, `ß` = `ss`); never inside a longer word; with or without punctuation or spaces between the words
-(`first last`, `first.last`, `first_last`, `FirstLast`, `firstlast@...`), and a two or three word name also as
-`last, first`. A number matches with any grouping (`079 555 12 34` = `0795551234`), and a number that starts with `0`
-also with a country code (`+41 79 ...`, `0041 79 ...`). Text is also read after decoding: `\u00fc`, `\xFC`, `%C3%BC`,
-`&uuml;`, `=C3=BC`, RFC 2047 headers and base64 (two layers). Invisible characters (every format character, combining
-mark and control character: zero-width, tag and variation characters too), accents and look-alike letters are ignored.
-A line `regex:<pattern>` is a regular expression instead (it sees the text as written and with umlauts folded).
+**How a term matches.** Without regard to case; an umlaut also matches its two-letter form and the plain vowel (`ü` =
+`ue` = `u`, `ß` = `ss`); never inside a longer word; with or without punctuation or spaces between the words (`first
+last`, `first.last`, `first_last`, `FirstLast`, `firstlast@...`), and a two or three word name also as `last, first`.
+A number matches with any grouping (`079 555 12 34` = `0795551234`), and a number that starts with `0` also with a
+country code (`+41 79 ...`, `0041 79 ...`). Text is also read after decoding: `\u00fc`, `\xFC`, `%C3%BC`, `&uuml;`,
+`=C3=BC`, RFC 2047 headers and base64 (two layers; also right after `=` and wrapped over lines, as in a mail).
+Invisible characters (every format character, combining mark and control character: zero-width, tag and variation
+characters too), accents and look-alike letters are ignored. A line `regex:<pattern>` is a regular expression instead
+(it sees the text as written and with umlauts folded).
 
 A matched term is never printed, not even in CI logs: the report shows `file:line` and the rule number
 (`personal term #4 (list line 7)`) so you can find the term in your own list. A file name, a ref name or a git error
