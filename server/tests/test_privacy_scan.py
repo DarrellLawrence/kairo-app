@@ -173,6 +173,21 @@ def no_leak(out: str, *secrets: str) -> None:
 
 # ---------------------------------------------------------------- matching rules (unit)
 
+def test_fold_drops_every_invisible_character_but_keeps_the_spaces(ps):
+    """Format characters (Cf), combining and enclosing marks (Mn, Me) and controls other than whitespace inside a word
+    must not hide it; a tab, a line break or a form feed still separates two words."""
+    import unicodedata
+    plain = ps.fold(PLACE)
+    missed = [hex(cp) for cp in range(0x110000)
+              if (unicodedata.category(chr(cp)) in ("Cf", "Mn", "Me")
+                  or (unicodedata.category(chr(cp)) == "Cc" and not chr(cp).isspace()))
+              and ps.fold(PLACE[:4] + chr(cp) + PLACE[4:]) != plain]
+    assert missed == [], missed[:20]
+    for sep in "\t\n\r\x0b\x0c\x1e\x1f\x85 ":
+        assert ps.fold(f"ab{sep}cd") == f"ab{sep}cd", repr(sep)
+    assert ps.TermList.parse(PLACE).find(PLACE[:4] + "\t" + PLACE[4:]) == []
+
+
 def test_fold_umlauts_case_and_accents(ps):
     assert ps.fold("Müller") == "mueller"
     assert ps.fold("ÖL Äpfel Üben") == "oel aepfel ueben"
@@ -809,6 +824,16 @@ ENCODED: dict[str, tuple[str | bytes, int, int]] = {
     "utf-16-le-with-bom": (NAME.encode("utf-16"), 1, 1),
     "utf-32-with-bom": (NAME.encode("utf-32"), 1, 1),
     "utf-16-be-without-bom": ("x\n".encode("utf-16-be") + NAME.encode("utf-16-be"), 1, 2),
+    "utf-32-le-without-bom": ((NAME + "\n").encode("utf-32-le"), 1, 1),
+    "utf-32-be-without-bom": (("x\n" + NAME).encode("utf-32-be"), 1, 2),
+    "tag-character-inside-a-word": (PLACE[:4] + chr(0xE0041) + PLACE[4:], 3, 1),
+    "variation-selector-supplement-inside-a-word": (PLACE[:4] + chr(0xE0100) + PLACE[4:], 3, 1),
+    "arabic-format-character-inside-a-word": (PLACE[:4] + chr(0x600) + PLACE[4:], 3, 1),
+    "braille-blank-inside-a-word": (PLACE[:4] + chr(0x2800) + PLACE[4:], 3, 1),
+    "c1-control-inside-a-word": ("x " + PLACE[:4] + chr(0x80) + PLACE[4:], 3, 1),
+    "delete-inside-a-word": (PLACE[:4] + chr(0x7F) + PLACE[4:], 3, 1),
+    "ascii-control-inside-a-word": (PLACE[:4] + chr(0x1) + PLACE[4:], 3, 1),
+    "ascii-control-between-words": ("field" + chr(0x1) + NAME, 1, 1),
     "latin-1-bytes": (UML.encode("latin-1"), 2, 1),
 }
 

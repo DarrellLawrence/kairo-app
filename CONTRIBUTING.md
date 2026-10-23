@@ -65,8 +65,9 @@ is read as separate terms, with a warning.)
 (`first last`, `first.last`, `first_last`, `FirstLast`, `firstlast@...`), and a two or three word name also as
 `last, first`. A number matches with any grouping (`079 555 12 34` = `0795551234`), and a number that starts with `0`
 also with a country code (`+41 79 ...`, `0041 79 ...`). Text is also read after decoding: `\u00fc`, `\xFC`, `%C3%BC`,
-`&uuml;`, `=C3=BC`, RFC 2047 headers and base64 (two layers). Invisible characters, accents and look-alike letters are
-ignored. A line `regex:<pattern>` is a regular expression instead (it sees the text as written and with umlauts folded).
+`&uuml;`, `=C3=BC`, RFC 2047 headers and base64 (two layers). Invisible characters (every format character, combining
+mark and control character: zero-width, tag and variation characters too), accents and look-alike letters are ignored.
+A line `regex:<pattern>` is a regular expression instead (it sees the text as written and with umlauts folded).
 
 A matched term is never printed, not even in CI logs: the report shows `file:line` and the rule number
 (`personal term #4 (list line 7)`) so you can find the term in your own list. A file name, a ref name or a git error
@@ -90,11 +91,12 @@ purpose (for a step that has no list; another job checks the terms).
 
 ## What it reads, and what it cannot
 
-It reads text files of any size (in pieces), UTF-8, Windows-1252 and UTF-16/32 text, the strings of binaries (text
-chunks of PNG, tags of WAV and MP3, EXIF, SQLite files), PDFs (metadata and the text of their compressed streams),
-office files, zip, gzip, bzip2, xz and tar files inside each other (a `.tar.gz`, an installer stub in front of a zip
-...), zip comments, commit objects (all headers, not only author and message), annotated tags and the names of files,
-refs and zip members (also symlinks and files that only a merge commit introduced).
+It reads text files of any size (in pieces), UTF-8, Windows-1252 and UTF-16/32 text (with or without a BOM), the
+strings of binaries (text chunks of PNG, tags of WAV and MP3, EXIF, SQLite files), PDFs (metadata and the text of
+their compressed streams), office files, zip, gzip, bzip2, xz and tar files inside each other (a `.tar.gz`, an
+installer stub in front of a zip ...), zip comments, commit objects (all headers, not only author and message),
+annotated tags and the names of files, refs and zip members (also symlinks and files that only a merge commit
+introduced).
 
 What it **cannot** do: 7z, rar and zstd archives, encrypted or damaged members and anything nested deeper than 8
 archives are reported as "not scanned" (an error in CI and for a zip; a warning on your machine). PDFs whose text is in

@@ -56,6 +56,7 @@ import bisect
 import bz2
 import codecs
 import fnmatch
+import functools
 import gzip
 import html
 import io
@@ -116,24 +117,38 @@ _CONFUSABLES = {"\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0
                 "\u0456": "i", "\u0458": "j", "\u04bb": "h", "\u0455": "s", "\u03bf": "o", "\u03b1": "a", "\u03c1": "p",
                 "\u03b9": "i", "\u03ba": "k", "\u03bd": "v", "\u03c5": "u"}
 _CONFUSABLES_RX = re.compile("[" + "".join(_CONFUSABLES) + "]")
-# soft hyphen, zero-width characters, direction marks, variation selectors, byte order mark, and combining accents
-_INVISIBLE = re.compile(
-    "[\u00ad\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164"
-    "\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]")
+_FILLERS = frozenset("\u115f\u1160\u3164\uffa0\u2800")      # Hangul and Braille fillers: letters that show nothing
+_ASCII_CONTROLS = re.compile("[\x00-\x08\x0e-\x1b\x7f]")
+_CONTROLS = re.compile("[\x00-\x08\x0e-\x1b\x7f-\x84\x86-\x9f]")    # controls that are not white space
+
+
+@functools.lru_cache(maxsize=None)
+def _shows_nothing(ch: str) -> bool:
+    cat = unicodedata.category(ch)
+    return cat in ("Cf", "Mn", "Me") or (cat == "Cc" and not ch.isspace()) or ch in _FILLERS
+
+
+def _drop_invisible(s: str) -> str:
+    """s without what shows nothing inside a word: format characters (zero-width, direction marks, tags, the byte order
+    mark ...), combining and enclosing marks (accents after NFKD, variation selectors), controls that are not white
+    space and the fillers. White space stays, it separates words. Only the characters s holds are looked up."""
+    bad = [c for c in set(s) if _shows_nothing(c)]
+    return re.sub("[" + "".join(map(re.escape, bad)) + "]", "", s) if bad else s
 
 
 def fold(text: str) -> str:
     """Lower case, umlauts as their two-letter form (ue, oe, ae, ss), other accents dropped, quotes and dashes plain,
     invisible characters gone. Never changes the number of newlines."""
     if text.isascii():
-        return text.lower()
+        return _ASCII_CONTROLS.sub("", text.lower())
     s = text if unicodedata.is_normalized("NFC", text) else unicodedata.normalize("NFC", text)
+    s = s.replace("\u0345", "")                     # a combining mark that casefold would turn into a letter
     s = s.casefold().replace("\u00e4", "ae").replace("\u00f6", "oe").replace("\u00fc", "ue")     # casefold: sharp s -> ss
     if not s.isascii():
         s = _PUNCT_RX.sub(lambda m: _PUNCT_MAP[m[0]], s)
         s = _CONFUSABLES_RX.sub(lambda m: _CONFUSABLES[m[0]], s)
-        s = _INVISIBLE.sub("", unicodedata.normalize("NFKD", s))
-    return s
+        s = _drop_invisible(unicodedata.normalize("NFKD", s))
+    return _ASCII_CONTROLS.sub("", s)
 
 
 def _line(text: str, pos: int) -> int:
@@ -308,6 +323,9 @@ def _views(text: str) -> list[View]:
             seen.add(t)
             views.append((t, lm))
 
+    if _CONTROLS.search(text):                       # fold drops a control inside a word; between two words it separates
+        add(_CONTROLS.sub(" ", text), None)
+
     base, base_map = text, None
     joined = _qp_join(text)
     if joined is not None:
@@ -415,7 +433,7 @@ def _word_regex(word: str) -> str:
 
 
 def _term_regex(raw: str) -> re.Pattern | None:
-    cleaned = _INVISIBLE.sub("", unicodedata.normalize("NFC", raw).casefold())
+    cleaned = _drop_invisible(unicodedata.normalize("NFC", raw).casefold())
     words = _WORD.findall(cleaned)
     if not words:
         return None
@@ -546,7 +564,7 @@ def decode_terms_file(data: bytes) -> tuple[str, str | None]:
         return data.decode("utf-16", "replace"), "the list is UTF-16; save it as UTF-8"
     wide = _wide_codec(data)
     if wide:
-        return data.decode(wide, "replace"), "the list is UTF-16 without a BOM; save it as UTF-8"
+        return data.decode(wide, "replace"), f"the list is {wide[:6].upper()} without a BOM; save it as UTF-8"
     try:
         return data.decode("utf-8-sig"), None
     except UnicodeDecodeError:
@@ -917,8 +935,15 @@ def _dec(b: bytes) -> str:
 # ---------------------------------------------------------------- reading bytes as text
 
 def _wide_codec(data: bytes) -> str | None:
-    """utf-16-le / utf-16-be for a text without a BOM (every other byte is a NUL), else None."""
+    """utf-32-le / -be or utf-16-le / -be for a text without a BOM (the high bytes of each unit are NUL), else None."""
     sample = data[:4096]
+    quarter = len(sample) // 4
+    if quarter >= 4:
+        cols = [sample[k: quarter * 4: 4].count(0) for k in range(4)]
+        if cols[2] > 0.9 * quarter and cols[3] > 0.9 * quarter and cols[0] < 0.05 * quarter:
+            return "utf-32-le"
+        if cols[0] > 0.9 * quarter and cols[1] > 0.9 * quarter and cols[3] < 0.05 * quarter:
+            return "utf-32-be"
     half = len(sample) // 2
     if half < 4:
         return None
