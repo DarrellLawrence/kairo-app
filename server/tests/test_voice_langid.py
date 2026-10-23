@@ -1,14 +1,12 @@
 """G2: one encoder pass for finding the language (English or German) and writing the words down
 (app/voice/langid.py), behind g2.single_encode_langid.
 
-Three kinds of test: the rule that picks the language (runs everywhere); a pin on the faster-whisper
-internals the path relies on (runs where faster-whisper is installed; a bump of the pinned version fails it
-on purpose); and the real thing against a real model (KAIRO_STT_TEST_MODEL = a model folder, e.g. the small
-one; and in the CI voice job, with Kairo's own voices, KAIRO_VOICE_TEST=1)."""
+Two kinds of test here: the rule that picks the language (runs everywhere) and the real thing against a real
+model (KAIRO_STT_TEST_MODEL = a model folder, e.g. the small one). The pin on the faster-whisper internals and
+the run with Kairo's own voices (KAIRO_VOICE_TEST=1) are in test_voice.py, which the CI voice job runs."""
 
 from __future__ import annotations
 
-import inspect
 import os
 import wave
 from pathlib import Path
@@ -36,25 +34,6 @@ SPEECH = Path(__file__).parent / "fixtures" / "speech_en.wav"        # "Remind m
 def test_the_language_is_english_or_german_and_is_taken_only_when_the_two_together_carry_half(probs, prev, expected):
     language, _p, accepted = langid.pick_language(probs, prev)
     assert (language, accepted) == expected
-
-
-# ---------------------------------------------------------------- the pin
-
-def test_the_faster_whisper_internals_the_path_uses_are_the_ones_it_was_checked_against():
-    fw = pytest.importorskip("faster_whisper")
-    assert fw.__version__ == langid.PINNED, "faster-whisper changed: re-check app/voice/langid.py against its transcribe()"
-    from faster_whisper import WhisperModel
-    from faster_whisper.transcribe import TranscriptionOptions
-    assert list(inspect.signature(WhisperModel.generate_segments).parameters) == [
-        "self", "features", "tokenizer", "options", "log_progress", "encoder_output"]
-    assert list(inspect.signature(WhisperModel.encode).parameters) == ["self", "features"]
-    # the first window reuses a given encoder output: that is what saves the second pass
-    assert "if seek > 0 or encoder_output is None" in inspect.getsource(WhisperModel.generate_segments)
-    # every option is either a transcribe() argument or one langid sets itself
-    import dataclasses
-    fields = {f.name for f in dataclasses.fields(TranscriptionOptions)}
-    given = set(inspect.signature(WhisperModel.transcribe).parameters)
-    assert fields - given <= {"temperatures"}, fields - given
 
 
 # ---------------------------------------------------------------- the real thing
@@ -125,32 +104,3 @@ def test_a_voice_with_the_flag_on_hears_english_and_remembers_it(tmp_path):
     t = v.transcribe_pcm(pcm, "auto")
     assert t.language == "en" and "dentist" in t.text.lower() and model.encodes == 1
     assert v._last_language == "en"
-
-
-@pytest.mark.skipif(os.environ.get("KAIRO_VOICE_TEST") != "1", reason="real voice models: set KAIRO_VOICE_TEST=1 (CI voice job)")
-def test_english_and_german_in_kairos_own_voices_are_found_in_one_pass(tmp_path):
-    """CI voice job: Kokoro and Piper say a sentence each, Whisper (CPU, base) finds the language and writes it down."""
-    from app import voice as voice_mod
-    from app.voicelink import wav_pcm
-    import numpy as np
-    v = Voice(os.environ.get("KAIRO_VOICE_MODELS") or str(tmp_path / "models"))
-    v.download()
-    v.tuning = voice_mod.Tuning(single_encode_langid=True)
-    model = v._load_stt()
-    model.encodes = 0
-    real = model.encode
-
-    def counted(features):
-        model.encodes += 1
-        return real(features)
-    model.encode = counted
-    for text, lang in (("Kairo voice test. Please call the dentist tomorrow.", "en"),
-                       ("Guten Morgen. Heute hast du eine Prüfung in Mathe.", "de")):
-        wav, said = v.speak(text, lang)
-        pcm, rate = wav_pcm(wav)
-        x = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
-        x16 = np.interp(np.arange(0, len(x), rate / 16000), np.arange(len(x)), x).astype("<i2").tobytes()
-        model.encodes = 0
-        t = v.transcribe_pcm(x16, "auto")
-        assert said == lang and t.language == lang and t.text, (lang, t)
-        assert model.encodes == 1

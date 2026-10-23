@@ -577,7 +577,7 @@ class Voice:
         with self._count:
             self._active += 1
         try:
-            if detect and not self._single_failed and getattr(model.model, "is_multilingual", True):
+            if detect and not self._single_failed and getattr(getattr(model, "model", None), "is_multilingual", True):
                 try:
                     segments, info = langid.transcribe_en_de(model, audio(), prev_language=prev_language,
                                                              vad_filter=vad_filter, **opts)

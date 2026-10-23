@@ -4,6 +4,7 @@ end-to-end run (Kokoro speaks, Whisper listens) when KAIRO_VOICE_TEST=1 (CI voic
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import io
 import os
 import wave
@@ -18,7 +19,7 @@ from app.main import create_app
 from app.profile import load_profile
 from app.settings import REPO_ROOT
 from app.voice import NotInstalled, Transcript, Voice, VoiceError, _clean_for_speech, language_of, to_wav
-from app.voice import calls
+from app.voice import calls, langid
 
 
 def test_language_and_cleanup():
@@ -310,3 +311,51 @@ def test_the_voice_model_is_named_in_the_requirements_so_a_new_one_gets_a_new_fo
     from app import voice
     req = (Path(voice.__file__).resolve().parents[2] / "requirements-voice.txt").read_text(encoding="utf-8")
     assert voice.KOKORO_MODEL in req and "int8" not in voice.KOKORO_MODEL
+
+
+# ---------------------------------------------------------------- G2: one pass for the language and the words (app/voice/langid.py)
+
+def test_the_faster_whisper_internals_the_path_uses_are_the_ones_it_was_checked_against():
+    fw = pytest.importorskip("faster_whisper")
+    assert fw.__version__ == langid.PINNED, "faster-whisper changed: re-check app/voice/langid.py against its transcribe()"
+    from faster_whisper import WhisperModel
+    from faster_whisper.transcribe import TranscriptionOptions
+    assert list(inspect.signature(WhisperModel.generate_segments).parameters) == [
+        "self", "features", "tokenizer", "options", "log_progress", "encoder_output"]
+    assert list(inspect.signature(WhisperModel.encode).parameters) == ["self", "features"]
+    # the first window reuses a given encoder output: that is what saves the second pass
+    assert "if seek > 0 or encoder_output is None" in inspect.getsource(WhisperModel.generate_segments)
+    # every option is either a transcribe() argument or one langid sets itself
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(TranscriptionOptions)}
+    given = set(inspect.signature(WhisperModel.transcribe).parameters)
+    assert fields - given <= {"temperatures"}, fields - given
+
+
+@pytest.mark.skipif(os.environ.get("KAIRO_VOICE_TEST") != "1", reason="real voice models: set KAIRO_VOICE_TEST=1 (CI voice job)")
+def test_real_english_and_german_are_found_in_one_encoder_pass(tmp_path):
+    """CI voice job: Kokoro and Piper say a sentence each, Whisper (CPU, base) finds the language and writes it down."""
+    from app import voice as voice_mod
+    from app.voicelink import wav_pcm
+    import numpy as np
+    v = Voice(os.environ.get("KAIRO_VOICE_MODELS") or str(tmp_path / "models"))
+    v.download()
+    v.tuning = voice_mod.Tuning(single_encode_langid=True)
+    model = v._load_stt()
+    model.encodes = 0
+    real = model.encode
+
+    def counted(features):
+        model.encodes += 1
+        return real(features)
+    model.encode = counted
+    for text, lang in (("Kairo voice test. Please call the dentist tomorrow.", "en"),
+                       ("Guten Morgen. Heute hast du eine Prüfung in Mathe.", "de")):
+        wav, said = v.speak(text, lang)
+        pcm, rate = wav_pcm(wav)
+        x = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        x16 = np.interp(np.arange(0, len(x), rate / 16000), np.arange(len(x)), x).astype("<i2").tobytes()
+        model.encodes = 0
+        t = v.transcribe_pcm(x16, "auto")
+        assert said == lang and t.language == lang and t.text, (lang, t)
+        assert model.encodes == 1
