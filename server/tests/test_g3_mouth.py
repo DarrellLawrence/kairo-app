@@ -53,7 +53,7 @@ def test_the_app_gives_its_voice_model_the_owners_switches(migrated):
 
 
 def test_the_voice_lab_starts_its_servers_like_the_real_one(migrated, tmp_path, monkeypatch):
-    """The lab measures what will run: same flags (it used to have its own, older, args)."""
+    """The lab measures what will run: it reads the same switches the real server does."""
     from tests.test_voicelab import lab, make_site
     site = make_site(monkeypatch, tmp_path)
     engine, the_lab = lab(migrated, tmp_path, site, None, monkeypatch)
