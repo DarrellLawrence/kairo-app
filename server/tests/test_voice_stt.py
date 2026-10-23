@@ -26,6 +26,7 @@ class Whisper:
     def __init__(self, monkeypatch, *, fail_on=(), language="en", text=" hello"):
         self.made, self.calls = [], []
         self.fail_on, self.language, self.text = set(fail_on), language, text
+        self.multilingual = True
         outer = self
         mod = types.ModuleType("faster_whisper")
 
@@ -35,7 +36,8 @@ class Whisper:
                     raise ValueError(f"no {compute_type} on {device}")
                 outer.made.append({"path": str(path), "device": device, "compute": compute_type, **kw})
                 self.device, self.compute = device, compute_type
-                self.model = types.SimpleNamespace(compute_type="float16" if compute_type == "default" else compute_type)
+                self.model = types.SimpleNamespace(compute_type="float16" if compute_type == "default" else compute_type,
+                                                   is_multilingual=outer.multilingual)
 
             def transcribe(self, audio, **kw):
                 outer.calls.append(kw)
@@ -369,3 +371,121 @@ def test_a_database_that_cannot_be_read_never_stops_a_call(voice, whisper):
     thread = voice.call_started(object())                    # the last switches stay (warm-up on by default)
     assert thread is not None and voice.tuning == voice_mod.Tuning()
     thread.join(20)
+
+
+# ---------------------------------------------------------------- "English and German": one pass (g2.single_encode_langid)
+
+class OnePass:
+    """langid.transcribe_en_de as a stand-in: records its arguments and answers in the language it is told to."""
+
+    def __init__(self, monkeypatch, language="de", text="guten morgen"):
+        from app.voice import langid
+        self.calls, self.language, self.text, self.error = [], language, text, None
+        monkeypatch.setattr(langid, "transcribe_en_de", self)
+
+    def __call__(self, model, audio, *, prev_language=None, vad_filter=True, **opts):
+        self.calls.append({"prev": prev_language, "vad_filter": vad_filter, **opts})
+        if self.error is not None:
+            raise self.error
+        info = types.SimpleNamespace(language=self.language, language_probability=0.9, accepted=True, duration=1.0)
+        return [types.SimpleNamespace(text=self.text)], info
+
+
+def test_single_encode_waits_for_the_pc_test_so_it_is_off_until_the_owner_says_otherwise(tmp_path):
+    assert flags.FLAGS["g2.single_encode_langid"][0] is False and Voice(tmp_path).tuning.single_encode_langid is False
+
+
+def test_with_the_flag_off_auto_is_left_to_whisper_as_before(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch)
+    assert voice.transcribe_pcm(PCM, "auto").language == "en"
+    assert one.calls == [] and whisper.calls[0]["language"] is None
+
+
+def test_with_the_flag_on_auto_is_found_in_one_pass_and_whisper_is_never_asked_with_none(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch)
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    t = voice.transcribe_pcm(PCM, "auto")
+    assert (t.language, t.text) == ("de", "guten morgen") and whisper.calls == []
+    (call,) = one.calls
+    assert call["prev"] is None and call["vad_filter"] is True and call["beam_size"] == 1 and call["temperature"] == 0.0
+    assert call["without_timestamps"] is True and call["condition_on_previous_text"] is False
+
+
+@pytest.mark.parametrize("mode", ["en", "de"])
+def test_an_explicit_language_never_needs_the_detection(voice, whisper, monkeypatch, mode):
+    one = OnePass(monkeypatch)
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    voice.transcribe_pcm(PCM, mode)
+    assert one.calls == [] and whisper.calls[0]["language"] == mode
+
+
+def test_the_last_turns_language_is_what_an_unsure_turn_falls_back_to(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch, language="de")
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    voice.transcribe_pcm(PCM, "auto")
+    one.language = "en"
+    voice.transcribe_pcm(PCM, None)
+    assert [c["prev"] for c in one.calls] == [None, "de"]
+    one.text = ""                                                     # a noise-only piece says nothing about the language
+    one.language = "de"
+    voice.transcribe_pcm(PCM, "auto")
+    one.text = "hello"
+    voice.transcribe_pcm(PCM, "auto")
+    assert [c["prev"] for c in one.calls] == [None, "de", "en", "en"]
+
+
+def test_a_new_call_starts_without_the_last_calls_language(voice, whisper, monkeypatch, db):
+    one = OnePass(monkeypatch, language="de")
+    flags.set_flag(db, "g2.single_encode_langid", True)
+    voice.read_flags(db)
+    voice.transcribe_pcm(PCM, "auto")
+    voice.call_started(db).join(20)
+    voice.transcribe_pcm(PCM, "auto")
+    assert [c["prev"] for c in one.calls] == [None, None]
+
+
+def test_the_warm_up_does_not_teach_the_voice_a_language(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch, language="de")
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    Voices(voice)
+    voice.warm_call()
+    voice.transcribe_pcm(PCM, "auto")
+    assert [c["prev"] for c in one.calls] == [None]
+
+
+def test_an_english_only_model_has_nothing_to_find(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch)
+    whisper.multilingual = False
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    voice.transcribe_pcm(PCM, "auto")
+    assert one.calls == [] and whisper.calls[0]["language"] is None
+
+
+def test_if_the_single_pass_ever_breaks_the_turn_is_still_heard_the_old_way_and_it_says_so(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch)
+    one.error = RuntimeError("TranscriptionOptions() got an unexpected keyword argument")
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    assert voice.transcribe_pcm(PCM, "auto").text == "hello"          # Whisper's own language=None
+    assert whisper.calls[-1]["language"] is None
+    w = voice.devices()["whisper"]
+    assert "unexpected keyword" in w["language_detection_note"] and w["language_detection"].startswith("Whisper's own")
+    voice.transcribe_pcm(PCM, "auto")
+    assert len(one.calls) == 1                                        # not tried again on every turn
+
+
+def test_a_graphics_card_error_inside_the_single_pass_still_moves_the_call_to_the_cpu(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch)
+    one.error = RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    voice.transcribe_pcm(PCM, "auto")
+    assert voice.status()["stt_device"] == "cpu"
+    assert [c["device"] for c in whisper.made] == ["cuda", "cpu"]
+
+
+def test_devices_say_which_language_finding_is_in_use(voice, whisper, monkeypatch):
+    OnePass(monkeypatch)
+    voice.transcribe_pcm(PCM, "en")
+    assert voice.devices()["whisper"]["language_detection"].startswith("Whisper's own")
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    w = voice.devices()["whisper"]
+    assert w["language_detection"] == "one pass, English or German" and w["language_detection_note"] is None

@@ -29,6 +29,10 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g2.warm_at_connect": (True, "When a call or the voice button connects, Whisper writes down two short test sentences "
                                  "(English, German) in the background, so your first real sentence does not meet a cold "
                                  "graphics card."),
+    "g2.single_encode_langid": (False, "Calls set to English and German: Whisper listens once, picks English or German from that same "
+                                       "pass and writes the words down. Today it listens twice (an estimated 0.2 to 1.4 s per "
+                                       "sentence). Wait for the PC test (P2) and a check on your own short sentences (P25) "
+                                       "before you switch it on."),
 
     # -- G3 mouth
 

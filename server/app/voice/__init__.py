@@ -22,6 +22,8 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import langid
+
 log = logging.getLogger("kairo.voice")
 
 WHISPER_GPU = os.environ.get("KAIRO_WHISPER_MODEL", "large-v3-turbo")
@@ -223,6 +225,7 @@ class Tuning:
     offline_models: bool = True
     int8_float16: bool = False
     warm_at_connect: bool = True
+    single_encode_langid: bool = False
 
 
 class Voice:
@@ -242,6 +245,8 @@ class Voice:
         self._last_decode = float("-inf")    # when the last one ended (monotonic)
         self._warming = threading.Lock()     # one warm-up at a time
         self._warm_audio: dict[str, bytes] | None = None
+        self._last_language: str | None = None   # the language of the last turn with words (this call)
+        self._single_failed: str | None = None   # why the one-pass language finding was given up (None: working)
         self._stt_failed = 0.0
         self._tts_device = None
         self._tts_why: str | None = None
@@ -421,6 +426,7 @@ class Voice:
         """A call or the voice button connects (s: a database session). The owner's switches are read now, once;
         the last call's language is forgotten; Whisper is warmed in the background (the card is cold after
         minutes of idle) and loaded again if the owner changed the compute type. Returns that thread."""
+        self._last_language = None
         try:
             self.read_flags(s)
         except Exception as exc:   # a database hiccup must not stop a call: the last switches stay
@@ -498,7 +504,10 @@ class Voice:
         whisper = {"device": self._stt_device, "model": self._stt_model, "loaded": stt_loaded,
                    "load_ms": self.load_ms.get("whisper"), "warm_ms": self.warm_ms.get("whisper"),
                    "compute_type": self._stt_compute if stt_loaded else None, "compute_note": self._stt_compute_note,
-                   "ctranslate2": _ct2_version()}
+                   "ctranslate2": _ct2_version(),
+                   "language_detection": ("one pass, English or German" if self.tuning.single_encode_langid and not self._single_failed
+                                          else "Whisper's own (two passes, 99 languages)"),
+                   "language_detection_note": self._single_failed}
         if not inst["stt"]:
             whisper.update(ok=False, reason="not installed")
         elif not stt_loaded:
@@ -541,7 +550,14 @@ class Voice:
         if len(pcm) > MAX_AUDIO:
             raise VoiceError("recording too long")
         fixed = language if language not in (None, "", "auto") else None
-        return self._stt_run(lambda: _samples(pcm), fixed, **self._call_options())
+        opts = self._call_options()
+        if fixed is None and self.tuning.single_encode_langid:     # "English and German": found in the same pass
+            tr = self._stt_run(lambda: _samples(pcm), None, detect=True, prev_language=self._last_language, **opts)
+        else:
+            tr = self._stt_run(lambda: _samples(pcm), fixed, **opts)
+        if tr.text and tr.language in langid.LANGUAGES:
+            self._last_language = tr.language
+        return tr
 
     def _call_options(self) -> dict:
         """What a spoken turn asks Whisper for (the plan's call path): one greedy decode; no previous-text
@@ -551,14 +567,28 @@ class Voice:
             opts["temperature"] = 0.0      # one decode, no random re-tries (Whisper's default list goes up to 1.0)
         return opts
 
-    def _stt_run(self, audio, language: str | None, vad_filter: bool = True, **opts) -> Transcript:
+    def _stt_run(self, audio, language: str | None, vad_filter: bool = True, *, detect: bool = False,
+                 prev_language: str | None = None, **opts) -> Transcript:
+        """detect: find English or German in the same encoder pass (langid.py) instead of Whisper's own
+        language=None, which encodes twice; prev_language: what an unsure turn falls back to."""
         with self._lock:
             model = self._load_stt()
         t = time.monotonic()
         with self._count:
             self._active += 1
         try:
-            segments, info = model.transcribe(audio(), language=language, vad_filter=vad_filter, **opts)
+            if detect and not self._single_failed and getattr(model.model, "is_multilingual", True):
+                try:
+                    segments, info = langid.transcribe_en_de(model, audio(), prev_language=prev_language,
+                                                             vad_filter=vad_filter, **opts)
+                except Exception as exc:
+                    if self._stt_device == "cuda" and GPU_RUNTIME.search(str(exc)):
+                        raise      # the card, not the new path: the CPU fallback below
+                    self._single_failed = f"{type(exc).__name__}: {exc}"[:200]
+                    log.error("Whisper: one-pass language finding failed (%s); Whisper's own is used", self._single_failed)
+                    segments, info = model.transcribe(audio(), language=None, vad_filter=vad_filter, **opts)
+            else:
+                segments, info = model.transcribe(audio(), language=language, vad_filter=vad_filter, **opts)
             text = " ".join(s.text.strip() for s in segments).strip()
         except Exception as exc:
             if self._stt_device == "cuda" and GPU_RUNTIME.search(str(exc)):
@@ -570,7 +600,7 @@ class Voice:
                     except Exception as exc2:
                         self._stt, self.last_error = None, f"load: {type(exc2).__name__}: {exc2}"
                         raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
-                return self._stt_run(audio, language, vad_filter, **opts)
+                return self._stt_run(audio, language, vad_filter, detect=detect, prev_language=prev_language, **opts)
             self.last_error = f"transcribe: {exc}"
             raise VoiceError(f"could not understand the audio ({type(exc).__name__})") from exc
         finally:
