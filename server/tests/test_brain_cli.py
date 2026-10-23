@@ -562,6 +562,10 @@ def test_the_app_reads_the_owners_switch_for_the_conversation_process(migrated, 
 # With the switch off the tail is expected (about 2 s); with it on, a tail means the Claude Code version
 # no longer honours the setting. Either way it is logged and shown on Voice speed (tail_notes).
 
+def tail_logs(caplog):
+    return [r for r in caplog.records if r.name == "kairo.brain" and r.getMessage().startswith("claude tail")]
+
+
 def slow_notes(brain):
     return [(n["id"], n["title"], n["what"]) for n in brain.tail_notes()]
 
@@ -570,9 +574,9 @@ def test_a_tail_over_half_a_second_is_logged(tmp_path, caplog):
     import logging
     with caplog.at_level(logging.INFO, logger="kairo.brain"):
         run(make(tmp_path))                                                 # no tail
-        assert not [r for r in caplog.records if "tail" in r.getMessage()]
+        assert not tail_logs(caplog)
         run(make(tmp_path, KAIRO_HOOK_FAKE_TAIL_S="0.8"))
-    logged = [r for r in caplog.records if "tail" in r.getMessage()]
+    logged = tail_logs(caplog)
     assert len(logged) == 1 and logged[0].levelno == logging.WARNING
     assert "g1.cli_no_summary" in logged[0].getMessage()                    # off: says what would remove it
 
@@ -583,7 +587,7 @@ def test_a_tail_with_the_switch_on_says_the_setting_stopped_working(tmp_path, ca
     with caplog.at_level(logging.INFO, logger="kairo.brain"):
         usage = run(brain)[-1].data["usage"]
     assert usage["no_summary"] is True and usage["tail_ms"] >= 700
-    text = " ".join(r.getMessage() for r in caplog.records if "tail" in r.getMessage())
+    text = " ".join(r.getMessage() for r in tail_logs(caplog))
     assert "CLAUDE_CODE_CLASSIFIER_SUMMARY=0" in text and "g1.cli_no_summary" not in text
 
 
@@ -592,7 +596,7 @@ def test_the_log_line_comes_at_most_every_ten_minutes(tmp_path, caplog):
     brain = make(tmp_path)
 
     def logged():
-        return [r.getMessage() for r in caplog.records if "tail" in r.getMessage()]
+        return [r.getMessage() for r in tail_logs(caplog)]
     with caplog.at_level(logging.INFO, logger="kairo.brain"):
         for i in range(3):
             brain._note_tail(900, False, now=1000.0 + 5 * i)
