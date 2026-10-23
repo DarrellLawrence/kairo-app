@@ -22,7 +22,14 @@ read it once through for_call() and hand the result to the speaker (voicertc.Kai
 
 from __future__ import annotations
 
+import logging
 import re
+from typing import Callable
+
+log = logging.getLogger(__name__)
+
+FLAG = "g9.speaknorm"
+FLAG_EN_DIGIT_TIMES = "g9.speaknorm_en_digit_times"
 
 # ---------------------------------------------------------------- number words
 
@@ -393,3 +400,34 @@ def normalize(text: str, lang: str | None = None, *, en_times: str = "past") -> 
     if lang == "de":
         return _german(text)
     return _english(text, en_times) if lang == "en" else text
+
+
+# ---------------------------------------------------------------- what a call uses
+
+def hook(en_times: str = "past") -> Callable[[str, str | None], tuple[str, str | None]]:
+    """(text, language) -> (text to say, language to say it in): what a speaker hands to the voice. When the
+    language was not known and the text changed, it is found from the original words here, because words alone
+    ("vierzehn Uhr dreißig") may no longer show it. A bug in the rules never costs a sentence: the text is then
+    said as written."""
+    def say(text: str, lang: str | None = None) -> tuple[str, str | None]:
+        try:
+            out = normalize(text, lang, en_times=en_times)
+            if out == text:
+                return text, lang
+            if lang is None:
+                from .voice import language_of
+                lang = language_of(text)
+            return out, lang
+        except Exception:
+            log.exception("speaknorm: the text is said as written")        # (never the text: it may be personal)
+            return text, lang
+    return say
+
+
+def for_call(s) -> Callable[[str, str | None], tuple[str, str | None]] | None:
+    """The owner's switches (More -> System -> Experiments), read once when a call or the voice button starts:
+    None while g9.speaknorm is off (the default)."""
+    from . import flags
+    if not flags.on(s, FLAG):
+        return None
+    return hook("digits" if flags.on(s, FLAG_EN_DIGIT_TIMES) else "past")

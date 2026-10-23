@@ -40,7 +40,7 @@ from . import loop_send as loop_send_mod
 from . import conversation
 from . import memory
 from . import turns
-from . import speech, voicelink
+from . import speaknorm, speech, voicelink
 from . import selftest as selftest_mod
 from . import semantic
 from . import speaker as speaker_mod
@@ -1053,7 +1053,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
                                      current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
-                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"))
+                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"), norm=None)
 
         def interrupt() -> None:
             """The answer of a talked-over turn stops being written (what was said so far is kept)."""
@@ -1068,6 +1068,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         with session_for(engine) as s_:              # English only: Whisper skips finding the language
             line.stt_language = "en" if realtime.load_settings(s_).get("language") == "en" else None
+            line.norm = speaknorm.for_call(s_)       # g9.speaknorm: read once, as the call starts
         line.smart, line.endpointed = app.state.smart_turn.available(), False
         if line.smart:
             await line.send({"type": "hello", "endpoint": "smart", "pause_ms": 200, "end_ms": 1500})
@@ -1149,7 +1150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         line.speaker.stop()
                     number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
                     line.current = number
-                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number)
+                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number, norm=line.norm)
                     line.speaker.say(text)
                     if not line.warned:                # the call's first line: then the slow-voice line, once
                         line.warned = True
@@ -1318,6 +1319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         with session_for(engine) as s_:
             language_mode = realtime.load_settings(s_).get("language", "auto")
+            norm = speaknorm.for_call(s_)            # g9.speaknorm: read once, as the call starts
         if _mouth_ok(call_id):
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         _warm_openers()
@@ -1339,7 +1341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                    language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
                                    speculate=speculate, discard=discard, greeting=_greeting(),
                                    warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
-                                   gate=gate.answer if gate else None)
+                                   gate=gate.answer if gate else None, norm=norm)
         key = id(call)
         _rtc_calls[key] = call
 
@@ -1425,7 +1427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             line.carry = f"{line.carry} {text}".strip()   # talked on before Kairo answered: one message
             return
         text, line.carry = f"{line.carry} {text}".strip(), ""
-        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number)
+        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm)
         if line.speaker is not None:
             line.speaker.stop()
         line.speaker = speaker

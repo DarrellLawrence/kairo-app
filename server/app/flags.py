@@ -33,6 +33,14 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G8 Windows
 
     # -- G9 speech text
+    "g9.speaknorm": (False, "Kairo says numbers, times, dates and amounts as words, so its voices read them right: "
+                            "14:30 becomes 'vierzehn Uhr dreißig', 12,50 Franken becomes 'zwölf Franken fünfzig', 14:10 "
+                            "becomes 'ten past two'. What you read on the screen stays as written, and a number is never "
+                            "split from its unit when Kairo starts to talk. Listen to it on the PC before you switch it on. "
+                            "Takes effect at the next call or voice reply."),
+    "g9.speaknorm_en_digit_times": (False, "Only counts when the switch above is on: English times are said 'two ten' "
+                                           "instead of 'ten past two'. Try both and keep the one that sounds better. Takes "
+                                           "effect at the next call."),
 
     # -- G10 fast paths
 
