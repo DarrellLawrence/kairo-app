@@ -11,3 +11,8 @@ node_modules/
 dist/
 # The owner's profile lives only in the vault on the PC (owner's decision 2026-10-19), never here.
 private/
+# The voice latency harness (bench/): its results and rendered clips live in the data folder; a run that
+# writes into a checkout leaves nothing in git but the README.
+bench/results/*
+!bench/results/.gitkeep
+!bench/results/README.md
