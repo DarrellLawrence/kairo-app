@@ -43,6 +43,12 @@ FLAGS: dict[str, tuple[bool, str]] = {
                               "picked stays until the lab is run again. Gemma uses about 3.5 GiB of graphics memory: turn it on "
                               "after the PC memory check."),
 
+    "g3.smart_turn_pin": (False, "Calls load the exact Smart Turn v3.2 file the installer downloaded and checked (pinned revision and "
+                                 "checksum in voicellm.json) instead of the copy inside the Pipecat package. The same bytes today, so "
+                                 "nothing sounds different; it only keeps a later package update from changing the turn detector "
+                                 "unnoticed. Needs the pin in voicellm.json (the owner-gated commit): without it, or if the downloaded "
+                                 "file is not the pinned one, calls keep using Pipecat's copy. Applies from the next call."),
+
     # -- G4 jitter buffer
 
     # -- G5 hand-off

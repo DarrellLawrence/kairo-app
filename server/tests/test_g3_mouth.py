@@ -17,10 +17,11 @@ from app.db import make_engine
 from app.main import create_app
 from app.voicemouth import g3_options
 from tests.test_voice_llm import FAKE, free_port
+from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model)
 
 #            flag                  default  what an owner who turns it on gets
 DEFAULTS = {"g3.llama_flags": True, "g3.gemma_markup": True, "g3.swa_full": False, "g3.constant_tools": False,
-            "g3.gemma_first": False}
+            "g3.gemma_first": False, "g3.smart_turn_pin": False}
 
 
 def test_the_g3_switches_have_the_planned_defaults():
@@ -177,3 +178,44 @@ def test_the_lab_reads_the_switch_when_it_starts_a_run(migrated, tmp_path, monke
     with Session(engine) as s:
         flags.set_flag(s, "g3.gemma_first", True)
     assert the_lab._prefer() == "gemma-4-e4b"
+
+
+# ---------------------------------------------------------------- g3.smart_turn_pin: which turn-detector file calls load
+
+def test_calls_get_the_downloaded_pinned_file_only_when_the_switch_is_on(migrated, tmp_path, monkeypatch):
+    pinned = tmp_path / "smart-turn-v3.2-cpu.onnx"
+    monkeypatch.setattr(voicellm, "smart_turn_pinned_path", lambda site: pinned)
+    with Session(make_engine(migrated.db_url)) as s:
+        assert voicellm.smart_turn_for_calls(s, tmp_path) is None                  # default off: pipecat's own copy
+        flags.set_flag(s, "g3.smart_turn_pin", True)
+        assert voicellm.smart_turn_for_calls(s, tmp_path) == str(pinned)
+        monkeypatch.setattr(voicellm, "smart_turn_pinned_path", lambda site: None)   # not the pinned file / not installed
+        assert voicellm.smart_turn_for_calls(s, tmp_path) is None
+        flags.set_flag(s, "g3.smart_turn_pin", None)
+        assert voicellm.smart_turn_for_calls(s, tmp_path) is None
+
+
+def test_the_app_hands_a_call_the_model_the_switch_says(local, monkeypatch, tmp_path):
+    """/api/rtc/offer reads the switch at the start of each call and gives build_call the file (or None: pipecat's copy)."""
+    pytest.importorskip("pipecat")
+    pytest.importorskip("aiortc")
+    import asyncio
+    from app import voicertc
+    from tests import test_voice_rtc as rtc
+    pinned = tmp_path / "smart-turn-v3.2-cpu.onnx"
+    monkeypatch.setattr(voicellm, "smart_turn_pinned_path", lambda site: pinned)
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    local.app.state.voice = rtc.ToneVoice(local.voice)
+    seen = []
+    original = voicertc.build_call
+
+    def spy(*a, **k):
+        seen.append(k.get("smart_turn_model"))
+        return original(*a, **{**k, "smart_turn_model": None})        # the stand-in file is not a model: load pipecat's own
+    monkeypatch.setattr(voicertc, "build_call", spy)
+    asyncio.run(rtc._app_call(local, seconds=2))
+    assert local.put("/api/flags/g3.smart_turn_pin", json={"on": True}).status_code == 200
+    asyncio.run(rtc._app_call(local, seconds=2))
+    assert local.put("/api/flags/g3.smart_turn_pin", json={"on": False}).status_code == 200
+    asyncio.run(rtc._app_call(local, seconds=2))
+    assert seen == [None, str(pinned), None]

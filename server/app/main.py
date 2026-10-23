@@ -1330,6 +1330,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         with session_for(engine) as s_:
             language_mode = realtime.load_settings(s_).get("language", "auto")
+            turn_model = voicellm.smart_turn_for_calls(s_, _vl_site)      # g3.smart_turn_pin, read once per call
         if _mouth_ok(call_id):
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         _warm_openers()
@@ -1349,7 +1350,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         call = voicertc.build_call(conn, voice=speaker_mod.Listening(app.state.voice, gate) if gate else app.state.voice,
                                    answer=answer, interrupt=talked_over, events=None,
                                    language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
-                                   speculate=speculate, discard=discard, greeting=_greeting(),
+                                   smart_turn_model=turn_model, speculate=speculate, discard=discard, greeting=_greeting(),
                                    warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
                                    gate=gate.answer if gate else None)
         key = id(call)
