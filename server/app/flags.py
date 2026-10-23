@@ -35,6 +35,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                  "(no silent test sounds), so Kairo's voice reaches you only through the call connection, the one way the iPhone cancels "
                                  "the echo. Applies to calls, the voice button and the sound check's call test. "
                                  "Off: the old start (normal audio first, then call mode, with silent test sounds)."),
+    "g7.call_logs": (True, "A call writes more about the microphone and the audio to the PC's log: what the phone asked for and got, whether the iPhone "
+                           "muted the microphone, every audio-mode change, and how the first sound from Kairo arrived. Nothing you say. "
+                           "Off: the usual short log."),
 
     # -- G8 Windows
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { applyFlags, resetFlags } from '../src/flags.js'
 import { makeRtcMeter } from '../src/rtclink.js'
-import { FakePeer, installPhone } from './phone-fakes.js'
+import { FakePeer, installPhone, logged } from './phone-fakes.js'
 
 function clock(t = 0) {
   return { now: () => t, set: (v) => { t = v } }
@@ -91,7 +91,14 @@ test('a turn ended by your tap is timed from the tap and recorded as a tap', () 
 // The stand-ins (phone-fakes.js): a mic, Kairo's AudioContext, the peer connection with its data channel
 // (what the phone sends is kept; the test plays the PC's events).
 
-/* options: settings = what the mic track's getSettings() says; path = call or chat_voice. */
+/* A call for the length of fn; always hung up, so a failing check can't leave the timers running.
+   options: settings = what the mic track's getSettings() says; path = call or chat_voice; ua. */
+async function withLine(on, phone, fn) {
+  const made = await rtcLine(on, phone)
+  try { await fn(made) } finally { made.line.close() }
+}
+
+/* options: see withLine. */
 async function rtcLine(on = {}, { path = 'call', ...phone } = {}) {
   const fake = installPhone(phone)
   const { startRtc } = await import('../src/rtclink.js')
@@ -145,4 +152,71 @@ test('g7.mic_constraints off: the old request, echo cancelling and noise suppres
   const { line, rec } = await rtcLine()
   line.close()
   assert.deepEqual(rec.gum, [{ audio: { echoCancellation: true, noiseSuppression: true } }])
+})
+
+// ---------------------------------------------------------------- g7.call_logs: what the PC's log learns about a call's audio
+
+const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1'
+
+test('g7.call_logs on: the mic settings once per call, what was asked next to what the phone gave', () => withLine({}, { ua: UA }, ({ rec }) => {
+  const [one, ...more] = logged(rec, 'mic.settings')
+  assert.equal(more.length, 0)
+  assert.deepEqual(one.asked, { echoCancellation: true, noiseSuppression: true, autoGainControl: true })
+  assert.deepEqual(one.settings, { echoCancellation: true, sampleRate: 48000, volume: 1 })   // the one setting iOS honours
+  assert.deepEqual(one.supported, { echoCancellation: true, noiseSuppression: true, autoGainControl: true })
+  assert.equal(one.path, 'call')
+  assert.equal(one.safari, '26.1')
+  assert.equal(one.ios, '18.7')
+}))
+
+test('g7.call_logs on: a mock track without getSettings is fine, the log says nothing was readable', () => withLine({}, { settings: null }, ({ rec }) => {
+  assert.deepEqual(logged(rec, 'mic.settings').map((x) => x.settings), [null])
+}))
+
+test('g7.call_logs on: the mic track going silent, coming back or ending is logged', () => withLine({}, {}, ({ rec, micTrack }) => {
+  micTrack.fire('mute')
+  micTrack.fire('unmute')
+  micTrack.fire('ended')
+  assert.deepEqual(logged(rec, 'mic.track').map((x) => x.event), ['mute', 'unmute', 'ended'])
+}))
+
+test('g7.call_logs on: every audio-session change the page makes is logged, from and to', async () => {
+  const { line, rec } = await rtcLine()
+  line.close()
+  const changes = logged(rec, 'audio.session').map((x) => `${x.from}>${x.to}`)
+  assert.deepEqual(changes, ['auto>play-and-record', 'play-and-record>playback'])
+})
+
+test('g7.call_logs on: one rtc.audio line per call, with the audio element and the inbound audio, when sound first arrives', async () => {
+  const { line, rec } = await rtcLine()
+  try {
+    assert.deepEqual(logged(rec, 'rtc.audio'), [])         // nothing yet: no sound has come in (logged() keeps all so far)
+    FakePeer.last.stats = [{ type: 'inbound-rtp', kind: 'audio', packetsReceived: 240, packetsLost: 3, jitter: 0.004, jitterBufferDelay: 3, jitterBufferEmittedCount: 100 }]
+    await new Promise((r) => setTimeout(r, 1300))          // the next stats tick
+    const [one, ...more] = logged(rec, 'rtc.audio')
+    assert.equal(more.length, 0)
+    assert.equal(one.when, 'first-audio')
+    assert.deepEqual(one.audio, { muted: false, paused: false, hasStream: true })   // the connection's own stream, playing
+    assert.deepEqual(one.inbound, { received: 240, lost: 3, jitter_ms: 30 })
+  } finally {
+    line.close()
+  }
+  assert.equal(logged(rec, 'rtc.audio').length, 1)         // once per call: the hang-up adds nothing
+})
+
+test('g7.call_logs on: a call that never heard Kairo logs rtc.audio at hang-up, so the silence is on record', async () => {
+  const { line, rec } = await rtcLine()
+  line.close()
+  const [one] = logged(rec, 'rtc.audio')
+  assert.equal(one.when, 'close')
+  assert.equal(one.inbound, null)
+})
+
+test('g7.call_logs off: none of those lines (the usual short log stays)', async () => {
+  applyFlags([flag('g7.call_logs', false)])
+  const { line, rec, micTrack } = await rtcLine()
+  micTrack.fire('mute')
+  line.close()
+  for (const name of ['mic.settings', 'mic.track', 'audio.session', 'rtc.audio']) assert.deepEqual(logged(rec, name), [], name)
+  assert.equal(logged(rec, 'rtc.start').length, 1)         // what was always logged still is
 })

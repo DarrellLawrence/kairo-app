@@ -39,9 +39,64 @@ export function setReleaseWhileSpeaking(on) {
   clientLog('audio.release_mode', { on })
 }
 
+const watchedSessions = new WeakSet()
+/* g7.call_logs: iOS tells the page when it interrupts or resumes the audio (a phone call, Siri, another app). */
+function watchSession(session) {
+  if (watchedSessions.has(session)) return
+  watchedSessions.add(session)
+  try {
+    session.addEventListener?.('statechange', () => {
+      if (flagOn('g7.call_logs')) clientLog('audio.session_state', { state: session.state, type: session.type, mic: Boolean(mic) })
+    })
+  } catch { /* not every WebKit has the event */ }
+}
+
 export function setSession(type) {
   if (!('audioSession' in navigator)) return
-  try { if (navigator.audioSession.type !== type) navigator.audioSession.type = type } catch (e) { clientLog('audio.session_error', { type, err: errName(e) }) }
+  const session = navigator.audioSession
+  try {
+    const from = session.type
+    if (from !== type) {
+      session.type = type
+      if (flagOn('g7.call_logs')) clientLog('audio.session', { from, to: type, mic: Boolean(mic) })   // every change the page makes
+    }
+    watchSession(session)
+  } catch (e) { clientLog('audio.session_error', { type, err: errName(e) }) }
+}
+
+// ---------------------------------------------------------------- what the mic really is (g7.call_logs)
+
+const MIC_KEYS = ['echoCancellation', 'noiseSuppression', 'autoGainControl', 'sampleRate', 'channelCount', 'volume']
+const ASKED_KEYS = ['echoCancellation', 'noiseSuppression', 'autoGainControl']
+
+/* What the browser says the mic track is (getSettings), only the audio processing and format: no device ids.
+   null for a track that can't say (a mock). iOS says {echoCancellation, sampleRate, volume}. */
+export function micSettings(track) {
+  if (typeof track?.getSettings !== 'function') return null
+  try {
+    const got = track.getSettings() || {}
+    return Object.fromEntries(MIC_KEYS.filter((k) => k in got).map((k) => [k, got[k]]))
+  } catch { return null }
+}
+
+const watchedTracks = new WeakSet()
+
+/* Once per call, in the PC's log: what was asked of the mic, what the phone gave, which constraints this
+   browser knows at all; and from then on the track going silent (iOS muting it), back, or ended. */
+export function logMic(track, path) {
+  if (!flagOn('g7.call_logs') || !track) return
+  let supported = null
+  try {
+    const known = navigator.mediaDevices?.getSupportedConstraints?.()
+    if (known) supported = Object.fromEntries(ASKED_KEYS.map((k) => [k, Boolean(known[k])]))
+  } catch { /* nice to have */ }
+  clientLog('mic.settings', { path, asked: micConstraints().audio, settings: micSettings(track), supported, ...device() })
+  if (typeof track.addEventListener === 'function' && !watchedTracks.has(track)) {
+    watchedTracks.add(track)
+    for (const event of ['mute', 'unmute', 'ended']) {
+      track.addEventListener(event, () => clientLog('mic.track', { path, event, readyState: track.readyState, ...device() }))
+    }
+  }
 }
 
 function silentWav(seconds = 0.05, rate = 8000) {

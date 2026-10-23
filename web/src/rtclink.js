@@ -16,7 +16,8 @@
 // connection's stats; direct or relayed comes from the PC (Tailscale knows, WebRTC can't see it).
 import { clientLog, device } from './clientlog.js'
 import { startTurn } from './turns.js'
-import { closeMic, micStream, outputContext, unlockAudio } from './voice.js'
+import { flagOn } from './flags.js'
+import { closeMic, logMic, micStream, outputContext, unlockAudio } from './voice.js'
 import { makeVad } from './voicelink.js'
 
 const FRAME_MS = 20
@@ -95,9 +96,9 @@ function rmsOf(analyser, buf) {
   return Math.sqrt(sum / buf.length)
 }
 
-/* The selected path's round trip (ms) and its candidate types, from the connection's stats. */
-export async function pathStats(pc) {
-  const stats = await pc.getStats()
+/* The selected path's round trip (ms) and its candidate types, and the inbound audio (packets, jitter), from a
+   connection's stats. Either may be null. */
+export function readStats(stats) {
   let pair = null
   const byId = new Map()
   stats.forEach((s) => {
@@ -106,26 +107,36 @@ export async function pathStats(pc) {
   })
   let p = pair ? byId.get(pair) : null
   if (!p) stats.forEach((s) => { if (s.type === 'candidate-pair' && (s.selected || s.nominated) && s.state === 'succeeded') p = s })
-  if (!p) return null
-  const local = byId.get(p.localCandidateId)
-  const remote = byId.get(p.remoteCandidateId)
   let jitterMs = null
+  let inbound = null
   stats.forEach((s) => {
-    if (s.type === 'inbound-rtp' && s.kind === 'audio' && s.jitterBufferEmittedCount > 0) {
-      jitterMs = Math.round((s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000)
+    if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+      if (s.jitterBufferEmittedCount > 0) jitterMs = Math.round((s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000)
+      inbound = { received: s.packetsReceived ?? 0, lost: s.packetsLost ?? 0, jitter_ms: jitterMs }
     }
   })
-  return {
-    rtt_ms: Number.isFinite(p.currentRoundTripTime) ? Math.round(p.currentRoundTripTime * 1000) : null,
-    local: local?.candidateType || null,
-    remote: remote?.candidateType || null,
-    jitter_ms: jitterMs,
+  let path = null
+  if (p) {
+    const local = byId.get(p.localCandidateId)
+    const remote = byId.get(p.remoteCandidateId)
+    path = {
+      rtt_ms: Number.isFinite(p.currentRoundTripTime) ? Math.round(p.currentRoundTripTime * 1000) : null,
+      local: local?.candidateType || null,
+      remote: remote?.candidateType || null,
+      jitter_ms: jitterMs,
+    }
   }
+  return { path, inbound }
+}
+
+export async function pathStats(pc) {
+  return readStats(await pc.getStats()).path
 }
 
 /* The WebRTC line. Same shape as voicelink's startVoice, plus on.fallback({reason, message}). */
 export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   const call = path === 'call'
+  const logs = flagOn('g7.call_logs')     // read once, when the call starts
   const meter = makeRtcMeter(path)
   const lastVoice = makeLastVoice()
   let pc = null
@@ -147,6 +158,8 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   let reply = ''
   let talking = false         // the PC hears a turn of yours (speech, or words not answered yet): a tap ends it
   let tappedAt = null
+  let audioLogged = false     // g7.call_logs: 'rtc.audio' is written once per call
+  let inbound = null          // the latest inbound audio stats
 
   const set = (s) => { if (state !== s) { state = s; on.state?.(s) } }
   const hear = (v) => { if (talking !== v) { talking = v; on.hearing?.(v) } }
@@ -272,12 +285,26 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     }
   }
 
+  /* g7.call_logs: how the call's audio stands, once per call: when the first sound from Kairo arrives, or at
+     hang-up when none ever did (that silence is the finding). */
+  const logAudio = (when) => {
+    if (!logs || audioLogged) return
+    audioLogged = true
+    clientLog('rtc.audio', {
+      when, path, inbound,
+      audio: audio ? { muted: audio.muted, paused: audio.paused, hasStream: Boolean(audio.srcObject) } : null,
+      ...device(),
+    })
+  }
+
   const measure = async () => {
     if (!pc) return
     try {
-      const s = await pathStats(pc)
-      if (s?.rtt_ms != null) meter.rtt(s.rtt_ms)
-      if (s) on.path?.(s)
+      const { path: net, inbound: heard } = readStats(await pc.getStats())
+      if (net?.rtt_ms != null) meter.rtt(net.rtt_ms)
+      if (net) on.path?.(net)
+      inbound = heard
+      if (heard?.received > 0) logAudio('first-audio')
     } catch { /* stats are a nice-to-have */ }
     send('ping')        // the PC's transport counts the line as alive while pings come
   }
@@ -293,6 +320,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       mic = await micStream()                  // the mic first: then Safari shows its tailnet address
       if (closed) return false
       mic.buf = mic.buf || new Float32Array(mic.analyser.fftSize)
+      logMic(mic.stream.getAudioTracks()[0], path)
       pc = new RTCPeerConnection({ iceServers: [] })
       pc.addTransceiver(mic.stream.getAudioTracks()[0], { direction: 'sendrecv', streams: [mic.stream] })
       audio = new Audio()
@@ -408,6 +436,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onHidden)
       meter.end('hung up')
       clearTimeout(settleTimer)
+      logAudio('close')
       teardown()
       closeMic()                               // iOS: the mic indicator goes off with the call
     },

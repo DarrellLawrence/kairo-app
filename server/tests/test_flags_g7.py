@@ -15,6 +15,7 @@ from app.main import create_app
 G7 = {
     "g7.mic_constraints": True,
     "g7.call_audio_mode": True,
+    "g7.call_logs": True,
 }
 
 

@@ -4,7 +4,10 @@
 //   rec.buffers  AudioBufferSource.start() calls (Web Audio playback)
 //   rec.plays    <audio>.play() calls on a file/blob src (anything that is not the call's MediaStream)
 //   rec.gum      the constraints getUserMedia was given
+//   rec.logs     what the page told the PC's log (/api/client-log), after flushLogs(rec)
 // WebRTC itself only runs on the phone; what is tested here is what the page asks for and when.
+
+import { flushClientLog } from '../src/clientlog.js'
 
 export class FakeChannel {
   constructor() { this.readyState = 'open'; this.sent = [] }
@@ -21,8 +24,13 @@ export class FakePeer {
   createDataChannel() { this.dc = new FakeChannel(); return this.dc }
   async createOffer() { return { type: 'offer', sdp: 'v=0\r\n' } }
   async setLocalDescription(d) { this.localDescription = d }
-  async setRemoteDescription() { setTimeout(() => this.dc.onopen?.(), 0) }
-  async getStats() { return new Map() }
+  async setRemoteDescription() {
+    setTimeout(() => {
+      this.ontrack?.({ streams: [{ id: 'kairo-voice' }] })         // Kairo's voice arrives as the connection's own stream
+      this.dc.onopen?.()
+    }, 0)
+  }
+  async getStats() { return new Map((this.stats || []).map((s, i) => [s.id ?? `s${i}`, s])) }
   close() { this.connectionState = 'closed' }
 }
 
@@ -52,9 +60,9 @@ export class FakeAudioContext {
 }
 
 export class FakeAudio {
-  constructor() { FakeAudio.last = this; current.audios.push(this); this.muted = false; this.srcObject = null; this.src = '' }
-  play() { if (this.src && !this.srcObject) current.plays.push(this.src); return Promise.resolve() }
-  pause() {}
+  constructor() { FakeAudio.last = this; current.audios.push(this); this.muted = false; this.paused = true; this.srcObject = null; this.src = '' }
+  play() { if (this.src && !this.srcObject) current.plays.push(this.src); this.paused = false; return Promise.resolve() }
+  pause() { this.paused = true }
   setAttribute() {}
 }
 
@@ -65,7 +73,7 @@ export const IOS_SETTINGS = { echoCancellation: true, sampleRate: 48000, volume:
    settings: what the mic track's getSettings() says (null: a track without getSettings, like a mock).
    ua: the user agent. audioSession: false for a browser without navigator.audioSession. */
 export function installPhone({ settings = IOS_SETTINGS, ua = 'test', audioSession = true, rtcStatus = { available: true } } = {}) {
-  const rec = { session: [], states: [], buffers: 0, plays: [], gum: [], audios: [], micOpen: false, fetched: [], posted: [] }
+  const rec = { session: [], states: [], buffers: 0, plays: [], gum: [], audios: [], micOpen: false, fetched: [], posted: [], logs: [] }
   const session = {
     _t: 'auto',
     get type() { return this._t },
@@ -103,12 +111,21 @@ export function installPhone({ settings = IOS_SETTINGS, ua = 'test', audioSessio
   globalThis.RTCPeerConnection = FakePeer
   globalThis.WebSocket = FakeSocket
   globalThis.fetch = async (url, init) => {
+    if (url === '/api/client-log') { rec.logs.push(...JSON.parse(init.body).events); return { ok: true } }
     rec.fetched.push(url)
     if (init?.method === 'POST') rec.posted.push([url, init.body ? JSON.parse(init.body) : null])
     if (url === '/api/rtc') return { ok: true, json: async () => rtcStatus }
     return { ok: true, json: async () => (url === '/api/rtc/offer' ? { sdp: 'v=0\r\n', type: 'answer' } : {}) }
   }
+  flushClientLog()      // what an earlier test left in the page's log queue
+  rec.logs.length = 0
   return { rec, micTrack, session }
+}
+
+/* What the page told the PC's log so far (the newest first call empties the queue), by event name. */
+export function logged(rec, name) {
+  flushClientLog()
+  return rec.logs.filter((e) => e.event === name).map((e) => e.data)
 }
 
 /* The page may never show 'playback' before 'play-and-record': that flip is what puts the audio outside the
