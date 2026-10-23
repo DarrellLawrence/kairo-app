@@ -106,8 +106,9 @@ _NEG = re.compile(r"(?<![\w.,:/\\@#'’+-])-(?=\d)")                    # "-3,5"
 _PERCENT = re.compile(r"(?<=\w)\s?%(?!\w)")
 # A number that stands alone: not glued to letters, not joined to other characters (IDs, versions, addresses,
 # phone numbers), and not a part of a longer number written with spaces ("044 123 45 67").
-_BEFORE = r"(?<![\w.,:/\\@#$€£'’+-])(?<!\d[   ])"
-_AFTER = r"(?![\w@/\\]|[.,:]\d|-\w|[   ]\d)"
+_BEFORE_WORD = r"(?<![\w.,:/\\@#$€£'’+-])"
+_BEFORE = _BEFORE_WORD + r"(?<!\d[ \u00a0\u202f])"
+_AFTER = r"(?![\w@/\\]|[.,:]\d|-\w|[ \u00a0\u202f]\d)"
 _INT_DE = re.compile(_BEFORE + r"(\d{1,3}(?:[.'’]\d{3})+|\d+)" + _AFTER)
 _DEC_DE = re.compile(_BEFORE + r"(\d{1,3}(?:\.\d{3})+|\d+),(\d+)(?![\w@/\\]|[.,:]\d|-\w)")
 _DEC_EN = re.compile(_BEFORE + r"(\d{1,3}(?:,\d{3})+|\d+)\.(\d+)(?![\w@/\\]|\.\d|-\w)")
@@ -120,6 +121,25 @@ def _whole(token: str) -> int | None:
     if len(digits) > 9 or (len(digits) > 1 and digits[0] == "0"):
         return None
     return int(digits)
+
+
+_DE_MONTHS = "Januar Februar März April Mai Juni Juli August September Oktober November Dezember".split()
+_EN_MONTHS = "January February March April May June July August September October November December".split()
+_DE_MONTH_OF = {"jan": 0, "feb": 1, "mär": 2, "mrz": 2, "apr": 3, "mai": 4, "jun": 5, "jul": 6, "aug": 7, "sep": 8,
+                "okt": 9, "nov": 10, "dez": 11}                       # by the first three letters: "Okt." -> October
+_MONTH_DE = (r"(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember|"
+             r"(?:Jan|Feb|Mär|Mrz|Apr|Jun|Jul|Aug|Sept?|Okt|Nov|Dez)\.?)(?![a-zäöüß])")
+_VERSIONISH = {"version", "v", "ver", "python", "ios", "android", "windows", "build", "release", "node", "java", "port"}
+# "3.11." without a year is a date only after one of these ("Raum 2.01." is a room); with a year it always is.
+_DATE_WORDS = {"am", "bis", "ab", "vom", "von", "zum", "zu", "seit", "vor", "nach", "den", "dem", "der", "beim", "bei", "und",
+               "oder", "für", "zwischen", "ist", "war", "wäre", "auf", "gegen", "um", "ende", "anfang", "mitte", "datum", "termin",
+               "frist", "stichtag", "deadline", "geburtstag", "fällig", "montag", "dienstag", "mittwoch", "donnerstag", "freitag",
+               "samstag", "sonntag", "mo", "di", "mi", "do", "fr", "sa", "so"}
+_ISO = re.compile(r"(?<![\w.:/-])(\d{4})-(\d{2})-(\d{2})(?![\w-]|[.:/]\d)")
+
+
+def _valid_date(day: int, month: int) -> bool:
+    return 1 <= day <= 31 and 1 <= month <= 12
 
 
 # ---------------------------------------------------------------- German
@@ -161,8 +181,85 @@ def _one_de(m: re.Match) -> str | None:
     return {"f": "eine", "n": "ein", "m": "ein" if word.endswith("er") and word[0].islower() else "einen"}[gender]
 
 
+_ORD_NOUNS = {"Stock": "m", "Platz": "m", "Tag": "m", "Versuch": "m", "Rang": "m", "Monat": "m", "Mal": "n",
+              "Semester": "n", "Quartal": "n", "Kapitel": "n", "Jahr": "n", "Jahrhundert": "n", "Woche": "f", "Klasse": "f",
+              "Runde": "f", "Etage": "f", "Liga": "f", "Reihe": "f", "Zeile": "f", "Aufgabe": "f", "Stunde": "f",
+              "Auflage": "f", "Lektion": "f", "Spalte": "f", "Seite": "f", "Weltkrieg": "m", "Advent": "m",
+              "Geburtstag": "m", "Jahrestag": "m", "Spieltag": "m"}
+_NUM_DATE_DE = re.compile(_BEFORE_WORD + r"(\d{1,2})\.(\d{1,2})\.(?:(\d{4})(?!\d|\.\d))?(?!\d)")
+_DAY_MONTH_DE = re.compile(_BEFORE + r"(\d{1,2})\.\s*(" + _MONTH_DE + ")")
+_DAY_RANGE_DE = re.compile(_BEFORE + r"(\d{1,2})\.\s*(?:[–-]\s*|(bis|und|oder)\s+)(?=\d{1,2}\.\s*" + _MONTH_DE + ")")
+_DAY_NOUN_DE = re.compile(_BEFORE + r"(\d{1,2})\.\s*(" + "|".join(_ORD_NOUNS) + r")\b")
+_YEAR_DE = re.compile(r"(?<![\w.,:/-])((?:" + "|".join(_DE_MONTHS) + r"|Jahr|Jahre|Jahres|Baujahr|Jahrgang|geboren|seit|im|bis|ab)\s+)"
+                      r"(1[1-9]\d\d)(?![\w]|[.,:]\d)", re.I)
+_CLOCK_RANGE_DE = re.compile(_BEFORE_WORD + r"(\d{1,2}:[0-5]\d(?:\s*Uhr)?)\s*[–−-]\s*(?=\d{1,2}:[0-5]\d)")
+_HOUR_RANGE_DE = re.compile(_BEFORE_WORD + r"(\d{1,2})\s*[–−-]\s*(\d{1,2})(?=\s*Uhr\b)")
+_TIME_DE = re.compile(_BEFORE_WORD + r"(\d{1,2})(?::([0-5]\d)(?!\d)|\.([0-5]\d)(?=\s*Uhr\b))(?:\s*Uhr\b)?(?![\w:])")
+
+
+def _ordinal_de(n: int, text: str, pos: int, gender: str = "m") -> str:
+    """"dritten" (after am, zum, den, dem ...) or "dritte" (after the article of the noun: der Oktober, die Aufgabe)."""
+    article = {"m": "der", "f": "die", "n": "das"}[gender]
+    return de_ordinal(n, "e" if _prev_word(text, pos) == article else "en")
+
+
+def _year_de(y: int) -> str:
+    """1100 .. 1999 as years are said ("neunzehnhundertfünf"); every other year is a plain number."""
+    if 1100 <= y <= 1999:
+        hundreds, rest = divmod(y, 100)
+        return de_cardinal(hundreds) + "hundert" + (de_cardinal(rest) if rest else "")
+    return de_cardinal(y)
+
+
+def _date_de(m: re.Match, day: int, month: int, year: int | None) -> str:
+    before = _prev_word(m.string, m.start())
+    if not _valid_date(day, month) or before in _VERSIONISH or (year is None and before not in _DATE_WORDS):
+        return m.group(0)
+    return f"{_ordinal_de(day, m.string, m.start())} {_DE_MONTHS[month - 1]}" + (f" {_year_de(year)}" if year else "")
+
+
+def _day_month_de(m: re.Match) -> str:
+    day = int(m[1])
+    if not 1 <= day <= 31:
+        return m.group(0)
+    return f"{_ordinal_de(day, m.string, m.start())} {_DE_MONTHS[_DE_MONTH_OF[m[2][:3].lower()]]}"
+
+
+def _day_range_de(m: re.Match) -> str:
+    day = int(m[1])
+    return m.group(0) if not 1 <= day <= 31 else f"{_ordinal_de(day, m.string, m.start())} {m[2] or 'bis'} "
+
+
+def _day_noun_de(m: re.Match) -> str:
+    day = int(m[1])
+    return m.group(0) if not 1 <= day <= 99 else f"{_ordinal_de(day, m.string, m.start(), _ORD_NOUNS[m[2]])} {m[2]}"
+
+
+def _year_after_de(m: re.Match) -> str:
+    year = int(m[2])
+    if m[1].strip().lower() in ("geboren", "seit", "im", "bis", "ab") and year < 1900:
+        return m.group(0)
+    return m[1] + _year_de(year)
+
+
+def _time_de(m: re.Match) -> str:
+    hour, minute = int(m[1]), int(m[2] or m[3])
+    if hour > 24 or (hour == 24 and minute):
+        return m.group(0)
+    return de_cardinal(hour, "ein") + " Uhr" + (f" {de_cardinal(minute)}" if minute else "")
+
+
 def _german(t: str) -> str:
     t = _NEG.sub("minus ", t)
+    t = _ISO.sub(lambda m: _date_de(m, int(m[3]), int(m[2]), int(m[1])), t)
+    t = _NUM_DATE_DE.sub(lambda m: _date_de(m, int(m[1]), int(m[2]), int(m[3]) if m[3] else None), t)
+    t = _DAY_RANGE_DE.sub(_day_range_de, t)
+    t = _DAY_MONTH_DE.sub(_day_month_de, t)
+    t = _DAY_NOUN_DE.sub(_day_noun_de, t)
+    t = _YEAR_DE.sub(_year_after_de, t)
+    t = _CLOCK_RANGE_DE.sub(r"\1 bis ", t)
+    t = _HOUR_RANGE_DE.sub(lambda m: f"{de_cardinal(int(m[1]), 'ein')} bis {de_cardinal(int(m[2]), 'ein')}", t)
+    t = _TIME_DE.sub(_time_de, t)
     t = _DEC_DE.sub(lambda m: (_decimal(m, de_cardinal, "Komma", _DE_TO19)), t)
     t = _INT_DE.sub(lambda m: _integer_de(m), t)
     return _PERCENT.sub(" Prozent", t)
@@ -182,8 +279,52 @@ def _integer_de(m: re.Match) -> str:
 
 # ---------------------------------------------------------------- English
 
-def _english(t: str) -> str:
+_NUM_DATE_EN = re.compile(_BEFORE_WORD + r"(\d{1,2})\.(\d{1,2})\.(\d{4})(?![\w]|\.\d)")
+_CLOCK_RANGE_EN = re.compile(_BEFORE_WORD + r"(\d{1,2}:[0-5]\d(?:\s?[ap]\.?m\.?)?)\s*[–−-]\s*(?=\d{1,2}:[0-5]\d)", re.I)
+_TIME_EN = re.compile(_BEFORE_WORD + r"(\d{1,2})(?::([0-5]\d)|\.([0-5]\d)(?=\s?[ap](?:\.m\.|m)(?!\w)))"
+                      r"(?:\s?([ap])(?:\.m\.|m)(?!\w))?(?![\w:])(?:\s+(noon|midnight)\b)?", re.I)
+
+
+def _date_en(m: re.Match, day: int, month: int, year: int) -> str:
+    if not _valid_date(day, month):
+        return m.group(0)
+    return f"{_EN_MONTHS[month - 1]} {en_ordinal(day)}, {year}"
+
+
+def _en_time(hour: int, minute: int, ap: str, style: str) -> str:
+    """A clock time as it is said: "ten past two" (style "past": on the five, quarter and half hours; other minutes
+    as "seven forty-one") or "two ten" (style "digits"). Hours are said on the 12-hour clock; "P M" when the text had it."""
+    h12 = hour % 12 or 12
+    tail = {"a": " A M", "p": " P M"}.get(ap, "")
+    if minute == 0:
+        if (ap and h12 == 12) or (not ap and hour in (0, 12)):
+            return "noon" if (ap == "p" or (not ap and hour == 12)) else "midnight"
+        return en_cardinal(h12) + (tail or " o'clock")
+    if style == "past" and minute % 5 == 0:
+        nxt = en_cardinal(h12 % 12 + 1)
+        if minute == 15:
+            return f"quarter past {en_cardinal(h12)}{tail}"
+        if minute == 30:
+            return f"half past {en_cardinal(h12)}{tail}"
+        if minute == 45:
+            return f"quarter to {nxt}{tail}"
+        return (f"{en_cardinal(minute)} past {en_cardinal(h12)}" if minute < 30 else f"{en_cardinal(60 - minute)} to {nxt}") + tail
+    return f"{en_cardinal(h12)} {'oh ' + _EN_TO19[minute] if minute < 10 else en_cardinal(minute)}{tail}"
+
+
+def _time_en(m: re.Match, style: str) -> str:
+    hour, minute, ap = int(m[1]), int(m[2] or m[3]), (m[4] or "").lower()
+    if (ap and not 1 <= hour <= 12) or (not ap and hour > 23):
+        return m.group(0)
+    return m[5].lower() if m[5] and minute == 0 else _en_time(hour, minute, ap, style)     # "12:00 noon" is "noon"
+
+
+def _english(t: str, en_times: str) -> str:
     t = _NEG.sub("minus ", t)
+    t = _ISO.sub(lambda m: _date_en(m, int(m[3]), int(m[2]), int(m[1])), t)
+    t = _NUM_DATE_EN.sub(lambda m: _date_en(m, int(m[1]), int(m[2]), int(m[3])), t)
+    t = _CLOCK_RANGE_EN.sub(r"\1 to ", t)
+    t = _TIME_EN.sub(lambda m: _time_en(m, en_times), t)
     t = _DEC_EN.sub(lambda m: _decimal(m, en_cardinal, "point", _EN_TO19), t)
     t = _SWISS_THOUSANDS.sub(lambda m: re.sub(r"['’]", "", m.group(0)), t)
     return _PERCENT.sub(" percent", t)
@@ -194,9 +335,10 @@ def _english(t: str) -> str:
 _NEEDS_WORK = re.compile(r"[\d%]")
 
 
-def normalize(text: str, lang: str | None = None) -> str:
+def normalize(text: str, lang: str | None = None, *, en_times: str = "past") -> str:
     """`text` as it should be said. lang: "en" or "de"; None finds it from the words (as the voice does). Text
-    without a digit or a percent sign is returned as it is (the same object). Other languages are not touched."""
+    without a digit or a percent sign is returned as it is (the same object). Other languages are not touched.
+    en_times: English clock times as "ten past two" ("past") or "two ten" ("digits"); chosen by listening."""
     if not text or not _NEEDS_WORK.search(text):
         return text
     if lang is None:
@@ -204,4 +346,4 @@ def normalize(text: str, lang: str | None = None) -> str:
         lang = language_of(text)
     if lang == "de":
         return _german(text)
-    return _english(text) if lang == "en" else text
+    return _english(text, en_times) if lang == "en" else text

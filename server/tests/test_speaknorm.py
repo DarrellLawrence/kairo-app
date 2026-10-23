@@ -78,13 +78,12 @@ LINES = [
     ("Die Rechnung beträgt 1250 Franken.", "Die Rechnung beträgt eintausendzweihundertfünfzig Franken."),
     ("Der Test ist am 23.10.2026.", "Der Test ist am dreiundzwanzigsten Oktober zweitausendsechsundzwanzig."),
 ]
-# stage 1 (integers, decimals): the lines that need no clock, calendar or money rule
-_STAGE1 = {"Das Meeting beginnt um 9 Uhr.", "Es sind 3,5 Kilometer bis zum Bahnhof.", "Du hast 7 neue Nachrichten.",
-           "Es sind 25 Leute eingeladen.", "Ich erinnere dich in 20 Minuten daran.", "Im Jahr 2026 ist viel passiert.",
-           "Die Rechnung beträgt 1250 Franken."}
 
 
-@pytest.mark.parametrize("digits,spelled", [x for x in LINES if x[0] in _STAGE1])
+_MONEY_LINES = {"Das kostet 12,50 Franken."}                       # (the amount rules come in the next commit)
+
+
+@pytest.mark.parametrize("digits,spelled", [x for x in LINES if x[0] not in _MONEY_LINES])
 def test_the_research_lines_read_as_words(digits, spelled):
     assert normalize(digits, "de") == spelled
 
@@ -181,3 +180,130 @@ def test_the_language_is_found_from_the_text_when_it_is_not_given():
 def test_no_digit_or_percent_sign_is_left_that_the_rules_know():
     assert not re.search(r"[\d%]", normalize("Es sind 3,5 km und 80% von 1250 Franken.", "de"))
     assert normalize("100%", "de") == "einhundert Prozent"
+
+
+# ---------------------------------------------------------------- German times
+
+@pytest.mark.parametrize("text,said", [
+    ("Dein Termin ist um 14:30 Uhr.", "Dein Termin ist um vierzehn Uhr dreißig."),         # not "... Uhr dreißig Uhr"
+    ("Das Meeting beginnt um 9:00.", "Das Meeting beginnt um neun Uhr."),
+    ("Das Meeting beginnt um 9:00 Uhr.", "Das Meeting beginnt um neun Uhr."),
+    ("Um 0:05 Uhr ist Schluss.", "Um null Uhr fünf ist Schluss."),
+    ("Um 1:30 und um 13:01.", "Um ein Uhr dreißig und um dreizehn Uhr eins."),
+    ("Um 7:05 geht es los.", "Um sieben Uhr fünf geht es los."),
+    ("Um 14.30 Uhr kommt der Bus.", "Um vierzehn Uhr dreißig kommt der Bus."),             # written the German way
+    ("Von 9:00 bis 10:30 Uhr.", "Von neun Uhr bis zehn Uhr dreißig."),
+    ("Von 9:00-10:30 Uhr.", "Von neun Uhr bis zehn Uhr dreißig."),
+    ("Von 9-10 Uhr.", "Von neun bis zehn Uhr."),
+    ("Bis 24:00 Uhr.", "Bis vierundzwanzig Uhr."),
+])
+def test_german_times(text, said):
+    assert normalize(text, "de") == said
+
+
+def test_a_time_that_is_none_is_left_alone():
+    for text in ("Um 25:30 Uhr.", "Um 24:30 Uhr.", "Um 14:75 Uhr.", "Es stand 3:1.", "Um 14:30h.", "Um 12:30:15 Uhr."):
+        assert normalize(text, "de") == text
+
+
+# ---------------------------------------------------------------- German dates and ordinals
+
+@pytest.mark.parametrize("text,said", [
+    ("Am 3. November habe ich frei.", "Am dritten November habe ich frei."),
+    ("Heute ist der 23. Oktober.", "Heute ist der dreiundzwanzigste Oktober."),            # "der" + a month: nominative
+    ("Der 21. Oktober war ein Dienstag.", "Der einundzwanzigste Oktober war ein Dienstag."),
+    ("Ab dem 1. Januar 2027.", "Ab dem ersten Januar zweitausendsiebenundzwanzig."),
+    ("Am 31. Dezember ist Schluss.", "Am einunddreißigsten Dezember ist Schluss."),
+    ("Am 23. Okt. 2026 ist es so weit.", "Am dreiundzwanzigsten Oktober zweitausendsechsundzwanzig ist es so weit."),
+    ("Am 1. Mai 1999 war es so.", "Am ersten Mai neunzehnhundertneunundneunzig war es so."),
+    ("Am 5. Mai 1905 war es so.", "Am fünften Mai neunzehnhundertfünf war es so."),
+    ("Im Jahr 1999 war es so.", "Im Jahr neunzehnhundertneunundneunzig war es so."),
+    ("Vom 3. bis 5. Mai ist frei.", "Vom dritten bis fünften Mai ist frei."),
+    ("Vom 3.-5. Mai ist frei.", "Vom dritten bis fünften Mai ist frei."),
+    ("Am 3. und 4. Juni ist frei.", "Am dritten und vierten Juni ist frei."),
+])
+def test_german_ordinal_dates(text, said):
+    assert normalize(text, "de") == said
+
+
+@pytest.mark.parametrize("text,said", [
+    ("Der Test ist am 23.10.2026.", "Der Test ist am dreiundzwanzigsten Oktober zweitausendsechsundzwanzig."),
+    ("Am 3.11. ist frei.", "Am dritten November ist frei."),
+    ("Der Test ist am 2026-10-23.", "Der Test ist am dreiundzwanzigsten Oktober zweitausendsechsundzwanzig."),
+    ("Der 03.04.1999 war ein Samstag.", "Der dritte April neunzehnhundertneunundneunzig war ein Samstag."),
+    ("Vom 1.5. bis 3.5. ist zu.", "Vom ersten Mai bis dritten Mai ist zu."),
+    ("Am Mo., 23.10. um 8:00.", "Am Mo., dreiundzwanzigsten Oktober um acht Uhr."),
+    ("Frist: 15.3. ist fix.", "Frist: fünfzehnten März ist fix."),
+])
+def test_german_numeric_dates(text, said):
+    assert normalize(text, "de") == said
+
+
+def test_a_dotted_number_without_a_year_is_a_date_only_after_a_date_word():
+    """"Raum 2.01." could be a date or a room; with a year, or after am / bis / vom / a weekday, it is a date."""
+    for text in ("Zimmer 3.14 und Raum 2.01.", "Kapitel 4.10. Danach.", "Die Zahl 7.12. ist es."):
+        assert normalize(text, "de") == text, text
+
+
+@pytest.mark.parametrize("text,said", [
+    ("Du bist im 2. Stock.", "Du bist im zweiten Stock."),
+    ("Das war zum 3. Mal.", "Das war zum dritten Mal."),
+    ("Der 2. Platz ist frei, den 1. Platz nimmt er.", "Der zweite Platz ist frei, den ersten Platz nimmt er."),
+    ("Die 3. Aufgabe fehlt, bei der 3. Aufgabe hakt es.", "Die dritte Aufgabe fehlt, bei der dritten Aufgabe hakt es."),
+    ("Der 2. Weltkrieg und am 1. Advent.", "Der zweite Weltkrieg und am ersten Advent."),
+    ("Alles Gute zum 30. Geburtstag.", "Alles Gute zum dreißigsten Geburtstag."),
+])
+def test_german_ordinals_before_the_nouns_that_take_them(text, said):
+    assert normalize(text, "de") == said
+
+
+def test_a_number_with_a_dot_that_is_no_date_stays_a_sentence_end():
+    assert normalize("Ich habe 3. Dann gehe ich.", "de") == "Ich habe drei. Dann gehe ich."
+    assert normalize("Es gibt 32. Oktober nicht.", "de") == "Es gibt zweiunddreißig. Oktober nicht."   # no day 32
+    assert normalize("Am 31.13. nicht.", "de") == "Am 31.13. nicht."                                  # no month 13
+    assert normalize("Python 3.11. Danach.", "de") == "Python 3.11. Danach."                        # a version
+
+
+# ---------------------------------------------------------------- English times
+
+@pytest.mark.parametrize("text,said", [
+    ("Your meeting is at 14:10.", "Your meeting is at ten past two."),
+    ("It starts at 9:00.", "It starts at nine o'clock."),
+    ("Your train leaves at 07:41.", "Your train leaves at seven forty-one."),
+    ("Meet at 6:07.", "Meet at six oh seven."),
+    ("Meet at 6:15 or 6:30.", "Meet at quarter past six or half past six."),
+    ("Meet at 6:35, 6:45 or 6:55.", "Meet at twenty-five to seven, quarter to seven or five to seven."),
+    ("It's 12:30 pm.", "It's half past twelve P M."),
+    ("It starts at 9:00 am.", "It starts at nine A M."),
+    ("It starts at 2:45 p.m. sharp.", "It starts at quarter to three P M sharp."),
+    ("Noon is 12:00, midnight is 00:00 or 12:00 am.", "Noon is noon, midnight is midnight or midnight."),
+    ("Meet at 12:45 or 0:05.", "Meet at quarter to one or five past twelve."),
+    ("From 9:00-10:30.", "From nine o'clock to half past ten."),
+    ("Call at 5.30 pm or 5:30pm.", "Call at half past five P M or half past five P M."),   # not "five point three zero"
+    ("At 12:00 noon or 12:00 midnight.", "At noon or midnight."),
+])
+def test_english_times_are_said_as_a_clock(text, said):
+    assert normalize(text, "en") == said
+
+
+@pytest.mark.parametrize("text,said", [
+    ("Your meeting is at 14:10.", "Your meeting is at two ten."),
+    ("Meet at 9:05, 9:00 or 14:30.", "Meet at nine oh five, nine o'clock or two thirty."),
+    ("It's 2:45 pm.", "It's two forty-five P M."),
+])
+def test_english_times_can_be_said_as_digits_too(text, said):
+    assert normalize(text, "en", en_times="digits") == said
+
+
+def test_an_english_time_that_is_none_is_left_alone():
+    for text in ("At 25:30 now.", "At 13:00 pm now.", "At 14:75 now.", "At 14:30h now."):
+        assert normalize(text, "en") == text
+
+
+@pytest.mark.parametrize("text,said", [
+    ("The test is on 23.10.2026.", "The test is on October twenty-third, 2026."),
+    ("The test is on 2026-10-23.", "The test is on October twenty-third, 2026."),
+    ("It was on 01.05.1999.", "It was on May first, 1999."),
+])
+def test_english_dates(text, said):
+    assert normalize(text, "en") == said
