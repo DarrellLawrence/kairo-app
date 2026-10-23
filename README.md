@@ -39,6 +39,7 @@ Everything on kairo-home is double-click. Nothing gets wiped, no Docker, no WSL.
 - **Rollback Kairo.bat**: back to the previous version (database schema first).
 - **Kairo Logins.bat**: redo a login (e.g. Claude login expired).
 - **Kairo Check.bat**: the same checks the PC runs after every reboot (Kairo up, own account, Claude, Tailscale, HTTPS).
+- **`kairo diag`** (type it in any Command Prompt, no admin needed): is the voice stack healthy? One line per check (Whisper, Kokoro, Piper, the voice model, Smart Turn, Silero, speaker check, memory, graphics and main memory, firewall rule, Tailscale path, latency harness), PASS / WARN / FAIL with the reason; exit code 0 when nothing fails. The same report is in the app: More → System → Voice check.
 
 Kairo runs as its own Windows account **kairo-svc**: no admin rights, hidden from the sign-in screen, can only use `C:\Kairo`.
 - **Uninstall Kairo.bat**: removes Kairo; your data stays unless you type DELETE.
