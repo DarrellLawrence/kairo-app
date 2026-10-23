@@ -115,7 +115,7 @@ keys in tests from pieces (`"gh" + "p_" + ...`) so the file itself stays clean.
 Paths that must never be committed or shipped: `private/`, `secrets/`, `vault/`, `data/`, `devdata/`, `.private/`,
 `*.local.*`, `.env`, `*.env` and `.envrc` (not `.env.example`), databases (`*.db`, `*.sqlite*`, and any file with the
 SQLite header), the terms list, key stores, Google client secrets, Kairo's own secret stores (by their header), the
-capture token and documents or photos outside `web/public/`.
+capture token, `.gitleaksignore` and documents or photos outside `web/public/`.
 
 In tests use made-up names and places only.
 
@@ -127,8 +127,16 @@ In tests use made-up names and places only.
   checksum-verified [gitleaks](https://github.com/gitleaks/gitleaks) (`.gitleaks.toml`, needs gitleaks 8.25 or newer,
   looks into archives 3 deep). gitleaks never runs with `--verbose` there (that prints the matched line, the file name
   and the author, which are not masked in the log); only rule, file, line and commit are printed.
-- A pull request is judged by the scanner and the gitleaks config of its **base branch**, not by its own copy, so a pull
-  request cannot weaken the check that judges it.
+- A pull request is judged by the scanner and the gitleaks config of its **base branch**, not by its own copy, so
+  changing them does not help it pass. A `.gitleaksignore` file (any folder) and gitleaks' inline allow comment
+  (outside `server/tests/`, `docs/` and `installer/ci/`) are findings, and CI deletes the ignore file before gitleaks
+  runs, because gitleaks honours both whatever config it is given.
+- **What only review can stop.** The workflow file of a pull request comes from the pull request itself: a pull
+  request that edits `.github/` (or adds a workflow) can change or skip these steps, and could read the
+  `PERSONAL_TERMS` secret. No scanner can prevent that. So a pull request that touches `.github/`,
+  `scripts/privacy_scan.py`, `scripts/hooks/`, `.gitleaks.toml` or `scripts/build-release.sh` is reviewed and merged by
+  the owner by hand, never merged automatically on green CI. (A code-owner rule would not help here: pull requests are
+  opened with the owner's own account, and nobody can approve their own pull request.)
 - Job `privacy-zip` (needs `build`): the exact zip the build made, scanned with the terms (`--ci`) and unpacked for
   gitleaks. The `release` job needs it, so a release is never published without the terms check; without the secret
   it is red on `main` and nothing is released. A pull request from this repository is red too when the secret is

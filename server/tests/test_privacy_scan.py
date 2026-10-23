@@ -1511,3 +1511,28 @@ def test_a_zip_member_name_written_by_an_old_windows_tool_is_read_the_way_it_was
     code, out = scan(tmp_path, "--zip", str(z), terms=[UML])
     assert code == 1 and "personal term #1 (list line 1) in the name" in out, out
     no_leak(out, UML, UML.replace(U, "ue"))
+
+
+# ---------------------------------------------------------------- what tells gitleaks to look away
+
+GL_ALLOW = j("gitleaks", ":allow")                            # gitleaks skips any line that holds this
+
+
+def test_a_gitleaks_ignore_file_is_never_committed_or_shipped(ps):
+    """gitleaks always reads .gitleaksignore from the folder it scans, whatever config CI gives it: a pull request
+    could add one with the fingerprint of its own finding."""
+    for path in (".gitleaksignore", "server/.gitleaksignore", "Kairo-Setup-1/app/.GITLEAKSIGNORE"):
+        assert any("gitleaks" in r for r in ps.forbidden_path(path)), path
+
+
+def test_a_gitleaks_allow_comment_is_a_finding_outside_the_folders_for_fakes(tmp_path):
+    line = f"x = '{GH_PAT[:10]}'  # {GL_ALLOW}\n"
+    code, out = hit(tmp_path, f"ok\n{line}", name="server/app/x.py")
+    assert code == 1 and "server/app/x.py:2: secret: gitleaks allow comment" in out, out
+    code, out = hit(tmp_path, f"ok\n{line}", name="server/tests/test_x.py")
+    assert code == 0, out                                                         # deliberate fakes in tests may carry it
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    commit(repo, tmp_path, "quiet please", {"cfg.toml": f"key = 1  # {GL_ALLOW}\n", ".gitleaksignore": "abc:cfg.toml:generic:1\n"})
+    code, out = scan(tmp_path, "--history", "HEAD~1..HEAD", terms=[NAME], cwd=repo)
+    assert code == 1 and "cfg.toml:1: secret: gitleaks allow comment" in out and ".gitleaksignore: forbidden path" in out, out

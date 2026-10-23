@@ -4,6 +4,10 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token for every job; only the release job asks for more.
+permissions:
+  contents: read
+
 jobs:
   # The setup zip, built once (fix P2.12): every test below runs on exactly this file, and the
   # release publishes exactly this file.
@@ -11,6 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false        # npm install scripts run in this job
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -41,7 +47,8 @@ jobs:
   # file:line and the rule number) and a pinned, checksum-verified gitleaks (its output is reduced to rule, file, line
   # and commit by privacy_scan.py --gitleaks-report: never --verbose, which prints the matched line and the author).
   # A pull request is checked with the scanner and the gitleaks config of its BASE branch, never with its own copy,
-  # so a pull request cannot weaken the check that judges it.
+  # so changing them does not help it pass. This workflow file itself comes from the pull request, though: a pull
+  # request that edits .github/ can skip these steps or read the secret. Only review stops that (CONTRIBUTING.md).
   # Pull requests: the commits the pull request adds must be clean (hard); the whole old history is reported but
   # does not fail the pull request (it holds the old private/ file until the history is rewritten, task 97).
   # Pushes to main: the whole history, hard. Without the secret this job is an error on main (so it is noticed) and
@@ -106,6 +113,7 @@ jobs:
         env:
           KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
         run: |
+          rm -f .gitleaksignore          # gitleaks reads it whatever --config says; the scanner flags the file itself
           rc=0
           "$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --max-archive-depth 3 --config "$GITLEAKS_CONFIG" \
             --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" --log-opts="--all" . || rc=$?
@@ -185,6 +193,7 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/unpacked"
           unzip -q dist/Kairo-Setup-*.zip -d "$RUNNER_TEMP/unpacked"
+          rm -f "$RUNNER_TEMP/unpacked/.gitleaksignore"   # gitleaks reads it whatever --config says
           rc=0
           "$RUNNER_TEMP/gitleaks/gitleaks" dir --redact --no-banner --max-archive-depth 3 --config "$GITLEAKS_CONFIG" \
             --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" "$RUNNER_TEMP/unpacked" || rc=$?

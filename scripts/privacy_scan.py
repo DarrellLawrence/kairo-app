@@ -639,6 +639,8 @@ def forbidden_path(path: str) -> list[str]:
             out.append("key file")
         if name.startswith("capture-token"):
             out.append("capture token file")
+        if name == ".gitleaksignore":
+            out.append("gitleaks ignore file (it would silence gitleaks in CI)")
         if PurePosixPath(name).suffix in DOCUMENT_EXT:
             norm = "/" + "/".join(parts).lower()
             if not any("/" + d in norm for d in DOCUMENT_ALLOWED_DIRS):
@@ -793,6 +795,11 @@ _RULES: list[SecretRule] = [
                lambda m: not _trivial(m["body"]) and not _placeholder(m["body"]), ("vapid",), True),
 ]
 
+# gitleaks skips every line that holds its allow comment, whatever config CI uses (built from pieces so that this file
+# does not hold it)
+_GITLEAKS_ALLOW = re.compile("gitleaks" + ":allow", re.I)
+GITLEAKS_ALLOW_NAME = "gitleaks allow comment (only server/tests, docs and installer/ci may hold one)"
+
 _ASSIGN = re.compile(
     r"[\"'`]?[ \t]*(?::=|=>|[:=])[ \t]*[\"'`]?(?P<body>[A-Za-z0-9_\-+/=.~!@#$%^&*?:]{20,})(?![\w(\[{])")
 _NAME_BEFORE = re.compile(r"([A-Za-z0-9_\-.]{1,80})$")
@@ -827,6 +834,9 @@ def _secret_spans_one(text: str, pragma_ok: bool) -> list[tuple[int, int, str]]:
         for m in rule.rx.finditer(text):
             if rule.ok(m):
                 add(m.start(), m.end(), rule.name)
+    if not pragma_ok and "gitleaks" in low:
+        for m in _GITLEAKS_ALLOW.finditer(text):
+            add(m.start(), m.end(), GITLEAKS_ALLOW_NAME)
     if any(k in low for k in _GENERIC_NEEDLES):
         for m in _ASSIGN.finditer(text):
             if not _random_value(m["body"]):

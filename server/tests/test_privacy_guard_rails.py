@@ -389,6 +389,28 @@ def test_a_pull_request_is_judged_by_the_base_branchs_scanner_and_gitleaks_confi
     assert "pull_request_target" not in text                                   # forks never get the secret or a write token
 
 
+def test_gitleaks_never_reads_an_ignore_file_and_no_job_gets_a_write_token_it_does_not_need():
+    """A .gitleaksignore in the scanned folder silences gitleaks whatever --config says (the base branch's scanner also
+    flags the file in a pull request). Only the release job may write; the build job runs npm scripts."""
+    wf = workflow()
+    for name in ("privacy", "privacy-zip"):
+        gl = next(r for r in run_steps(wf["jobs"][name]) if "gitleaks/gitleaks" in r and "--config" in r)
+        assert "rm -f" in gl and ".gitleaksignore" in gl and gl.index(".gitleaksignore") < gl.index("gitleaks/gitleaks"), name
+    assert wf["permissions"] == {"contents": "read"}
+    writers = {n for n, job in wf["jobs"].items() if "write" in str(job.get("permissions", ""))}
+    assert writers == {"release"}, writers
+    build_checkout = next(s for s in wf["jobs"]["build"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert build_checkout["with"]["persist-credentials"] is False
+
+
+def test_contributing_says_what_the_base_branch_scanner_cannot_stop():
+    """The workflow file of a pull request comes from the pull request: it can skip these steps or read the secret.
+    Only review stops that, and the docs must say so instead of promising more."""
+    text = " ".join((REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
+    assert "cannot weaken the check that judges it" not in text
+    assert ".github/" in text and "by hand" in text and "workflow" in text
+
+
 def test_pull_requests_must_add_clean_commits_but_the_old_history_does_not_block_them():
     steps = workflow()["jobs"]["privacy"]["steps"]
     new = next(s for s in steps if "origin/${BASE_REF}..HEAD" in s.get("run", ""))
