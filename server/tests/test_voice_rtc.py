@@ -218,11 +218,11 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
     later: (seconds after the mic started, message[, event]) sent on the data channel then, once the PC sent
     that event (the phone taps "done" only after the PC said it hears speech); phone.sent: when."""
     import numpy as np
-    from aiortc import RTCPeerConnection, RTCSessionDescription
+    from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
     voicertc.tailnet_only(allow_loopback=True)      # the fake phone is in this process: it offers 127.0.0.1 too
     voice = voice or FakeVoice()
     phone = SimpleNamespace(events=[], audio_after=[], mic=None, loud=[], sent=[])
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))   # like the phone: no STUN/TURN (aiortc's default asks Google)
     mic = _phone_track(list(times), speech)
     phone.mic = mic
     pc.addTrack(mic)
@@ -458,11 +458,11 @@ from tests.test_voice_local import local  # noqa: E402,F401  (the app with the f
 async def _app_call(client, *, path="call", seconds=12.0):
     """The fake phone calls the app: offer over HTTP, audio over WebRTC on this machine."""
     import numpy as np
-    from aiortc import RTCPeerConnection, RTCSessionDescription
+    from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
     voicertc.tailnet_only(allow_loopback=True)
     phone = SimpleNamespace(events=[], audio_after=[])
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))   # like the phone: no STUN/TURN (aiortc's default asks Google)
     mic = _phone_track([0.5])
     pc.addTrack(mic)
     channel = pc.createDataChannel("kairo")
