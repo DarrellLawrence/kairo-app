@@ -315,8 +315,21 @@ def test_the_voice_model_is_named_in_the_requirements_so_a_new_one_gets_a_new_fo
 
 # ---------------------------------------------------------------- G2: one pass for the language and the words (app/voice/langid.py)
 
+def real_faster_whisper():
+    """The installed library, or a skip: not an empty namespace package (an unreadable folder) and not a stand-in
+    another test left in sys.modules."""
+    from app.tool_sites import is_real_package
+    found, why = is_real_package("faster_whisper")
+    if not found:
+        pytest.skip(why)
+    import faster_whisper
+    if not hasattr(faster_whisper, "__version__"):
+        pytest.skip("faster_whisper is a stand-in module here")
+    return faster_whisper
+
+
 def test_the_faster_whisper_internals_the_path_uses_are_the_ones_it_was_checked_against():
-    fw = pytest.importorskip("faster_whisper")
+    fw = real_faster_whisper()
     assert fw.__version__ == langid.PINNED, "faster-whisper changed: re-check app/voice/langid.py against its transcribe()"
     from faster_whisper import WhisperModel
     from faster_whisper.transcribe import TranscriptionOptions

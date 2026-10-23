@@ -42,7 +42,8 @@ def real_model():
     path = os.environ.get("KAIRO_STT_TEST_MODEL")
     if not path or not Path(path).is_dir():
         pytest.skip("set KAIRO_STT_TEST_MODEL to a faster-whisper model folder (the small one) to run against a real model")
-    pytest.importorskip("faster_whisper")
+    from tests.test_voice import real_faster_whisper
+    real_faster_whisper()
     from faster_whisper import WhisperModel
     model = WhisperModel(path, device="cpu", compute_type="int8", local_files_only=True)
     model.encodes = 0
