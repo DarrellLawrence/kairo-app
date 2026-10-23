@@ -10,15 +10,18 @@ CUDA environment variable for it, only NVAPI's DRS calls, so this module calls t
   python -I nvsettings.py set 1           write it (an elevated process); 0 = driver default, 1 = prefer no sysmem
                                           fallback, 2 = prefer sysmem fallback. Writes, saves and reads back.
 
-Output of get/set: one line, `policy=<0|1|2|unset|unavailable> <words>`, so the installer can parse it. Exit code:
+Output of get/set: one line, `policy=<0|1|2|unset|unavailable> <words>` and then, in brackets, which NVAPI interface answered
+(`[NVAPI SetSetting 0x8A2CF5F5 (newer id), GetSetting 0xEA99498D (newer id)]`), so the installer can parse the start of it and the
+check on the PC (P17) can see which of the driver's two ids did the work. Exit code:
 0 it read (and for set: the read-back is what was asked), 1 the read-back differs, 2 wrong use, 3 it could not
 (not Windows, no NVIDIA driver, not elevated, ...). The read-back is the proof: NVAPI's own status is not enough.
 
 This file imports nothing from Kairo and nothing from the network, so the installer can run it as a script with
 any Python. Windows only at run time; the struct layout and the call sequence are checked on any OS by
 tests/test_nvsettings.py. Every number below comes from NVIDIA's open NVAPI headers (nvapi_interface.h, nvapi.h)
-and from NVIDIA Profile Inspector's CustomSettingNames.xml (v3.0.2.3). The driver supports the setting from
-536.40 and a global switch from 546.01.
+and from NVIDIA Profile Inspector's CustomSettingNames.xml and NvapiDrsWrapper.cs (v3.0.2.3: the two newer interface ids
+and the two extra arguments). The driver supports the setting from 536.40 and a global switch from 546.01. Whether a real
+driver is happy with all this is proven only on the PC (voice recipe 14, P17); the output line says which ids it used.
 """
 
 from __future__ import annotations
@@ -39,6 +42,13 @@ IDS = {
     "DRS_SaveSettings": 0xFCBC7E14, "DRS_GetCurrentGlobalProfile": 0x617BFF9F, "DRS_GetBaseProfile": 0xDA8466A0,
     "DRS_GetSetting": 0x73BF8338, "DRS_SetSetting": 0x577DD202,
 }
+# The two calls that read and write a setting have a newer id as well, which is not in the SDK header. NVIDIA Profile Inspector
+# (v3.0.2.3, NvapiDrsWrapper.cs: GetDelegate(0x8A2CF5F5, out _DRS_SetSetting, 0x577DD202) and the same for 0xEA99498D / 0x73BF8338),
+# the one tool known to work on current drivers, asks for these first and uses the SDK ids only when the driver has none, and it
+# calls whichever answered with two more arguments than the header shows: DRS_SetSetting(session, profile, &setting, 0, 0) and
+# DRS_GetSetting(session, profile, id, &setting, &x) with x a zeroed uint32. Both are copied here. The extra arguments are harmless
+# for a function that does not read them (the x64 calling conventions leave cleaning up to the caller).
+NEWER_IDS = {"DRS_GetSetting": 0xEA99498D, "DRS_SetSetting": 0x8A2CF5F5}
 NVAPI_OK, NVAPI_SETTING_NOT_FOUND, NVAPI_INVALID_USER_PRIVILEGE = 0, -160, -137
 
 NVDRS_DWORD_TYPE, NVDRS_CURRENT_PROFILE_LOCATION = 0, 0
@@ -72,14 +82,30 @@ class NvApi:
             query_interface.argtypes = [ctypes.c_uint32]
         self._q = query_interface
         self._fn = {}
+        self.answered = {}          # name -> the id the driver answered to (the newer one if it has it, else the SDK's)
 
     def fn(self, name: str, *argtypes):
         if name not in self._fn:
-            ptr = self._q(IDS[name])
-            if not ptr:
+            for ident in ([NEWER_IDS[name]] if name in NEWER_IDS else []) + [IDS[name]]:
+                ptr = self._q(ident)
+                if ptr:
+                    self.answered[name] = ident
+                    self._fn[name] = ctypes.CFUNCTYPE(ctypes.c_int, *argtypes)(ptr)
+                    break
+            else:
                 raise OSError(f"nvapi_QueryInterface has no {name} (driver too old?)")
-            self._fn[name] = ctypes.CFUNCTYPE(ctypes.c_int, *argtypes)(ptr)
         return self._fn[name]
+
+    def called(self, name: str) -> str:
+        """`DRS_SetSetting (0x8A2CF5F5)` for an error message: which id was called when it failed."""
+        got = self.answered.get(name)
+        return name if got is None else f"{name} (0x{got:08X})"
+
+    def via(self) -> str | None:
+        """Which ids answered for the setting calls, in words (None before any call): `SetSetting 0x8A2CF5F5 (newer id), GetSetting ...`."""
+        parts = [f"{name.split('_')[1]} 0x{self.answered[name]:08X} ({'newer' if self.answered[name] == NEWER_IDS.get(name) else 'SDK'} id)"
+                 for name in ("DRS_SetSetting", "DRS_GetSetting") if name in self.answered]
+        return ", ".join(parts) or None
 
     def check(self, status: int, what: str) -> int:
         if status != NVAPI_OK:
@@ -111,11 +137,12 @@ class NvApi:
         """The effective dword value on that profile, or None when the setting is not set (the driver default)."""
         s = NVDRS_SETTING()
         s.version = setting_version()
-        st = self.fn("DRS_GetSetting", ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(NVDRS_SETTING))(
-            h, profile, setting_id, ctypes.byref(s))
+        extra = ctypes.c_uint32(0)          # Profile Inspector's fifth argument ("x"); a function that does not know it never looks
+        st = self.fn("DRS_GetSetting", ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(NVDRS_SETTING),
+                     ctypes.POINTER(ctypes.c_uint32))(h, profile, setting_id, ctypes.byref(s), ctypes.byref(extra))
         if st == NVAPI_SETTING_NOT_FOUND:
             return None
-        self.check(st, "DRS_GetSetting")
+        self.check(st, self.called("DRS_GetSetting"))
         return int.from_bytes(bytes(s.currentValue[:4]), "little")
 
     def set(self, h, profile, value: int, setting_id=SETTING_ID):
@@ -123,8 +150,8 @@ class NvApi:
         s.version = setting_version()
         s.settingId, s.settingType, s.settingLocation = setting_id, NVDRS_DWORD_TYPE, NVDRS_CURRENT_PROFILE_LOCATION
         s.currentValue[:4] = list(int(value).to_bytes(4, "little"))
-        self.check(self.fn("DRS_SetSetting", ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(NVDRS_SETTING))(h, profile, ctypes.byref(s)),
-                   "DRS_SetSetting")
+        self.check(self.fn("DRS_SetSetting", ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(NVDRS_SETTING), ctypes.c_uint32, ctypes.c_uint32)(
+            h, profile, ctypes.byref(s), 0, 0), self.called("DRS_SetSetting"))
         self.check(self.fn("DRS_SaveSettings", ctypes.c_void_p)(h), "DRS_SaveSettings")
 
 
@@ -149,12 +176,14 @@ def label(value: int | None) -> str:
 
 
 def status(api: NvApi | None = None) -> dict:
-    """{available, value, off, label, why}: never raises. off = the policy is 1 (no quiet spill into shared memory)."""
+    """{available, value, off, label, why, via}: never raises. off = the policy is 1 (no quiet spill into shared memory). via = which
+    NVAPI ids answered (None when it could not read)."""
     try:
+        api = api or NvApi()
         value = read_policy(api)
     except (OSError, ValueError, AttributeError, ctypes.ArgumentError) as exc:
-        return {"available": False, "value": None, "off": False, "label": "not available", "why": str(exc)[:200]}
-    return {"available": True, "value": value, "off": value == 1, "label": label(value), "why": None}
+        return {"available": False, "value": None, "off": False, "label": "not available", "why": str(exc)[:200], "via": None}
+    return {"available": True, "value": value, "off": value == 1, "label": label(value), "why": None, "via": api.via()}
 
 
 USAGE = "usage: nvsettings.py get [--json] | set <0|1|2>"
@@ -166,7 +195,8 @@ def _say(state: dict, as_json: bool) -> None:
     elif not state["available"]:
         print(f"policy=unavailable {state['why']}")
     else:
-        print(f"policy={'unset' if state['value'] is None else state['value']} {state['label']}")
+        print(f"policy={'unset' if state['value'] is None else state['value']} {state['label']}"
+              + (f" [NVAPI {state['via']}]" if state.get("via") else ""))
 
 
 def main(argv: list[str], api: NvApi | None = None) -> int:
@@ -177,11 +207,12 @@ def main(argv: list[str], api: NvApi | None = None) -> int:
     if len(argv) == 2 and argv[0] == "set" and argv[1] in ("0", "1", "2"):
         want = int(argv[1])
         try:
+            api = api or NvApi()
             got = set_policy(want, api)
         except (OSError, ValueError, AttributeError, ctypes.ArgumentError) as exc:
             _say({"available": False, "why": str(exc)[:200]}, False)
             return 3
-        _say({"available": True, "value": got, "label": label(got)}, False)
+        _say({"available": True, "value": got, "label": label(got), "via": api.via()}, False)
         return 0 if got == want else 1
     print(USAGE, file=sys.stderr)
     return 2

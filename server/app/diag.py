@@ -441,6 +441,8 @@ def _sysmem(ctx: Ctx, card: dict | None, vram: Check) -> Check:
     served = bool(card and card.get("sysmem"))
     pol = card["sysmem"] if served else gpu.sysmem_policy()
     seen = "read by Kairo's server" if served or ctx.source == "server" else "read by this command"
+    if pol.get("via"):
+        seen += f"; NVAPI {pol['via']}"          # which of the driver's ids answered: what P17 has to see
     if not pol.get("available"):
         if sys.platform != "win32":
             return ok("system.sysmem", name, "not applicable: it is NVIDIA's Windows driver setting, and this PC isn't Windows")

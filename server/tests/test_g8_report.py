@@ -68,6 +68,14 @@ def test_policy_one_is_a_pass_that_says_a_full_card_is_an_error_not_a_slowdown(p
     assert c["status"] == "PASS" and c["value"] == 1 and "out-of-memory error" in c["detail"] and "Kairo's server" in c["detail"]
 
 
+def test_the_check_says_which_nvapi_interface_answered(pc, only_system, monkeypatch):
+    c = sysmem(pc, {**OFF, "via": "GetSetting 0xEA99498D (newer id)"}, monkeypatch=monkeypatch)
+    assert c["status"] == "PASS" and "NVAPI GetSetting 0xEA99498D (newer id)" in c["detail"]
+    c = sysmem(pc, {**UNSET, "via": "GetSetting 0x73BF8338 (SDK id)"}, used=11000, monkeypatch=monkeypatch)
+    assert c["status"] == "WARN" and "NVAPI GetSetting 0x73BF8338 (SDK id)" in c["detail"]
+    assert "NVAPI" not in sysmem(pc, OFF, monkeypatch=monkeypatch)["detail"]            # nothing to say when the reader did not say
+
+
 def test_not_set_is_fine_while_the_card_has_room_and_a_warning_when_it_is_nearly_full(pc, only_system, monkeypatch):
     fine = sysmem(pc, UNSET, used=7000, monkeypatch=monkeypatch)
     assert fine["status"] == "PASS" and "may spill" in fine["detail"] and "Your choice" in fine["detail"]

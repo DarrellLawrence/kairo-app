@@ -229,6 +229,16 @@ def test_the_policy_is_read_by_a_child_python_never_inside_kairo(windows, monkey
     assert kw["timeout"] <= 30 and kw["capture_output"] is True
 
 
+def test_which_nvapi_interface_answered_comes_through_from_the_child(windows, monkeypatch):
+    """P17 has to see whether the driver served the newer ids or the SDK ones: the child says it, the report keeps it."""
+    monkeypatch.setattr(gpu.subprocess, "run", lambda cmd, **kw: Ran(
+        '{"available": true, "value": 1, "off": true, "label": "x", "why": null, "via": "GetSetting 0xEA99498D (newer id)"}\n'))
+    assert gpu.sysmem_policy()["via"] == "GetSetting 0xEA99498D (newer id)"
+    monkeypatch.setattr(gpu, "_sysmem_cache", None)
+    monkeypatch.setattr(gpu.subprocess, "run", lambda cmd, **kw: Ran('{"available": true, "value": 1, "off": true, "label": "x", "why": null}\n'))
+    assert gpu.sysmem_policy()["via"] is None             # an older child without the key
+
+
 def test_a_child_that_could_not_read_is_not_available_with_its_reason(windows, monkeypatch):
     monkeypatch.setattr(gpu.subprocess, "run", lambda cmd, **kw: Ran(
         '{"available": false, "value": null, "off": false, "label": "not available", "why": "no NVIDIA driver found"}', 3))

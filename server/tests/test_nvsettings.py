@@ -32,17 +32,27 @@ def test_the_setting_is_the_one_in_nvidias_profile_inspector_list():
 
 
 class FakeDriver:
-    """Just enough of the DRS API: one global profile with a dict of dword settings, admin or not."""
+    """Just enough of the DRS API: one global profile with a dict of dword settings, admin or not.
 
-    def __init__(self, admin=True, initial=None, fail_on=None):
+    generation says which NVAPI interface ids the driver answers, and with which argument list:
+      "both"  (default, a current driver) the newer ids with NVIDIA Profile Inspector's five arguments, and the SDK ids too, which must
+              then stay unused;
+      "new"   only the newer ids;
+      "sdk"   only the SDK header's ids with its three and four arguments (an old driver; the caller's extra arguments are harmless
+              in the x64 calling conventions, which is also what Profile Inspector relies on when it falls back to these ids)."""
+
+    def __init__(self, admin=True, initial=None, fail_on=None, generation="both"):
         self.admin, self.db, self.saved, self.calls = admin, dict(initial or {}), dict(initial or {}), []
-        self.fail_on = fail_on
+        self.fail_on, self.generation = fail_on, generation
+        self.asked, self.sdk_used, self.trailing = [], [], {}
         ptr = ctypes.POINTER
         sess = ctypes.CFUNCTYPE(ctypes.c_int, ptr(ctypes.c_void_p))
         one = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
         prof = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ptr(ctypes.c_void_p))
         sset = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ptr(n.NVDRS_SETTING))
         sget = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ptr(n.NVDRS_SETTING))
+        set5 = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ptr(n.NVDRS_SETTING), ctypes.c_uint32, ctypes.c_uint32)
+        get5 = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ptr(n.NVDRS_SETTING), ptr(ctypes.c_uint32))
         nothing = ctypes.CFUNCTYPE(ctypes.c_int)
 
         def call(name, code=0):
@@ -72,6 +82,22 @@ class FakeDriver:
             ps[0].currentValue[:4] = list(self.db[sid].to_bytes(4, "little"))
             return call("DRS_GetSetting")
 
+        def set_setting5(h, p, ps, x, y):
+            self.trailing["set"] = (x, y)
+            return set_setting(h, p, ps)
+
+        def get_setting5(h, p, sid, ps, px):
+            self.trailing["get"] = bool(px)
+            if px:
+                px[0] = 5                      # a driver may write there: it must be memory of ours, or this crashes
+            return get_setting(h, p, sid, ps)
+
+        def sdk(fn):
+            def used(*a):
+                self.sdk_used.append(fn.__name__)
+                return fn(*a)
+            return used
+
         def save(h):
             if not self.admin:
                 return n.NVAPI_INVALID_USER_PRIVILEGE
@@ -81,9 +107,21 @@ class FakeDriver:
             "Initialize": nothing(lambda: call("Initialize")), "Unload": nothing(lambda: call("Unload")),
             "DRS_CreateSession": sess(create), "DRS_DestroySession": one(lambda h: call("DRS_DestroySession")),
             "DRS_LoadSettings": one(lambda h: call("DRS_LoadSettings")), "DRS_SaveSettings": one(save),
-            "DRS_GetCurrentGlobalProfile": prof(get_profile), "DRS_SetSetting": sset(set_setting), "DRS_GetSetting": sget(get_setting)}
+            "DRS_GetCurrentGlobalProfile": prof(get_profile)}
         by_id = {n.IDS[k]: v for k, v in self.cbs.items()}
-        self.query = lambda i: ctypes.cast(by_id[i], ctypes.c_void_p).value
+        if generation in ("both", "new"):
+            by_id[n.NEWER_IDS["DRS_SetSetting"]] = set5(set_setting5)
+            by_id[n.NEWER_IDS["DRS_GetSetting"]] = get5(get_setting5)
+        if generation in ("both", "sdk"):
+            watch = (lambda f: sdk(f)) if generation == "both" else (lambda f: f)
+            by_id[n.IDS["DRS_SetSetting"]] = sset(watch(set_setting))
+            by_id[n.IDS["DRS_GetSetting"]] = sget(watch(get_setting))
+        self.by_id = by_id
+
+        def query(i):
+            self.asked.append(i)
+            return ctypes.cast(by_id[i], ctypes.c_void_p).value if i in by_id else None     # the real one answers NULL for an id it lacks
+        self.query = query
 
     def api(self):
         return n.NvApi(query_interface=self.query)
@@ -126,10 +164,64 @@ def test_a_driver_too_old_for_the_call_is_an_error_naming_it():
         n.read_policy(api)
 
 
+# ---------------------------------------------------------------- which NVAPI ids and argument lists (review: the ABI was unproven)
+# NVIDIA Profile Inspector (the one tool known to work on current drivers) asks for 0x8A2CF5F5 / 0xEA99498D first, falls back to the SDK
+# header's 0x577DD202 / 0x73BF8338, and calls either with two trailing arguments (set: 0, 0; get: a pointer to a uint32).
+
+def test_the_newer_ids_are_the_ones_profile_inspector_asks_for_first():
+    assert n.NEWER_IDS == {"DRS_SetSetting": 0x8A2CF5F5, "DRS_GetSetting": 0xEA99498D}
+    assert n.IDS["DRS_SetSetting"] == 0x577DD202 and n.IDS["DRS_GetSetting"] == 0x73BF8338
+
+
+def test_a_current_driver_is_asked_for_the_newer_ids_first_and_the_old_ones_stay_unused():
+    d = FakeDriver(generation="both")
+    api = d.api()
+    assert n.set_policy(1, api) == 1 and d.saved == {n.SETTING_ID: 1}
+    assert d.sdk_used == []
+    assert n.NEWER_IDS["DRS_SetSetting"] in d.asked and n.NEWER_IDS["DRS_GetSetting"] in d.asked
+    assert n.IDS["DRS_SetSetting"] not in d.asked and n.IDS["DRS_GetSetting"] not in d.asked    # the old ids are never even asked for
+    assert (api.answered["DRS_SetSetting"], api.answered["DRS_GetSetting"]) == (0x8A2CF5F5, 0xEA99498D)
+
+
+def test_the_newer_calls_get_their_two_trailing_arguments():
+    d = FakeDriver(generation="new")
+    n.set_policy(1, d.api())
+    assert d.trailing == {"set": (0, 0), "get": True}          # set: two zeros; get: a pointer to memory of ours the driver may write
+
+
+def test_an_older_driver_without_the_newer_ids_is_served_by_the_sdk_ids():
+    d = FakeDriver(generation="sdk")
+    api = d.api()
+    assert n.set_policy(1, api) == 1 and n.read_policy(d.api()) == 1
+    assert d.asked[d.asked.index(n.NEWER_IDS["DRS_SetSetting"]) + 1] == n.IDS["DRS_SetSetting"]      # asked the newer, then fell back
+    assert (api.answered["DRS_SetSetting"], api.answered["DRS_GetSetting"]) == (0x577DD202, 0x73BF8338)
+
+
+def test_a_driver_with_neither_id_for_a_call_is_an_error_naming_the_call():
+    d = FakeDriver(generation="both")
+    for gone in (n.NEWER_IDS["DRS_GetSetting"], n.IDS["DRS_GetSetting"]):
+        d.by_id.pop(gone)
+    with pytest.raises(OSError, match="DRS_GetSetting"):
+        n.read_policy(d.api())
+    assert d.calls[-2:] == ["DRS_DestroySession", "Unload"]
+
+
+def test_the_status_and_a_failure_say_which_interface_answered():
+    d = FakeDriver(generation="both")
+    got = n.status(d.api())
+    assert "GetSetting 0xEA99498D (newer id)" in got["via"]
+    got = n.status(FakeDriver(generation="sdk").api())
+    assert "GetSetting 0x73BF8338 (SDK id)" in got["via"]
+    with pytest.raises(OSError) as err:
+        n.set_policy(1, FakeDriver(admin=False).api())
+    assert "0x8A2CF5F5" in str(err.value)                       # which id was called when it failed
+    assert n.status(FakeDriver(admin=True, fail_on="DRS_LoadSettings").api())["via"] is None
+
+
 def test_status_says_what_the_policy_is_in_words():
     d = FakeDriver()
     got = n.status(d.api())
-    assert got == {"available": True, "value": None, "off": False, "label": n.UNSET, "why": None}
+    assert got == {"available": True, "value": None, "off": False, "label": n.UNSET, "why": None, "via": got["via"]} and got["via"]
     n.set_policy(1, d.api())
     got = n.status(d.api())
     assert got["value"] == 1 and got["off"] is True and "NO sysmem fallback" in got["label"] and got["why"] is None
@@ -168,7 +260,8 @@ def test_windows_without_an_nvidia_driver_is_a_clean_not_available(monkeypatch):
 def test_cli_get_prints_one_parsable_line_and_exits_by_whether_it_could_read(capsys):
     d = FakeDriver()
     assert n.main(["get"], api=d.api()) == 0
-    assert capsys.readouterr().out.splitlines() == ["policy=unset " + n.UNSET]
+    line = capsys.readouterr().out.splitlines()
+    assert len(line) == 1 and line[0].startswith("policy=unset " + n.UNSET) and "GetSetting 0xEA99498D (newer id)" in line[0]
     n.set_policy(1, d.api())
     assert n.main(["get"], api=d.api()) == 0
     assert capsys.readouterr().out.startswith("policy=1 ")
@@ -186,7 +279,11 @@ def test_cli_get_off_windows_exits_3_and_says_so(capsys, monkeypatch):
 def test_cli_set_writes_reads_back_and_compares(capsys):
     d = FakeDriver()
     assert n.main(["set", "1"], api=d.api()) == 0
-    assert capsys.readouterr().out.startswith("policy=1 ") and d.saved == {n.SETTING_ID: 1}
+    out = capsys.readouterr().out
+    assert out.startswith("policy=1 ") and d.saved == {n.SETTING_ID: 1}
+    assert len(out.splitlines()) == 1 and "SetSetting 0x8A2CF5F5 (newer id)" in out and "GetSetting 0xEA99498D (newer id)" in out
+    import re      # the installer's two patterns (KairoSetup.psm1) still read this line
+    assert re.match(r"^policy=1(\s|$)", out) and re.match(r"^policy=", out)
 
 
 def test_cli_set_exits_1_when_the_read_back_is_not_what_was_asked(capsys):
@@ -218,7 +315,7 @@ def test_the_file_runs_alone_under_isolated_python_from_any_folder(tmp_path):
     out = subprocess.run([sys.executable, "-I", str(SCRIPT), "get", "--json"], cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert out.returncode in (0, 3), out.stderr
     got = json.loads(out.stdout)
-    assert set(got) == {"available", "value", "off", "label", "why"}
+    assert set(got) == {"available", "value", "off", "label", "why", "via"}
     if sys.platform != "win32":
         assert out.returncode == 3 and got["available"] is False and "Windows" in got["why"]
 

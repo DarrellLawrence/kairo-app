@@ -193,12 +193,12 @@ def _read_sysmem() -> dict:
         got = None
     if isinstance(got, dict) and "available" in got:
         return {"available": bool(got["available"]), "value": got.get("value"), "off": bool(got.get("off")),
-                "label": str(got.get("label") or ""), "why": got.get("why")}
+                "label": str(got.get("label") or ""), "why": got.get("why"), "via": got.get("via")}
     return _no_sysmem(f"the driver check failed (exit {out.returncode})" + (f": {out.stderr.strip()[-120:]}" if out.stderr.strip() else ""))
 
 
 def sysmem_policy(*, force: bool = False) -> dict:
-    """NVIDIA's CUDA sysmem fallback policy as the driver has it: {available, value (0|1|2|None), off (value is 1), label, why}.
+    """NVIDIA's CUDA sysmem fallback policy as the driver has it: {available, value (0|1|2|None), off (value is 1), label, why, via (which NVAPI ids answered)}.
     Read by a child Python (app/nvsettings.py), never inside Kairo: a driver call that goes wrong can't take the server down.
     Kept for SYSMEM_TTL_S (an answer that failed too, so a page that polls doesn't start a process each time)."""
     global _sysmem_cache
