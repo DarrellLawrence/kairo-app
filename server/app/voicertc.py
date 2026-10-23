@@ -523,7 +523,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
         async def _words(self, audio: bytes) -> str:
             t = state.turn
             t.stt_start = time.monotonic()
-            lang = "en" if state.language_mode == "en" else None
+            lang = state.language_mode if state.language_mode in ("en", "de") else None
             try:
                 tr = await asyncio.to_thread(voice.transcribe_pcm, resample(audio, self.sample_rate, 16000), lang)
             except Exception as exc:   # nothing that sounds like words (or Whisper failed): no turn

@@ -1066,8 +1066,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         line.interrupt = interrupt
         if _mouth_ok(None):                          # the call's conversation is set up while the owner starts talking
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
-        with session_for(engine) as s_:              # English only: Whisper skips finding the language
-            line.stt_language = "en" if realtime.load_settings(s_).get("language") == "en" else None
+        with session_for(engine) as s_:              # English only or German only: Whisper skips finding the language
+            line.stt_language = {"en": "en", "de": "de"}.get(realtime.load_settings(s_).get("language"))
         line.smart, line.endpointed = app.state.smart_turn.available(), False
         if line.smart:
             await line.send({"type": "hello", "endpoint": "smart", "pause_ms": 200, "end_ms": 1500})
@@ -1336,7 +1336,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gate = _speaker_gate(path, ignored)
         call = voicertc.build_call(conn, voice=speaker_mod.Listening(app.state.voice, gate) if gate else app.state.voice,
                                    answer=answer, interrupt=talked_over, events=None,
-                                   language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
+                                   language_mode=language_mode if language_mode in ("en", "de") else "auto", openers=_openers(),
                                    speculate=speculate, discard=discard, greeting=_greeting(),
                                    warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
                                    gate=gate.answer if gate else None)

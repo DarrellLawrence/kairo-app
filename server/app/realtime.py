@@ -62,7 +62,7 @@ DEFAULTS = {"enabled": True, "cap_chf": 10.0, "model": "gpt-realtime-2.1-mini", 
             # owner's decision 2026-10-16: the local voice model talks by default; OpenAI only if chosen (and a key added)
             "engine": "local", "language": "auto"}
 ENGINES = ("local", "openai")
-LANGUAGES = ("auto", "en")
+LANGUAGES = ("auto", "en", "de")
 WARN_AT = 0.8
 REASONS = {
     "local": "Local voice: the voice model on the PC talks (More → Settings → Voice).",
