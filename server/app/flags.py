@@ -33,7 +33,7 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G8 Windows
     "g8.embed_batch4": (True, "The memory search reads your notes 4 pieces at a time instead of 16. While it works it keeps about half "
                               "the main memory (1.4 GB instead of 2.9 GB on the processor, measured on a test machine) and gives the "
-                              "same answers; building the index takes a little longer. Takes effect the next time the memory model starts."),
+                              "same answers and about the same indexing speed. Takes effect the next time the memory model starts."),
     "g8.stagger_boot": (True, "When Kairo starts, the voice model, then Whisper and Kokoro, then the memory model load one after the other "
                               "instead of all at once, and the free graphics memory is read in between and logged. Before, the memory "
                               "model checked the card before the voice model had taken its share and could pick the GPU when it did not "
