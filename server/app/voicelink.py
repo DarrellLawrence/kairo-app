@@ -52,6 +52,9 @@ _NOT_AN_END = re.compile(r"(?:^|[\s(])(?:dr|mr|mrs|ms|st|nr|no|bzw|ca|vs|etc|usw
                          re.I)
 # The end of a sentence: . ! ? … (and closing quotes or brackets) before a space, or a line break.
 _END = re.compile(r"[.!?…]+[\"'”’»)\]]*(?=\s)|\n+")
+# With g9.speaknorm: "Fr." (francs or Friday) and the weekday abbreviations stand in front of the number they explain
+# ("Fr. 12.50", "Mo. 23.10."), so their dot is no place to cut.
+_BEFORE_NUMBER = re.compile(r"(?:^|[\s(])(?:S?Fr|Mo|Di|Mi|Do|Sa|So)\.$")
 FIRST_MIN = 12   # the first piece starts the voice: as soon as there is a short sentence
 NEXT_MIN = 40    # later pieces are made while the one before plays: fewer, longer ones
 LONG = 220       # no sentence end for this long: cut at a comma (or a space) so the voice doesn't wait
@@ -67,20 +70,29 @@ _PHANTOM = re.compile(r"untertitel|amara\.org|subtitles by|captions by|copyright
 FIRST_WORDS = 5  # owner's request 2026-10-16/17: the voice starts after the first clause or 5 words
 
 
-def first_clause(text: str, words: int = FIRST_WORDS) -> int | None:
+def first_clause(text: str, words: int = FIRST_WORDS, whole_numbers: bool = False) -> int | None:
     """Where the first piece of a reply may go to the voice while it is still being written: just after its
     first comma / colon / semicolon / sentence end, or after `words` words. None: keep collecting. Only
-    with a space after it (in "at 7.42" the "7." isn't an end yet), and never at "Dr." or "3." (a date)."""
+    with a space after it (in "at 7.42" the "7." isn't an end yet), and never at "Dr." or "3." (a date).
+    whole_numbers (g9.speaknorm): the voice's number rules see one piece at a time, so a word cut at
+    five words is not cut off from its number: not after a word with a digit ("14:30" keeps its "Uhr",
+    "12,50" its "Franken"), and not in front of a word that starts with one ("CHF | 120.50", "am | 23.10.",
+    "in | 1 Minute"). It waits until the next word has begun to arrive."""
     for m in re.finditer(r"[,;:.!?](?=\s)|\s", text):
         piece = text[:m.end()].strip()
         if not piece:
             continue
         if m.group(0) in ",;:!?":
             return m.end()
-        if m.group(0) == "." and not _NOT_AN_END.search(text[max(0, m.start() - 6):m.start() + 1]):
+        if m.group(0) == "." and not _NOT_AN_END.search(text[max(0, m.start() - 6):m.start() + 1]) \
+                and not (whole_numbers and _BEFORE_NUMBER.search(text[max(0, m.start() - 4):m.start() + 1])):
             return m.end()
         if len(piece.split()) >= words and m.group(0).isspace():
-            return m.end()
+            if not whole_numbers:
+                return m.end()
+            ahead = text[m.end():].lstrip()
+            if ahead and not ahead[0].isdigit() and not re.search(r"\d", piece.split()[-1]):
+                return m.end()
     return None
 
 
@@ -88,15 +100,16 @@ class Sentences:
     """Cuts an answer into pieces to speak while it is still being written: the first at its first clause
     or 5 words (the voice starts at once), then whole sentences."""
 
-    def __init__(self) -> None:
+    def __init__(self, whole_numbers: bool = False) -> None:
         self.buf = ""
         self.count = 0
+        self.whole_numbers = whole_numbers
 
     def feed(self, delta: str) -> list[str]:
         self.buf += delta or ""
         out, start = [], 0
         if self.count == 0:
-            at = first_clause(self.buf)
+            at = first_clause(self.buf, whole_numbers=self.whole_numbers)
             if at is None:
                 return []
             out.append(self.buf[:at].strip())
@@ -181,10 +194,11 @@ class Speaker:
     """Speaks an answer sentence by sentence: audio for the next sentence is made while the
     phone plays the one before. stop() ends it at once (talked over, hung up)."""
 
-    def __init__(self, voice, send_json, send_bytes, language: str | None, turn: int = 0) -> None:
+    def __init__(self, voice, send_json, send_bytes, language: str | None, turn: int = 0, norm=None) -> None:
         self.voice, self.send_json, self.send_bytes, self.turn = voice, send_json, send_bytes, turn
         self.language = language if language in ("en", "de") else None
-        self.split = Sentences()
+        self.norm = norm                    # g9.speaknorm: (text, language) -> (what the voice says, language), or None
+        self.split = Sentences(norm is not None)
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.sent = 0
         self.first_audio_ms: int | None = None
@@ -231,9 +245,10 @@ class Speaker:
             heard.append(text)
             lang = self.language or language_of(" ".join(heard))
             started = time.monotonic()
+            spoken, lang = self.norm(text, lang) if self.norm else (text, lang)   # g9.speaknorm: said as words, shown as written
             await self.send_json({"type": "sentence", "i": self.sent, "turn": self.turn})   # written; its voice is being made
             try:
-                wav, _used = await asyncio.to_thread(self.voice.speak, text, lang)
+                wav, _used = await asyncio.to_thread(self.voice.speak, spoken, lang)
                 pcm, rate = wav_pcm(wav)
             except asyncio.CancelledError:
                 raise

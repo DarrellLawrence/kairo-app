@@ -238,13 +238,14 @@ class RtcSpeaker:
     Kairo's own lines (holding line, bring-up) as they are, all in order. stop(): talked over, the rest
     is dropped."""
 
-    def __init__(self, turn: int = 0) -> None:
+    def __init__(self, turn: int = 0, whole_numbers: bool = False) -> None:
         from .voicelink import Sentences
         self.turn = turn
+        self.whole_numbers = whole_numbers   # g9.speaknorm: no piece ends on a number that wants its unit
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.first = ""                      # the first piece, until it's cut
         self.cut = False
-        self.rest = Sentences()
+        self.rest = Sentences(whole_numbers)
         self.closed = False
         self.stopped = False
         self.sent = 0
@@ -263,7 +264,7 @@ class RtcSpeaker:
             return
         if not self.cut:
             self.first += delta
-            at = first_clause(self.first)
+            at = first_clause(self.first, whole_numbers=self.whole_numbers)
             if at is None:
                 return
             piece, more = self.first[:at], self.first[at:]
@@ -282,7 +283,7 @@ class RtcSpeaker:
             self._put(rest)
         self.cut, self.first = False, ""        # after one of Kairo's own lines, the next words start fresh
         from .voicelink import Sentences
-        self.rest = Sentences()
+        self.rest = Sentences(self.whole_numbers)
 
     def say(self, text: str) -> None:
         if self.closed or self.stopped:
@@ -380,7 +381,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                events: Callable[[dict], Any] | None = None, language_mode: str = "auto",
                openers: OpenerCache | None = None, smart_turn_model: str | None = None,
                speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None,
-               greeting: str | None = None, warning: str | None = None, gate: Callable[[], Any] | None = None):
+               greeting: str | None = None, warning: str | None = None, gate: Callable[[], Any] | None = None,
+               norm: Callable[[str, str | None], tuple[str, str | None]] | None = None):
     """The pipeline for one call on an initialized SmallWebRTCConnection.
 
     voice: transcribe_pcm(pcm16k, language) -> Transcript; speak(text, language) -> (wav, lang).
@@ -395,6 +397,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
       voice is slow right now (a part of it is off the GPU).
     gate: async () -> bool, asked when a turn is finished: False = not the owner (speaker.py), the turn is
       ignored (no answer, nothing started early kept) and the call keeps listening.
+    norm: (text, language) -> (what the voice says, language) (speaknorm.for_call, g9.speaknorm); None: as written.
     """
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -572,7 +575,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                 state.tap = None                 # the turn is taken (or ignored): the VAD listens again
                 if text:
                     state.number += 1
-                    speaker = RtcSpeaker(state.number)
+                    speaker = RtcSpeaker(state.number, whole_numbers=norm is not None)
                     if state.speaker is not None:
                         state.speaker.stop()
                     state.speaker, state.speaking = speaker, state.turn
@@ -623,6 +626,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             if turn.tts_start is None:
                 turn.tts_start = time.monotonic()
             lang = state.language if state.language in ("en", "de") else None
+            shown = text                                            # g9.speaknorm: said as words, shown as written
+            text, lang = norm(text, lang) if norm else (text, lang)
             got = cache.get(text, lang or "en")
             if got is None:
                 try:
@@ -638,7 +643,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                 pcm = resample(got[0], got[1], self.sample_rate)
                 if turn.first_audio is None:
                     turn.cached = True
-            state.send({"type": "say", "text": text, "turn": number})
+            state.send({"type": "say", "text": shown, "turn": number})
             if turn.first_audio is None:
                 turn.first_audio = time.monotonic()
                 state.send({"type": "timing", "turn": number, "server": turn.ms(), "route": turn.route})
