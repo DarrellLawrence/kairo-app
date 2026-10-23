@@ -70,6 +70,11 @@ def test_only_a_few_purposes_can_ever_run_locally_and_none_of_them_is_about_date
     ("AHV 756.1234.5678.97", "ahv", "secret"),
     ("token ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2", "key", "secret"),
     ("sk-" + "x" * 24, "key", "secret"),
+    ("ghs_" + "a1B2c3D4e5F6g7H8i9J0k1L2", "key", "secret"),
+    ("xoxb-" + "1234567890-abcdef", "key", "secret"),
+    ("AKIA" + "ABCDEFGHIJKLMNOP", "key", "secret"),
+    ("AIza" + "SyA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P", "key", "secret"),
+    ("-----BEGIN RSA PRIVATE KEY-----", "key", "secret"),
 ])
 def test_the_scanner_finds_what_it_should(text, hit, klass):
     found, hits = router.scan(text)

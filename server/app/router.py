@@ -105,7 +105,8 @@ _IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?:[ \-]?[A-Z0-9]){11,30}(?![A-Z0-9])")
 _CARD = re.compile(r"(?<![\w-])\d(?:[ \-]?\d){12,18}(?![\w-])")
 _AHV = re.compile(r"(?<!\d)756[ .]?\d{4}[ .]?\d{4}[ .]?\d{2}(?!\d)")
 _KEY = re.compile(r"\b(?:sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9\-]{10,}"
-                  r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_\-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)")
+                  r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_\-]{30,})|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_KEY_MARKS = ("sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "xoxa-", "xoxb-", "xoxp-", "xoxr-", "xoxs-", "AKIA", "AIza", "-----BEGIN")
 HIT_CLASS = {"email": "personal", "phone": "personal", "name": "personal",
              "iban": "secret", "card": "secret", "ahv": "secret", "key": "secret"}
 _MIN_NAME = 3
@@ -146,9 +147,9 @@ def scan(text: str, names: frozenset[str] | None = None) -> tuple[str, tuple[str
         hits.append("iban")
     if any(13 <= len(d := re.sub(r"\D", "", m.group())) <= 19 and _luhn(d) for m in _CARD.finditer(t)):
         hits.append("card")
-    if _AHV.search(t):
+    if "756" in t and _AHV.search(t):                 # the substring test is ~50x cheaper than the pattern on a big prompt
         hits.append("ahv")
-    if _KEY.search(t):
+    if any(m in t for m in _KEY_MARKS) and _KEY.search(t):
         hits.append("key")
     if names and not names.isdisjoint(w.casefold() for w in _WORD.findall(t)):
         hits.append("name")
