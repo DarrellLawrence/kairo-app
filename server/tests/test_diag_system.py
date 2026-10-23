@@ -21,6 +21,7 @@ def only_system(monkeypatch):
     monkeypatch.setattr(diag, "CHECKS", [diag._system, diag._network])
     monkeypatch.setattr(diag, "firewall_check", lambda: diag.ok("net.firewall", "rule", "fine"))
     monkeypatch.setattr(tailnet, "status", lambda data_dir: None)
+    monkeypatch.setattr(gpu, "sysmem_policy", lambda **kw: {"available": False, "value": None, "off": False, "label": "not available", "why": "Windows only"})
 
 
 def card(used, total=12288, processes=()):
