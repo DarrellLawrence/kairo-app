@@ -1,5 +1,6 @@
 """G8 in the Windows installer (voice recipe 9). These only run on kairo-home, so here they are checked as text (pwsh is not installed on
-the build machine, nothing below was executed by PowerShell): HF_HUB_OFFLINE goes into kairo.env and nowhere else."""
+the build machine, nothing below was executed by PowerShell): HF_HUB_OFFLINE goes into kairo.env and nowhere else; NVIDIA's CUDA sysmem
+fallback policy is written only when the owner passes -CudaSysmemPolicy to Install-Kairo, never by an update and never in CI."""
 
 from __future__ import annotations
 
@@ -47,9 +48,10 @@ def test_the_installers_own_python_environment_takes_only_the_four_model_names_f
     assert "$script:EnvFromFile = @('KAIRO_WHISPER_MODEL', 'KAIRO_WHISPER_CPU_MODEL', 'KAIRO_KOKORO_VOICE', 'KAIRO_PIPER_VOICE')" in psm1
 
 
-def test_ci_checks_kairo_env_and_the_installers_environment():
+def test_ci_checks_kairo_env_the_installers_environment_and_the_driver_script():
     ci = read("ci/Test-Install.ps1")
-    for needle in ("HF_HUB_OFFLINE=1", "'HF_HUB_OFFLINE=1'", "-not $env:HF_HUB_OFFLINE"):
+    for needle in ("HF_HUB_OFFLINE=1", "'HF_HUB_OFFLINE=1'", "-not $env:HF_HUB_OFFLINE",
+                   "system.sysmem", "nvsettings.py", "Set-CudaSysmemPolicy"):
         assert needle in ci, needle
 
 
@@ -109,3 +111,54 @@ def test_with_the_variable_set_a_missing_whisper_model_fails_at_once_without_a_c
     import json
     got = json.loads(out.stdout.strip().splitlines()[-1])
     assert got["error"] is not None and got["connections"] == [] and got["seconds"] < 15, got
+
+
+# ---------------------------------------------------------------- the sysmem policy: the owner's opt-in
+
+def test_the_switch_exists_is_off_by_default_and_is_passed_on_when_the_installer_restarts_itself_as_administrator():
+    install = read("Install-Kairo.ps1")
+    assert "[switch]$CudaSysmemPolicy," in install or "[switch]$CudaSysmemPolicy\r\n" in install
+    assert not re.search(r"\$CudaSysmemPolicy\s*=\s*\$true", install, re.I)
+    assert "if ($CudaSysmemPolicy) { $passArgs += '-CudaSysmemPolicy' }" in install
+    assert "-CudaSysmemPolicy" in install.split("param(")[0]            # the header comment says how to use it
+
+
+def test_it_runs_only_for_an_interactive_install_on_a_real_pc():
+    install = read("Install-Kairo.ps1")
+    calls = [ln.strip() for ln in install.splitlines() if "Set-CudaSysmemPolicy" in ln]
+    assert len(calls) == 1
+    # inside the `if (-not $CI)` block of step 4, and only for an interactive run (not -Update, which is what the auto-updater passes)
+    step4 = install[install.index("# 4. Windows settings"):install.index("# 5. Kairo itself")]
+    assert "if (-not $CI) {" in step4 and calls[0] in step4
+    assert "$CudaSysmemPolicy -and $interactive" in calls[0]
+    assert "$sourceApp" in calls[0] and "server\\app\\nvsettings.py" in calls[0] and "$python" in calls[0]
+
+
+@pytest.mark.parametrize("name", ["Update-Kairo.ps1", "Kairo-AutoUpdate.ps1", "Kairo-BootCheck.ps1", "Kairo.psm1", "KairoSync.psm1"])
+def test_no_update_and_no_boot_check_ever_writes_the_driver_setting(name):
+    text = read(name)
+    assert "CudaSysmemPolicy" not in text and "nvsettings" not in text
+
+
+def test_the_function_writes_then_reads_back_in_a_fresh_process_and_compares_and_never_fails_the_install():
+    body = function_body(read("KairoSetup.psm1"), "Set-CudaSysmemPolicy")
+    assert "@('set', '1')" in body and "@('get')" in body and body.index("'set', '1'") < body.index("'get'")
+    assert "'^policy=1(\\s|$)'" in body                                  # the read-back must say 1
+    assert "Write-Ok" in body and "Write-Warn" in body and "return $true" in body and "return $false" in body
+    assert "try {" in body and "} catch {" in body
+    outside = body.replace(body[body.index("try {"):body.index("} catch {")], "")
+    assert "throw" not in outside                                        # only inside the try: a problem is a warning
+    helper = function_body(read("KairoSetup.psm1"), "Get-SysmemPolicyLine")
+    assert "2>&1" not in body and "2>&1" not in helper                    # Windows PowerShell 5.1 + ErrorAction Stop would throw
+    assert "& $Python -I $ScriptPath @Arguments" in helper                    # isolated Python, the script by path (stdlib only)
+
+
+def test_a_driver_setting_is_never_part_of_the_ci_install():
+    install = read("Install-Kairo.ps1")
+    step4 = install[install.index("# 4. Windows settings"):install.index("# 5. Kairo itself")]
+    assert step4.index("if (-not $CI) {") < step4.index("Set-CudaSysmemPolicy")
+
+
+def test_the_driver_script_travels_in_the_release_zip_and_in_the_release_folder():
+    script = (REPO / "scripts" / "build-release.sh").read_text(encoding="utf-8")
+    assert "cp -r server/app " in script and (APP / "nvsettings.py").is_file()

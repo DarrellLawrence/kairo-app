@@ -597,4 +597,38 @@ function Connect-GitHub($P, [string]$Repo) {
     }
 }
 
+# ---------------------------------------------------------------- NVIDIA driver: CUDA sysmem fallback policy
+
+# Only with Install-Kairo.ps1 -CudaSysmemPolicy (your choice, voice recipe 9; never from an update, never in CI). Sets NVIDIA's
+# "CUDA - Sysmem Fallback Policy" to 1 ("prefer no sysmem fallback") on the driver's global profile: a graphics card that is full
+# is then an out-of-memory error instead of a silent, 2 to 28 times slower voice. server\app\nvsettings.py (standard library
+# only, run by path with an isolated Python) writes it, saves it and reads it back; this reads it once more in a fresh process
+# and compares: the read-back is the proof, NVAPI's own status is not. $true only when the driver says 1. Every problem is a
+# warning: a driver setting is never a reason for the setup to fail.
+function Set-CudaSysmemPolicy([string]$Python, [string]$ScriptPath) {
+    Write-Step 'NVIDIA driver: CUDA sysmem fallback'
+    try {
+        if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "nvsettings.py is not in this release ($ScriptPath)" }
+        $wrote = Get-SysmemPolicyLine $Python $ScriptPath @('set', '1')
+        $read = Get-SysmemPolicyLine $Python $ScriptPath @('get')
+        if ($read -match '^policy=1(\s|$)') {
+            Write-Ok 'CUDA sysmem fallback is off (policy 1), read back from the driver: a full graphics card is now an error, not a slowdown.'
+            Write-Note 'Undo (administrator window): python -I server\app\nvsettings.py set 0, from the release folder (see the changelog).'
+            return $true
+        }
+        Write-Warn "The driver did not keep the setting. It says: $read (the write said: $wrote). Nothing else was changed."
+    } catch {
+        Write-Warn "CUDA sysmem fallback was not changed ($($_.Exception.Message.Trim()))."
+    }
+    return $false
+}
+
+# The one line `policy=...` that nvsettings.py prints. No stderr redirect here: in Windows PowerShell 5.1 with ErrorAction Stop it would throw.
+function Get-SysmemPolicyLine([string]$Python, [string]$ScriptPath, [string[]]$Arguments) {
+    $out = @(& $Python -I $ScriptPath @Arguments)
+    $line = @($out | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^policy=' } | Select-Object -Last 1)
+    if ($line.Count -eq 0) { return "no answer (exit code $LASTEXITCODE)" }
+    return [string]$line[0]
+}
+
 Export-ModuleMember -Function *

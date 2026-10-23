@@ -230,6 +230,30 @@ $diagJson = $null
 try { $diagJson = ($diagRaw -join "`n") | ConvertFrom-Json } catch { }
 Check ($null -ne $diagJson -and $diagJson.schema -eq 1 -and @($diagJson.checks).Count -gt 10) 'kairo diag --json --local prints its report'
 Check (@(0, 1) -contains $diagExit) "kairo diag exits 0 or 1 (it exited $diagExit; 2 would mean the tool itself broke)"
+# ---- G8: NVIDIA's CUDA sysmem fallback policy: read by kairo diag, written only on the owner's say (this runner has no NVIDIA card)
+$sysmemCheck = @($diagJson.checks | Where-Object { $_.id -eq 'system.sysmem' })
+Check ($sysmemCheck.Count -eq 1 -and $sysmemCheck[0].status -ne 'FAIL') "kairo diag has the CUDA sysmem fallback check ($($sysmemCheck[0].status): $($sysmemCheck[0].detail))"
+$nvScript = Join-Path $Root 'app\current\server\app\nvsettings.py'
+$nvPython = Join-Path $Root 'app\current\venv\Scripts\python.exe'
+$nvOut = @(& $nvPython -I $nvScript get)
+Check (@(0, 3) -contains $LASTEXITCODE -and ($nvOut -join "`n") -match '^policy=') "nvsettings.py runs as a script under isolated Python and answers on one line ($($nvOut -join ' '))"
+$hasNvidia = Test-Path (Join-Path $env:SystemRoot 'System32\nvapi64.dll')
+if ($hasNvidia) {
+    Write-Host 'SKIP: this runner has an NVIDIA driver; Set-CudaSysmemPolicy is not run here (it would change the runner''s driver setting)'
+} else {
+    $nvTest = Join-Path $work 'nvtest.ps1'
+    @'
+param([string]$Installer, [string]$Python, [string]$NvScript)
+Import-Module (Join-Path $Installer 'Kairo.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Installer 'KairoSetup.psm1') -Force -DisableNameChecking
+$done = Set-CudaSysmemPolicy $Python $NvScript
+$missing = Set-CudaSysmemPolicy $Python (Join-Path $Installer 'no-such-nvsettings.py')
+Write-Host "driver: $done, missing script: $missing"
+if (($done -eq $false) -and ($missing -eq $false)) { exit 0 } else { exit 1 }
+'@ | Set-Content -Path $nvTest -Encoding ASCII
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $nvTest -Installer (Join-Path $Root 'installer') -Python $nvPython -NvScript $nvScript | Out-Host
+    Check ($LASTEXITCODE -eq 0) 'Set-CudaSysmemPolicy without an NVIDIA driver (or without the script) is a warning and returns false, it does not throw'
+}
 Check ((Invoke-Install $s1) -eq 0) 'running the same version again is harmless'
 
 # ---- config in layers (fix P0.4): new actions arrive, the owner's edit stays, older versions keep a full copy
