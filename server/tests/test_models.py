@@ -81,3 +81,21 @@ def test_only_the_last_twenty_escalations_are_shown(migrated):
     with TestClient(app) as c:
         esc = c.get("/api/usage?days=1").json()["escalations"]
     assert len(esc) == models.ESCALATIONS == 20 and esc[0]["reason"] == '"should I" 24' and esc[-1]["reason"] == '"should I" 5'
+
+
+def test_learn_and_selftest_are_purposes_on_haiku():
+    """G11: the router needs every purpose that reaches the model by name (a knowledge call, the self-test)."""
+    assert models.DEFAULTS["learn"] == "haiku" and models.DEFAULTS["selftest"] == "haiku"
+    assert models.pick("learn") == "haiku" and models.pick("selftest") == "haiku"
+    assert len(models.DEFAULTS) == 33
+
+
+def test_every_purpose_named_in_the_code_is_in_the_table():
+    """A purpose written as purpose="x" anywhere in app/ is one the router has a ceiling for (a new one fails here)."""
+    import re
+    from pathlib import Path
+    app_dir = Path(models.__file__).parent
+    named = set()
+    for f in app_dir.rglob("*.py"):
+        named |= set(re.findall(r"""\bpurpose=["']([a-z_]+)["']""", f.read_text(encoding="utf-8")))
+    assert not (named - set(models.DEFAULTS)), sorted(named - set(models.DEFAULTS))

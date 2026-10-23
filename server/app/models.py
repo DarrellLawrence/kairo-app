@@ -28,6 +28,8 @@ DEFAULTS = {
     "draft": "sonnet", "document": "sonnet", "gauntlet": "sonnet", "study": "sonnet", "lerndoku": "sonnet",
     "voice_check": "sonnet", "acceptance": "sonnet", "coach": "sonnet",
     "learn_call": "haiku",               # fix plan 29: a getting-to-know-you call answers fast
+    "learn": "haiku",                    # G11: a knowledge call by its own name (Call.purpose); the router needs a ceiling for it
+    "selftest": "haiku",                 # G11: the on-PC self-test's fixed question (main.py), nothing personal in it
     "proactive": "sonnet", "judgment": "sonnet", "judgment_high": "opus",
     "loop_check": "sonnet",              # loops block L: the sanity check before a loop is shown
     "voice_agenda": "sonnet",            # local voice (2026-10-16): what the voice model brings up on a call
