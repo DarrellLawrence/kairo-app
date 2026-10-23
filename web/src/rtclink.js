@@ -129,10 +129,6 @@ export function readStats(stats) {
   return { path, inbound }
 }
 
-export async function pathStats(pc) {
-  return readStats(await pc.getStats()).path
-}
-
 /* The WebRTC line. Same shape as voicelink's startVoice, plus on.fallback({reason, message}). */
 export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   const call = path === 'call'

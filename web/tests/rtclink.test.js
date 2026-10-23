@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { applyFlags, resetFlags } from '../src/flags.js'
-import { makeRtcMeter } from '../src/rtclink.js'
+import { makeRtcMeter, readStats } from '../src/rtclink.js'
 import { FakePeer, installPhone, logged } from './phone-fakes.js'
 
 function clock(t = 0) {
@@ -305,4 +305,24 @@ test('g7.listen_on_barge_in off: the old way, any loud sound on the phone flips 
     dc.pc({ type: 'barge_in' })
     assert.equal(states.at(-1), 'speaking')
   })
+})
+
+// ---------------------------------------------------------------- the stats the call reads once a second
+
+test('readStats: the selected path (round trip, candidate types) and the inbound audio (packets, loss, jitter)', () => {
+  const stats = new Map([
+    ['t', { id: 't', type: 'transport', selectedCandidatePairId: 'p' }],
+    ['p', { id: 'p', type: 'candidate-pair', currentRoundTripTime: 0.0184, localCandidateId: 'l', remoteCandidateId: 'r' }],
+    ['l', { id: 'l', type: 'local-candidate', candidateType: 'host' }],
+    ['r', { id: 'r', type: 'remote-candidate', candidateType: 'host' }],
+    ['a', { id: 'a', type: 'inbound-rtp', kind: 'audio', packetsReceived: 500, packetsLost: 2, jitterBufferDelay: 5, jitterBufferEmittedCount: 100 }],
+    ['v', { id: 'v', type: 'inbound-rtp', kind: 'video', packetsReceived: 9 }],
+  ])
+  assert.deepEqual(readStats(stats), {
+    path: { rtt_ms: 18, local: 'host', remote: 'host', jitter_ms: 50 },
+    inbound: { received: 500, lost: 2, jitter_ms: 50 },
+  })
+  assert.deepEqual(readStats(new Map()), { path: null, inbound: null })
+  const noJitterYet = readStats(new Map([['a', { id: 'a', type: 'inbound-rtp', kind: 'audio', packetsReceived: 3 }]]))
+  assert.deepEqual(noJitterYet, { path: null, inbound: { received: 3, lost: 0, jitter_ms: null } })
 })
