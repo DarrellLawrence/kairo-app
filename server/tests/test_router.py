@@ -246,11 +246,11 @@ def test_a_rejected_local_answer_goes_to_the_subscription_with_the_reason(tmp_pa
 
 def test_when_the_subscription_is_paused_a_lab_passed_job_still_runs_locally_and_the_rest_wait(tmp_path):
     rules = lab_passed(tmp_path)
-    ok = dict(local_flag=True, local_ready=True, claude_paused=True)
+    ok = dict(local_flag=True, local_ready=True, claude_hold="paused (usage limit)")
     assert router.decide(rules, "triage", content="personal", **ok).route == "local"
     d = router.decide(rules, "reply_check", content="personal", **ok)
     assert d.route == "none" and "paused (usage limit)" in d.reason
-    assert router.decide(router.load_rules(SHIPPED), "triage", content="personal", claude_paused=True).route == "none"
+    assert router.decide(router.load_rules(SHIPPED), "triage", content="personal", claude_hold="paused (usage limit)").route == "none"
 
 
 def test_switching_the_subscription_off_in_the_file_stops_everything_that_needs_it(tmp_path):
@@ -267,7 +267,7 @@ def all_calls():
     for purpose, scanned, mode, tools, images, paused, call_open, flag, ready in itertools.product(
             ALL_PURPOSES, router.CLASSES, router.MODES, (False, True), (False, True), (False, True), (False, True),
             (False, True), (False, True)):
-        yield purpose, scanned, dict(mode=mode, tools=tools, images=images, claude_paused=paused, call_open=call_open,
+        yield purpose, scanned, dict(mode=mode, tools=tools, images=images, claude_hold="paused (usage limit)" if paused else "", call_open=call_open,
                                      local_flag=flag, local_ready=ready)
 
 
@@ -297,7 +297,7 @@ def test_matrix_with_the_shipped_file_every_call_is_the_subscription_or_nothing(
     rules = router.load_rules(SHIPPED)
     for purpose, scanned, kw in all_calls():
         d = router.decide(rules, purpose, content=scanned, **kw)
-        assert d.route == ("none" if kw["claude_paused"] else "claude"), (purpose, scanned, kw, d)
+        assert d.route == ("none" if kw["claude_hold"] else "claude"), (purpose, scanned, kw, d)
 
 
 def test_matrix_only_a_public_selftest_could_ever_reach_a_free_cloud_provider(monkeypatch, tmp_path):
@@ -315,7 +315,7 @@ def test_matrix_nothing_routes_without_the_file_except_the_subscription_as_befor
     for purpose, scanned, kw in all_calls():
         d = router.decide(None, purpose, content=scanned, **kw)
         assert d.rules is False
-        assert d.route == ("none" if kw["claude_paused"] else "claude"), (purpose, scanned, kw, d)
+        assert d.route == ("none" if kw["claude_hold"] else "claude"), (purpose, scanned, kw, d)
         assert "no routing.yaml" in d.reason or d.route == "none"
 
 

@@ -32,16 +32,23 @@ What keeps this safe:
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import re
+import threading
+import time
 import unicodedata
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import yaml
+from sqlmodel import Session, delete, select
 
-from .models import DEFAULTS, NEVER_HAIKU
+from . import flags
+from .db import RouteLog, utcnow
+from .models import NEVER_HAIKU
 
 log = logging.getLogger("kairo.router")
 
@@ -240,15 +247,15 @@ _SUBSCRIPTION_ONLY = Rules({"claude": Provider("claude", "R1", True)})
 
 
 def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job", model: str | None = None,
-           tools: bool = False, images: bool = False, claude_paused: bool = False, call_open: bool = False,
+           tools: bool = False, images: bool = False, claude_hold: str = "", call_open: bool = False,
            local_flag: bool = False, local_ready: bool = False, hits: tuple[str, ...] = (),
-           exclude: frozenset[str] = frozenset(), fallback_from: str | None = None) -> Decision:
+           exclude: frozenset[str] = frozenset(), fallback_from: str | None = None, fallback_why: str = "") -> Decision:
     """The route for one model call. First allowed wins: a free-cloud provider (none has an adapter), then the
     local model, then the subscription. `content` is the class to protect, ceiling_of(purpose) tightened by scan():
     a caller can't pass anything looser than the ceiling.
 
     A provider is skipped when it isn't listed, isn't enabled, has no adapter, is a class not allowed to see this
-    content (MAY_RECEIVE), or doesn't fit the call (tools, images, mode, a call open, not ready, paused)."""
+    content (MAY_RECEIVE), or doesn't fit the call (tools, images, mode, a call open, not ready, on hold: claude_hold says why)."""
     have = rules is not None
     rules = rules or _SUBSCRIPTION_ONLY
     content = tighter(content if content in RANK else UNKNOWN_PURPOSE, ceiling_of(purpose))
@@ -257,7 +264,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
     order = [n for n in rules.providers if n not in ("local", "claude")] + ["local", "claude"]
     for name in order:
         skip = _skip(rules, name, purpose=purpose, content=content, mode=mode, tools=tools, images=images,
-                     claude_paused=claude_paused, call_open=call_open, local_flag=local_flag, local_ready=local_ready,
+                     claude_hold=claude_hold, call_open=call_open, local_flag=local_flag, local_ready=local_ready,
                      excluded=name in exclude)
         if skip:
             why[name] = skip
@@ -268,7 +275,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
             if purpose in LOCAL_ELIGIBLE and "local" in why:
                 reason += f"; local not used: {why['local']}"
             if fallback_from:
-                reason = f"{fallback_from} did not work out; " + reason
+                reason = f"{fallback_from} did not work out" + (f" ({fallback_why})" if fallback_why else "") + "; " + reason
         elif name == "local":
             reason = "the local model: this purpose passed the router lab"
         else:
@@ -277,7 +284,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
     return Decision("none", None, reason="no route allowed: " + "; ".join(f"{n}: {w}" for n, w in why.items()), **base)
 
 
-def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, claude_paused, call_open, local_flag,
+def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, claude_hold, call_open, local_flag,
           local_ready, excluded) -> str | None:
     """Why this provider can't take the call, or None when it can."""
     prov = rules.providers.get(name)
@@ -292,7 +299,7 @@ def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, cla
     if RANK[content] > RANK[MAY_RECEIVE[prov.tier]]:
         return f"{content} content may not go to {prov.tier}"
     if name == "claude":
-        return "paused (usage limit)" if claude_paused else None
+        return claude_hold or None
     if name == "local":
         if not local_flag:
             return "g11.local_route is off"
@@ -312,3 +319,156 @@ def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, cla
     if tools or images or mode != "job":
         return "free cloud takes background jobs with no tools and no images"
     return None
+
+
+# ---------------------------------------------------------------- the router: flags, scan, decision, log
+
+FLAG_ROUTER = "g11.router"
+FLAG_LOCAL = "g11.local_route"
+KEEP_DAYS = 90                 # route_log rows older than this are deleted (once a day)
+NAMES_TTL_S = 300              # the people list is read again after this
+BREAKER_FAILS = 3              # this many local failures within BREAKER_WINDOW_S ...
+BREAKER_WINDOW_S = 600
+BREAKER_OPEN_S = 600           # ... switch the local route off for this long (voice recipe 13)
+RECENT = 40
+
+
+class Router:
+    """Decides every model call and writes the decision down. Never raises: if the router itself breaks, the call
+    goes to the subscription as it always did, with 'router error' as the reason."""
+
+    def __init__(self, engine, config_dir: Path | None, *, names: Callable[[], Iterable[str]] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.engine = engine
+        self.config_dir = config_dir
+        self.rules = load_rules(config_dir)
+        self._names_fn = names
+        self._names: frozenset[str] = frozenset()
+        self._names_at = float("-inf")
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._fails: deque[float] = deque()
+        self._open_until = float("-inf")
+        self._pruned_on: dt.date | None = None
+
+    def reload(self) -> None:
+        self.rules = load_rules(self.config_dir)
+
+    # -- the local model's breaker
+
+    def local_failed(self) -> None:
+        with self._lock:
+            now = self._clock()
+            self._fails.append(now)
+            while self._fails and now - self._fails[0] > BREAKER_WINDOW_S:
+                self._fails.popleft()
+            if len(self._fails) >= BREAKER_FAILS:
+                self._open_until = now + BREAKER_OPEN_S
+                self._fails.clear()
+
+    def fails(self) -> int:
+        with self._lock:
+            now = self._clock()
+            return sum(1 for f in self._fails if now - f <= BREAKER_WINDOW_S)
+
+    def breaker_open(self) -> bool:
+        with self._lock:
+            return self._clock() < self._open_until
+
+    # -- one decision
+
+    def route(self, purpose: str, text: str | None = "", *, mode: str = "job", model: str | None = None, tools: bool = False,
+              images: bool = False, claude_hold: str = "", call_open: bool = False, local_ready: bool = False) -> Decision:
+        """text is scanned and never stored. model: Claude's alias for this purpose (models.pick)."""
+        try:
+            with Session(self.engine) as s:
+                if not flags.on(s, FLAG_ROUTER):
+                    return self._plain(purpose, mode, model, "g11.router is off: the subscription, as always")
+                klass, hits = scan(text or "", self._name_set())
+                d = decide(self.rules, purpose, content=klass, mode=mode, model=model, tools=tools, images=images,
+                           claude_hold=claude_hold, call_open=call_open, local_flag=flags.on(s, FLAG_LOCAL),
+                           local_ready=local_ready and not self.breaker_open(), hits=hits)
+                self._write(s, d)
+                return d
+        except Exception as exc:       # the router never stops a call
+            log.warning("router failed: %s", exc, exc_info=True)
+            return self._plain(purpose, mode, model, f"router error ({type(exc).__name__}): the subscription, as always")
+
+    def escalate(self, d: Decision, why: str, *, model: str | None = None, claude_hold: str = "") -> Decision:
+        """The route's answer was refused (local: not valid, too unsure, too slow): the next route, logged as a second
+        decision with where it came from. Counts toward the local breaker."""
+        if d.route == "local":
+            self.local_failed()
+        try:
+            with Session(self.engine) as s:
+                if not flags.on(s, FLAG_ROUTER):
+                    return self._plain(d.purpose, d.mode, model, "g11.router is off: the subscription, as always")
+                d2 = decide(self.rules, d.purpose, content=d.content, mode=d.mode, model=model, claude_hold=claude_hold,
+                            hits=d.hits, exclude=frozenset({d.route}), fallback_from=d.route, fallback_why=why[:80])
+                self._write(s, d2)
+                return d2
+        except Exception as exc:
+            log.warning("router failed: %s", exc, exc_info=True)
+            return self._plain(d.purpose, d.mode, model, f"router error ({type(exc).__name__}): the subscription, as always")
+
+    def _plain(self, purpose: str, mode: str, model: str | None, reason: str) -> Decision:
+        return Decision("claude", "R1", purpose, mode, ceiling_of(purpose), reason, model=model, rules=self.rules is not None)
+
+    def _name_set(self) -> frozenset[str]:
+        now = self._clock()
+        if self._names_fn is not None and now - self._names_at > NAMES_TTL_S:
+            try:
+                self._names = name_tokens(self._names_fn())
+            except Exception:
+                log.warning("router: the people list could not be read", exc_info=True)
+            self._names_at = now
+        return self._names
+
+    def _write(self, s: Session, d: Decision) -> None:
+        s.add(RouteLog(purpose=d.purpose[:40], mode=d.mode, content=d.content, hits=",".join(d.hits) or None, route=d.route,
+                       tier=d.tier, model=d.model, reason=d.reason[:300], fallback_from=d.fallback_from))
+        today = utcnow().date()
+        if self._pruned_on != today:
+            s.exec(delete(RouteLog).where(RouteLog.ts < utcnow() - dt.timedelta(days=KEEP_DAYS)))
+            self._pruned_on = today
+        s.commit()
+
+    # -- More -> Usage
+
+    def view(self, days: int = 7) -> dict:
+        """What the owner sees: the rules in force, and the routes taken with their reasons (newest first)."""
+        with Session(self.engine) as s:
+            router_on, local_on = flags.on(s, FLAG_ROUTER), flags.on(s, FLAG_LOCAL)
+            rows = s.exec(select(RouteLog).where(RouteLog.ts >= utcnow() - dt.timedelta(days=days))
+                          .order_by(RouteLog.id.desc())).all()
+        by_route: dict[str, int] = {}
+        by_tier: dict[str, int] = {}
+        for r in rows:
+            by_route[r.route] = by_route.get(r.route, 0) + 1
+            if r.tier:
+                by_tier[r.tier] = by_tier.get(r.tier, 0) + 1
+        rules = self.rules
+        providers = []
+        for name, p in (rules.providers if rules else {"claude": Provider("claude", "R1", True)}).items():
+            if not p.enabled:
+                status = "off: switched off in routing.yaml"
+            elif name not in ADAPTERS:
+                status = "off: no adapter in this version"
+            elif name == "local" and not local_on:
+                status = "off: g11.local_route is off"
+            elif name == "local" and not (rules and rules.local_purposes and rules.lab_model_hash):
+                status = "off: no purpose has passed the router lab"
+            else:
+                status = "on"
+            providers.append({"name": name, "tier": p.tier, "enabled": p.enabled, "status": status})
+        return {
+            "router_on": router_on, "local_on": local_on, "rules_loaded": rules is not None,
+            "problems": list(rules.problems) if rules else [], "providers": providers,
+            "local": {"purposes": sorted(rules.local_purposes) if rules else [],
+                      "lab_model_hash_set": bool(rules and rules.lab_model_hash), "could_run": sorted(LOCAL_ELIGIBLE)},
+            "ceilings": dict(sorted(CEILINGS.items())), "days": days, "total": len(rows), "by_route": by_route,
+            "by_tier": by_tier,
+            "recent": [{"ts": r.ts.isoformat(), "purpose": r.purpose, "mode": r.mode, "content": r.content,
+                        "hits": r.hits.split(",") if r.hits else [], "route": r.route, "tier": r.tier, "model": r.model,
+                        "reason": r.reason, "fallback_from": r.fallback_from} for r in rows[:RECENT]],
+        }

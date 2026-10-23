@@ -47,3 +47,16 @@ def test_downgrade_to_base_and_back(migrated):
     assert set(inspect(engine).get_table_names()) <= {"alembic_version"}
     command.upgrade(cfg, "head")
     assert SPEC_TABLES <= set(inspect(create_engine(migrated.db_url)).get_table_names())
+
+
+def test_route_log_table_comes_with_0026_and_goes_again(migrated):
+    """0026: G11's decision log (which route each model call took and why), no prompt text in it."""
+    cfg = alembic_config(migrated.db_url)
+    tables = lambda: set(inspect(create_engine(migrated.db_url)).get_table_names())  # noqa: E731
+    assert "route_log" in tables()
+    cols = {c["name"] for c in inspect(create_engine(migrated.db_url)).get_columns("route_log")}
+    assert cols == {"id", "ts", "purpose", "mode", "content", "hits", "route", "tier", "model", "reason", "fallback_from"}
+    command.downgrade(cfg, "0025")
+    assert "route_log" not in tables() and "model_runs" in tables()
+    command.upgrade(cfg, "head")
+    assert "route_log" in tables()

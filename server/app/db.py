@@ -457,6 +457,24 @@ class ModelRun(SQLModel, table=True):
     reason: str | None = None              # an owner turn not on Haiku: why (0025; '"should I"', money, settings, ...)
 
 
+class RouteLog(SQLModel, table=True):
+    """One routing decision and why (G11, app/router.py; More -> Usage). Never the prompt: only the class, what the
+    scanner found (kinds, not text), the route taken and the reason in words."""
+
+    __tablename__ = "route_log"
+    id: int | None = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=utcnow, index=True)
+    purpose: str = Field(index=True)
+    mode: str                              # owner / call / job
+    content: str                           # public / low / personal / secret: the ceiling, tightened by the scan
+    hits: str | None = None                # what the scanner found, kinds only: "email,iban"
+    route: str = Field(index=True)         # claude / local / none
+    tier: str | None = None                # R0 / R1 / R2 / R3
+    model: str | None = None               # haiku / sonnet / opus, or local
+    reason: str
+    fallback_from: str | None = None       # local: its answer was refused, this is the second decision
+
+
 class ChatThread(SQLModel, table=True):
     __tablename__ = "chat_threads"
     id: int | None = Field(default=None, primary_key=True)
