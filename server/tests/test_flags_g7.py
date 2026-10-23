@@ -12,12 +12,14 @@ from app.db import make_engine
 from app.main import create_app
 
 # name -> default. On by default: plain fixes of problems measured in the research (docs/CHANGELOG.md says which).
+# listen_on_barge_in is off: its other half (the PC sending {"type":"barge_in"}) is the turn-taking build's; without it
+# the call screen would stay on "Speaking" while you talk over an answer that is already written. Turn it on at that merge.
 G7 = {
     "g7.mic_constraints": True,
     "g7.call_audio_mode": True,
     "g7.call_logs": True,
     "g7.no_aec_warning": True,
-    "g7.listen_on_barge_in": True,
+    "g7.listen_on_barge_in": False,
     "g7.sound_check_rtc": True,
 }
 
