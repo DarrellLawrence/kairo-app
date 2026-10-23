@@ -1629,16 +1629,8 @@ class Scanner:
             self.unscanned(who, "it is over the size limit")
             return
         head, _, body = data.partition(b"\n\n")
-        encoding = "utf-8"
-        headers: list[tuple[str, str]] = []
-        for raw in head.split(b"\n"):
-            if raw.startswith(b" ") and headers:                       # a continuation line (gpgsig, mergetag)
-                headers[-1] = (headers[-1][0], headers[-1][1] + "\n" + raw[1:].decode("utf-8", "replace"))
-                continue
-            bkey, _, bval = raw.partition(b" ")
-            if bkey == b"encoding":
-                encoding = bval.decode("ascii", "ignore").strip() or "utf-8"
-            headers.append((bkey.decode("ascii", "replace"), bval.decode("utf-8", "replace")))
+        lines = head.split(b"\n")
+        encoding = next((ln[9:].decode("ascii", "ignore").strip() for ln in lines if ln.startswith(b"encoding ")), "") or "utf-8"
 
         def text(b: bytes) -> str:
             try:
@@ -1646,16 +1638,24 @@ class Scanner:
             except (LookupError, UnicodeDecodeError):
                 return b.decode("utf-8", "replace")
 
-        for key, val in headers:
-            if key in ("tree", "parent", "encoding"):
+        headers: list[tuple[str, str]] = []                            # (key, the whole header as text)
+        for raw in lines:
+            if raw.startswith(b" ") and headers:                       # a continuation line (gpgsig, mergetag)
+                headers[-1] = (headers[-1][0], headers[-1][1] + "\n" + text(raw[1:]))
                 continue
-            if key in ("author", "committer"):
-                m = re.match(r"(.*?)\s*<(.*?)>", val, re.S)
-                name, email = (m[1], m[2]) if m else (val, "")
-                self.scan_text(f"{who} {key} name", name, one_line=True)
-                self.scan_text(f"{who} {key} email", email, one_line=True)
-            else:
-                self.scan_text(f"{who} header {key}", val, one_line=True)
+            headers.append((text(raw.partition(b" ")[0]), text(raw)))
+        for key, whole in headers:
+            val = whole[len(key) + 1:]
+            if key in ("tree", "parent") and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", val):
+                continue
+            m = re.fullmatch(r"(.*?)\s*<(.*?)>(.*)", val, re.S) if key in ("author", "committer") else None
+            if m:
+                self.scan_text(f"{who} {key} name", m[1], one_line=True)
+                self.scan_text(f"{who} {key} email", m[2], one_line=True)
+                if not re.fullmatch(r"\s*\d+ [+-]\d{4}", m[3]):                   # anything but the date
+                    self.scan_text(f"{who} {key}", m[3], one_line=True)
+            else:                                                     # the key too: it is free text in a crafted object
+                self.scan_text(f"{who} header {self.safe(key)}", whole, one_line=True)
         self.scan_text(f"{who} message", text(body).rstrip("\n"))
 
     def _object_types(self, repo: Path, shas: list[str]) -> dict[str, tuple[str, int]]:

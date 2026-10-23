@@ -1419,6 +1419,19 @@ def test_history_reads_the_whole_commit_object_including_extra_headers(tmp_path)
     no_leak(out, NAME)
 
 
+@pytest.mark.parametrize("header", ["encoding {u}", "{u} clean", "{d}", "{u} {name}"])
+def test_history_reads_every_part_of_a_header_and_never_prints_its_key(tmp_path, header):
+    """The value of `encoding` was skipped, a header's key was never scanned, and an unknown key went into the report
+    as written."""
+    under, dashed = NAME.replace(" ", "_"), NAME.replace(" ", "-")
+    repo = make_repo(tmp_path)
+    commit(repo, tmp_path, "base", {"a.txt": "x\n"})
+    _commit_object(repo, tmp_path, header.format(u=under, d=dashed, name=PLACE) + "\n")
+    code, out = scan(tmp_path, "--history", terms=[NAME, PLACE], cwd=repo)
+    assert code == 1 and "personal term #1" in out, out
+    no_leak(out, NAME, under, dashed, PLACE)
+
+
 def test_history_sees_the_tag_that_a_signed_merge_carries_in_its_mergetag_header(tmp_path):
     repo = make_repo(tmp_path)
     commit(repo, tmp_path, "base", {"a.txt": "x\n"})
