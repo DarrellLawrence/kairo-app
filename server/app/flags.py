@@ -40,6 +40,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
                            "Off: the usual short log."),
     "g7.no_aec_warning": (True, "A call warns you on screen when the phone says echo cancelling is off, because Kairo could then hear itself and cut itself off. "
                                  "Off: no warning."),
+    "g7.listen_on_barge_in": (True, "The call screen switches to 'Listening' when the PC says you talked over Kairo (or that its answer was cut off), "
+                                     "not when the phone hears any sound. A cough or an 'mhm' no longer flips the screen while Kairo goes on talking. "
+                                     "Off: the old way, any loud sound on the phone."),
 
     # -- G8 Windows
 

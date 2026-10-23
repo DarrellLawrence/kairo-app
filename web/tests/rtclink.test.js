@@ -247,3 +247,62 @@ test('g7.no_aec_warning off: no warning even when echo cancelling is off', async
   await withLine({ warn: (w) => warns.push(w) }, { settings: { echoCancellation: false } }, () => {})
   assert.deepEqual(warns, [])
 })
+
+// ---------------------------------------------------------------- g7.listen_on_barge_in: the screen follows the PC, not the mic
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/* A call in which Kairo is speaking turn 1, then a loud sound on the mic (a cough, a "mhm", a real interruption). */
+async function speakingThenNoise(fn) {
+  const states = []
+  await withLine({ state: (s) => states.push(s) }, {}, async ({ dc, rec }) => {
+    dc.pc({ type: 'transcript', text: 'What is on today?', turn: 1, server: {} })
+    dc.pc({ type: 'say', text: 'You have two things.', turn: 1 })
+    assert.equal(states.at(-1), 'speaking')
+    rec.micLevel = 0.001
+    await wait(450)                                   // the room is quiet: the phone learns its floor
+    rec.micLevel = 0.1
+    await wait(350)                                   // a loud sound on the mic
+    await fn({ dc, rec, states })
+  })
+}
+
+test('g7.listen_on_barge_in on: a loud sound on the mic does not flip the screen while Kairo goes on talking', () =>
+  speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'speaking')))
+
+test('g7.listen_on_barge_in on: the PC\'s barge_in event is what switches the screen to listening, and ends the turn as talked over', () =>
+  speakingThenNoise(({ dc, states }) => {
+    dc.pc({ type: 'barge_in' })
+    assert.equal(states.at(-1), 'listening')
+    dc.pc({ type: 'barge_in' })                       // a second one changes nothing
+    assert.deepEqual(states.filter((s) => s === 'listening').length, 2)   // connecting>listening at the start, and this one
+  }))
+
+test('g7.listen_on_barge_in on: an answer the PC reports as interrupted also ends "speaking" (the PC that sends no barge_in yet)', () =>
+  speakingThenNoise(({ dc, states }) => {
+    dc.pc({ type: 'done', text: 'You have two', interrupted: true, model: 'm', server: {} })
+    assert.equal(states.at(-1), 'listening')
+  }))
+
+test('g7.listen_on_barge_in on: a normal end of an answer and a barge_in with nothing speaking change nothing', async () => {
+  const states = []
+  await withLine({ state: (s) => states.push(s) }, {}, ({ dc }) => {
+    dc.pc({ type: 'barge_in' })                       // listening already: nothing to cut
+    assert.deepEqual(states, ['listening'])
+    dc.pc({ type: 'transcript', text: 'Hi', turn: 1, server: {} })
+    dc.pc({ type: 'done', text: 'Hello', interrupted: false, model: 'm', server: {} })
+    assert.equal(states.at(-1), 'thinking')           // not 'listening' until its voice has played (the old rule)
+  })
+})
+
+test('g7.listen_on_barge_in off: the old way, any loud sound on the phone flips the screen, and barge_in is not listened to', async () => {
+  applyFlags([flag('g7.listen_on_barge_in', false)])
+  await speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'listening'))
+  const states = []
+  await withLine({ state: (s) => states.push(s) }, {}, ({ dc }) => {
+    dc.pc({ type: 'transcript', text: 'What is on today?', turn: 1, server: {} })
+    dc.pc({ type: 'say', text: 'x', turn: 1 })
+    dc.pc({ type: 'barge_in' })
+    assert.equal(states.at(-1), 'speaking')
+  })
+})

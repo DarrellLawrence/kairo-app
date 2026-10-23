@@ -4,6 +4,7 @@
 //   rec.buffers  AudioBufferSource.start() calls (Web Audio playback)
 //   rec.plays    <audio>.play() calls on a file/blob src (anything that is not the call's MediaStream)
 //   rec.gum      the constraints getUserMedia was given
+//   rec.micLevel what every analyser reads (the mic's level; set it to make a sound)
 //   rec.logs     what the page told the PC's log (/api/client-log), after flushLogs(rec)
 // WebRTC itself only runs on the phone; what is tested here is what the page asks for and when.
 
@@ -53,7 +54,7 @@ export class FakeAudioContext {
   constructor() { this.state = 'running'; this.sampleRate = 48000; this.destination = {} }
   resume() { return Promise.resolve() }
   close() { this.state = 'closed'; return Promise.resolve() }
-  createAnalyser() { return { fftSize: 512, connect() {}, getFloatTimeDomainData: (b) => b.fill(0) } }
+  createAnalyser() { return { fftSize: 512, connect() {}, getFloatTimeDomainData: (b) => b.fill(current.micLevel) } }
   createMediaStreamSource() { return { connect() {} } }
   createBuffer() { return {} }
   createBufferSource() { return { connect() {}, start: () => { current.buffers += 1 } } }
@@ -73,7 +74,7 @@ export const IOS_SETTINGS = { echoCancellation: true, sampleRate: 48000, volume:
    settings: what the mic track's getSettings() says (null: a track without getSettings, like a mock).
    ua: the user agent. audioSession: false for a browser without navigator.audioSession. */
 export function installPhone({ settings = IOS_SETTINGS, ua = 'test', audioSession = true, rtcStatus = { available: true } } = {}) {
-  const rec = { session: [], states: [], buffers: 0, plays: [], gum: [], audios: [], micOpen: false, fetched: [], posted: [], logs: [] }
+  const rec = { session: [], states: [], buffers: 0, plays: [], gum: [], audios: [], micOpen: false, fetched: [], posted: [], logs: [], micLevel: 0 }
   const session = {
     _t: 'auto',
     get type() { return this._t },

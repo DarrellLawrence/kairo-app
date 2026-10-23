@@ -138,6 +138,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   const call = path === 'call'
   const logs = flagOn('g7.call_logs')     // read once, when the call starts
   const warnAec = flagOn('g7.no_aec_warning')
+  const followPc = flagOn('g7.listen_on_barge_in')   // the screen goes to 'listening' when the PC says you talked over Kairo
   const meter = makeRtcMeter(path)
   const lastVoice = makeLastVoice()
   let pc = null
@@ -183,6 +184,13 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     clientLog('rtc.fallback', { reason, ...device() })
     teardown()
     on.fallback?.({ reason, message })
+  }
+
+  /* You talked over Kairo and the PC stopped it (its barge_in event, or its answer ending as interrupted). */
+  const bargeIn = () => {
+    if (state !== 'speaking') return
+    meter.cut('talked over')
+    set('listening')
   }
 
   const afterAnswer = () => {
@@ -235,12 +243,16 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       case 'say':
         if (f.turn === meter.number && state !== 'speaking') set('speaking')
         break
+      case 'barge_in':                       // the PC cut Kairo off because you really talked over it
+        if (followPc) bargeIn()
+        break
       case 'timing':
         meter.timing(f)
         break
       case 'done':
         meter.model(f.model)
         meter.server(f.server)
+        if (followPc && f.interrupted) bargeIn()
         on.done?.(f)
         written = true
         settle(spoken ? 250 : (f.text || '').trim() ? 8000 : 250)   // over when its voice has played (or never came)
@@ -268,8 +280,8 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       micLevel = Math.min(1, r * 8)
       const before = lastVoice.last
       lastVoice.feed(listening ? r : 0, t)
-      if (lastVoice.last !== before && state === 'speaking') {   // you talk over Kairo: the PC stops it
-        meter.cut('talked over')                                // (and says "speech": your turn goes on)
+      if (!followPc && lastVoice.last !== before && state === 'speaking') {   // the old way: any sound of yours on this phone
+        meter.cut('talked over')                                // (and the PC says "speech": your turn goes on)
         set('listening')
       }
     }
