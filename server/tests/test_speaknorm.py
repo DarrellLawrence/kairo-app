@@ -270,13 +270,13 @@ def test_a_number_with_a_dot_that_is_no_date_stays_a_sentence_end():
     ("Meet at 6:07.", "Meet at six oh seven."),
     ("Meet at 6:15 or 6:30.", "Meet at quarter past six or half past six."),
     ("Meet at 6:35, 6:45 or 6:55.", "Meet at twenty-five to seven, quarter to seven or five to seven."),
-    ("It's 12:30 pm.", "It's half past twelve P M."),
-    ("It starts at 9:00 am.", "It starts at nine A M."),
-    ("It starts at 2:45 p.m. sharp.", "It starts at quarter to three P M sharp."),
+    ("It's 12:30 pm.", "It's half past twelve PM."),
+    ("It starts at 9:00 am.", "It starts at nine AM."),
+    ("It starts at 2:45 p.m. sharp.", "It starts at quarter to three PM sharp."),
     ("Noon is 12:00, midnight is 00:00 or 12:00 am.", "Noon is noon, midnight is midnight or midnight."),
     ("Meet at 12:45 or 0:05.", "Meet at quarter to one or five past twelve."),
     ("From 9:00-10:30.", "From nine o'clock to half past ten."),
-    ("Call at 5.30 pm or 5:30pm.", "Call at half past five P M or half past five P M."),   # not "five point three zero"
+    ("Call at 5.30 pm or 5:30pm.", "Call at half past five PM or half past five PM."),   # not "five point three zero"
     ("At 12:00 noon or 12:00 midnight.", "At noon or midnight."),
 ])
 def test_english_times_are_said_as_a_clock(text, said):
@@ -286,7 +286,7 @@ def test_english_times_are_said_as_a_clock(text, said):
 @pytest.mark.parametrize("text,said", [
     ("Your meeting is at 14:10.", "Your meeting is at two ten."),
     ("Meet at 9:05, 9:00 or 14:30.", "Meet at nine oh five, nine o'clock or two thirty."),
-    ("It's 2:45 pm.", "It's two forty-five P M."),
+    ("It's 2:45 pm.", "It's two forty-five PM."),
 ])
 def test_english_times_can_be_said_as_digits_too(text, said):
     assert normalize(text, "en", en_times="digits") == said
@@ -300,7 +300,8 @@ def test_an_english_time_that_is_none_is_left_alone():
 @pytest.mark.parametrize("text,said", [
     ("The test is on 23.10.2026.", "The test is on October twenty-third, 2026."),
     ("The test is on 2026-10-23.", "The test is on October twenty-third, 2026."),
-    ("It was on 01.05.1999.", "It was on May first, 1999."),
+    ("It was on 01.05.1999.", "It was on May first, nineteen ninety-nine."),      # the engine says "nineteen hundred ninety nine"
+    ("It was on 2005-03-07 or 07.03.1905.", "It was on March seventh, 2005 or March seventh, nineteen oh five."),
 ])
 def test_english_dates(text, said):
     assert normalize(text, "en") == said
@@ -358,3 +359,9 @@ def test_whatever_is_thrown_at_it_comes_back_as_text_and_twice_through_is_still_
             assert isinstance(normalize(once, lang), str)
     for lang in ("de", "en"):
         assert isinstance(normalize("1" * 3000, lang), str) and isinstance(normalize("1:" * 3000, lang), str)
+
+
+def test_am_and_pm_are_written_so_that_kokoro_reads_them_as_letters():
+    """Kokoro reads "A M" as the article "a" + "M" (measured: "ɐ ˈɛm"); "AM" and "PM" as the letters."""
+    assert normalize("At 9:00 am and 2:30 pm.", "en") == "At nine AM and half past two PM."
+    assert " A M" not in normalize("At 9:05 am.", "en") and " P M" not in normalize("At 9:05 pm.", "en")

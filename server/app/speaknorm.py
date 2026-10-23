@@ -337,17 +337,25 @@ _TIME_EN = re.compile(_BEFORE_WORD + r"(\d{1,2})(?::([0-5]\d)|\.([0-5]\d)(?=\s?[
                       r"(?:\s?([ap])(?:\.m\.|m)(?!\w))?(?![\w:])(?:\s+(noon|midnight)\b)?", re.I)
 
 
+def _year_en(y: int) -> str:
+    """1100 .. 1999 as years are said ("nineteen ninety-nine", "nineteen oh five"); later years are left to the engine."""
+    if not 1100 <= y <= 1999:
+        return str(y)
+    hundreds, rest = divmod(y, 100)
+    return en_cardinal(hundreds) + (" hundred" if not rest else " oh " + _EN_TO19[rest] if rest < 10 else " " + en_cardinal(rest))
+
+
 def _date_en(m: re.Match, day: int, month: int, year: int) -> str:
     if not _valid_date(day, month):
         return m.group(0)
-    return f"{_EN_MONTHS[month - 1]} {en_ordinal(day)}, {year}"
+    return f"{_EN_MONTHS[month - 1]} {en_ordinal(day)}, {_year_en(year)}"
 
 
 def _en_time(hour: int, minute: int, ap: str, style: str) -> str:
     """A clock time as it is said: "ten past two" (style "past": on the five, quarter and half hours; other minutes
-    as "seven forty-one") or "two ten" (style "digits"). Hours are said on the 12-hour clock; "P M" when the text had it."""
+    as "seven forty-one") or "two ten" (style "digits"). Hours are said on the 12-hour clock; "PM" when the text had it."""
     h12 = hour % 12 or 12
-    tail = {"a": " A M", "p": " P M"}.get(ap, "")
+    tail = {"a": " AM", "p": " PM"}.get(ap, "")                 # (Kokoro reads "A M" as the article "a" + "M")
     if minute == 0:
         if (ap and h12 == 12) or (not ap and hour in (0, 12)):
             return "noon" if (ap == "p" or (not ap and hour == 12)) else "midnight"
