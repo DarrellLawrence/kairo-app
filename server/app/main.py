@@ -3973,7 +3973,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         it runs. Read-only, redacted; owner only like every route. deep: also hash the multi-GB model files."""
         notes = []
         try:
-            live = {"devices": await voice_devices(request)}
+            live = {"devices": await voice_devices(request), "env": {"HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE")}}
         except Exception as exc:   # the files on disk are still judged
             live, notes = None, [f"Kairo's own device report failed: {type(exc).__name__}"]
         return await asyncio.to_thread(diag_mod.collect, data_dir=settings.data_dir, app_root=REPO_ROOT, live=live,

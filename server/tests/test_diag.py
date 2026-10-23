@@ -247,6 +247,7 @@ def test_without_a_server_the_files_are_still_judged_and_the_reason_is_in_the_re
 def test_the_endpoint_returns_the_report_from_the_running_servers_own_state(local, monkeypatch):
     local.app.state.voice = DeviceVoice(local.voice, {"whisper": comp("cpu"), "kokoro": comp(),
                                                       "piper": {"device": "cpu", "loaded": False, "ok": True}})
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     r = local.get("/api/diag/voice")
     assert r.status_code == 200
     report = r.json()
@@ -255,7 +256,9 @@ def test_the_endpoint_returns_the_report_from_the_running_servers_own_state(loca
     assert by_id["kairo.running"]["status"] == "PASS"
     assert by_id["whisper.device"]["status"] == "FAIL" and "cublas64_12.dll" in by_id["whisper.device"]["detail"]
     assert by_id["kokoro.device"]["status"] == "PASS" and by_id["piper.loaded"]["status"] == "WARN"
-    assert local.get("/api/diag/voice?deep=true").status_code == 200
+    assert by_id["system.hf_offline"]["status"] == "PASS"                     # the server's own environment, not the caller's
+    monkeypatch.delenv("HF_HUB_OFFLINE")
+    assert {c["id"]: c for c in local.get("/api/diag/voice?deep=true").json()["checks"]}["system.hf_offline"]["status"] == "WARN"
 
 
 TAILNET = "https://kairo-home.tail1234.ts.net"
@@ -331,12 +334,17 @@ def test_a_healthy_voice_model_passes_all_four_checks(pc, vl):
     assert "RTX 3060" in by_id["llama.device"]["detail"] and "state: ready" in by_id["llama.running"]["detail"]
 
 
-def test_a_whole_healthy_stack_exits_zero_with_only_the_expected_warnings(pc, vl):
+def test_a_whole_healthy_stack_exits_zero_with_only_the_expected_warnings(pc, vl, monkeypatch):
+    from app import tailnet
     idle = {"device": None, "loaded": False, "on": False, "ok": True, "reason": "until you teach Kairo your voice"}
-    report, by_id = run(pc, live=voice_parts(speaker=idle), source="server")
+    monkeypatch.setattr(diag, "ram", lambda: (8000, 16384))
+    monkeypatch.setattr(tailnet, "status", lambda data_dir: {"peers": [{"os": "iOS", "online": True, "direct": True}], "source": "live"})
+    state = {**voice_parts(speaker=idle), "env": {"HF_HUB_OFFLINE": "1"}}
+    state["devices"]["gpu"] = {"name": "NVIDIA GeForce RTX 3060", "used_mb": 7000, "total_mb": 12288, "processes": []}
+    report, by_id = run(pc, live=state, source="server")
     assert report["counts"]["fail"] == 0 and report["exit_code"] == 0 and report["ok"] is True
     assert sorted(i for i, c in by_id.items() if c["status"] == "WARN") == ["embeddings.installed", "speaker.enrolled"]
-    assert run(pc, live=voice_parts(speaker=idle), strict=True)[0]["exit_code"] == 1
+    assert run(pc, live=state, strict=True)[0]["exit_code"] == 1
 
 
 def test_a_model_file_of_the_wrong_size_is_a_fail_and_the_checksum_is_only_read_with_deep(pc, vl):

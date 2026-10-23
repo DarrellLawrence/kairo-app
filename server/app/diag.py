@@ -20,10 +20,14 @@ import argparse
 import datetime as dt
 import functools
 import importlib.util
+import ipaddress
 import json
 import os
 import platform
+import shutil
+import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -47,7 +51,17 @@ GROUPS = {
     "silero": "Voice activity (Silero VAD)",
     "speaker": "Speaker check (CAM++)",
     "embeddings": "Memory search (embeddings)",
+    "system": "This PC",
+    "net": "Calls and network",
 }
+
+VRAM_MB = 12 * 1024                    # the RTX 3060 in kairo-home
+RAM_MB = 16 * 1024
+WARN_AT, FAIL_AT = 0.85, 0.95          # memory in use: getting full / about to run out
+FIREWALL_RULE = "Kairo calls (WebRTC, Tailscale only)"     # installer/Kairo.psm1 $script:CallFirewallRule (a test keeps them equal)
+LINE_WHY = {"not_installed": "the call packages (pipecat, aiortc) aren't installed", "voice_missing": "speech to text isn't installed",
+            "no_tailnet": "this PC has no Tailscale address right now (is Tailscale up?)"}
+SNAPSHOT_STALE_S = 15 * 60
 
 
 @dataclass
@@ -359,7 +373,136 @@ def _embeddings(ctx: Ctx) -> list[Check]:
     return [first, *live_checks(ctx, "embeddings", "embeddings", gpu_required=True, lazy=True)]
 
 
-CHECKS = [_kairo, _whisper, _kokoro, _piper, _llama, _smart_turn, _silero, _speaker, _embeddings]
+# ---------------------------------------------------------------- this PC: memory, environment, firewall, network
+
+def level(used: float, total: float) -> str:
+    return FAIL if used >= FAIL_AT * total else WARN if used >= WARN_AT * total else PASS
+
+
+def ram() -> tuple[int, int] | None:
+    """(used, total) MB of this PC's memory, None when the OS doesn't say. No package: ctypes on Windows, /proc on Linux."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class Status(ctypes.Structure):          # MEMORYSTATUSEX
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                            ("avail", ctypes.c_ulonglong), ("page_total", ctypes.c_ulonglong), ("page_avail", ctypes.c_ulonglong),
+                            ("virt_total", ctypes.c_ulonglong), ("virt_avail", ctypes.c_ulonglong), ("ext", ctypes.c_ulonglong)]
+            st = Status()
+            st.length = ctypes.sizeof(st)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return None
+            return int((st.total - st.avail) >> 20), int(st.total >> 20)
+        info = {k: int(v.split()[0]) for k, v in (ln.split(":", 1) for ln in Path("/proc/meminfo").read_text().splitlines() if ":" in ln)}
+        return (info["MemTotal"] - info["MemAvailable"]) // 1024, info["MemTotal"] // 1024
+    except (OSError, KeyError, ValueError, AttributeError):
+        return None
+
+
+def _system(ctx: Ctx) -> list[Check]:
+    card = ((ctx.live or {}).get("devices") or {}).get("gpu") or gpu.summary()
+    if not card or card.get("used_mb") is None or not card.get("total_mb"):
+        vram = bad("system.vram", "graphics memory (VRAM)", "the graphics card doesn't answer (no NVIDIA driver, or this account can't run nvidia-smi)")
+    else:
+        used, total = card["used_mb"], card["total_mb"]
+        who = "; ".join(f"{p.get('kairo') or p['name']} {mb(p['used_mb'])}" for p in (card.get("processes") or []) if p.get("used_mb"))
+        status = WARN if total < 0.9 * VRAM_MB and level(used, total) == PASS else level(used, total)
+        vram = Check("system.vram", GROUPS["system"], "graphics memory (VRAM)", status,
+                     f"{mb(used)} of {mb(total)} used ({round(100 * used / total)}%); Kairo is sized for {mb(VRAM_MB)}"
+                     + (f" and this card has {mb(total)}" if total < 0.9 * VRAM_MB else "") + (f"; {who}" if who else ""), used, "MB")
+    mem = ram()
+    memory = (warn("system.ram", "memory (RAM)", "this OS doesn't say how much memory is used") if mem is None else
+              Check("system.ram", GROUPS["system"], "memory (RAM)", level(*mem), f"{mb(mem[0])} of {mb(mem[1])} used ({round(100 * mem[0] / mem[1])}%); "
+                    f"Kairo is sized for {mb(RAM_MB)}", mem[0], "MB"))
+    env = (ctx.live or {}).get("env") or {}
+    value = str(env.get("HF_HUB_OFFLINE") or "").strip().lower()
+    offline = (warn("system.hf_offline", "HF_HUB_OFFLINE", "can't see Kairo's environment: Kairo isn't answering") if ctx.live is None else
+               ok("system.hf_offline", "HF_HUB_OFFLINE", "HF_HUB_OFFLINE is set: loading a model never waits for Hugging Face") if value in ("1", "true", "yes", "on") else
+               warn("system.hf_offline", "HF_HUB_OFFLINE", "HF_HUB_OFFLINE isn't set for Kairo's voice: a model load can wait for Hugging Face when the network is down"))
+    return [vram, memory, offline]
+
+
+def firewall_rule() -> dict | None:
+    """The call rule as Windows Firewall has it: {found, enabled, action, direction, remote, protocol, program}, else None."""
+    script = ("try { $r = @(Get-NetFirewallRule -DisplayName $env:KAIRO_FW_RULE -ErrorAction Stop) } "
+              "catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { '{\"found\":false}'; exit 0 } else { exit 3 } }; "
+              "[pscustomobject]@{ found = $true; enabled = '' + $r[0].Enabled; action = '' + $r[0].Action; direction = '' + $r[0].Direction; "
+              "remote = @($r | Get-NetFirewallAddressFilter | ForEach-Object { $_.RemoteAddress }); "
+              "protocol = @($r | Get-NetFirewallPortFilter | ForEach-Object { $_.Protocol }); "
+              "program = @($r | Get-NetFirewallApplicationFilter | ForEach-Object { $_.Program }) } | ConvertTo-Json -Compress")
+    exe = shutil.which("powershell") or "powershell.exe"
+    try:
+        out = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=20,
+                             env={**os.environ, "KAIRO_FW_RULE": FIREWALL_RULE}, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _list(v) -> list[str]:
+    return [str(x) for x in v] if isinstance(v, list) else [str(v)] if v else []
+
+
+def firewall_check() -> Check:
+    from .voicertc import TAILNET
+    name = "Windows Firewall rule for calls"
+    if sys.platform != "win32":
+        return ok("net.firewall", name, "not applicable: the rule belongs to Windows Firewall, and this PC isn't Windows")
+    rule = firewall_rule()
+    if rule is None:
+        return warn("net.firewall", name, "can't read the firewall rule as this account: run kairo diag as an administrator to check it")
+    if not rule.get("found"):
+        return bad("net.firewall", name, f"there is no rule '{FIREWALL_RULE}': the phone's audio can't reach this PC (run Update Kairo as administrator)")
+    nets = [ipaddress.ip_network(t) for t in TAILNET]
+    outside = []
+    for addr in _list(rule.get("remote")):
+        try:       # Windows may write 100.64.0.0/10 as 100.64.0.0/255.192.0.0
+            net = ipaddress.ip_network(addr, strict=False)
+            if not any(net.version == t.version and net.subnet_of(t) for t in nets):
+                outside.append(addr)
+        except ValueError:
+            outside.append(addr)
+    programs = [os.path.normcase(p) for p in _list(rule.get("program"))]
+    wrong = ([f"it is switched off ({rule.get('enabled')})"] if str(rule.get("enabled")).lower() not in ("true", "1") else []) \
+        + ([f"its action is {rule.get('action')}, not Allow"] if str(rule.get("action")).lower() not in ("allow", "2") else []) \
+        + ([f"it also lets in {', '.join(outside)}: not only Tailscale"] if outside or not rule.get("remote") else []) \
+        + (["it is for another Python than the one Kairo runs (run Update Kairo)"]
+           if programs and os.path.normcase(getattr(sys, "_base_executable", sys.executable)) not in programs else [])
+    if wrong:
+        return bad("net.firewall", name, "the rule is wrong: " + "; ".join(wrong))
+    if [x.upper() for x in _list(rule.get("protocol"))] != ["UDP"]:
+        return warn("net.firewall", name, f"the rule is for {', '.join(_list(rule.get('protocol'))) or 'no protocol'}; calls need UDP only")
+    return ok("net.firewall", name, "on, inbound, UDP only, from Tailscale's addresses only, for Kairo's Python")
+
+
+def _network(ctx: Ctx) -> list[Check]:
+    from . import tailnet
+    line = ((ctx.live or {}).get("devices") or {}).get("line") or {}
+    path_name = "Tailscale path to the phone"
+    if ctx.live is None:
+        calls = bad("net.line", "calls over WebRTC", NEEDS_SERVER)
+    elif line.get("webrtc_ready"):
+        calls = ok("net.line", "calls over WebRTC", "calls go over WebRTC" + (f" (last call turn: {line['last_turn']})" if line.get("last_turn") else ""))
+    else:
+        calls = bad("net.line", "calls over WebRTC", f"calls use the old line (slower): {LINE_WHY.get(line.get('reason'), line.get('reason') or 'no reason given')}")
+    st = tailnet.status(ctx.data_dir)
+    online = [p for p in (st or {}).get("peers") or [] if p.get("online")]
+    phones = [p for p in online if str(p.get("os", "")).lower() in ("ios", "android")] or online
+    old = f" (snapshot {int((time.time() - st['at']) / 60)} min old)" if st and st.get("source") == "snapshot" and time.time() - st.get("at", 0) > SNAPSHOT_STALE_S else ""
+    if st is None:
+        path = warn("net.tailscale", path_name, "Tailscale's status isn't available: this account can't run tailscale and the PC's snapshot (status\\tailnet.json) isn't there")
+    elif not phones:
+        path = warn("net.tailscale", path_name, "no other device is online on the tailnet, so direct or relayed can't be told" + old)
+    else:
+        relayed = [p for p in phones if not p.get("direct")]
+        via = ", ".join(sorted({str(p.get("relay") or st.get("self_relay") or "relay") for p in relayed}))
+        path = (warn("net.tailscale", path_name, f"{len(relayed)} of {len(phones)} device(s) go through Tailscale's relay ({via}): tens of ms more each way" + old, len(relayed), "relayed")
+                if relayed else ok("net.tailscale", path_name, f"{len(phones)} device(s) online, all direct" + old, 0, "relayed"))
+    return [calls, path, firewall_check()]
+
+
+CHECKS = [_kairo, _whisper, _kokoro, _piper, _llama, _smart_turn, _silero, _speaker, _embeddings, _system, _network]
 
 
 # ---------------------------------------------------------------- the report
@@ -383,6 +526,13 @@ def collect(*, data_dir: Path, app_root: Path = REPO_ROOT, live: dict | None = N
                    "host": {"version": versions.running(ctx.app_root) or "dev checkout", "python": platform.python_version(),
                             "platform": f"{platform.system()} {platform.release()}"},
                    "checks": [c.as_dict() for c in checks]})
+
+
+def recheck_here(report: dict) -> dict:
+    """The server runs as Kairo's limited account, which may not be allowed to read Windows Firewall; whoever
+    runs `kairo diag` (an administrator) may. A WARN for what the server couldn't see is judged again here."""
+    again = {"net.firewall": firewall_check}
+    return {**report, "checks": [again[c["id"]]().as_dict() if c["id"] in again and c["status"] == WARN else c for c in report["checks"]]}
 
 
 def finish(report: dict, strict: bool = False) -> dict:
@@ -457,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
             notes += [why] if why else []
         if report is None:
             report = collect(data_dir=settings.data_dir, deep=args.deep, notes=notes)
-        report = finish(report, args.strict)
+        report = finish(recheck_here(report) if report["source"] == "server" else report, args.strict)
     except Exception as exc:   # the tool itself is broken: not "unhealthy", a different exit code
         print(f"kairo diag could not run: {type(exc).__name__}: {diagnosis.redact(str(exc))[:300]}", file=sys.stderr)
         return 2
