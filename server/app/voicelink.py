@@ -52,6 +52,9 @@ _NOT_AN_END = re.compile(r"(?:^|[\s(])(?:dr|mr|mrs|ms|st|nr|no|bzw|ca|vs|etc|usw
                          re.I)
 # The end of a sentence: . ! ? … (and closing quotes or brackets) before a space, or a line break.
 _END = re.compile(r"[.!?…]+[\"'”’»)\]]*(?=\s)|\n+")
+# With g9.speaknorm: "Fr." (francs or Friday) and the weekday abbreviations stand in front of the number they explain
+# ("Fr. 12.50", "Mo. 23.10."), so their dot is no place to cut.
+_BEFORE_NUMBER = re.compile(r"(?:^|[\s(])(?:S?Fr|Mo|Di|Mi|Do|Sa|So)\.$")
 FIRST_MIN = 12   # the first piece starts the voice: as soon as there is a short sentence
 NEXT_MIN = 40    # later pieces are made while the one before plays: fewer, longer ones
 LONG = 220       # no sentence end for this long: cut at a comma (or a space) so the voice doesn't wait
@@ -71,17 +74,25 @@ def first_clause(text: str, words: int = FIRST_WORDS, whole_numbers: bool = Fals
     """Where the first piece of a reply may go to the voice while it is still being written: just after its
     first comma / colon / semicolon / sentence end, or after `words` words. None: keep collecting. Only
     with a space after it (in "at 7.42" the "7." isn't an end yet), and never at "Dr." or "3." (a date).
-    whole_numbers (g9.speaknorm): not after a word with a digit, so "14:30" keeps its "Uhr" and "12,50" its "Franken"."""
+    whole_numbers (g9.speaknorm): the voice's number rules see one piece at a time, so a word cut at
+    five words is not cut off from its number: not after a word with a digit ("14:30" keeps its "Uhr",
+    "12,50" its "Franken"), and not in front of a word that starts with one ("CHF | 120.50", "am | 23.10.",
+    "in | 1 Minute"). It waits until the next word has begun to arrive."""
     for m in re.finditer(r"[,;:.!?](?=\s)|\s", text):
         piece = text[:m.end()].strip()
         if not piece:
             continue
         if m.group(0) in ",;:!?":
             return m.end()
-        if m.group(0) == "." and not _NOT_AN_END.search(text[max(0, m.start() - 6):m.start() + 1]):
+        if m.group(0) == "." and not _NOT_AN_END.search(text[max(0, m.start() - 6):m.start() + 1]) \
+                and not (whole_numbers and _BEFORE_NUMBER.search(text[max(0, m.start() - 4):m.start() + 1])):
             return m.end()
-        if len(piece.split()) >= words and m.group(0).isspace() and not (whole_numbers and re.search(r"\d", piece.split()[-1])):
-            return m.end()
+        if len(piece.split()) >= words and m.group(0).isspace():
+            if not whole_numbers:
+                return m.end()
+            ahead = text[m.end():].lstrip()
+            if ahead and not ahead[0].isdigit() and not re.search(r"\d", piece.split()[-1]):
+                return m.end()
     return None
 
 

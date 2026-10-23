@@ -64,10 +64,70 @@ def test_the_first_piece_does_not_end_on_a_number_when_the_rules_are_on():
     text = "Dein Termin ist um 14:30 Uhr. Danach "
     assert first_clause(text) == len("Dein Termin ist um 14:30 ")                              # as always: five words
     assert first_clause(text, whole_numbers=True) == len("Dein Termin ist um 14:30 Uhr.")      # "Uhr" stays with its time
-    assert first_clause("Es kostet nur noch 12,50 Franken ", whole_numbers=True) == len("Es kostet nur noch 12,50 Franken ")
+    assert first_clause("Es kostet nur noch 12,50 Franken pro", whole_numbers=True) == len("Es kostet nur noch 12,50 Franken ")
     assert first_clause("Es kostet nur noch 12,50 ", whole_numbers=True) is None               # waits for the unit
     plain = "Du hast noch fünf neue Mails"
     assert first_clause(plain, whole_numbers=True) == first_clause(plain) == len("Du hast noch fünf neue ")   # no digit: unchanged
+
+
+def test_the_first_piece_is_not_cut_in_front_of_a_number_that_the_word_before_it_explains():
+    """The rules see one piece at a time: "CHF" | "120.50", "am" | "23.10.", "in" | "1 Minute" must not be parted."""
+    text = "Die letzte Rechnung war CHF 120.50 und ist offen."
+    assert first_clause(text) == len("Die letzte Rechnung war CHF ")                               # off: as always, five words
+    assert first_clause(text, whole_numbers=True) == len("Die letzte Rechnung war CHF 120.50 und ")  # on: the amount stays whole
+    assert first_clause("Der nächste Bus fährt in 1 Minute ab.", whole_numbers=True) == len("Der nächste Bus fährt in 1 Minute ")
+    assert first_clause("Die Frist ist am 23.10. und dann", whole_numbers=True) == len("Die Frist ist am 23.10. und ")
+    assert first_clause("Die Frist ist am 23.10. um 9 Uhr.", whole_numbers=True) is None      # "um 9 Uhr." goes on: no end yet
+    # the next word has not arrived yet: it may be a number, so the cut waits
+    assert first_clause("Du hast noch fünf neue ", whole_numbers=True) is None
+    assert first_clause("Du hast noch fünf neue Mails", whole_numbers=True) == len("Du hast noch fünf neue ")
+    assert first_clause("Du hast noch fünf neue  Mails", whole_numbers=True) == len("Du hast noch fünf neue ")   # two spaces
+    assert first_clause("Du hast noch fünf neue ") == len("Du hast noch fünf neue ")          # off: no waiting
+    # "Fr." and the weekday abbreviations are no sentence end in front of a number (off: they are, as always)
+    assert first_clause("Dein Termin kostet heute Fr. 12.50 und mehr.") == len("Dein Termin kostet heute Fr.")
+    assert first_clause("Dein Termin kostet heute Fr. 12.50 und mehr.", whole_numbers=True) == len("Dein Termin kostet heute Fr. 12.50 und ")
+    assert first_clause("Das Treffen ist am Mo. 23.10. um 8 Uhr. Danach", whole_numbers=True) == len("Das Treffen ist am Mo. 23.10. um 8 Uhr.")
+    assert first_clause("Das Treffen ist am Mo. 23.10. um 8 Uhr. Danach") == len("Das Treffen ist am Mo.")   # off: cut at "Mo.", as always
+    assert first_clause("Das war es. 3 Mails sind neu.", whole_numbers=True) == len("Das war es.")   # a real sentence end still cuts
+
+
+def _streamed(speaker, text):
+    """The pieces an answer comes out as when it streams in one word at a time."""
+    for word in text.split(" "):
+        speaker.feed(word + " ")
+    speaker.finish()
+    out = []
+    while not speaker.queue.empty():
+        piece = speaker.queue.get_nowait()
+        if piece is not None:
+            out.append(piece)
+    return out
+
+
+def test_the_amount_goes_in_the_first_piece_and_the_rest_follows():
+    async def run():
+        return _streamed(RtcSpeaker(1, whole_numbers=True), "Die letzte Rechnung war CHF 120.50 und ist offen.")
+    assert asyncio.run(run()) == ["Die letzte Rechnung war CHF 120.50 und", "ist offen."]
+
+
+@pytest.mark.parametrize("text,lang,said", [
+    ("Die letzte Rechnung war CHF 120.50 und ist offen.", "de", "Die letzte Rechnung war einhundertzwanzig Franken fünfzig und ist offen."),
+    ("Your last bill was CHF 12.50 and is open now.", "en", "Your last bill was twelve francs fifty and is open now."),
+    ("Your last bill was EUR 12.50 and is open now.", "en", "Your last bill was twelve euros fifty and is open now."),
+    ("Dein Termin kostet heute Fr. 12.50 und mehr.", "de", "Dein Termin kostet heute zwölf Franken fünfzig und mehr."),
+    ("Der nächste Bus fährt in 1 Minute ab.", "de", "Der nächste Bus fährt in einer Minute ab."),
+    ("Der nächste Test ist am 23.10. um 9 Uhr.", "de", "Der nächste Test ist am dreiundzwanzigsten Oktober um neun Uhr."),
+    ("Heute ist leider schon der 23. Oktober.", "de", "Heute ist leider schon der dreiundzwanzigste Oktober."),
+])
+def test_an_answer_that_streams_in_is_said_like_the_same_answer_in_one_piece(text, lang, said):
+    assert speaknorm.normalize(text, lang) == said                      # (the rules on the whole text)
+
+    async def run():
+        pieces = _streamed(RtcSpeaker(1, whole_numbers=True), text)
+        hook = speaknorm.hook()
+        return pieces, " ".join(hook(p, lang)[0] for p in pieces)
+    pieces, heard = asyncio.run(run())
+    assert heard == said, pieces                                    # cut in pieces or not, it is said as the whole text
 
 
 def test_sentences_and_the_rtc_speaker_hold_the_unit_with_the_number_only_when_asked():
