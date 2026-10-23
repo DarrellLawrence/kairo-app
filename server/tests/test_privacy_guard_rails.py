@@ -109,10 +109,82 @@ def test_a_line_that_starts_with_a_hash_in_the_message_is_scanned(tmp_path, how)
     assert log.returncode != 0 or NAME not in log.stdout           # nothing was committed
 
 
+SCISSORS = "-" * 24 + " >8 " + "-" * 24             # git's cut line comes after its comment char and a space
+
+
+def try_git(repo, tmp_path, *args, terms=(NAME, PLACE), **env_extra):
+    env = clean_env(tmp_path, KAIRO_PERSONAL_TERMS="\n".join(terms), **env_extra)
+    p = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+    return p.returncode, p.stdout + p.stderr
+
+
+@posix_only
+@pytest.mark.parametrize("how", ["dash-m-scissors", "dash-F-scissors", "dash-F-scissors-other-comment-char",
+                                 "merge-dash-m", "merge-dash-m-token"])
+def test_text_that_git_keeps_is_scanned_even_below_a_scissors_line_or_in_a_merge(tmp_path, how):
+    """git cuts at a scissors line only when an editor runs with -v or --cleanup=scissors, and `git merge -m` keeps
+    '#' lines like `git commit -m` does. The hook used to drop both, so the text went into the history unscanned."""
+    from tests.test_privacy_scan import GH_PAT
+    repo = hooked_repo(tmp_path)
+    commit(repo, tmp_path, "start", {"a.txt": "x\n"})
+    if how.startswith("merge"):
+        git(repo, tmp_path, "switch", "-q", "-c", "side")
+        commit(repo, tmp_path, "side", {"s.txt": "y\n"})
+        git(repo, tmp_path, "switch", "-q", "main")
+        last = f"# {GH_PAT}" if how.endswith("token") else f"# {NAME}"
+        code, out = try_git(repo, tmp_path, "merge", "--no-ff", "-q", "-m", f"Merge side\n\n#97 follow-up\n{last}", "side")
+        assert code != 0 and ("personal term #1" in out if "token" not in how else "secret: GitHub token" in out), out
+        no_leak(out, NAME, GH_PAT)
+        assert git(repo, tmp_path, "log", "-1", "--format=%s").strip() == "start"          # nothing was merged
+        return
+    write(repo / "ok.txt", "hello\n")
+    git(repo, tmp_path, "add", "ok.txt")
+    char = ";" if how.endswith("other-comment-char") else "#"
+    if char != "#":
+        git(repo, tmp_path, "config", "core.commentChar", char)
+    message = f"Fix the import\n\n{char} {SCISSORS}\n{NAME} asked for this\n"
+    if how == "dash-m-scissors":
+        args = ("-m", message)
+    else:
+        write(tmp_path / "msg.txt", message)
+        args = ("-F", str(tmp_path / "msg.txt"))
+    code, out = try_commit(repo, tmp_path, *args)
+    assert code != 0 and "commit message:4: personal term #1" in out, out
+    no_leak(out, NAME)
+
+
 EDITOR = """#!/bin/sh
 # a fake editor: a subject line is typed above whatever git put in the file
 { printf '%s\\n' "$KAIRO_TEST_SUBJECT"; cat "$1"; } > "$1.new" && mv "$1.new" "$1"
 """
+EDITOR_GLUED = """#!/bin/sh
+# a fake editor: the typed lines replace the empty line git put above its comment block
+{ printf '%s\\n' "$KAIRO_TEST_SUBJECT"; tail -n +2 "$1"; } > "$1.new" && mv "$1.new" "$1"
+"""
+EDITOR_REPLACE = """#!/bin/sh
+# a fake editor: the whole file is replaced with what was typed
+printf '%s\\n' "$KAIRO_TEST_SUBJECT" > "$1"
+"""
+
+
+@posix_only
+@pytest.mark.parametrize("how", ["hash-line-glued-to-the-template-whitespace-cleanup", "last-line-starts-with-at"])
+def test_an_editor_commit_scans_every_line_that_was_typed(tmp_path, how):
+    """Only the lines git itself wrote into the file are left out, not every trailing line that starts with a sign."""
+    repo = hooked_repo(tmp_path)
+    write(repo / "ok.txt", "x\n")
+    git(repo, tmp_path, "add", "ok.txt")
+    if how.startswith("hash"):
+        editor, args, typed = EDITOR_GLUED, ("--cleanup=whitespace",), f"Fix the import\n\n# {NAME}"
+    else:
+        editor, args, typed = EDITOR_REPLACE, (), f"subject line\nbody text\n@{NAME} asked for this"
+    ed = write(tmp_path / "editor.sh", editor)
+    ed.chmod(0o755)
+    code, out = try_commit(repo, tmp_path, *args, GIT_EDITOR=str(ed), KAIRO_TEST_SUBJECT=typed)
+    assert code != 0 and "personal term #1" in out, out
+    no_leak(out, NAME)
+    log = subprocess.run(["git", "log", "-1", "--format=%B"], cwd=repo, env=clean_env(tmp_path), capture_output=True, text=True)
+    assert NAME not in log.stdout
 
 
 @posix_only
@@ -127,7 +199,7 @@ def test_an_editor_commit_is_not_blocked_by_gits_own_comment_block(tmp_path):
     code, out = try_commit(repo, tmp_path, GIT_EDITOR=str(editor), KAIRO_TEST_SUBJECT="Remove the notes")
     assert code == 0, out
     assert git(repo, tmp_path, "log", "-1", "--format=%s").strip() == "Remove the notes"
-    assert not (repo / ".git" / "kairo-msg-source").exists()                       # the note for commit-msg is cleaned up
+    assert not (repo / ".git" / "kairo-msg-prepared").exists()                     # the copy for commit-msg is cleaned up
 
 
 @posix_only
@@ -161,18 +233,37 @@ def test_commit_dash_v_can_remove_a_term_the_diff_below_the_scissors_line_is_not
 @posix_only
 def test_message_scanning_unit_cases(tmp_path):
     from tests.test_privacy_scan import scan
+    repo = make_repo(tmp_path)
     template = "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored.\n#\n# On branch main\n#\tdeleted:    " \
                + PLACE.lower() + "-notes.txt\n"
-    f = write(tmp_path / "m.txt", f"Subject\n{template}")
-    assert scan(tmp_path, "--message-file", str(f), terms=[PLACE])[0] == 1                       # not told that an editor was used: all lines
-    assert scan(tmp_path, "--message-file", str(f), "--message-editor", terms=[PLACE])[0] == 0   # the trailing comment block is git's
-    f = write(tmp_path / "m.txt", f"Subject\n\n# ------------------------ >8 ------------------------\n-{NAME}\n")
-    code, out = scan(tmp_path, "--message-file", str(f), terms=[NAME])
-    assert code == 0, out                                                                           # below the scissors line is the diff
-    f = write(tmp_path / "m.txt", f"Subject\n\n# note: {NAME}\n")
-    assert scan(tmp_path, "--message-file", str(f), "--message-editor", terms=[NAME])[0] == 0     # (a block of comment lines at the end)
-    f = write(tmp_path / "m.txt", f"Subject\n# {NAME}\nmore text\n")
-    assert scan(tmp_path, "--message-file", str(f), "--message-editor", terms=[NAME])[0] == 1     # a '#' line with text after it is scanned
+    prepared = write(tmp_path / "prepared.txt", template)
+
+    def code(message, *extra, terms=(NAME, PLACE)):
+        f = write(tmp_path / "m.txt", message)
+        return scan(tmp_path, "--message-file", str(f), *extra, terms=list(terms), cwd=repo)[0]
+
+    assert code(f"Subject\n{template}") == 1                                                # no editor (-m, -F): every line
+    assert code(f"Subject\n{template}", "--message-prepared", str(prepared)) == 0          # git's own block, unchanged
+    assert code(f"Subject\n\n# note: {NAME}{template}", "--message-prepared", str(prepared)) == 1   # a typed '#' line
+    assert code(f"Subject\n{template}# {NAME}\n", "--message-prepared", str(prepared)) == 1         # typed below the block
+    assert code(f"Subject\n\n# {SCISSORS}\n-{NAME}\n") == 1                                 # -m/-F: git keeps text below it
+    diff = f"# {SCISSORS}\n# Do not modify or remove the line above.\n# Everything below it will be ignored.\ndiff --git a/b b/b\n-{NAME}\n"
+    write(prepared, template + diff)                                                       # commit -v: git cuts at its line
+    assert code(f"Remove it\n{template}{diff}", "--message-prepared", str(prepared)) == 0
+    fake = f"Subject\n# {SCISSORS}\n{NAME} was here\n"                                     # a cut line from -e -F, no -v:
+    write(prepared, fake + template)                                                       # git keeps the text below it
+    assert code(fake + template, "--message-prepared", str(prepared)) == 1
+    write(prepared, template)
+    git(repo, tmp_path, "config", "commit.cleanup", "whitespace")                         # git keeps its comment block then
+    assert code(f"Subject\n{template}", "--message-prepared", str(prepared)) == 1
+    git(repo, tmp_path, "config", "--unset", "commit.cleanup")
+    git(repo, tmp_path, "config", "core.commentChar", ";")
+    write(prepared, template.replace("#", ";"))
+    assert code(f"Subject\n{template.replace('#', ';')}", "--message-prepared", str(prepared)) == 0
+    assert code(f"Subject\n# {NAME}\n{template.replace('#', ';')}", "--message-prepared", str(prepared)) == 1
+    f = write(tmp_path / "m.txt", "Subject\n")                                             # hooks older than the scanner
+    rc, out = scan(tmp_path, "--message-file", str(f), "--message-editor", terms=[NAME], cwd=repo)
+    assert rc == 2 and "--install-hooks" in out
 
 
 @posix_only

@@ -18,8 +18,13 @@ git config core.hooksPath scripts/hooks
 - `pre-commit` runs `python scripts/privacy_scan.py --staged` on what the commit adds, and `gitleaks` too if it is
   installed (with `--verbose`, so you see file, line and rule; its output is already redacted).
 - `commit-msg` checks the commit message (a term in a message stays in the history for good). Every line of it is
-  checked, also lines that start with `#`: `git commit -m` and `-F` keep those lines. Only when an editor was opened is
-  git's own comment block at the end ignored (`prepare-commit-msg` notes how the message was made).
+  checked, also lines that start with `#` and text below a scissors line (`# ---- >8 ----`): `git commit -m`, `-F`
+  and `git merge -m` keep them. Only when an editor was opened are the lines git itself wrote into the file left out
+  (its comment block, the diff of `commit -v`), and only while they still end the file unchanged: `prepare-commit-msg`
+  saves the file as git hands it to the editor, so a typed line is always checked, whatever it starts with. One gap:
+  `--cleanup=whitespace` or `--cleanup=verbatim` typed on the command line makes git keep its comment block (it lists
+  file names and the branch), and a hook cannot see that option. Set `commit.cleanup` in the git config instead (the
+  hook reads it); CI's history scan checks every message in any case.
 - They need Python 3 on the PATH. Git for Windows runs them with its own `sh`; no `.cmd` or `.ps1` is needed.
 - `git commit --no-verify` skips them, but CI scans the whole history again, so it only delays the red build.
 

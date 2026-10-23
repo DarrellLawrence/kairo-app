@@ -1506,18 +1506,19 @@ class Scanner:
                     continue
             self.scan_blob(path, data, only_lines=lines, path_checked=True)
 
-    def scan_message_file(self, path: Path, editor: bool = False) -> None:
-        """A commit message. Every line is scanned (git keeps '#' lines unless it runs in its "strip" cleanup mode,
-        and -m and -F do not). With editor=True (the commit-msg hook knows an editor was opened) the template git
-        appended at the end is not part of the message and is left out; so is everything after the scissors line."""
-        data = path.read_bytes()
-        try:
-            texts = [data.decode("utf-8")]
-        except UnicodeDecodeError:                       # i18n.commitEncoding=ISO-8859-1 and the like
-            texts = [data.decode("utf-8", "replace"), data.decode("latin-1")]
+    def scan_message_file(self, path: Path, prepared: Path | None = None, repo: Path | str = ".") -> None:
+        """A commit message. Every line is scanned: with -m, -F and `git merge -m` git keeps '#' lines and the text
+        below a scissors line. Only with `prepared` (an editor was opened and the prepare-commit-msg hook saved the
+        file as git handed it over) are the lines git itself appended left out, while they stand unchanged at the
+        end and git's cleanup mode drops them."""
+        texts = _message_texts(path.read_bytes())
+        before: list[str | None] = [None]
+        if prepared is not None and (_git_config(repo, "commit.cleanup") or "default").lower() in ("default", "strip", "scissors"):
+            before = _message_texts(prepared.read_bytes())         # decoded the same way as the message
+        marker = _git_config(repo, "core.commentString") or _git_config(repo, "core.commentChar") or "#"
         self.report.items += 1
-        for text in texts:
-            self.scan_text("commit message", _message_body(text, editor))
+        for i, text in enumerate(texts):
+            self.scan_text("commit message", _message_body(text, before[min(i, len(before) - 1)], marker))
 
     def scan_gitleaks_report(self, path: Path) -> None:
         """A gitleaks JSON report as findings: rule, file, line and commit. The matched text, the secret, the author
@@ -1690,28 +1691,69 @@ class Scanner:
         self.report.findings = rebuilt
 
 
-_COMMENT_CHARS = "#;@!$%^&|:"
-_SCISSORS = re.compile(r"^[#;@!$%^&|:] -{24} >8 -{24}\s*$")
+_COMMENT_CHARS = "#;@!$%^&|:"                  # what core.commentChar=auto picks from
+_CUT_LINE = "-" * 24 + " >8 " + "-" * 24
 
 
-def _message_body(text: str, editor: bool) -> str:
-    lines = text.split("\n")
-    for n, ln in enumerate(lines):
-        if _SCISSORS.match(ln):                          # below this line is the diff of `git commit -v`
-            lines = lines[:n]
+def _message_texts(data: bytes) -> list[str]:
+    try:
+        return [data.decode("utf-8")]
+    except UnicodeDecodeError:                       # i18n.commitEncoding=ISO-8859-1 and the like
+        return [data.decode("utf-8", "replace"), data.decode("latin-1")]
+
+
+def _git_config(repo: Path | str, key: str) -> str | None:
+    try:
+        return _dec(_git(repo, "config", "--get", key)).strip() or None
+    except GitError:                                 # not set (exit 1), or no git
+        return None
+
+
+def _git_appended(prepared: str, marker: str) -> list[str]:
+    """The lines git appended to the message it handed to the editor (right-stripped): its comment block and, from its
+    scissors line on, what -v shows. git cuts at that line only with -v or --cleanup=scissors, and then it wrote the
+    line itself: below it there are only comment lines and the diff. A cut line that came with the message (-e -F)
+    and has other text below it is not git's."""
+    p = [ln.rstrip() for ln in prepared.split("\n")]
+    while p and not p[-1]:
+        p.pop()
+    end = len(p)
+    for i in range(len(p) - 1, -1, -1):
+        if p[i] == f"{marker} {_CUT_LINE}":
+            j = i + 1
+            while j < len(p) and (not p[j] or p[j].startswith(marker)):
+                j += 1
+            if j == len(p) or p[j].startswith("diff --git "):
+                end = i
             break
-    if editor:
-        last = next((ln for ln in reversed(lines) if ln.strip()), "")
-        if last[:1] in _COMMENT_CHARS and last[:1]:
-            char = last[:1]
-            end = len(lines)
-            while end > 0 and not lines[end - 1].strip():
-                end -= 1
-            start = end
-            while start > 0 and lines[start - 1].startswith(char):
-                start -= 1
-            lines = lines[:start]
-    return "\n".join(lines).rstrip("\n")
+    start = end
+    while start > 0 and (not p[start - 1] or p[start - 1].startswith(marker)):
+        start -= 1
+    return p[start:]
+
+
+def _message_body(text: str, prepared: str | None = None, marker: str = "#") -> str:
+    """The part of a commit message file that is scanned. Without `prepared` (no editor ran) all of it. With it,
+    everything but the lines git appended to `prepared`, as long as they still end the file unchanged: a line that
+    was typed is never left out, whatever it starts with."""
+    if prepared is None:
+        return text
+    lines = text.split("\n")
+    if marker == "auto":                             # git picked a sign no line of the message starts with
+        last = next((ln for ln in reversed(prepared.split("\n")) if ln.strip()), "")
+        marker = last[:1] if last[:1] in _COMMENT_CHARS else "#"
+        for ln in prepared.split("\n"):
+            if ln.rstrip().endswith(_CUT_LINE) and ln[:1] in _COMMENT_CHARS:
+                marker = ln[:1]
+    block = _git_appended(prepared, marker)
+    seen = [ln.rstrip() for ln in lines]
+    end = len(seen)
+    while end and not seen[end - 1]:
+        end -= 1
+    k = 0
+    while k < len(block) and k < end and seen[end - 1 - k] == block[-1 - k]:
+        k += 1
+    return "\n".join(lines[: end - k])
 
 
 def _discard(stream, n: int) -> None:
@@ -1815,8 +1857,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history", nargs="*", metavar="REF", help="every commit reachable from the refs (default: all refs)")
     p.add_argument("--zip", nargs="+", metavar="FILE", help="a release zip")
     p.add_argument("--message-file", metavar="FILE", help="a commit message (the commit-msg hook)")
-    p.add_argument("--message-editor", action="store_true",
-                   help="with --message-file: an editor was opened, so git's trailing comment block is not part of the message")
+    p.add_argument("--message-prepared", metavar="FILE",
+                   help="with --message-file: the file as git handed it to the editor (the lines git appended are left out)")
+    p.add_argument("--message-editor", action="store_true", help=argparse.SUPPRESS)       # hooks older than this scanner
     p.add_argument("--gitleaks-report", metavar="FILE", help="print a gitleaks JSON report (no matched text)")
     p.add_argument("--install-hooks", action="store_true", help="install the git hooks for every branch and worktree of --repo")
     p.add_argument("--ci", action="store_true", help="GitHub Actions: annotations; a missing list on main is an error")
@@ -1836,6 +1879,10 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     env = os.environ if env is None else env
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.message_editor:
+        print("error: the git hooks are older than this scanner. Run: python scripts/privacy_scan.py --install-hooks "
+              "(or git config core.hooksPath scripts/hooks)", file=sys.stderr)
+        return 2
     if args.install_hooks:
         try:
             print(f"privacy_scan: hooks installed in {install_hooks(Path(args.repo))} (core.hooksPath set for this repository)")
@@ -1889,7 +1936,8 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
         if args.staged:
             scanner.scan_staged(Path(args.repo))
         if args.message_file:
-            scanner.scan_message_file(Path(args.message_file), editor=args.message_editor)
+            scanner.scan_message_file(Path(args.message_file),
+                                      Path(args.message_prepared) if args.message_prepared else None, Path(args.repo))
         if args.tree is not None:
             root = Path(args.tree)
             if not root.is_dir():
