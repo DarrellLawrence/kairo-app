@@ -384,9 +384,12 @@ def test_context_slots_and_template_are_judged_against_what_kairo_starts_it_with
     assert props()["status"] == "PASS"
     small = props(n_ctx=4096)
     assert small["status"] == "FAIL" and "context 4096 tokens, Kairo starts it with 8192" in small["detail"] and small["value"] == 4096
-    no_template = props(template="")
-    assert no_template["status"] == "FAIL" and "--jinja" in no_template["detail"]
-    assert props(slots=4)["status"] == "WARN"
+    assert props(slots=4)["status"] == "WARN" and "4 slots" in props(slots=4)["detail"]
+    # what llama.cpp doesn't say (a newer build that moved a field) is a warning, never a false alarm
+    assert props(template="")["status"] == "WARN" and "no chat template" in props(template="")["detail"]
+    monkeypatch.setattr(voice_local, "props", lambda port=8091, timeout=2.0: {"total_slots": 1, "chat_template": "x"})
+    c = run(pc, live=voice_parts())[1]["llama.flags"]
+    assert c["status"] == "WARN" and "doesn't say its context size" in c["detail"]
     monkeypatch.setattr(voice_local, "props", lambda port=8091, timeout=2.0: None)
     assert run(pc, live=voice_parts())[1]["llama.flags"]["status"] == "WARN"
 

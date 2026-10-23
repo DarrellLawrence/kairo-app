@@ -258,7 +258,6 @@ def probe_smart_turn(path: Path) -> tuple[int | None, str | None]:
 
 def probe_silero(path: Path) -> tuple[int | None, str | None]:
     """(ms, None) when the VAD model loads on the CPU (a call loads its own copy), else (None, why)."""
-    import time
     try:
         import onnxruntime as ort
         t0 = time.monotonic()
@@ -305,10 +304,11 @@ def _llama(ctx: Ctx) -> list[Check]:
     else:
         n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
         slots, template = props.get("total_slots"), bool(props.get("chat_template"))
-        wrong = ([f"context {n_ctx} tokens, Kairo starts it with {want}"] if want and n_ctx != want else []) \
-            + ([] if template else ["no chat template (started without --jinja: no tool calls)"])
+        wrong = [f"context {n_ctx} tokens, Kairo starts it with {want}"] if want and n_ctx is not None and n_ctx != want else []
+        unsure = (["it doesn't say its context size"] if n_ctx is None else []) + ([] if template else ["it shows no chat template (tool calls need one)"]) \
+            + ([f"{slots} slots; Kairo uses 1 (-np 1) so the prompt cache stays"] if slots not in (1, None) else [])
         flags = (bad("llama.flags", "context and flags", "; ".join(wrong) + " (restart Kairo)", n_ctx, "tokens") if wrong else
-                 warn("llama.flags", "context and flags", f"{slots} slots; Kairo uses 1 (-np 1) so the prompt cache stays", n_ctx, "tokens") if slots != 1 else
+                 warn("llama.flags", "context and flags", "; ".join(unsure), n_ctx, "tokens") if unsure else
                  ok("llama.flags", "context and flags", f"context {n_ctx} tokens, 1 slot, chat template on (-c, -np 1, --jinja)", n_ctx, "tokens"))
     dev = gpu.llama_device(ctx.data_dir / "logs" / "voice-llm.log")
     layers = (ok("llama.device", "on the GPU", f"{dev['layers']} layers on the GPU" + (f" ({dev['gpu']})" if dev.get("gpu") else ""))
