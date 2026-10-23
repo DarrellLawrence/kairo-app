@@ -222,10 +222,19 @@ def stats(values: list) -> dict:
 
 # ---------------------------------------------------------------- the language models
 
+# What must never be said aloud (G3's gate, "markup spoken 0 of N"): a model's tool-call or reasoning markers that got through
+# the sanitiser (brain/voice_local.TextCalls) into the words.
+_MARKUP = re.compile(r"</?think>|<\|?/?tool_(?:call|response)|\btool_(?:call|response)\|>|\bcall:[A-Za-z_]\w*\s*\{|\[TOOL_CALLS\]", re.I)
+
+
+def spoke_markup(text: str | None) -> bool:
+    return bool(text and _MARKUP.search(text))
+
+
 async def _run_model(vm: VoiceModel, temperature: float, layout: dict | None = None) -> dict:
     out = {"ttft": [], "first_text": [], "tok_s": [], "cold_ms": {}, "need": 0, "hits": 0, "small": 0, "false": 0,
            "facts_n": 0, "facts_ok": 0, "card_n": 0, "card_pc": 0, "card_wrong": 0, "card_claude": 0,
-           "replies": {"en": [], "de": []}, "errors": []}
+           "replies": {"en": [], "de": []}, "errors": [], "spoken_n": 0, "markup": 0}
     for lang, cases in CASES.items():
         answers = {c.text: c.answer for c in cases}
 
@@ -253,6 +262,8 @@ async def _run_model(vm: VoiceModel, temperature: float, layout: dict | None = N
             if r.timings.get("predicted_per_second"):
                 out["tok_s"].append(round(float(r.timings["predicted_per_second"]), 1))
             spoken = ear.text.strip()
+            out["spoken_n"] += 1
+            out["markup"] += 1 if spoke_markup(spoken) else 0
             if case.card:                      # the card has it: on the PC, right, at once
                 out["card_n"] += 1
                 if r.asked:
@@ -282,6 +293,7 @@ def _summary(raw: dict) -> dict:
             "card_on_pc": round(raw["card_pc"] / raw["card_n"], 2) if raw["card_n"] else None,
             "card_wrong": round(raw["card_wrong"] / raw["card_n"], 2) if raw["card_n"] else None,
             "card_via_claude": round(raw["card_claude"] / raw["card_n"], 2) if raw["card_n"] else None,
+            "markup_spoken": raw.get("markup", 0), "spoken_replies": raw.get("spoken_n", 0),
             "errors": raw["errors"][:5]}
 
 
@@ -340,6 +352,8 @@ def pick(models: dict, language_mode: str = "auto", prefer: str | None = None) -
             problems.append(f"answers from the card {m['card_on_pc']}")
         if m.get("card_wrong") is not None and m["card_wrong"] > CARD_WRONG_MAX:
             problems.append(f"wrong from the card {m['card_wrong']}")
+        if (m.get("markup_spoken") or 0) > 0:
+            problems.append(f"spoke tool-call markup in {m['markup_spoken']} of {m.get('spoken_replies')} replies")
         for lang in langs:
             score = (m.get("natural") or {}).get(lang)
             if score is not None and score < NATURAL_MIN[lang]:

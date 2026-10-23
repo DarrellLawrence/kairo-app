@@ -219,3 +219,37 @@ def test_the_app_hands_a_call_the_model_the_switch_says(local, monkeypatch, tmp_
     assert local.put("/api/flags/g3.smart_turn_pin", json={"on": False}).status_code == 200
     asyncio.run(rtc._app_call(local, seconds=2))
     assert seen == [None, str(pinned), None]
+
+
+# ---------------------------------------------------------------- the lab counts spoken call markup (the gate: 0 of N)
+
+def test_spoken_markup_is_told_from_ordinary_words():
+    said = ["<|tool_call>call:ask_kairo{request:<|\"|>x<|\"|>}<tool_call|>", "Sure.<tool_call|>", "ok <|tool_response>", "a</think>b",
+            "call:ask_kairo{request: 'x'}", "[TOOL_CALLS]", "<tool_call>{\"name\": \"ask_kairo\"}"]
+    for text in said:
+        assert voicelab.spoke_markup(text), text
+    for text in ["Sure, I'll call the dentist tomorrow.", "Call: that is what the card says.", "Your tool call count is two.",
+                 "Chemistry lab at 10:40 in room 214.", "", None]:
+        assert not voicelab.spoke_markup(text), text
+
+
+def test_the_lab_summary_and_the_pick_know_about_spoken_markup():
+    raw = {"ttft": [10], "first_text": [10], "tok_s": [], "cold_ms": {}, "need": 1, "hits": 1, "small": 1, "false": 0, "facts_n": 1,
+           "facts_ok": 1, "card_n": 1, "card_pc": 1, "card_wrong": 0, "card_claude": 0, "errors": [], "spoken_n": 40, "markup": 2}
+    s = voicelab._summary(raw)
+    assert s["markup_spoken"] == 2 and s["spoken_replies"] == 40
+    base = {"tool_recall": 1.0, "false_calls": 0.0, "fidelity": 1.0, "natural": {"en": 4.0, "de": 3.5}, "first_word_ms": {"p50": 90}}
+    mid, why = voicelab.pick({"a": {**base, "markup_spoken": 2, "spoken_replies": 40}, "b": {**base, "first_word_ms": {"p50": 200},
+                                                                                          "markup_spoken": 0}})
+    assert mid == "b" and "markup" in why and "2" in why
+    assert voicelab.pick({"a": {**base}})[0] == "a"                       # an older report without the number is fine
+
+
+def test_the_lab_run_reports_how_many_replies_carried_markup(migrated, tmp_path, monkeypatch):
+    from tests.test_voicelab import lab, make_site
+    pytest.importorskip("numpy")
+    site = make_site(monkeypatch, tmp_path)
+    engine, the_lab = lab(migrated, tmp_path, site, None, monkeypatch)
+    rep = the_lab.run()
+    m = rep["models"]["lfm2.5-2.6b"]
+    assert m["markup_spoken"] == 0 and m["spoken_replies"] > 0
