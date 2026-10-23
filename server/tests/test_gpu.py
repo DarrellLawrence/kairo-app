@@ -118,6 +118,61 @@ def test_the_other_ways_llama_cpp_says_the_card_is_full(tmp_path, line, said):
     assert gpu.llama_vram(log)["oom"] == said
 
 
+# The real order in llama.cpp (llama-model.cpp: weights, then the "offloaded n/n" line; llama-kv-cache.cpp: the context memory;
+# llama-context.cpp: the work space): a card that fills up AFTER the weights went on it prints the "offloaded" line first.
+WEIGHTS_IN = ("build: 11292 (90c908d) with MSVC for x64\nggml_cuda_init: found 1 CUDA devices:\n"
+              "llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3060) - 11250 MiB free\n"
+              "load_tensors: offloaded 43/43 layers to GPU\nload_tensors:        CUDA0 model buffer size =  2831.40 MiB\n")
+CUDA_FULL = "ggml_backend_cuda_buffer_type_alloc_buffer: allocating {mib} MiB on device 0: cudaMalloc failed: out of memory\n"
+
+
+@pytest.mark.parametrize("after", [
+    CUDA_FULL.format(mib="448.00") + "llama_init_from_model: failed to allocate buffer for kv cache\n",
+    "llama_kv_cache:      CUDA0 KV buffer size =   448.00 MiB\n" + CUDA_FULL.format(mib="363.00")
+    + "llama_init_from_model: failed to allocate compute pp buffers\n",
+    CUDA_FULL.format(mib="363.00") + "llama_init_from_model: failed to allocate compute tg buffers\n",
+    CUDA_FULL.format(mib="448.00"),
+], ids=["kv cache", "compute pp buffers", "compute tg buffers", "only the cudaMalloc line"])
+def test_a_card_that_fills_up_after_the_weights_went_on_it_is_red_not_green(tmp_path, after):
+    """The weights fit (the 'offloaded 43/43' line is printed), then the context memory or the work space does not: the start is dead.
+    The first version looked at the layer count first and called this a healthy GPU start."""
+    log = tmp_path / "voice-llm.log"
+    log.write_text(WEIGHTS_IN + after, encoding="utf-8")
+    d = gpu.llama_device(log)
+    assert d["ok"] is False and d["device"] == "gpu" and d["layers"] == "43/43"
+    assert "cudaMalloc failed: out of memory" in d["reason"]            # the cause, not only the line that says what was not allocated
+    assert "43/43" in d["reason"] and "ran out of memory" in d["reason"]
+    assert gpu.llama_vram(log)["oom"] == "cudaMalloc failed: out of memory"
+
+
+def test_a_partial_offload_that_also_ran_out_of_memory_says_the_memory_first(tmp_path):
+    log = tmp_path / "voice-llm.log"
+    log.write_text(WEIGHTS_IN.replace("43/43", "30/43") + CUDA_FULL.format(mib="448.00") + "llama_init_from_model: failed to allocate buffer for kv cache\n",
+                   encoding="utf-8")
+    d = gpu.llama_device(log)
+    assert d["ok"] is False and "30/43" in d["reason"] and "cudaMalloc failed: out of memory" in d["reason"]
+
+
+def test_an_allocation_that_llama_cpp_got_past_is_not_a_failure(tmp_path):
+    """llama.cpp retries a failed work-space allocation without pipeline parallelism (llama-context.cpp) and then starts: the server
+    saying it is listening after the message means the start worked, so the message must not turn a healthy start red."""
+    log = tmp_path / "voice-llm.log"
+    log.write_text(WEIGHTS_IN + CUDA_FULL.format(mib="363.00")
+                   + "llama_context: compute buffer allocation failed, retrying without pipeline parallelism\n"
+                   "sched_reserve:      CUDA0 compute buffer size =   363.25 MiB\nsrv          main: listening on http://127.0.0.1:8081\n", encoding="utf-8")
+    assert gpu.llama_device(log)["ok"] is True and gpu.llama_vram(log)["oom"] is None
+    log.write_text(WEIGHTS_IN + CUDA_FULL.format(mib="363.00") + "main: server is listening on http://127.0.0.1:8081 - starting the main loop\n",
+                   encoding="utf-8")
+    assert gpu.llama_device(log)["ok"] is True and gpu.llama_vram(log)["oom"] is None
+
+
+def test_an_out_of_memory_after_the_server_was_listening_still_counts(tmp_path):
+    """Only a message BEFORE 'listening' is forgiven; the order matters (a later allocation failing is a real failure)."""
+    log = tmp_path / "voice-llm.log"
+    log.write_text(WEIGHTS_IN + "srv          main: listening on http://127.0.0.1:8081\n" + CUDA_FULL.format(mib="64.00"), encoding="utf-8")
+    assert gpu.llama_device(log)["ok"] is False and gpu.llama_vram(log)["oom"] == "cudaMalloc failed: out of memory"
+
+
 def test_an_old_out_of_memory_does_not_count_after_a_good_restart(tmp_path):
     log = tmp_path / "voice-llm.log"
     log.write_text(OOM + FULL, encoding="utf-8")

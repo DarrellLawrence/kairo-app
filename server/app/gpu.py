@@ -27,6 +27,9 @@ _OOM_TEXT = (r"cudaMalloc failed: [^\r\n]*|unable to allocate CUDA\d+ buffer|"
              r"failed to allocate (?:buffer for kv cache|compute \w+ buffers)")
 _CUDA_FAILED = re.compile(r"ggml_cuda_init: failed[^\r\n]*|no usable GPU found[^\r\n]*|CUDA error[^\r\n]*|" + _OOM_TEXT, re.I)
 _OOM = re.compile(_OOM_TEXT, re.I)
+# The server saying it listens means the model and its memory are in: llama.cpp can retry a failed work-space allocation and then start
+# (llama-context.cpp, pipeline parallelism off), so a message BEFORE this line is not a dead start. "listening on" is in the old and the new wording.
+_LISTENING = re.compile(r"\blistening on\b", re.I)
 _BUF = re.compile(r"\b(CUDA\d+)\s+(model|KV|RS|compute) buffer size\s*=\s*([\d.]+)\s*MiB")
 _DEVICE = re.compile(r"using device (CUDA\d+) \(([^)]+)\)")
 _RUN = re.compile(r"build: \d+")          # every llama-server start logs its build first
@@ -90,6 +93,17 @@ def _last_run(text: str) -> str:
     return text[runs[-1]:] if runs else text          # only the newest start counts
 
 
+def _oom(last: str) -> str | None:
+    """llama.cpp's words when the card was full and the start did not get past it (None when there is no such message or the server went
+    on to listen after the last one). The first message is the cause ("cudaMalloc failed: out of memory"); the ones after it only say what
+    could not be allocated. Weights, context memory and work space can each run out, and the "offloaded n/n layers" line comes between
+    the first and the others, so the layer count alone cannot tell a finished start from a dead one."""
+    hits = list(_OOM.finditer(last))
+    if not hits or _LISTENING.search(last, hits[-1].end()):
+        return None
+    return hits[0].group(0).strip()[:200]
+
+
 def llama_device(log_path: Path, *, tail_bytes: int = 400_000) -> dict:
     """What llama.cpp's log says about its last start: {device: gpu|cpu|None, layers, gpu, ok, reason}."""
     out = {"device": None, "layers": None, "gpu": None, "ok": False, "reason": "no log yet (the voice model hasn't started)"}
@@ -100,6 +114,7 @@ def llama_device(log_path: Path, *, tail_bytes: int = 400_000) -> dict:
     found = _CUDA_FOUND.search(last)
     dev = _DEVICE.search(last)
     offl = list(_OFFLOADED.finditer(last))
+    oom = _oom(last)
     if dev:
         out["gpu"] = dev.group(2)[:60]
     if offl:
@@ -107,6 +122,8 @@ def llama_device(log_path: Path, *, tail_bytes: int = 400_000) -> dict:
         out["layers"] = f"{n}/{total}"
         if n == 0:
             out.update(device="cpu", ok=False, reason=f"0/{total} layers on the GPU" + (f": {failed.group(0).strip()[:200]}" if failed else ""))
+        elif oom:       # the weights went on the card, then the context memory or the work space did not fit: the start is dead
+            out.update(device="gpu", ok=False, reason=f"{n}/{total} layers on the GPU, then the card ran out of memory: {oom}")
         elif n < total:
             out.update(device="gpu", ok=False, reason=f"only {n}/{total} layers on the GPU (not enough free VRAM?)")
         else:
@@ -131,8 +148,7 @@ def llama_vram_text(text: str) -> dict:
         key = {"model": "model", "KV": "kv", "RS": "rs", "compute": "compute"}[kind]
         parts[key] = max(parts[key], float(mib)) if key == "compute" else parts[key] + float(mib)
         seen = True
-    oom = _OOM.search(last)
-    said = oom.group(0).strip()[:200] if oom else None
+    said = _oom(last)
     if not seen:
         return {"model": None, "kv": None, "rs": None, "compute": None, "total": None, "oom": said}
     got = {k: round(v) for k, v in parts.items()}

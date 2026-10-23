@@ -517,3 +517,14 @@ def test_the_command_asks_a_real_server_process_the_way_the_pc_does(tmp_path):
     assert report["source"] == "server" and by_id["kairo.running"]["status"] == "PASS"
     assert out.returncode == 1 and report["counts"]["fail"] > 0            # a bare data folder: nothing installed
     assert str(tmp_path) not in out.stdout                                   # no folder of this machine in what is printed
+
+
+def test_a_card_that_fills_up_after_the_weights_is_a_fail_in_kairo_diag(pc, vl):
+    """The log has 'offloaded 33/33' and then the context memory does not fit: the check used to be green and say 33/33."""
+    (pc / "logs" / "voice-llm.log").write_text(
+        "build: 11292 (90c908d)\nggml_cuda_init: found 1 CUDA devices:\nload_tensors: offloaded 33/33 layers to GPU\n"
+        "load_tensors: CUDA0 model buffer size = 2831.40 MiB\n"
+        "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 448.00 MiB on device 0: cudaMalloc failed: out of memory\n"
+        "llama_init_from_model: failed to allocate buffer for kv cache\n", encoding="utf-8")
+    c = run(pc, live=voice_parts())[1]["llama.device"]
+    assert c["status"] == "FAIL" and "cudaMalloc failed: out of memory" in c["detail"] and "33/33" in c["detail"]
