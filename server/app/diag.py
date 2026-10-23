@@ -190,7 +190,22 @@ def _whisper(ctx: Ctx) -> list[Check]:
         size = (folder / "model.bin").stat().st_size / 1024 ** 2 if folder is not None else None
         first = (ok("whisper.installed", "installed", f"faster-whisper found; model {WHISPER_GPU} ({mb(size)})", round(size), "MB")
                  if size is not None else bad("whisper.installed", "installed", f"the model {WHISPER_GPU} isn't downloaded (run Update Kairo)"))
-    return [first] + live_checks(ctx, "whisper", "whisper", gpu_required=True)
+    return [first] + live_checks(ctx, "whisper", "whisper", gpu_required=True) + _whisper_compute(ctx)
+
+
+def _whisper_compute(ctx: Ctx) -> list[Check]:
+    """How the loaded Whisper really runs (voice plan G2): the compute type, the ctranslate2 version, the way the
+    language is found. A lighter type that did not load, or a language finding that broke, is a WARN with its reason
+    (the call still works: float16 on the GPU, Whisper's own finding). An older server that does not say adds nothing."""
+    d = ctx.dev("whisper")
+    if not d or not d.get("loaded") or not d.get("compute_type"):
+        return []
+    bits = [str(d["compute_type"])] + ([f"ctranslate2 {d['ctranslate2']}"] if d.get("ctranslate2") else []) \
+        + ([f"language: {d['language_detection']}"] if d.get("language_detection") else [])
+    notes = [str(n) for n in (d.get("compute_note"), d.get("language_detection_note")) if n]
+    if notes:
+        return [warn("whisper.compute", "compute type", ", ".join(bits) + ". " + " ".join(notes))]
+    return [ok("whisper.compute", "compute type", ", ".join(bits))]
 
 
 def _kokoro(ctx: Ctx) -> list[Check]:

@@ -516,3 +516,32 @@ def test_the_command_asks_a_real_server_process_the_way_the_pc_does(tmp_path):
     assert report["source"] == "server" and by_id["kairo.running"]["status"] == "PASS"
     assert out.returncode == 1 and report["counts"]["fail"] > 0            # a bare data folder: nothing installed
     assert str(tmp_path) not in out.stdout                                   # no folder of this machine in what is printed
+
+
+# ---------------------------------------------------------------- G2: how Whisper really runs (compute type, ctranslate2, language finding)
+
+def test_diag_names_the_compute_type_and_the_ctranslate2_version_whisper_really_runs_in(pc, speech_only):
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", ctranslate2="4.8.3",
+                                              language_detection="Whisper's own (two passes, 99 languages)")))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "PASS" and "float16" in c["detail"] and "ctranslate2 4.8.3" in c["detail"]
+    assert "two passes" in c["detail"]
+
+
+def test_a_lighter_compute_type_that_did_not_load_is_a_warning_with_the_reason(pc, speech_only):
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", ctranslate2="4.8.3",
+                                              compute_note="int8_float16 did not load (ValueError: no int8_float16 on cuda); float16 is used")))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "WARN" and "int8_float16 did not load" in c["detail"] and "float16" in c["detail"]
+
+
+def test_a_language_finding_that_broke_is_a_warning_with_the_reason(pc, speech_only):
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", language_detection="Whisper's own (two passes, 99 languages)",
+                                              language_detection_note="RuntimeError: faster-whisper's options changed")))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "WARN" and "options changed" in c["detail"]
+
+
+def test_an_older_server_without_the_compute_type_adds_no_check(pc, speech_only):
+    _, by_id = run(pc, live=live())
+    assert "whisper.compute" not in by_id
