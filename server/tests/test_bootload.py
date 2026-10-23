@@ -333,3 +333,21 @@ def test_an_explicit_self_test_never_waits_for_the_boot_order(tmp_path, monkeypa
         assert got["ok"] is True and got["device"] == "cpu"
     finally:
         e.close()
+
+
+def test_a_flag_that_cannot_be_read_gives_its_default_not_a_dead_start(app_with_fakes, monkeypatch):
+    """The start-up task must never die on a locked database: no voice model watch, no memory index would follow."""
+    app, events = app_with_fakes
+    monkeypatch.setattr(flags, "on", lambda s, name: (_ for _ in ()).throw(RuntimeError("database is locked")))
+    boot_and_stop(app, events)                    # the default of g8.stagger_boot is on: the staged start runs
+    assert "llama watch" in events and "embedder released" in events
+
+
+def test_a_bug_in_the_sequence_still_lets_the_memory_model_in(app_with_fakes, monkeypatch):
+    app, events = app_with_fakes
+
+    async def broken(*a, **kw):
+        raise RuntimeError("bug")
+    monkeypatch.setattr(bootload, "run", broken)
+    boot_and_stop(app, events)
+    assert app.state.memory_gate.is_set() and "embedder released" in events and "memory reindex" in events

@@ -448,8 +448,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def _flag_on(name: str) -> bool:
         from . import flags as flags_mod
-        with session_for(engine) as s_:
-            return flags_mod.on(s_, name)
+        try:
+            with session_for(engine) as s_:
+                return flags_mod.on(s_, name)
+        except Exception:           # a locked database must not kill the start-up task: the flag's default
+            log.exception("could not read the switch %s", name)
+            return flags_mod.FLAGS[name][0]
 
     def _embed_batch() -> int:
         """G8: pieces through the embedding model at once, asked at every start of its process (flag g8.embed_batch4)."""
@@ -488,6 +492,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.boot_trail.clear()
             try:
                 await bootload.run(stages, free_mb=gpu_mod.free_mb, trail=app.state.boot_trail)
+            except Exception:       # a bug in the ordering must not keep the memory model out for good
+                log.exception("boot: the staged start failed; the memory model is let in now")
             finally:
                 gate.set()
             emb = getattr(app.state.memory, "embedder", None)
