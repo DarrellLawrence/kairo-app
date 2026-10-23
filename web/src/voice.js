@@ -273,7 +273,9 @@ async function openMic() {
     if (mic.ctx.state === 'suspended') await mic.ctx.resume().catch(() => {})
     return mic
   }
-  closeMic()
+  // A stale mic goes first. In call mode the audio mode is not flipped to 'playback' on the way (that flip is what puts
+  // the audio outside the call route); the old way did flip it.
+  if (dropMic() && !flagOn('g7.call_audio_mode')) setSession('playback')
   setSession('play-and-record')
   const stream = await navigator.mediaDevices.getUserMedia(micConstraints())
   const ctx = new (window.AudioContext || window.webkitAudioContext)()
@@ -284,13 +286,19 @@ async function openMic() {
   return mic
 }
 
-export function closeMic() {
+/* Stops the mic if there is one. Returns whether there was. */
+function dropMic() {
   clearTimeout(releaseTimer)
-  if (!mic) return
+  if (!mic) return false
   mic.stream.getTracks().forEach((t) => t.stop())
   mic.ctx.close().catch(() => {})
   mic = null
-  setSession('playback')
+  return true
+}
+
+export function closeMic() {
+  // With g7.call_audio_mode also when there was no mic: a call that was hung up before its mic opened is not left in call mode.
+  if (dropMic() || flagOn('g7.call_audio_mode')) setSession('playback')
 }
 
 function idleMic() {

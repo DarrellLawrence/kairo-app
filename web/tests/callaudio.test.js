@@ -8,7 +8,7 @@ import { afterEach, test } from 'node:test'
 import { applyFlags, resetFlags } from '../src/flags.js'
 import { startRealtime, startLine } from '../src/realtime.js'
 import { startRtc } from '../src/rtclink.js'
-import { unlockAudio } from '../src/voice.js'
+import { closeMic, micStream, unlockAudio } from '../src/voice.js'
 import { installPhone, playbackBeforeCall } from './phone-fakes.js'
 
 const flag = (on) => [{ name: 'g7.call_audio_mode', on, default: true, what: '' }]
@@ -63,6 +63,29 @@ test('g7.call_audio_mode on: the call\'s <audio> is the connection\'s own and is
   assert.equal(rec.audios.length, 1)                  // one element, the call's (no priming element beside it)
   assert.equal(rec.audios[0].muted, false)
   l.close()
+})
+
+test('g7.call_audio_mode on: a call that never got its mic (hung up first) leaves the audio mode as chat replies need it', () => {
+  const { rec } = installPhone()
+  unlockAudio({ call: true })                         // the tap that was meant to start the call
+  closeMic()                                          // hung up before the mic opened
+  assert.deepEqual(rec.session.map((x) => x.type), ['play-and-record', 'playback'])
+  closeMic()                                          // and a second close changes nothing
+  assert.equal(rec.session.length, 2)
+})
+
+test('g7.call_audio_mode on: replacing a mic whose track ended does not flip to playback on the way, off it does (the old way)', async () => {
+  for (const on of [true, false]) {
+    applyFlags(flag(on))
+    const { rec, micTrack } = installPhone()
+    await micStream()                                  // a mic from earlier (the chat mic, kept for a minute)
+    micTrack.readyState = 'ended'                      // ... whose track iOS ended
+    rec.session.length = 0
+    micTrack.readyState = 'ended'
+    await micStream()                                  // the next call opens a new one
+    assert.deepEqual(rec.session.map((x) => x.type), on ? [] : ['playback', 'play-and-record'], `flag ${on}`)
+    closeMic()
+  }
 })
 
 test('g7.call_audio_mode off: the old start, normal audio first, a silent buffer and a silent blob', async () => {
