@@ -14,6 +14,7 @@ from app.main import create_app
 # name -> default. On by default: plain fixes of problems measured in the research (docs/CHANGELOG.md says which).
 G7 = {
     "g7.mic_constraints": True,
+    "g7.call_audio_mode": True,
 }
 
 

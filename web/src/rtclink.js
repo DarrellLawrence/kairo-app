@@ -289,7 +289,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
 
   const ready = (async () => {
     try {
-      unlockAudio()
+      unlockAudio({ call: true })
       mic = await micStream()                  // the mic first: then Safari shows its tailnet address
       if (closed) return false
       mic.buf = mic.buf || new Float32Array(mic.analyser.fftSize)
@@ -303,7 +303,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
         audio.srcObject = stream
         audio.play().catch(() => on.needTap?.())
         try {
-          const ctx = outputContext()
+          const ctx = outputContext({ call: true })
           const analyser = ctx.createAnalyser()
           analyser.fftSize = 512
           ctx.createMediaStreamSource(stream).connect(analyser)   // only measured, not played twice
@@ -397,7 +397,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       set('listening')
     },
     tapToPlay() {
-      unlockAudio()
+      unlockAudio({ call: true })
       if (!audio) return false
       audio.play().catch(() => {})
       return true

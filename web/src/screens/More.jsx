@@ -541,11 +541,11 @@ function DiagnosisPage() {
 function SoundCheckPage() {
   const [state, setState] = useState({ step: null, busy: false, heard: {}, needTap: false })
   const play = async (step) => {
-    unlockAudio()                       // inside the tap
+    unlockAudio({ call: step === 'call' })   // inside the tap; the call test is a call's
     setState((s) => ({ ...s, step, busy: true, needTap: false }))
     try {
       if (step === 'speaker') { releaseMic(); await speak('This is Kairo. Sound check, through the speaker.') }
-      else { await holdMic(); unlockAudio(); await speak('Sound check two. This is how I sound on a call.', { call: true, keepMic: true }) }
+      else { await holdMic(); unlockAudio({ call: true }); await speak('Sound check two. This is how I sound on a call.', { call: true, keepMic: true }) }
       setState((s) => ({ ...s, busy: false }))
     } catch (e) {
       setState((s) => ({ ...s, busy: false, needTap: e.name === 'NeedTap', error: e.name === 'NeedTap' ? null : e.message }))

@@ -10,6 +10,7 @@ import { api } from './api.js'
 // them). Used until the PC has answered, and when it is away.
 export const DEFAULTS = {
   'g7.mic_constraints': true,
+  'g7.call_audio_mode': true,
 }
 
 let known = null   // name -> on, from the PC's last list

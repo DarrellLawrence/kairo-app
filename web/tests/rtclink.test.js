@@ -1,9 +1,10 @@
 // node --test: the WebRTC line's measuring (rtclink.js). WebRTC itself only runs on the phone; what is
 // tested here is when a turn starts (your last sound) and what it marks from the PC's events.
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { afterEach, test } from 'node:test'
 import { applyFlags, resetFlags } from '../src/flags.js'
 import { makeRtcMeter } from '../src/rtclink.js'
+import { FakePeer, installPhone } from './phone-fakes.js'
 
 function clock(t = 0) {
   return { now: () => t, set: (v) => { t = v } }
@@ -87,65 +88,16 @@ test('a turn ended by your tap is timed from the tap and recorded as a tap', () 
 })
 
 // ---------------------------------------------------------------- finish(): "I'm done" on the WebRTC line
-// Browser stand-ins, just enough for startRtc to connect: a mic, Kairo's AudioContext, the peer connection
-// with its data channel (what the phone sends is kept; the test plays the PC's events).
+// The stand-ins (phone-fakes.js): a mic, Kairo's AudioContext, the peer connection with its data channel
+// (what the phone sends is kept; the test plays the PC's events).
 
-class FakeChannel {
-  constructor() { this.readyState = 'open'; this.sent = [] }
-  send(data) { this.sent.push(data[0] === '{' ? JSON.parse(data) : data) }
-  pc(event) { this.onmessage?.({ data: JSON.stringify(event) }) }   // an event from the PC
-  done() { return this.sent.filter((m) => m?.type === 'done').length }
-}
-class FakePeer {
-  constructor() { FakePeer.last = this; this.connectionState = 'connected'; this.iceGatheringState = 'complete' }
-  addTransceiver() {}
-  createDataChannel() { this.dc = new FakeChannel(); return this.dc }
-  async createOffer() { return { type: 'offer', sdp: 'v=0\r\n' } }
-  async setLocalDescription(d) { this.localDescription = d }
-  async setRemoteDescription() { setTimeout(() => this.dc.onopen?.(), 0) }
-  async getStats() { return new Map() }
-  close() { this.connectionState = 'closed' }
-}
-class FakeAudioContext {
-  constructor() { this.state = 'running'; this.sampleRate = 48000; this.destination = {} }
-  resume() { return Promise.resolve() }
-  close() { this.state = 'closed'; return Promise.resolve() }
-  createAnalyser() { return { fftSize: 512, connect() {}, getFloatTimeDomainData: (b) => b.fill(0) } }
-  createMediaStreamSource() { return { connect() {} } }
-  createBuffer() { return {} }
-  createBufferSource() { return { connect() {}, start() {} } }
-}
-class FakeAudio {
-  constructor() { FakeAudio.last = this; this.muted = false }
-  play() { return Promise.resolve() }
-  pause() {}
-  setAttribute() {}
-}
-
-// What iOS really reports for a call's mic (WebKit bug 326286, comment 8): the one setting it honours.
-const IOS_SETTINGS = { echoCancellation: true, sampleRate: 48000, volume: 1 }
-
-/* options: settings = what the mic track's getSettings() says; gum = collects the getUserMedia constraints. */
-async function rtcLine(on = {}, { settings = IOS_SETTINGS, gum = null, path = 'call' } = {}) {
-  const micTrack = { enabled: true, readyState: 'live', stop() { this.readyState = 'ended' }, getSettings: () => settings }
-  globalThis.window = globalThis
-  Object.defineProperty(globalThis, 'navigator', {
-    value: {
-      userAgent: 'test',
-      mediaDevices: {
-        getUserMedia: async (constraints) => { gum?.push(constraints); return { getTracks: () => [micTrack], getAudioTracks: () => [micTrack] } },
-      },
-    },
-    configurable: true,
-  })
-  globalThis.AudioContext = FakeAudioContext
-  globalThis.RTCPeerConnection = FakePeer
-  globalThis.Audio = FakeAudio
-  globalThis.fetch = async (url) => ({ ok: true, json: async () => (url === '/api/rtc/offer' ? { sdp: 'v=0\r\n', type: 'answer' } : {}) })
+/* options: settings = what the mic track's getSettings() says; path = call or chat_voice. */
+async function rtcLine(on = {}, { path = 'call', ...phone } = {}) {
+  const fake = installPhone(phone)
   const { startRtc } = await import('../src/rtclink.js')
   const line = startRtc({ path, on })
   assert.equal(await line.ready, true)
-  return { line, dc: FakePeer.last.dc, audio: FakeAudio.last }
+  return { line, dc: FakePeer.last.dc, audio: globalThis.Audio.last, ...fake }
 }
 
 test('finish() sends "done" and says true only while the PC hears a turn of yours', async () => {
@@ -180,22 +132,17 @@ test('finish() sends "done" and says true only while the PC hears a turn of your
 // ---------------------------------------------------------------- g7.mic_constraints: what the mic is asked for
 
 const flag = (name, on, def = true) => ({ name, on, default: def, what: '' })
+afterEach(() => resetFlags())
 
 test('g7.mic_constraints on: the call asks for exactly echo cancelling, noise suppression and automatic gain', async () => {
-  const gum = []
-  const { line } = await rtcLine({}, { gum })
+  const { line, rec } = await rtcLine()
   line.close()
-  assert.deepEqual(gum, [{ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }])
+  assert.deepEqual(rec.gum, [{ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }])
 })
 
 test('g7.mic_constraints off: the old request, echo cancelling and noise suppression only', async () => {
   applyFlags([flag('g7.mic_constraints', false)])
-  try {
-    const gum = []
-    const { line } = await rtcLine({}, { gum })
-    line.close()
-    assert.deepEqual(gum, [{ audio: { echoCancellation: true, noiseSuppression: true } }])
-  } finally {
-    resetFlags()
-  }
+  const { line, rec } = await rtcLine()
+  line.close()
+  assert.deepEqual(rec.gum, [{ audio: { echoCancellation: true, noiseSuppression: true } }])
 })

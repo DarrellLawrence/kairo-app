@@ -231,7 +231,7 @@ export function startRealtime({ path = 'call', callId = null, on = {} } = {}) {
 
   const ready = (async () => {
     try {
-      unlockAudio()
+      unlockAudio({ call: true })
       ws = new WebSocket(lineUrl())
       let answer = null
       const answered = waitFor((done) => {
@@ -256,7 +256,7 @@ export function startRealtime({ path = 'call', callId = null, on = {} } = {}) {
         audio.srcObject = e.streams[0]
         audio.play().catch(() => on.needTap?.())
         try {
-          const ctx = outputContext()
+          const ctx = outputContext({ call: true })
           const analyser = ctx.createAnalyser()
           analyser.fftSize = 512
           ctx.createMediaStreamSource(e.streams[0]).connect(analyser)   // only measured, not played twice
@@ -326,7 +326,7 @@ export function startRealtime({ path = 'call', callId = null, on = {} } = {}) {
       set('listening')
     },
     tapToPlay() {
-      unlockAudio()
+      unlockAudio({ call: true })
       if (!audio) return false
       audio.play().catch(() => {})
       return true
@@ -359,7 +359,7 @@ export function tapOrb(line, phase) {
 export function startLine({ path = 'call', callId = null, on = {}, status = null } = {}) {
   let cur = null
   let closed = false
-  unlockAudio()                 // still inside the tap: iOS lets Kairo's voice play later
+  unlockAudio({ call: true })   // still inside the tap: iOS lets Kairo's voice play later (and the call's audio mode is set first)
   const oldLine = () => {
     if (closed) return null
     cur = startVoice({ path, callId, on })

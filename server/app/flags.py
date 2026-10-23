@@ -31,6 +31,10 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "
                                   "An iPhone only does the echo cancelling and ignores the other two. Off: the old request (echo cancelling and noise reduction)."),
+    "g7.call_audio_mode": (True, "A call puts the iPhone's audio into call mode before the microphone opens and plays nothing else while it is open "
+                                 "(no silent test sounds), so Kairo's voice reaches you only through the call connection, the one way the iPhone cancels "
+                                 "the echo. Applies to calls, the voice button and the sound check's call test. "
+                                 "Off: the old start (normal audio first, then call mode, with silent test sounds)."),
 
     # -- G8 Windows
 

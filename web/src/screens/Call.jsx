@@ -53,7 +53,7 @@ export default function Call({ callId: initialId, onClose }) {
       start(false)
     }).catch((e) => { setErr(e.message); set('error') })
     // iPhone plays sound only after a tap: the first touch anywhere unlocks Kairo's voice.
-    const unlock = () => unlockAudio()
+    const unlock = () => unlockAudio({ call: true })
     document.addEventListener('touchend', unlock, { once: true })
     return () => document.removeEventListener('touchend', unlock)
   }, [])   // eslint-disable-line react-hooks/exhaustive-deps
@@ -137,7 +137,7 @@ export default function Call({ callId: initialId, onClose }) {
   }
 
   const answer = () => {
-    unlockAudio()   // must happen inside the tap
+    unlockAudio({ call: true })   // must happen inside the tap, and before the mic opens
     start(true)
   }
 
@@ -162,7 +162,7 @@ export default function Call({ callId: initialId, onClose }) {
   }
 
   const tapOrb = () => {
-    unlockAudio()
+    unlockAudio({ call: true })
     const l = live.current
     if (!l.on || !l.voice) return
     tapLine(l.voice, l.phase)            // talking: your turn ends now; else pause / go on

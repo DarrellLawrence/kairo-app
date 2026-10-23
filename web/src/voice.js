@@ -56,8 +56,22 @@ function silentWav(seconds = 0.05, rate = 8000) {
 let SILENCE = null
 
 /* iOS lets a page start sound only inside a tap: call this in every tap that can lead to Kairo
-   talking. Starts Kairo's AudioContext and primes the <audio> fallback with real (silent) samples. */
-export function unlockAudio() {
+   talking. Starts Kairo's AudioContext and primes the <audio> fallback with real (silent) samples.
+
+   { call: true } in every tap that starts or joins a call (research §7, g7.call_audio_mode): Kairo's voice then comes
+   only as the connection's own stream in an <audio> element, the one path iOS renders through the echo canceller.
+   So the call's audio mode is set BEFORE the mic opens (a flip from 'playback' puts the audio outside the call
+   route), and nothing else plays while the mic is open: no silent Web Audio buffer, no silent blob <audio>.
+   Only Kairo's AudioContext is started (it is how the call's level is measured). */
+export function unlockAudio({ call = false } = {}) {
+  if (call && flagOn('g7.call_audio_mode')) {
+    setSession('play-and-record')
+    try {
+      if (!outCtx || outCtx.state === 'closed') outCtx = new (window.AudioContext || window.webkitAudioContext)()
+      if (outCtx.state !== 'running') outCtx.resume().catch(() => {})
+    } catch (e) { clientLog('audio.unlock_error', { err: errName(e) }) }
+    return
+  }
   setSession(mic ? 'play-and-record' : 'playback')
   try {
     if (!outCtx || outCtx.state === 'closed') outCtx = new (window.AudioContext || window.webkitAudioContext)()
@@ -232,9 +246,10 @@ function idleMic() {
 /* The open mic ({ stream, ctx }) for streaming it (voicelink.js). */
 export async function micStream() { return openMic() }
 
-/* Kairo's AudioContext (started by unlockAudio inside a tap). */
-export function outputContext() {
-  if (!outCtx || outCtx.state === 'closed') unlockAudio()
+/* Kairo's AudioContext (started by unlockAudio inside a tap). { call: true } from a call's line, which has
+   unlocked it in call mode already (this is only the fallback for a context that went away). */
+export function outputContext({ call = false } = {}) {
+  if (!outCtx || outCtx.state === 'closed') unlockAudio({ call })
   return outCtx
 }
 
