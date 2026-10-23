@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, parseTs } from '../api.js'
 import { clientLog, device } from '../clientlog.js'
+import { applyFlags, changedCount } from '../flags.js'
+import { startCallCheck } from '../soundcheck.js'
+import ExperimentsPage from './Experiments.jsx'
 import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
 import { PASSAGE, SECONDS, recordVoice, sendVoice } from '../voiceprint.js'
 import { RoutesView } from './Routes.jsx'
@@ -544,23 +547,59 @@ function DiagnosisPage() {
 }
 
 /* Sound check (fix A1): proves on this iPhone which way Kairo's voice is audible, and sets calls up
-   to match. Every answer goes to the PC log, so the real cause is on record. */
+   to match. Every answer goes to the PC log, so the real cause is on record.
+   Test 2 ("like a call") runs over the real call line when the PC can take one (g7.sound_check_rtc, research
+   §7): the PC says one fixed line over WebRTC, so it proves what a call really sounds like. Otherwise (or with
+   the switch off) the old test: a sound played in the app with the mic open. */
 function SoundCheckPage() {
-  const [state, setState] = useState({ step: null, busy: false, heard: {}, needTap: false })
+  const [state, setState] = useState({ step: null, busy: false, heard: {}, needTap: false, line: 'old' })
+  const check = useRef(null)          // the call test's connection while it is open
+  const tapNeeded = useRef(false)     // iOS didn't start the call's <audio>: the connection stays open for the tap
+  const stopCheck = () => { check.current?.close(); check.current = null }
+  useEffect(() => stopCheck, [])      // leaving the page hangs the test call up
   const play = async (step) => {
-    unlockAudio()                       // inside the tap
-    setState((s) => ({ ...s, step, busy: true, needTap: false }))
+    unlockAudio({ call: step === 'call' })      // inside the tap; the call test is a call's
+    stopCheck()
+    tapNeeded.current = false
+    setState((s) => ({ ...s, step, busy: true, needTap: false, error: null }))
     try {
       if (step === 'speaker') { releaseMic(); await speak('This is Kairo. Sound check, through the speaker.') }
-      else { await holdMic(); unlockAudio(); await speak('Sound check two. This is how I sound on a call.', { call: true, keepMic: true }) }
+      else {
+        const rtc = await startCallCheck({ on: { needTap: () => { tapNeeded.current = true; setState((s) => ({ ...s, needTap: true })) } } })
+        if (rtc) {
+          check.current = rtc
+          setState((s) => ({ ...s, line: 'webrtc' }))
+          const how = await rtc.say()
+          clientLog('audio.check_line', { how, line: 'webrtc', ...device() })
+          if (!tapNeeded.current) stopCheck()
+        } else {
+          setState((s) => ({ ...s, line: 'old' }))
+          await holdMic(); unlockAudio({ call: true }); await speak('Sound check two. This is how I sound on a call.', { call: true, keepMic: true })
+        }
+      }
       setState((s) => ({ ...s, busy: false }))
     } catch (e) {
       setState((s) => ({ ...s, busy: false, needTap: e.name === 'NeedTap', error: e.name === 'NeedTap' ? null : e.message }))
     }
   }
+  const tapToPlay = async () => {
+    setState((s) => ({ ...s, needTap: false }))
+    const c = check.current
+    if (!c) { playLastAgain().catch(() => {}); return }
+    tapNeeded.current = false
+    setState((s) => ({ ...s, busy: true }))
+    c.tapToPlay()                       // inside this tap: the call's <audio> may play now; the PC says the line again
+    await c.say()
+    if (!tapNeeded.current) stopCheck()
+    setState((s) => ({ ...s, busy: false }))
+  }
   const answer = (step, heard) => {
-    clientLog('audio.check', { step, heard, ...device() })
-    if (step === 'call') { setReleaseWhileSpeaking(!heard); releaseMic() }
+    clientLog('audio.check', { step, heard, line: step === 'call' ? state.line : 'speaker', ...device() })
+    stopCheck()
+    if (step === 'call') {
+      if (state.line === 'old') setReleaseWhileSpeaking(!heard)   // the old line's remedy; the call line has none
+      releaseMic()
+    }
     setState((s) => ({ ...s, step: null, heard: { ...s.heard, [step]: heard } }))
   }
   const h = state.heard
@@ -576,7 +615,7 @@ function SoundCheckPage() {
           onClick={() => !state.busy && play('call')} />
       </List>
       {state.needTap && (
-        <div className="k-pad"><Button variant="primary" block onClick={() => { setState((s) => ({ ...s, needTap: false })); playLastAgain().catch(() => {}) }}>Tap to play</Button></div>
+        <div className="k-pad"><Button variant="primary" block onClick={tapToPlay}>Tap to play</Button></div>
       )}
       {state.step && !state.busy && (
         <div className="k-pad" style={{ display: 'flex', gap: 8 }}>
@@ -586,8 +625,12 @@ function SoundCheckPage() {
       )}
       {state.error && <p className="k-small k-pad" style={{ color: 'var(--danger)' }}>{state.error}</p>}
       <p className="k-muted k-small k-pad" style={{ marginTop: 12 }}>
-        {h.call === false ? 'Calls on this phone: the mic pauses while Kairo talks. Tap the orb to interrupt.'
-          : h.call ? 'Calls on this phone: Kairo keeps listening while it talks, so you can talk over it.'
+        {h.call === false ? (state.line === 'webrtc'
+          ? 'Kairo’s voice was silent on the call line. The PC’s log has it. Check the volume and that no other app holds the speaker, then try again.'
+          : 'Calls on this phone: the mic pauses while Kairo talks. Tap the orb to interrupt.')
+          : h.call ? (state.line === 'webrtc'
+            ? 'Calls on this phone: Kairo’s voice comes through the call line, and you can talk over it.'
+            : 'Calls on this phone: Kairo keeps listening while it talks, so you can talk over it.')
             : 'If test 1 is silent too, the phone itself is muted for media or connected to another speaker.'}
       </p>
     </Page>
@@ -1016,11 +1059,12 @@ function SystemPage() {
   const [askPause, setAskPause] = useState(false)
   const [speed, setSpeed] = useState([])
   const [conflicts, setConflicts] = useState(0)
+  const [switched, setSwitched] = useState(0)   // Experiments: switches the owner changed
 
   const load = useCallback(async () => {
-    const [h, s, g, k, l, c] = await Promise.allSettled([
+    const [h, s, g, k, l, c, f] = await Promise.allSettled([
       fetch('/health').then((r) => r.json()), api('/api/status'), api('/api/setup/google/status'), api('/api/kill-switch'),
-      api('/api/latency'), api('/api/vault/conflicts'),
+      api('/api/latency'), api('/api/vault/conflicts'), api('/api/flags'),
     ])
     setHealth(h.status === 'fulfilled' ? (h.value.detail ?? h.value) : { status: 'unreachable' })
     setStatus(s.status === 'fulfilled' ? s.value : {})
@@ -1028,6 +1072,7 @@ function SystemPage() {
     setPaused(k.status === 'fulfilled' ? k.value.paused : null)
     setSpeed(l.status === 'fulfilled' ? l.value.rows : [])
     setConflicts(c.status === 'fulfilled' ? c.value.conflicts.length : 0)
+    setSwitched(f.status === 'fulfilled' ? changedCount(applyFlags(f.value)) : 0)
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -1099,6 +1144,9 @@ function SystemPage() {
               onClick={() => stack.push('Acceptance', () => <AcceptancePage />)} />
             <ListRow icon={<IconSpeaker />} title="Sound check" subtitle="Is Kairo's voice audible on this iPhone?" chevron
               onClick={() => stack.push('Sound check', () => <SoundCheckPage />)} />
+            <ListRow icon={<IconBolt />} title="Experiments" subtitle="Switches for changes that wait for your OK or the PC" chevron
+              value={switched > 0 ? <Badge tone="warn" pop={false}>{switched} changed</Badge> : undefined}
+              onClick={() => stack.push('Experiments', () => <ExperimentsPage />)} />
           </List>
         </>
       )}

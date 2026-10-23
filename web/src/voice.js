@@ -9,12 +9,19 @@
 // heard, "No sound? Tap to play" replays through the speaker inside the tap and remembers, for
 // this phone, to pause the mic while Kairo talks on calls. Every step is logged to the PC.
 import { clientLog, device } from './clientlog.js'
+import { flagOn } from './flags.js'
 
 let outCtx = null      // Kairo's voice: one AudioContext, started inside a tap
 let element = null     // <audio> fallback, primed inside a tap
 let current = null     // the reply playing now: { stop() }
 let last = null        // the last reply, for "tap to play": { buf, call }
 const RELEASE_KEY = 'voice.release-mic-while-speaking'
+
+// What a call asks the mic for. An iPhone honours only echoCancellation (WebKit has no other constraint) and
+// ignores the other two; a browser on a computer applies all three. g7.mic_constraints off: the old pair.
+export const MIC_AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+const MIC_AUDIO_OLD = { echoCancellation: true, noiseSuppression: true }
+export const micConstraints = () => ({ audio: { ...(flagOn('g7.mic_constraints') ? MIC_AUDIO : MIC_AUDIO_OLD) } })
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const errName = (e) => `${e?.name || 'Error'}: ${e?.message || e}`.slice(0, 160)
@@ -32,9 +39,64 @@ export function setReleaseWhileSpeaking(on) {
   clientLog('audio.release_mode', { on })
 }
 
+const watchedSessions = new WeakSet()
+/* g7.call_logs: iOS tells the page when it interrupts or resumes the audio (a phone call, Siri, another app). */
+function watchSession(session) {
+  if (watchedSessions.has(session)) return
+  watchedSessions.add(session)
+  try {
+    session.addEventListener?.('statechange', () => {
+      if (flagOn('g7.call_logs')) clientLog('audio.session_state', { state: session.state, type: session.type, mic: Boolean(mic) })
+    })
+  } catch { /* not every WebKit has the event */ }
+}
+
 export function setSession(type) {
   if (!('audioSession' in navigator)) return
-  try { if (navigator.audioSession.type !== type) navigator.audioSession.type = type } catch (e) { clientLog('audio.session_error', { type, err: errName(e) }) }
+  const session = navigator.audioSession
+  try {
+    const from = session.type
+    if (from !== type) {
+      session.type = type
+      if (flagOn('g7.call_logs')) clientLog('audio.session', { from, to: type, mic: Boolean(mic) })   // every change the page makes
+    }
+    watchSession(session)
+  } catch (e) { clientLog('audio.session_error', { type, err: errName(e) }) }
+}
+
+// ---------------------------------------------------------------- what the mic really is (g7.call_logs)
+
+const MIC_KEYS = ['echoCancellation', 'noiseSuppression', 'autoGainControl', 'sampleRate', 'channelCount', 'volume']
+const ASKED_KEYS = ['echoCancellation', 'noiseSuppression', 'autoGainControl']
+
+/* What the browser says the mic track is (getSettings), only the audio processing and format: no device ids.
+   null for a track that can't say (a mock). iOS says {echoCancellation, sampleRate, volume}. */
+export function micSettings(track) {
+  if (typeof track?.getSettings !== 'function') return null
+  try {
+    const got = track.getSettings() || {}
+    return Object.fromEntries(MIC_KEYS.filter((k) => k in got).map((k) => [k, got[k]]))
+  } catch { return null }
+}
+
+const watchedTracks = new WeakSet()
+
+/* Once per call, in the PC's log: what was asked of the mic, what the phone gave, which constraints this
+   browser knows at all; and from then on the track going silent (iOS muting it), back, or ended. */
+export function logMic(track, path) {
+  if (!flagOn('g7.call_logs') || !track) return
+  let supported = null
+  try {
+    const known = navigator.mediaDevices?.getSupportedConstraints?.()
+    if (known) supported = Object.fromEntries(ASKED_KEYS.map((k) => [k, Boolean(known[k])]))
+  } catch { /* nice to have */ }
+  clientLog('mic.settings', { path, asked: micConstraints().audio, settings: micSettings(track), supported, ...device() })
+  if (typeof track.addEventListener === 'function' && !watchedTracks.has(track)) {
+    watchedTracks.add(track)
+    for (const event of ['mute', 'unmute', 'ended']) {
+      track.addEventListener(event, () => clientLog('mic.track', { path, event, readyState: track.readyState, ...device() }))
+    }
+  }
 }
 
 function silentWav(seconds = 0.05, rate = 8000) {
@@ -49,8 +111,22 @@ function silentWav(seconds = 0.05, rate = 8000) {
 let SILENCE = null
 
 /* iOS lets a page start sound only inside a tap: call this in every tap that can lead to Kairo
-   talking. Starts Kairo's AudioContext and primes the <audio> fallback with real (silent) samples. */
-export function unlockAudio() {
+   talking. Starts Kairo's AudioContext and primes the <audio> fallback with real (silent) samples.
+
+   { call: true } in every tap that starts or joins a call (research §7, g7.call_audio_mode): Kairo's voice then comes
+   only as the connection's own stream in an <audio> element, the one path iOS renders through the echo canceller.
+   So the call's audio mode is set BEFORE the mic opens (a flip from 'playback' puts the audio outside the call
+   route), and nothing else plays while the mic is open: no silent Web Audio buffer, no silent blob <audio>.
+   Only Kairo's AudioContext is started (it is how the call's level is measured). */
+export function unlockAudio({ call = false } = {}) {
+  if (call && flagOn('g7.call_audio_mode')) {
+    setSession('play-and-record')
+    try {
+      if (!outCtx || outCtx.state === 'closed') outCtx = new (window.AudioContext || window.webkitAudioContext)()
+      if (outCtx.state !== 'running') outCtx.resume().catch(() => {})
+    } catch (e) { clientLog('audio.unlock_error', { err: errName(e) }) }
+    return
+  }
   setSession(mic ? 'play-and-record' : 'playback')
   try {
     if (!outCtx || outCtx.state === 'closed') outCtx = new (window.AudioContext || window.webkitAudioContext)()
@@ -197,9 +273,11 @@ async function openMic() {
     if (mic.ctx.state === 'suspended') await mic.ctx.resume().catch(() => {})
     return mic
   }
-  closeMic()
+  // A stale mic goes first. In call mode the audio mode is not flipped to 'playback' on the way (that flip is what puts
+  // the audio outside the call route); the old way did flip it.
+  if (dropMic() && !flagOn('g7.call_audio_mode')) setSession('playback')
   setSession('play-and-record')
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+  const stream = await navigator.mediaDevices.getUserMedia(micConstraints())
   const ctx = new (window.AudioContext || window.webkitAudioContext)()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 1024
@@ -208,13 +286,19 @@ async function openMic() {
   return mic
 }
 
-export function closeMic() {
+/* Stops the mic if there is one. Returns whether there was. */
+function dropMic() {
   clearTimeout(releaseTimer)
-  if (!mic) return
+  if (!mic) return false
   mic.stream.getTracks().forEach((t) => t.stop())
   mic.ctx.close().catch(() => {})
   mic = null
-  setSession('playback')
+  return true
+}
+
+export function closeMic() {
+  // With g7.call_audio_mode also when there was no mic: a call that was hung up before its mic opened is not left in call mode.
+  if (dropMic() || flagOn('g7.call_audio_mode')) setSession('playback')
 }
 
 function idleMic() {
@@ -225,9 +309,10 @@ function idleMic() {
 /* The open mic ({ stream, ctx }) for streaming it (voicelink.js). */
 export async function micStream() { return openMic() }
 
-/* Kairo's AudioContext (started by unlockAudio inside a tap). */
-export function outputContext() {
-  if (!outCtx || outCtx.state === 'closed') unlockAudio()
+/* Kairo's AudioContext (started by unlockAudio inside a tap). { call: true } from a call's line, which has
+   unlocked it in call mode already (this is only the fallback for a context that went away). */
+export function outputContext({ call = false } = {}) {
+  if (!outCtx || outCtx.state === 'closed') unlockAudio({ call })
   return outCtx
 }
 

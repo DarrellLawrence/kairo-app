@@ -29,6 +29,25 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G6 turn-taking
 
     # -- G7 phone
+    "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "
+                                  "An iPhone only does the echo cancelling and ignores the other two. Off: the old request (echo cancelling and noise reduction)."),
+    "g7.call_audio_mode": (True, "A call puts the iPhone's audio into call mode before the microphone opens and plays nothing else while it is open "
+                                 "(no silent test sounds), so Kairo's voice reaches you only through the call connection, the one way the iPhone cancels "
+                                 "the echo. Applies to calls, the voice button and the sound check's call test. "
+                                 "Off: the old start (normal audio first, then call mode, with silent test sounds)."),
+    "g7.call_logs": (True, "A call writes more about the microphone and the audio to the PC's log: what the phone asked for and got, whether the iPhone "
+                           "muted the microphone, every audio-mode change, the first time Kairo's voice is really heard on the phone, and at hang-up how "
+                           "long the call was, whether Kairo was ever heard, and how many sound packets arrived or were lost. Nothing you say. "
+                           "Off: the usual short log."),
+    "g7.no_aec_warning": (True, "A call warns you on screen when the phone says echo cancelling is off, because Kairo could then hear itself and cut itself off. "
+                                 "Off: no warning."),
+    "g7.listen_on_barge_in": (False, "The call screen switches to 'Listening' when the PC says you talked over Kairo (or that its answer was cut off), "
+                                      "not when the phone hears any sound. A cough or an 'mhm' no longer flips the screen while Kairo goes on talking. "
+                                      "Off for now, because the PC does not send that message yet (the turn-taking build adds it): switched on without it, "
+                                      "the screen stays on 'Speaking' while you talk over an answer that is already written. "
+                                      "Off: the old way, any loud sound on the phone."),
+    "g7.sound_check_rtc": (True, "The sound check's call test starts the real call connection and has the PC say a line over it, instead of playing a "
+                                  "sound inside the app, so it proves what a call really sounds like. Off: the old test."),
 
     # -- G8 Windows
     "g8.embed_batch4": (True, "The memory search reads your notes 4 pieces at a time instead of 16. While it works it keeps about half "

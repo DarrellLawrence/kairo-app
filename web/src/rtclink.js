@@ -16,7 +16,8 @@
 // connection's stats; direct or relayed comes from the PC (Tailscale knows, WebRTC can't see it).
 import { clientLog, device } from './clientlog.js'
 import { startTurn } from './turns.js'
-import { closeMic, micStream, outputContext, unlockAudio } from './voice.js'
+import { flagOn } from './flags.js'
+import { closeMic, logMic, micSettings, micStream, outputContext, unlockAudio } from './voice.js'
 import { makeVad } from './voicelink.js'
 
 const FRAME_MS = 20
@@ -95,9 +96,9 @@ function rmsOf(analyser, buf) {
   return Math.sqrt(sum / buf.length)
 }
 
-/* The selected path's round trip (ms) and its candidate types, from the connection's stats. */
-export async function pathStats(pc) {
-  const stats = await pc.getStats()
+/* The selected path's round trip (ms) and its candidate types, and the inbound audio (packets, jitter), from a
+   connection's stats. Either may be null. */
+export function readStats(stats) {
   let pair = null
   const byId = new Map()
   stats.forEach((s) => {
@@ -106,26 +107,34 @@ export async function pathStats(pc) {
   })
   let p = pair ? byId.get(pair) : null
   if (!p) stats.forEach((s) => { if (s.type === 'candidate-pair' && (s.selected || s.nominated) && s.state === 'succeeded') p = s })
-  if (!p) return null
-  const local = byId.get(p.localCandidateId)
-  const remote = byId.get(p.remoteCandidateId)
   let jitterMs = null
+  let inbound = null
   stats.forEach((s) => {
-    if (s.type === 'inbound-rtp' && s.kind === 'audio' && s.jitterBufferEmittedCount > 0) {
-      jitterMs = Math.round((s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000)
+    if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+      if (s.jitterBufferEmittedCount > 0) jitterMs = Math.round((s.jitterBufferDelay / s.jitterBufferEmittedCount) * 1000)
+      inbound = { received: s.packetsReceived ?? 0, lost: s.packetsLost ?? 0, jitter_ms: jitterMs }
     }
   })
-  return {
-    rtt_ms: Number.isFinite(p.currentRoundTripTime) ? Math.round(p.currentRoundTripTime * 1000) : null,
-    local: local?.candidateType || null,
-    remote: remote?.candidateType || null,
-    jitter_ms: jitterMs,
+  let path = null
+  if (p) {
+    const local = byId.get(p.localCandidateId)
+    const remote = byId.get(p.remoteCandidateId)
+    path = {
+      rtt_ms: Number.isFinite(p.currentRoundTripTime) ? Math.round(p.currentRoundTripTime * 1000) : null,
+      local: local?.candidateType || null,
+      remote: remote?.candidateType || null,
+      jitter_ms: jitterMs,
+    }
   }
+  return { path, inbound }
 }
 
 /* The WebRTC line. Same shape as voicelink's startVoice, plus on.fallback({reason, message}). */
 export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   const call = path === 'call'
+  const logs = flagOn('g7.call_logs')     // read once, when the call starts
+  const warnAec = flagOn('g7.no_aec_warning')
+  const followPc = flagOn('g7.listen_on_barge_in')   // the screen goes to 'listening' when the PC says you talked over Kairo
   const meter = makeRtcMeter(path)
   const lastVoice = makeLastVoice()
   let pc = null
@@ -147,6 +156,10 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   let reply = ''
   let talking = false         // the PC hears a turn of yours (speech, or words not answered yet): a tap ends it
   let tappedAt = null
+  let soundHeard = false      // Kairo's voice has been heard on this phone (the incoming audio rose above silence)
+  let started = false         // the line connected: there is a call's audio to describe at hang-up
+  let startedAt = 0
+  let inbound = null          // the latest inbound audio stats (packets, loss, jitter), up to a second old
 
   const set = (s) => { if (state !== s) { state = s; on.state?.(s) } }
   const hear = (v) => { if (talking !== v) { talking = v; on.hearing?.(v) } }
@@ -169,6 +182,13 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     clientLog('rtc.fallback', { reason, ...device() })
     teardown()
     on.fallback?.({ reason, message })
+  }
+
+  /* You talked over Kairo and the PC stopped it (its barge_in event, or its answer ending as interrupted). */
+  const bargeIn = () => {
+    if (state !== 'speaking') return
+    meter.cut('talked over')
+    set('listening')
   }
 
   const afterAnswer = () => {
@@ -221,12 +241,16 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       case 'say':
         if (f.turn === meter.number && state !== 'speaking') set('speaking')
         break
+      case 'barge_in':                       // the PC cut Kairo off because you really talked over it
+        if (followPc) bargeIn()
+        break
       case 'timing':
         meter.timing(f)
         break
       case 'done':
         meter.model(f.model)
         meter.server(f.server)
+        if (followPc && f.interrupted) bargeIn()
         on.done?.(f)
         written = true
         settle(spoken ? 250 : (f.text || '').trim() ? 8000 : 250)   // over when its voice has played (or never came)
@@ -254,8 +278,8 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       micLevel = Math.min(1, r * 8)
       const before = lastVoice.last
       lastVoice.feed(listening ? r : 0, t)
-      if (lastVoice.last !== before && state === 'speaking') {   // you talk over Kairo: the PC stops it
-        meter.cut('talked over')                                // (and says "speech": your turn goes on)
+      if (!followPc && lastVoice.last !== before && state === 'speaking') {   // the old way: any sound of yours on this phone
+        meter.cut('talked over')                                // (and the PC says "speech": your turn goes on)
         set('listening')
       }
     }
@@ -263,6 +287,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       const r = rmsOf(remote.analyser, remote.buf)
       outLevel = Math.min(1, r * 8)
       meter.level(r)
+      if (!soundHeard && r >= PLAYING_RMS) { soundHeard = true; logFirstSound() }
     }
     if (pc && ['disconnected', 'failed'].includes(pc.connectionState)) {
       disconnectedAt ??= t
@@ -272,12 +297,32 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     }
   }
 
+  /* g7.call_logs: how the call's audio stood, in two lines. The PC sends silent packets from the moment the line
+     connects (Pipecat's audio_out_auto_silence), so "packets arrived" says nothing about Kairo: the first line waits
+     for a sound that is really heard here. */
+  const audioState = () => (audio ? { muted: audio.muted, paused: audio.paused, hasStream: Boolean(audio.srcObject) } : null)
+  const callSecs = () => Math.round((performance.now() - startedAt) / 1000)
+
+  /* Once per call, the first time Kairo's voice is heard on this phone: the audio element and the packets so far. */
+  const logFirstSound = () => {
+    if (!logs) return
+    clientLog('rtc.audio', { when: 'first-sound', path, secs: callSecs(), inbound, audio: audioState(), ...device() })
+  }
+
+  /* At hang-up of a call that connected: how long, whether Kairo was ever heard (no: that silence is the finding), and
+     the last packets received and lost and the jitter (P11's phone half). */
+  const logAudioEnd = () => {
+    if (!logs || !started) return
+    clientLog('rtc.audio_end', { path, secs: callSecs(), heard: soundHeard, inbound, audio: audioState(), ...device() })
+  }
+
   const measure = async () => {
     if (!pc) return
     try {
-      const s = await pathStats(pc)
-      if (s?.rtt_ms != null) meter.rtt(s.rtt_ms)
-      if (s) on.path?.(s)
+      const { path: net, inbound: heard } = readStats(await pc.getStats())
+      if (net?.rtt_ms != null) meter.rtt(net.rtt_ms)
+      if (net) on.path?.(net)
+      inbound = heard
     } catch { /* stats are a nice-to-have */ }
     send('ping')        // the PC's transport counts the line as alive while pings come
   }
@@ -289,10 +334,18 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
 
   const ready = (async () => {
     try {
-      unlockAudio()
+      unlockAudio({ call: true })
       mic = await micStream()                  // the mic first: then Safari shows its tailnet address
       if (closed) return false
       mic.buf = mic.buf || new Float32Array(mic.analyser.fftSize)
+      const track = mic.stream.getAudioTracks()[0]
+      logMic(track, path)
+      // g7.no_aec_warning: the phone says it does not cancel the echo (iOS reports it in getSettings), so Kairo's
+      // own voice can come back in through the mic and cut it off. Only a plain `false` counts.
+      if (warnAec && micSettings(track)?.echoCancellation === false) {
+        clientLog('rtc.warn', { reason: 'no-aec', path, ...device() })
+        on.warn?.({ reason: 'no-aec', message: 'Echo cancelling is off for this call, so Kairo may hear itself and stop talking. Try AirPods, or turn the volume down.' })
+      }
       pc = new RTCPeerConnection({ iceServers: [] })
       pc.addTransceiver(mic.stream.getAudioTracks()[0], { direction: 'sendrecv', streams: [mic.stream] })
       audio = new Audio()
@@ -303,7 +356,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
         audio.srcObject = stream
         audio.play().catch(() => on.needTap?.())
         try {
-          const ctx = outputContext()
+          const ctx = outputContext({ call: true })
           const analyser = ctx.createAnalyser()
           analyser.fftSize = 512
           ctx.createMediaStreamSource(stream).connect(analyser)   // only measured, not played twice
@@ -333,6 +386,8 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       const got = await r.json()
       await pc.setRemoteDescription({ type: 'answer', sdp: got.sdp })
       if (!(await opened)) { fallback('webrtc', 'Couldn’t reach the PC over WebRTC from this phone.'); return false }
+      started = true
+      startedAt = performance.now()
       timer = setInterval(tick, FRAME_MS)
       statsTimer = setInterval(measure, 1000)
       measure()
@@ -397,7 +452,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       set('listening')
     },
     tapToPlay() {
-      unlockAudio()
+      unlockAudio({ call: true })
       if (!audio) return false
       audio.play().catch(() => {})
       return true
@@ -408,6 +463,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onHidden)
       meter.end('hung up')
       clearTimeout(settleTimer)
+      logAudioEnd()
       teardown()
       closeMic()                               // iOS: the mic indicator goes off with the call
     },

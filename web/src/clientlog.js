@@ -16,6 +16,11 @@ function flush(beacon = false) {
   if (queue.length) timer = setTimeout(flush, 500)
 }
 
+/* Send everything queued now (tests; a page that is going away uses the beacon in flush). */
+export function flushClientLog() {
+  while (queue.length) flush()
+}
+
 export function clientLog(event, data = {}) {
   queue.push({ t: new Date().toISOString(), event, data })
   if (queue.length > 60) queue.splice(0, queue.length - 60)
@@ -25,8 +30,10 @@ export function clientLog(event, data = {}) {
 export function device() {
   const ua = navigator.userAgent || ''
   const ios = /OS (\d+[._]\d+)/.exec(ua)
+  const safari = /Version\/(\d+(?:\.\d+)*)/.exec(ua)    // the real Safari version: the OS token above is frozen at 18_7
   return {
     ios: ios ? ios[1].replace('_', '.') : null,
+    safari: safari ? safari[1] : null,
     standalone: Boolean(window.navigator.standalone || window.matchMedia?.('(display-mode: standalone)').matches),
     audioSession: 'audioSession' in navigator ? navigator.audioSession.type : 'unsupported',
   }

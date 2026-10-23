@@ -148,7 +148,7 @@ export default function Chat() {
       return
     }
     if (busy) return
-    unlockAudio()
+    unlockAudio({ call: true })        // the voice button is a call line too: its audio mode comes before the mic
     stopSpeaking()
     setError(null)
     setMic('busy')                           // connecting; talk once the mic shows recording
