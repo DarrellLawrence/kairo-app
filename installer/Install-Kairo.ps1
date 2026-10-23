@@ -90,7 +90,11 @@ try {
         # 3. Settings file. Config: release defaults + data\config (owner changes only);
         #    KAIRO_CONFIG_DIR is for releases from before that (see Save-LegacyConfig).
         #    Written inside the data lock with the rights and the sync settings (step 5).
+        # HF_HUB_OFFLINE=1 only here, in kairo.env: Kairo and the programs it starts never ask Hugging Face for a model (a
+        # missing one is an error at once, not a 1.5 GB download inside a request). Never in this installer's own environment:
+        # it downloads the voice models through huggingface_hub (Use-KairoEnv passes on only the model names).
         $envValues = @{
+            HF_HUB_OFFLINE    = '1'
             KAIRO_DATA_DIR    = $P.Data
             KAIRO_STATUS_DIR  = $P.Status
             KAIRO_CONFIG_DIR  = $P.ConfigLegacy

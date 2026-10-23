@@ -247,6 +247,8 @@ $cu = Get-Content -Raw (Join-Path $Root 'data\updates\config-update.json') | Con
 Check ($cu.message -match '^Config updated: 2 new actions') "one note for the iPhone: $($cu.message)"
 $envText = Get-Content -Raw (Join-Path $Root 'data\kairo.env')
 Check ($envText -match 'KAIRO_CONFIG_OVERRIDES=.*data\\config\r?\n' -and $envText -match 'KAIRO_CONFIG_DIR=.*config-legacy') 'kairo.env: owner changes for this version, the full copy for older ones'
+Check ($envText -match '(?m)^HF_HUB_OFFLINE=1\r?$') 'kairo.env: HF_HUB_OFFLINE=1, so a model load never waits for Hugging Face'
+Check (-not $env:HF_HUB_OFFLINE) "the installer's own environment has no HF_HUB_OFFLINE (it downloads the voice models through huggingface_hub)"
 
 # ---- Kairo has hands (fix P0): the self-test the installer ran after the switch, as kairo-svc
 $stj = Get-Content -Raw (Join-Path $Root 'status\selftest.json') | ConvertFrom-Json
@@ -301,11 +303,11 @@ Import-Module (Join-Path $Installer 'KairoSetup.psm1') -Force -DisableNameChecki
 $P = Get-KairoPaths $TestRoot
 [void](New-Item -ItemType Directory -Force (Split-Path $P.EnvFile))
 Set-Content -Path $P.EnvFile -Encoding ASCII -Value @('PYTHONPATH=C:\evil', 'KAIRO_WHISPER_MODEL=small', 'KAIRO_KOKORO_VOICE=x & calc',
-    'KAIRO_DATA_DIR=C:\elsewhere', 'KAIRO_DB_URL=sqlite:///C:/Windows/x.db')
+    'KAIRO_DATA_DIR=C:\elsewhere', 'KAIRO_DB_URL=sqlite:///C:/Windows/x.db', 'HF_HUB_OFFLINE=1')
 $env:PYTHONSTARTUP = 'C:\evil.py'
 Use-KairoEnv $P
 $envOk = (-not $env:PYTHONPATH) -and (-not $env:PYTHONSTARTUP) -and $env:KAIRO_WHISPER_MODEL -eq 'small' -and
-    (-not $env:KAIRO_KOKORO_VOICE) -and $env:KAIRO_DATA_DIR -eq $P.Data -and (-not $env:KAIRO_DB_URL)
+    (-not $env:KAIRO_KOKORO_VOICE) -and $env:KAIRO_DATA_DIR -eq $P.Data -and (-not $env:KAIRO_DB_URL) -and (-not $env:HF_HUB_OFFLINE)
 $good = Join-Path $P.Tools 'claude\9.9.9\claude.exe'
 $bad = Join-Path $P.Data 'claude.exe'
 foreach ($f in @($good, $bad)) { [void](New-Item -ItemType Directory -Force (Split-Path $f)); Set-Content -Path $f -Value 'x' }
