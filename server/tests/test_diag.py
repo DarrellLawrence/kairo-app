@@ -139,7 +139,8 @@ def test_a_check_that_crashes_is_a_fail_of_its_own_and_the_rest_still_run(pc, mo
 
 def test_the_json_has_a_fixed_shape(pc, speech_only):
     report, _ = run(pc, live=live(), source="server")
-    assert set(report) == {"schema", "at", "source", "ok", "exit_code", "counts", "host", "checks"}
+    assert set(report) == {"schema", "at", "source", "ok", "exit_code", "counts", "host", "checks", "bench"}
+    assert report["bench"] == {"installed": False, "mock": None, "latest": None}
     assert report["schema"] == 1 and set(report["host"]) == {"version", "python", "platform"}
     for c in report["checks"]:
         assert set(c) == {"id", "group", "name", "status", "detail", "value", "unit"} and c["status"] in ("PASS", "WARN", "FAIL")
@@ -338,12 +339,14 @@ def test_a_whole_healthy_stack_exits_zero_with_only_the_expected_warnings(pc, vl
     from app import tailnet
     idle = {"device": None, "loaded": False, "on": False, "ok": True, "reason": "until you teach Kairo your voice"}
     monkeypatch.setattr(diag, "ram", lambda: (8000, 16384))
+    monkeypatch.setitem(sys.modules, "app.bench_voice", None)                      # the harness is another change's file
     monkeypatch.setattr(tailnet, "status", lambda data_dir: {"peers": [{"os": "iOS", "online": True, "direct": True}], "source": "live"})
     state = {**voice_parts(speaker=idle), "env": {"HF_HUB_OFFLINE": "1"}}
     state["devices"]["gpu"] = {"name": "NVIDIA GeForce RTX 3060", "used_mb": 7000, "total_mb": 12288, "processes": []}
     report, by_id = run(pc, live=state, source="server")
     assert report["counts"]["fail"] == 0 and report["exit_code"] == 0 and report["ok"] is True
-    assert sorted(i for i, c in by_id.items() if c["status"] == "WARN") == ["embeddings.installed", "speaker.enrolled"]
+    assert sorted(i for i, c in by_id.items() if c["status"] == "WARN") == [
+        "bench.latest", "bench.mock", "embeddings.installed", "speaker.enrolled"]
     assert run(pc, live=state, strict=True)[0]["exit_code"] == 1
 
 

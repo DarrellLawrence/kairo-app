@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import functools
+import importlib
 import importlib.util
 import ipaddress
 import json
@@ -27,6 +28,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -53,6 +56,7 @@ GROUPS = {
     "embeddings": "Memory search (embeddings)",
     "system": "This PC",
     "net": "Calls and network",
+    "bench": "Latency harness",
 }
 
 VRAM_MB = 12 * 1024                    # the RTX 3060 in kairo-home
@@ -103,6 +107,7 @@ class Ctx:
     live: dict | None = None            # the running server's own state: {"devices": /api/voice/devices, ...}
     deep: bool = False                  # also hash the multi-GB model files
     notes: list[str] = field(default_factory=list)
+    bench: dict = field(default_factory=lambda: {"installed": False, "mock": None, "latest": None})
 
     @functools.cached_property
     def voice(self) -> "voice_mod.Voice":
@@ -502,7 +507,90 @@ def _network(ctx: Ctx) -> list[Check]:
     return [calls, path, firewall_check()]
 
 
-CHECKS = [_kairo, _whisper, _kokoro, _piper, _llama, _smart_turn, _silero, _speaker, _embeddings, _system, _network]
+# ---------------------------------------------------------------- the latency harness (app/bench_voice.py)
+
+MOCK_TIMEOUT_S = 30
+STALE_DAYS = 14
+
+
+def _within(fn, seconds: float):
+    """(result, None) or (None, why): fn on a thread that is given up on after `seconds`."""
+    box: dict = {}
+
+    def go():
+        try:
+            box["ok"] = fn()
+        except Exception as exc:   # whatever the harness does wrong is its report, not a crash of ours
+            box["err"] = f"{type(exc).__name__}: {exc}"[:200]
+    t = threading.Thread(target=go, name="diag-bench", daemon=True)
+    t.start()
+    t.join(seconds)
+    return (box["ok"], None) if "ok" in box else (None, box.get("err") or f"no answer after {seconds:g} s")
+
+
+def _redacted(obj, skip=("git_sha",)):
+    """Every string in a harness result through diagnosis.redact (a git sha is long and opaque, and is not a secret)."""
+    if isinstance(obj, str):
+        return diagnosis.redact(obj)
+    if isinstance(obj, list):
+        return [_redacted(x, skip) for x in obj]
+    if isinstance(obj, dict):
+        return {k: v if k in skip else _redacted(v, skip) for k, v in obj.items()}
+    return obj
+
+
+def _bench(ctx: Ctx) -> list[Check]:
+    from . import versions
+    try:
+        harness = importlib.import_module(f"{__package__}.bench_voice")
+    except ModuleNotFoundError as exc:
+        if exc.name != f"{__package__}.bench_voice":
+            return [bad("bench.mock", "self-check", f"the harness can't be imported: {exc}")]
+        return [warn("bench.mock", "self-check", "harness not installed"), warn("bench.latest", "latest live run", "harness not installed")]
+    except Exception as exc:
+        return [bad("bench.mock", "self-check", f"the harness can't be imported: {type(exc).__name__}: {exc}"[:240])]
+    ctx.bench["installed"] = True
+    with tempfile.TemporaryDirectory(prefix="kairo-diag-") as tmp:        # nothing is written into the data folder
+        res, why = _within(lambda: harness.run(mock=True, url=None, out_dir=Path(tmp)), MOCK_TIMEOUT_S)
+    s = (res or {}).get("summary") if isinstance(res, dict) else None
+    if why or not (isinstance(s, dict) and res.get("schema") == SCHEMA and res.get("turns")):
+        ctx.bench["mock"] = {"ok": False, "error": why or "the result isn't in the agreed shape"}
+        mock = bad("bench.mock", "self-check", f"the harness' mock run failed: {why or 'its result is not in the agreed shape (schema 1, turns, summary)'}")
+    else:
+        ctx.bench["mock"] = {"ok": True, "turns": s.get("n")}
+        line = f"mock run works: {s.get('n')} turns, p50 {s.get('p50_ms')} ms, p95 {s.get('p95_ms')} ms (not a measurement)"
+        mock = (ok if s.get("pass") else warn)("bench.mock", "self-check", line if s.get("pass") else line + ", but even the mock misses the target", s.get("n"), "turns")
+    latest, why = _within(lambda: harness.latest(ctx.data_dir / "bench" / "results"), 10)
+    summary = (latest or {}).get("summary") if isinstance(latest, dict) else None
+    if why:
+        last = bad("bench.latest", "latest live run", f"the results can't be read: {why}")
+    elif latest is None:
+        last = warn("bench.latest", "latest live run", "no run yet: run the latency harness on the PC (it keeps its results in bench\\results)")
+    elif not isinstance(summary, dict):
+        last = bad("bench.latest", "latest live run", "the newest result file has no summary")
+    elif latest.get("mode") != "live":
+        ctx.bench["latest"] = _redacted({k: v for k, v in latest.items() if k != "turns"})
+        last = warn("bench.latest", "latest live run", "the newest result is a mock run: no live measurement yet")
+    else:
+        ctx.bench["latest"] = _redacted({k: v for k, v in latest.items() if k != "turns"})
+        p95, target = summary.get("p95_ms"), summary.get("target_p95_ms", 1000)
+        stats = f"p50 {summary.get('p50_ms')} ms, p90 {summary.get('p90_ms')} ms, p95 {p95} ms over {summary.get('n')} turns"
+        age = None
+        try:
+            then = dt.datetime.fromisoformat(str(latest.get("at")).replace("Z", "+00:00"))
+            age = (dt.datetime.now(dt.timezone.utc) - (then if then.tzinfo else then.replace(tzinfo=dt.timezone.utc))).days
+        except ValueError:
+            pass
+        running = versions.running(ctx.app_root)
+        old = [f"{age} days old"] if age is not None and age > STALE_DAYS else []
+        old += [f"made on {latest.get('version')}, this is {running}"] if running and latest.get("version") not in (None, running) else []
+        last = (bad("bench.latest", "latest live run", f"{stats}: p95 is over the {target} ms target", p95, "ms") if not summary.get("pass") else
+                warn("bench.latest", "latest live run", f"{stats}, within the {target} ms target, but {' and '.join(old)}: run it again", p95, "ms") if old else
+                ok("bench.latest", "latest live run", f"{stats}: within the {target} ms target", p95, "ms"))
+    return [mock, last]
+
+
+CHECKS = [_kairo, _whisper, _kokoro, _piper, _llama, _smart_turn, _silero, _speaker, _embeddings, _system, _network, _bench]
 
 
 # ---------------------------------------------------------------- the report
@@ -525,7 +613,7 @@ def collect(*, data_dir: Path, app_root: Path = REPO_ROOT, live: dict | None = N
     return finish({"schema": SCHEMA, "at": now.isoformat(timespec="seconds"), "source": source,
                    "host": {"version": versions.running(ctx.app_root) or "dev checkout", "python": platform.python_version(),
                             "platform": f"{platform.system()} {platform.release()}"},
-                   "checks": [c.as_dict() for c in checks]})
+                   "checks": [c.as_dict() for c in checks], "bench": ctx.bench})
 
 
 def recheck_here(report: dict) -> dict:
