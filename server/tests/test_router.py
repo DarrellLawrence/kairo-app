@@ -277,7 +277,7 @@ def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
 
 
 def test_a_local_model_without_a_job_slot_is_not_used_and_the_reason_says_so(tmp_path):
-    """The voice model's server has one slot today: a job would wipe the mouth's cache (review of G11)."""
+    """The voice model's server has one slot today: a job would evict the mouth's cached start (review of G11)."""
     rules = lab_passed(tmp_path)
     ok = dict(content="personal", local_flag=True, local_model="abc")
     why = "the voice model's server has one slot; the local route needs a second slot for jobs (-np 2)"

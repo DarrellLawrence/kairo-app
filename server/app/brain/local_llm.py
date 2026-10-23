@@ -25,7 +25,7 @@ MAX_PROMPT_CHARS = 12_000       # about 3-4k tokens: a job's slot has voice_loca
 MAX_TOKENS = 700
 CALL_POLL_S = 0.05              # how often a running job looks whether a call has opened
 CALL_OPENED = "a call opened: the model stays with the voice"
-NO_JOB_SLOT = ("the voice model's server has one slot, and a job on it would wipe the mouth's cached start and make a call "
+NO_JOB_SLOT = ("the voice model's server has one slot, and a job on it would evict the mouth's cached start and make a call "
                "wait; the local route needs a second slot for jobs (-np 2) on the server")
 
 

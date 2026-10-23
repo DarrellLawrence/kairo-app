@@ -219,7 +219,7 @@ def test_without_a_list_of_mails_in_the_prompt_nothing_can_be_checked_so_nothing
 
 # ---------------------------------------------------------------- a slot of its own (review of G11)
 # The voice model's server runs one slot (-np 1) with the mouth's start of the prompt cached in it. A job on that
-# slot wipes the cache (cache_prompt is on) and a call opening meanwhile waits behind the job. So the local route needs a
+# slot evicts the mouth's cached start (cache_prompt is on) and a call opening meanwhile waits behind the job. So the local route needs a
 # second slot (-np 2) that only jobs use (id_slot), and it gives way when a call opens (voice recipe 13).
 
 def server(np=None, context=16384, flag="-np"):

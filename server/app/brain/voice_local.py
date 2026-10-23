@@ -466,7 +466,7 @@ class VoiceModel:
     def job_slot(self) -> int | None:
         """The slot a background job may use without touching the mouth's cached start of its prompt, or None.
         There is one only when the running server was started with two or more slots (-np) that each have room for a job
-        (llama-server splits -c between its slots). With one slot (today's flags) a job would wipe the mouth's cache and a
+        (llama-server splits -c between its slots). With one slot (today's flags) a job would evict the mouth's cached start and a
         call opening meanwhile would queue behind it, so the router's local route stays off (voice recipe 13)."""
         srv = self.server
         if srv is None or not self.ready():
