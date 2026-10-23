@@ -3231,6 +3231,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except KeyError:
                 raise HTTPException(404, "unknown option")
 
+    # Owner-only switches for changes that wait for the owner's OK or the PC (app/flags.py).
+    from . import flags as feature_flags
+
+    @app.get("/api/flags")
+    def flags_get():
+        with session_for(engine) as s:
+            return feature_flags.listing(s)
+
+    @app.put("/api/flags/{name}")
+    def flags_put(name: str, body: dict):
+        value = body.get("on")
+        if value is not None and not isinstance(value, bool):
+            raise HTTPException(422, "on is true, false or null (the default)")
+        with session_for(engine) as s:
+            try:
+                return feature_flags.set_flag(s, name, value)
+            except KeyError:
+                raise HTTPException(404, "unknown flag")
+
     # ---------------------------------------------------------------- realtime voice (owner's decision 2026-10-15)
     # Calls and the voice button talk to OpenAI's Realtime model (app/realtime.py); the brain stays Claude.
     # The settings are the owner's only (here, not prefs: the model's settings_set can't touch them).
