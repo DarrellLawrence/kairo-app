@@ -397,3 +397,26 @@ def test_the_app_reads_the_flag_at_the_start_of_every_call(local, monkeypatch):
         await call()
     asyncio.run(go())
     assert seen == [[(16, 4)], [(8, 1)], [(16, 4)]]
+
+
+def test_a_connection_without_the_peer_connection_it_expects_still_makes_the_call(caplog, monkeypatch):
+    """The patch is an extra: whatever the pipecat connection looks like one day, connect() returns it."""
+    _needs_pipecat()
+    from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+
+    from app import voicertc
+
+    def gone(self):
+        raise AttributeError("no pc any more")
+    monkeypatch.setattr(SmallWebRTCConnection, "pc", property(gone))
+
+    async def go():
+        pc = await _phone_offer()
+        with caplog.at_level(logging.INFO, logger="kairo.rtcjitter"):
+            conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                          jitter_patch=True)
+        await conn.disconnect()
+        await pc.close()
+        return conn
+    assert asyncio.run(go()) is not None
+    assert "left as it is" in caplog.text

@@ -143,7 +143,7 @@ async def connect(sdp: str, kind: str = "offer", *, allow_loopback: bool = False
     conn = SmallWebRTCConnection(ice_servers=[])
     await conn.initialize(sdp=offer_on_tailnet(sdp), type=kind)
     if jitter_patch:
-        rtcjitter.install(conn.pc)
+        rtcjitter.install(getattr(conn, "pc", None))      # never raises: the patch is an extra, the call is not
     return conn
 
 
