@@ -50,7 +50,7 @@ from . import bringup, gpu, voicellm
 from .brain.voice_local import PORT, VoiceModel
 from .db import SettingKV
 from .latency import pct
-from .voicemouth import FILLERS, Mouth
+from .voicemouth import FILLERS, Mouth, g3_options
 
 log = logging.getLogger("kairo.voicelab")
 
@@ -375,6 +375,11 @@ class Lab:
         with Session(self.engine) as s:
             _put_state(s, {**kw, "at": self.now().isoformat(timespec="seconds")})
 
+    def _options(self) -> dict:
+        """The owner's G3 switches: the lab measures with the same server flags the real server gets."""
+        with Session(self.engine) as s:
+            return g3_options(s)
+
     def run(self, language_mode: str = "auto", by: str = "owner") -> dict:
         """by: "owner" (Run) or "auto" (Kairo ran it by itself)."""
         started = time.monotonic()
@@ -430,7 +435,7 @@ class Lab:
             path = voicellm.model_path(self.site_dir, mid)
             before = nvidia_smi()
             vm = VoiceModel(lambda p=path, m=mid: (self.server_prefix(binary), p, m, int(spec.get("context", 8192))),
-                            log_dir=self.data_dir / "logs", port=self.port)
+                            log_dir=self.data_dir / "logs", port=self.port, options=self._options)
             t0 = time.monotonic()
             try:
                 if not vm.wait_ready():

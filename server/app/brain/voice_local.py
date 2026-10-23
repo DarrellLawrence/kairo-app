@@ -243,24 +243,38 @@ class TextCalls:
             self.n += 1
 
 
-def server_args(model: Path, *, port: int = PORT, context: int = 8192) -> list[str]:
-    """Flags checked against llama.cpp's own argument list (common/arg.cpp, Oct 2026)."""
-    return ["-m", str(model), "--host", HOST, "--port", str(port), "-c", str(context),
+# What the owner's switches (app/flags.py, read at server start and at the start of a call) change here.
+DEFAULT_OPTIONS = {"llama_flags": True, "swa_full": False, "gemma_markup": True}
+
+
+def server_args(model: Path, *, port: int = PORT, context: int = 8192, lean_ram: bool = True,
+                swa_full: bool = False) -> list[str]:
+    """Flags checked against llama.cpp's own argument list (b11292 --help, Oct 2026).
+    lean_ram (g3.llama_flags): --cache-ram 0 (no host-RAM copies of old prompts: the default cache grew 33 MiB a
+    call, up to 8 GiB) and --ctx-checkpoints 8 (3 broke the reuse of a call's start; the default 32 costs RAM).
+    swa_full (g3.swa_full): Gemma's sliding-window cache kept whole (+280 MiB of GPU memory) so the cached start
+    of the prompt survives from one turn to the next."""
+    args = ["-m", str(model), "--host", HOST, "--port", str(port), "-c", str(context),
             "-ngl", "all",                  # every layer in VRAM
             "-fa", "auto",                  # flash attention where the GPU has it
             "--jinja",                      # the model's own chat template: its tool-call format
             "--reasoning", "off", "--reasoning-budget", "0",   # no thinking: straight to words
             "-np", "1",                     # one conversation: one slot, its cache kept
-            "--cache-reuse", "256",         # reuse the cached start even when later text shifts
-            "--no-webui"]
+            "--cache-reuse", "256"]         # reuse the cached start even when later text shifts
+    if lean_ram:
+        args += ["--cache-ram", "0", "--ctx-checkpoints", "8"]
+    if swa_full:
+        args += ["--swa-full"]
+    return [*args, "--no-webui"]
 
 
 class LlamaServer:
     """One llama-server process. command_prefix: [binary] (tests use [python, fake_llama.py])."""
 
     def __init__(self, command_prefix: list[str], model: Path, *, port: int = PORT, context: int = 8192,
-                 log_path: Path | None = None, pid_path: Path | None = None):
-        self.cmd = [*command_prefix, *server_args(model, port=port, context=context)]
+                 log_path: Path | None = None, pid_path: Path | None = None, lean_ram: bool = True,
+                 swa_full: bool = False):
+        self.cmd = [*command_prefix, *server_args(model, port=port, context=context, lean_ram=lean_ram, swa_full=swa_full)]
         self.model, self.port, self.log_path, self.pid_path = Path(model), port, log_path, pid_path
         self.proc: subprocess.Popen | None = None
         self.started_at: float | None = None
@@ -334,8 +348,12 @@ class VoiceModel:
     state: not installed | starting | ready | failed | paused | off (installed, but no model passed the lab)."""
 
     def __init__(self, resolve: Callable[[], tuple[list[str], Path, str, int] | None], *, log_dir: Path,
-                 port: int = PORT, transport: httpx.AsyncBaseTransport | None = None):
+                 port: int = PORT, transport: httpx.AsyncBaseTransport | None = None,
+                 options: Callable[[], dict] | None = None):
         self.resolve, self.log_dir, self.port, self.transport = resolve, Path(log_dir), port, transport
+        self.options = options              # the owner's switches (DEFAULT_OPTIONS keys), read when a server starts
+        self.opts = dict(DEFAULT_OPTIONS)   # what was read last
+        self.applied: dict = {}             # the options the running server was started with
         self.server: LlamaServer | None = None
         self.model_id: str | None = None
         self.state, self.error, self.since = "not installed", None, time.time()
@@ -372,8 +390,10 @@ class VoiceModel:
                 if self.state == "failed" and time.time() - self.failed_at < RETRY_AFTER_S:
                     return self.state
                 self.log_dir.mkdir(parents=True, exist_ok=True)
+                opts = self.read_options()
                 self.server = LlamaServer(prefix, model, port=self.port, context=context,
-                                          log_path=self.log_dir / "voice-llm.log", pid_path=self.log_dir / "voice-llm.pid")
+                                          log_path=self.log_dir / "voice-llm.log", pid_path=self.log_dir / "voice-llm.pid",
+                                          lean_ram=opts["llama_flags"], swa_full=opts["swa_full"])
                 try:
                     self.server.start()
                 except OSError as exc:
@@ -381,7 +401,7 @@ class VoiceModel:
                     self.failed_at = time.time()
                     self._set("failed", f"could not start llama-server: {exc}")
                     return self.state
-                self.model_id = model_id
+                self.model_id, self.applied = model_id, dict(opts)
                 self._set("starting")
             if self.state == "starting":
                 if health(self.port):
@@ -395,6 +415,16 @@ class VoiceModel:
             elif self.state == "ready" and not health(self.port, timeout=5):
                 self._set("starting")          # busy or restarting; checked again next round
             return self.state
+
+    def read_options(self) -> dict:
+        """The owner's switches now (a failing reader keeps what was read before: the voice never waits on it)."""
+        if self.options is not None:
+            try:
+                got = self.options() or {}
+                self.opts = {**DEFAULT_OPTIONS, **{k: bool(v) for k, v in got.items() if k in DEFAULT_OPTIONS}}
+            except Exception:
+                log.exception("voice model: reading the switches")
+        return self.opts
 
     def wait_ready(self, timeout: float = START_TIMEOUT_S) -> bool:
         until = time.monotonic() + timeout
@@ -449,7 +479,7 @@ class VoiceModel:
 
     def status(self) -> dict:
         return {"state": self.state, "model": self.model_id, "error": self.error, "since": self.since,
-                "port": self.port, "turns": self.turns}
+                "port": self.port, "turns": self.turns, "options": dict(self.applied or self.opts)}
 
     # ---------------------------------------------------------------- one turn
 

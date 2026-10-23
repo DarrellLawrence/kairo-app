@@ -408,7 +408,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
-    from .voicemouth import Mouth
+    from .voicemouth import Mouth, g3_options
     _vl_site = voicellm.site(settings.data_dir)
 
     def _voice_llm_resolve():
@@ -424,7 +424,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return None
         return [str(binary)], path, mid, int((voicellm.spec(mid) or {}).get("context", 8192))
 
-    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs")
+    def _voice_llm_options() -> dict:
+        with session_for(engine) as s_:
+            return g3_options(s_)
+
+    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs", options=_voice_llm_options)
     with session_for(engine) as _s:
         _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
         if voicelab.clear_stale(_s):                # a run cut off by a restart: Run and the run by itself work again

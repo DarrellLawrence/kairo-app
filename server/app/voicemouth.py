@@ -32,11 +32,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from . import bringup, todaycard
+from . import bringup, flags, todaycard
 from .brain.voice_local import ASK_KAIRO
 from .speech import PlainStream, plain
 
 log = logging.getLogger("kairo.mouth")
+
+def g3_options(s) -> dict:
+    """The G3 switches (app/flags.py) as the voice model's server and the call read them: the server's when it
+    starts, the call's at its start (never per audio frame)."""
+    return {"llama_flags": flags.on(s, "g3.llama_flags"), "swa_full": flags.on(s, "g3.swa_full")}
+
 
 FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
 # Owner's request 2026-10-17: Claude gets ASK_CALL_TIMEOUT_S on a call; then Kairo says this once and the

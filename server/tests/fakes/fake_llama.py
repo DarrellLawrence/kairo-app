@@ -12,6 +12,7 @@ answer is here -> "Okay. <the answer>". Anything else -> "Sure, happy to help wi
 FAKE_LLAMA_LOAD_S: seconds of 503 on /health before the model is "loaded".
 FAKE_LLAMA_TOKEN_MS: delay between pieces (default 5). FAKE_LLAMA_FIRST_MS: before the first piece.
 FAKE_LLAMA_RECORD: every request body is appended there as one JSON line.
+FAKE_LLAMA_ARGV: the flags this server was started with are written there (one JSON list), so a test can see them.
 FAKE_LLAMA_NO_TOOLS=1: never calls the tool (a model that ignores tools). FAKE_LLAMA_ALWAYS_TOOL=1: always calls it.
 FAKE_LLAMA_TEXT_TOOLS=1: tool calls are written into the words, like LFM2 through llama-server
 (<|tool_call_start|>[ask_kairo(request="...")]<|tool_call_end|> as content); with FAKE_LLAMA_ALWAYS_TOOL=1 it
@@ -34,6 +35,9 @@ STARTED = time.monotonic()
 LOAD_S = float(os.environ.get("FAKE_LLAMA_LOAD_S", "0"))
 TOKEN_S = float(os.environ.get("FAKE_LLAMA_TOKEN_MS", "5")) / 1000
 FIRST_S = float(os.environ.get("FAKE_LLAMA_FIRST_MS", "0")) / 1000
+if os.environ.get("FAKE_LLAMA_ARGV"):
+    with open(os.environ["FAKE_LLAMA_ARGV"], "w", encoding="utf-8") as _f:
+        json.dump(ARGS, _f)
 CARD = [(re.compile(r"weather|wetter|\bwarm|\brain\b|regn|temperat|\bcold|kalt", re.I), "## Weather"),
         (re.compile(r"\btrain\b|\bbus\b|\bzug\b|connection|verbindung|platform|gleis|\bmiss\b|verpass", re.I), "## Next connection"),
         (re.compile(r"buy|kauf|overdue|überfällig|lock|schloss|bill|rechnung", re.I), "## Today's tasks"),

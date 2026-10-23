@@ -21,6 +21,12 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G2 Whisper
 
     # -- G3 mouth
+    "g3.llama_flags": (True, "The voice model's server keeps no extra copies of old prompts in the PC's memory "
+                             "(--cache-ram 0) and at most 8 saved checkpoints (--ctx-checkpoints 8): the memory use "
+                             "grew about 33 MiB with every call. Applies the next time the voice model starts."),
+    "g3.swa_full": (False, "Gemma's cache kept whole (--swa-full): +280 MiB of graphics-card memory, so the cached start of the "
+                           "prompt survives from one turn to the next. Wait for the PC check (the card's memory) before "
+                           "turning it on. Applies the next time the voice model starts."),
 
     # -- G4 jitter buffer
 
