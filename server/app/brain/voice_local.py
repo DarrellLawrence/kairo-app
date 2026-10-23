@@ -12,6 +12,7 @@ llama.cpp's prompt cache only has to read the newest words.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -280,7 +281,7 @@ class TextCalls:
 
 
 # What the owner's switches (app/flags.py, read at server start and at the start of a call) change here.
-DEFAULT_OPTIONS = {"llama_flags": True, "swa_full": False, "gemma_markup": True}
+DEFAULT_OPTIONS = {"llama_flags": True, "swa_full": False, "gemma_markup": True, "constant_tools": False}
 
 
 def server_args(model: Path, *, port: int = PORT, context: int = 8192, lean_ram: bool = True,
@@ -385,8 +386,14 @@ class VoiceModel:
 
     def __init__(self, resolve: Callable[[], tuple[list[str], Path, str, int] | None], *, log_dir: Path,
                  port: int = PORT, transport: httpx.AsyncBaseTransport | None = None,
-                 options: Callable[[], dict] | None = None):
+                 options: Callable[[], dict] | None = None,
+                 warm_messages: Callable[[], list[dict]] | None = None):
         self.resolve, self.log_dir, self.port, self.transport = resolve, Path(log_dir), port, transport
+        self.warm_messages = warm_messages  # the messages every call starts with (g3.constant_tools): read in advance
+        self.warm: dict = {}                # {how, tokens, ms, ...} of the server running now; {} = not (yet)
+        self._warming = False
+        self.last_cache_n: int | None = None      # llama.cpp's own numbers for the latest request: how much of the
+        self.last_prompt_n: int | None = None     # prompt it found cached / had to read
         self.options = options              # the owner's switches (DEFAULT_OPTIONS keys), read when a server starts
         self.opts = dict(DEFAULT_OPTIONS)   # what was read last
         self.applied: dict = {}             # the options the running server was started with
@@ -443,6 +450,7 @@ class VoiceModel:
                 if health(self.port):
                     self._set("ready")
                     log.info("voice model %s ready in %.1fs", model_id, time.monotonic() - (self.server.started_at or 0))
+                    self._warm_soon()
                 elif not self.server.alive() or time.monotonic() - (self.server.started_at or 0) > START_TIMEOUT_S:
                     tail = _tail(self.log_dir / "voice-llm.log")
                     self._stop_server()
@@ -465,6 +473,46 @@ class VoiceModel:
                 log.exception("voice model: reading the switches")
         return self.opts
 
+    def _warm_soon(self) -> None:
+        """Once per server, beside everything else (a call never waits for it): read the start every call shares."""
+        if self.warm_messages is None or not self.opts.get("constant_tools") or self.warm or self._warming:
+            return
+        self._warming = True
+        threading.Thread(target=self._warm, args=(self.server,), name="voice-llm-warm", daemon=True).start()
+
+    def _warm(self, server) -> None:
+        """No slot file (a truncated one aborts llama-server): the chat template turns the static start (system text + the
+        tool) into tokens and one request with n_predict 1 computes it, so the first call finds it cached. Never raises."""
+        t0 = time.monotonic()
+        try:
+            got = asyncio.run(self._warm_request())
+        except Exception as exc:   # the voice works without it
+            got = {"how": "failed", "why": f"{type(exc).__name__}: {exc}"[:200]}
+        got["ms"] = round((time.monotonic() - t0) * 1000)
+        with self.lock:
+            self._warming = False
+            if self.server is server and server is not None:
+                self.warm = got
+        if got.get("how") == "computed":
+            log.info("voice model: the start of every call (%s tokens) is cached, %s ms", got.get("tokens"), got["ms"])
+        else:
+            log.warning("voice model: warming the start of the prompt failed (%s)", got.get("why"))
+
+    async def _warm_request(self) -> dict:
+        messages = self.warm_messages()
+        async with httpx.AsyncClient(base_url=f"http://{HOST}:{self.port}", transport=self.transport,
+                                     timeout=httpx.Timeout(120.0, connect=2.0)) as c:
+            r = await c.post("/apply-template", json={"messages": messages, "tools": [ASK_KAIRO], "add_generation_prompt": False,
+                                                      "chat_template_kwargs": {"enable_thinking": False}})
+            r.raise_for_status()
+            r = await c.post("/tokenize", json={"content": r.json()["prompt"], "add_special": True, "parse_special": True})
+            r.raise_for_status()
+            tokens = r.json()["tokens"]
+            r = await c.post("/completion", json={"prompt": tokens, "n_predict": 1, "cache_prompt": True, "temperature": 0})
+            r.raise_for_status()
+            timings = r.json().get("timings") or {}
+        return {"how": "computed", "tokens": len(tokens), "cache_n": timings.get("cache_n"), "prompt_n": timings.get("prompt_n")}
+
     def wait_ready(self, timeout: float = START_TIMEOUT_S) -> bool:
         until = time.monotonic() + timeout
         while time.monotonic() < until:
@@ -480,6 +528,7 @@ class VoiceModel:
             self.server.stop()
             self.server = None
             self.model_id = None
+            self.warm = {}                  # the cache went with the process
 
     def watch(self) -> threading.Thread:
         """Loaded day and night: checks the server every 15 s."""
@@ -518,7 +567,8 @@ class VoiceModel:
 
     def status(self) -> dict:
         return {"state": self.state, "model": self.model_id, "error": self.error, "since": self.since,
-                "port": self.port, "turns": self.turns, "options": dict(self.applied or self.opts)}
+                "port": self.port, "turns": self.turns, "options": dict(self.applied or self.opts), "warm": dict(self.warm),
+                "last_cache_n": self.last_cache_n, "last_prompt_n": self.last_prompt_n}
 
     # ---------------------------------------------------------------- one turn
 
@@ -587,7 +637,22 @@ class VoiceModel:
                 log.info("voice model: a tool call was dropped (%s: %s)", _safe(call["name"]), why)
                 continue
             yield {"kind": "tool_call", "id": call["id"] or f"call_{i}", "name": call["name"], "arguments": call["arguments"]}
+        if timings:
+            self.last_cache_n, self.last_prompt_n = timings.get("cache_n"), timings.get("prompt_n")
         yield {"kind": "done", "finish": finish, "first_token_ms": first, "timings": timings or {}, "usage": usage or {}}
+
+    async def prime(self, messages: list[dict], **kw) -> dict:
+        """The call's first read of its prompt, before the owner says a word (one token out, thrown away). Returns llama.cpp's
+        timings. With the start warmed, this read must find at least that much cached; if not, it says so in the log."""
+        timings: dict = {}
+        async for ev in self.stream(messages, max_tokens=1, **kw):
+            if ev["kind"] == "done":
+                timings = ev.get("timings") or {}
+        want, got = self.warm.get("tokens"), timings.get("cache_n")
+        if want and isinstance(got, int) and got < want:
+            log.warning("voice model: a call's first read found %s tokens cached, fewer than the %s warmed at start "
+                        "(the prompt's start differs, or the cache was lost)", got, want)
+        return timings
 
 
 def _tail(path: Path, n: int = 300) -> str:

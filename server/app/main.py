@@ -408,7 +408,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
-    from .voicemouth import Mouth, g3_options, mouth_args
+    from .voicemouth import Mouth, g3_options, mouth_args, static_system
     _vl_site = voicellm.site(settings.data_dir)
 
     def _voice_llm_resolve():
@@ -428,7 +428,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s_:
             return g3_options(s_)
 
-    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs", options=_voice_llm_options)
+    def _voice_warm_messages() -> list[dict]:
+        """What every call starts with when the system text never changes (g3.constant_tools): read in advance."""
+        from . import realtime as rt
+        with session_for(engine) as s_:
+            language = rt.load_settings(s_).get("language", "auto")
+        return [{"role": "system", "content": static_system(profile.name, language)}]
+
+    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs", options=_voice_llm_options,
+                                     warm_messages=_voice_warm_messages)
     with session_for(engine) as _s:
         _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
         if voicelab.clear_stale(_s):                # a run cut off by a restart: Run and the run by itself work again
@@ -1531,9 +1539,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
         line.mouth = mouth
         try:
-            gen = app.state.voice_llm.stream(mouth.prime_messages(), max_tokens=1, **mouth.prime_args())
-            async for _ in gen:
-                pass
+            await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
         except Exception as exc:   # the first turn reads it then
             log.info("voice model: priming the cache failed: %s", exc)
         return mouth

@@ -44,7 +44,7 @@ def test_the_options_follow_the_switches_both_ways(migrated):
 def test_the_app_gives_its_voice_model_the_owners_switches(migrated):
     with TestClient(create_app(migrated)) as c:
         vm = c.app.state.voice_llm
-        assert vm.read_options() == {"llama_flags": True, "swa_full": False, "gemma_markup": True}
+        assert vm.read_options() == {"llama_flags": True, "swa_full": False, "gemma_markup": True, "constant_tools": False}
         assert c.put("/api/flags/g3.swa_full", json={"on": True}).status_code == 200
         assert c.put("/api/flags/g3.llama_flags", json={"on": False}).status_code == 200
         assert vm.read_options()["swa_full"] is True and vm.read_options()["llama_flags"] is False
@@ -87,3 +87,14 @@ def test_the_voice_lab_talks_with_the_call_layout_the_switch_says(migrated, tmp_
     monkeypatch.setattr(voicelab, "Mouth", Spy)
     the_lab._models({"models": {}}, "auto")
     assert made and set(made) == {(on, on)}
+
+
+def test_the_voice_model_warms_up_the_start_every_call_shares(migrated):
+    """What it reads in advance is exactly the system message a call would start with (same name, same language)."""
+    from app.voicemouth import static_system
+    with TestClient(create_app(migrated)) as c:
+        vm = c.app.state.voice_llm
+        name = c.app.state.profile.name
+        assert vm.warm_messages() == [{"role": "system", "content": static_system(name, "auto")}]
+        assert c.put("/api/voice/realtime/settings", json={"language": "en"}).status_code == 200
+        assert vm.warm_messages() == [{"role": "system", "content": static_system(name, "en")}]

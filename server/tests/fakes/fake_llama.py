@@ -14,6 +14,8 @@ FAKE_LLAMA_TOKEN_MS: delay between pieces (default 5). FAKE_LLAMA_FIRST_MS: befo
 FAKE_LLAMA_GEMMA_TOOLS=1: with FAKE_LLAMA_TEXT_TOOLS the calls are written the way Gemma 4 does it
 (<|tool_call>call:ask_kairo{request:<|"|>...<|"|>}<tool_call|><|tool_response>).
 FAKE_LLAMA_RECORD: every request body is appended there as one JSON line.
+FAKE_LLAMA_RECORD_WARM: the other endpoints (/apply-template, /tokenize, /completion: the warm-up of the prompt's start)
+are appended there as {"path", "body"} lines. FAKE_LLAMA_WARM_FAIL=1: /completion answers 500.
 FAKE_LLAMA_ARGV: the flags this server was started with are written there (one JSON list), so a test can see them.
 FAKE_LLAMA_NO_TOOLS=1: never calls the tool (a model that ignores tools). FAKE_LLAMA_ALWAYS_TOOL=1: always calls it.
 FAKE_LLAMA_TEXT_TOOLS=1: tool calls are written into the words, like LFM2 through llama-server
@@ -28,6 +30,7 @@ import os
 import re
 import sys
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ARGS = sys.argv[1:]
@@ -104,8 +107,31 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    def _other(self, body) -> bool:
+        """The endpoints the warm-up of the prompt's start uses (llama-server's own names and answers)."""
+        if self.path not in ("/apply-template", "/tokenize", "/completion"):
+            return False
+        if os.environ.get("FAKE_LLAMA_RECORD_WARM"):
+            with open(os.environ["FAKE_LLAMA_RECORD_WARM"], "a", encoding="utf-8") as f:
+                f.write(json.dumps({"path": self.path, "body": body}) + "\n")
+        if self.path == "/apply-template":
+            msgs, tools = body.get("messages") or [], body.get("tools") or []
+            text = "".join(f"<{m.get('role')}>{m.get('content')}" for m in msgs)
+            self._json(200, {"prompt": text + ("<tools>" + ",".join(t["function"]["name"] for t in tools) + "</tools>" if tools else "")})
+        elif self.path == "/tokenize":
+            words = str(body.get("content") or "").split()
+            self._json(200, {"tokens": [1] * bool(body.get("add_special")) + [zlib.crc32(w.encode()) % 50000 for w in words]})
+        elif os.environ.get("FAKE_LLAMA_WARM_FAIL"):
+            self._json(500, {"error": {"message": "no slot available"}})
+        else:
+            n = len(body.get("prompt") or [])
+            self._json(200, {"content": "x", "tokens_evaluated": n, "timings": {"cache_n": 0, "prompt_n": n, "prompt_ms": 5.0}})
+        return True
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        if self._other(body):
+            return
         if os.environ.get("FAKE_LLAMA_RECORD"):
             with open(os.environ["FAKE_LLAMA_RECORD"], "a", encoding="utf-8") as f:
                 f.write(json.dumps(body) + "\n")
