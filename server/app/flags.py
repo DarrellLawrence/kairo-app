@@ -29,6 +29,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G6 turn-taking
 
     # -- G7 phone
+    "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "
+                                  "An iPhone only does the echo cancelling and ignores the other two. Off: the old request (echo cancelling and noise reduction)."),
 
     # -- G8 Windows
 

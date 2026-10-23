@@ -8,7 +8,9 @@ import { api } from './api.js'
 
 // The phone's own switches and their defaults: the same names and values as server/app/flags.py (a test pins
 // them). Used until the PC has answered, and when it is away.
-export const DEFAULTS = {}
+export const DEFAULTS = {
+  'g7.mic_constraints': true,
+}
 
 let known = null   // name -> on, from the PC's last list
 

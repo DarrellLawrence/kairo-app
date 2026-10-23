@@ -9,12 +9,19 @@
 // heard, "No sound? Tap to play" replays through the speaker inside the tap and remembers, for
 // this phone, to pause the mic while Kairo talks on calls. Every step is logged to the PC.
 import { clientLog, device } from './clientlog.js'
+import { flagOn } from './flags.js'
 
 let outCtx = null      // Kairo's voice: one AudioContext, started inside a tap
 let element = null     // <audio> fallback, primed inside a tap
 let current = null     // the reply playing now: { stop() }
 let last = null        // the last reply, for "tap to play": { buf, call }
 const RELEASE_KEY = 'voice.release-mic-while-speaking'
+
+// What a call asks the mic for. An iPhone honours only echoCancellation (WebKit has no other constraint) and
+// ignores the other two; a browser on a computer applies all three. g7.mic_constraints off: the old pair.
+export const MIC_AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+const MIC_AUDIO_OLD = { echoCancellation: true, noiseSuppression: true }
+export const micConstraints = () => ({ audio: { ...(flagOn('g7.mic_constraints') ? MIC_AUDIO : MIC_AUDIO_OLD) } })
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const errName = (e) => `${e?.name || 'Error'}: ${e?.message || e}`.slice(0, 160)
@@ -199,7 +206,7 @@ async function openMic() {
   }
   closeMic()
   setSession('play-and-record')
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })
+  const stream = await navigator.mediaDevices.getUserMedia(micConstraints())
   const ctx = new (window.AudioContext || window.webkitAudioContext)()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 1024
