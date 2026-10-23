@@ -602,7 +602,9 @@ class ClaudeCLIBrain:
 
     def _note_tail(self, tail_ms: int, no_summary: bool, now: float | None = None) -> None:
         """One answer's tail (end of the answer -> result). Over TAIL_ALARM_MS it is logged (at most every
-        TAIL_LOG_EVERY_S) and tail_notes() shows it in Voice speed. no_summary: the process had the setting."""
+        TAIL_LOG_EVERY_S) and tail_notes() shows it in Voice speed. no_summary: the process had the setting.
+        The log line is a WARNING only when the setting is on and the tail is still there (a Claude Code update
+        dropped it); with the setting off the tail is expected and is logged at INFO."""
         now = time.monotonic() if now is None else now
         with self._tail_lock:
             self._tails.append((tail_ms, no_summary))
@@ -618,8 +620,10 @@ class ClaudeCLIBrain:
                         "CLAUDE_CODE_CLASSIFIER_SUMMARY=0 is set (%s). This Claude Code version may no longer honour "
                         "the setting.", tail_ms, slow)
         else:
-            log.warning("claude tail: %d ms between the end of the answer and the result (%s). Flag %s would "
-                        "remove it.", tail_ms, slow, NO_SUMMARY_FLAG)
+            # Switch off: the tail is the known cost, not a fault. INFO keeps it greppable and out of the
+            # diagnosis' last-15 warnings/errors (a slow answer comes every few minutes while the owner talks).
+            log.info("claude tail: %d ms between the end of the answer and the result (%s). Flag %s would "
+                     "remove it.", tail_ms, slow, NO_SUMMARY_FLAG)
 
     def tail_notes(self) -> list[dict]:
         """For Voice speed: what the tail after Claude's answers costs now, [] while the last answers were

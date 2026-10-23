@@ -577,7 +577,7 @@ def test_a_tail_over_half_a_second_is_logged(tmp_path, caplog):
         assert not tail_logs(caplog)
         run(make(tmp_path, KAIRO_HOOK_FAKE_TAIL_S="0.8"))
     logged = tail_logs(caplog)
-    assert len(logged) == 1 and logged[0].levelno == logging.WARNING
+    assert len(logged) == 1 and logged[0].levelno == logging.INFO           # off: the tail is the known cost, no warning
     assert "g1.cli_no_summary" in logged[0].getMessage()                    # off: says what would remove it
 
 
@@ -589,6 +589,7 @@ def test_a_tail_with_the_switch_on_says_the_setting_stopped_working(tmp_path, ca
     assert usage["no_summary"] is True and usage["tail_ms"] >= 700
     text = " ".join(r.getMessage() for r in tail_logs(caplog))
     assert "CLAUDE_CODE_CLASSIFIER_SUMMARY=0" in text and "g1.cli_no_summary" not in text
+    assert [r.levelno for r in tail_logs(caplog)] == [logging.WARNING]      # on and still slow: the real alarm
 
 
 def test_the_log_line_comes_at_most_every_ten_minutes(tmp_path, caplog):
@@ -605,6 +606,49 @@ def test_the_log_line_comes_at_most_every_ten_minutes(tmp_path, caplog):
     assert len(logged()) == 2 and "3 slow answers" in logged()[1]        # what happened in between is counted
     brain._note_tail(400, False, now=5000.0)                             # a short tail is no alarm
     assert len(logged()) == 2
+
+
+def test_the_expected_tail_never_logs_a_warning_but_the_unexpected_one_does(tmp_path, caplog):
+    import logging
+    brain = make(tmp_path)
+    with caplog.at_level(logging.DEBUG, logger="kairo.brain"):
+        brain._note_tail(1900, False, now=1000.0)                            # switch off: the known cost
+        brain._note_tail(1900, False, now=5000.0)
+    assert len(tail_logs(caplog)) == 2
+    assert [r for r in tail_logs(caplog) if r.levelno >= logging.WARNING] == []
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="kairo.brain"):
+        brain._note_tail(1900, True, now=9000.0)                             # switch on and still slow: not expected
+    assert [r.levelno for r in tail_logs(caplog)] == [logging.WARNING]
+
+
+def test_slow_answers_with_the_switch_off_do_not_push_real_warnings_out_of_the_diagnosis(tmp_path):
+    """A default install (switch off) has a slow tail on most answers. The diagnosis keeps the last 15
+    warnings/errors; a real problem must still be in that list after an afternoon of chatting."""
+    import logging
+    import logging.handlers
+    from app import diagnosis
+    handler = logging.handlers.RotatingFileHandler(tmp_path / "kairo.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    before = (root.level, list(root.handlers))
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    try:
+        logging.getLogger("kairo.push").warning("push failed for a reminder: 410 Gone")
+        brain = make(tmp_path)
+        for i in range(30):                                                  # one logged answer every ten minutes
+            brain._note_tail(1900, False, now=1000.0 + 600 * i)
+        handler.flush()
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(before[0])
+        handler.close()
+    report = diagnosis._Report()
+    diagnosis._logs(report, tmp_path)
+    kept = [line for line in report.lines if line.startswith("    ")]
+    assert any("push failed" in line for line in kept)
+    assert not any("claude tail" in line for line in kept)
 
 
 def test_voice_speed_has_no_note_while_tails_are_short(tmp_path):
