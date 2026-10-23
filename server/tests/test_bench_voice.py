@@ -5,10 +5,12 @@ the call packages, Pipecat and aiortc, skips without them like test_voice_rtc.py
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app import bench_corpus as bc
@@ -364,3 +366,134 @@ def test_other_delays_are_found_just_as_well_so_the_numbers_are_measured_not_rem
         assert st["tts_first_audio"] == pytest.approx(200, abs=TOLERANCE_MS), r
         assert sum(st.values()) == pytest.approx(r["total_ms"], abs=4)
         assert r["total_ms"] > 200 + 250 + 450 + 200 - TOLERANCE_MS            # the wait the stand-ins add up to
+
+
+# ================================================================ live mode: Kairo's address, the call, the setup
+
+@pytest.mark.parametrize("url,ok", [
+    ("http://127.0.0.1:8000", True), ("http://localhost:8000/", True), ("http://[::1]:8000", True),
+    ("https://kairo-home.tail1234.ts.net", True),
+    ("http://192.168.1.20:8000", False), ("https://example.com", False), ("http://kairo-home.tail1234.ts.net", False),
+    ("https://kairo-home.tail1234.ts.net:8443", False), ("https://me@kairo-home.tail1234.ts.net", False),
+    ("http://127.0.0.1:8000/api/rtc", False), ("ftp://127.0.0.1", False), ("https://evil.ts.net.example.com", False),
+    ("https://ts.net", False), ("", False)])
+def test_the_harness_calls_only_kairos_own_address(url, ok):
+    if ok:
+        assert bv.check_url(url).startswith(url.split("/")[0])
+    else:
+        with pytest.raises(bv.BenchError, match="not Kairo's own address"):
+            bv.check_url(url)
+
+
+def _scope(client="127.0.0.1", host="127.0.0.1:8000", **headers):
+    return {"type": "http", "path": "/api/rtc/offer", "client": (client, 50000), "headers": [
+        (b"host", host.encode()), *((k.replace("_", "-").encode(), v.encode()) for k, v in headers.items())]}
+
+
+def test_on_the_pc_itself_the_harness_is_the_owner_with_no_token_and_a_forged_proxy_header_is_not():
+    """The least privilege that already exists (main.owner_request / is_local_request): a caller on 127.0.0.1 that
+    names 127.0.0.1 as its Host and was not forwarded by tailscale serve. No bench token, no new door."""
+    from starlette.requests import HTTPConnection
+
+    from app.main import OwnerOnly, owner_request
+
+    def owner(**kw):
+        return owner_request(HTTPConnection(_scope(**kw)), None)
+    assert owner() is True and owner(host="localhost:8000") is True
+    assert owner(x_forwarded_for="100.64.1.2") is False                    # came through the proxy: not "on the PC itself"
+    assert owner(client="192.168.1.20") is False                           # another machine, no Tailscale login
+    assert owner(host="kairo-home.tail1234.ts.net") is False               # loopback but not by its own address and no login
+
+    async def asgi(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def status(scope):
+        out = []
+
+        async def send(msg):
+            out.append(msg)
+        await OwnerOnly(asgi, Path("/nonexistent"))(scope, None, send)
+        return out[0]["status"]
+    assert asyncio.run(status(_scope())) == 200 and asyncio.run(status(_scope(client="192.168.1.20"))) == 403
+
+
+def _kairo(handler):
+    return bv.Kairo("http://127.0.0.1:8000", transport=httpx.MockTransport(handler))
+
+
+def test_kairo_refusing_or_not_answering_is_said_in_plain_words():
+    async def go():
+        k = _kairo(lambda req: httpx.Response(403, json={"detail": "Kairo answers only its owner."}))
+        with pytest.raises(bv.BenchError, match="only its owner"):
+            await k.get("/health")
+
+        def down(req):
+            raise httpx.ConnectError("refused")
+        with pytest.raises(bv.BenchError, match="isn't answering at http://127.0.0.1:8000"):
+            await _kairo(down).get("/health")
+        k = _kairo(lambda req: httpx.Response(409, json={"detail": "no_tailnet"}))
+        with pytest.raises(bv.BenchError, match="Tailscale is down"):
+            await k.offer("v=0", "offer")
+        seen = []
+
+        def ok(req):
+            seen.append((req.method, req.url.path, json.loads(req.content)))
+            return httpx.Response(200, json={"sdp": "v=0 answer", "type": "answer", "path": "call"})
+        assert await _kairo(ok).offer("v=0", "offer") == {"sdp": "v=0 answer", "type": "answer", "path": "call"}
+        assert seen == [("POST", "/api/rtc/offer", {"sdp": "v=0", "type": "offer", "path": "call"})]      # the line with the speaker check
+    asyncio.run(go())
+
+
+def _answers(rtc=None, calls=(), speaker=None):
+    def handler(req):
+        body = {"/health": {"status": "ok", "version": "2026.10.23.0600-abc1234"}, "/api/rtc": rtc or {"available": True, "reason": None},
+                "/api/voice/calls": list(calls), "/api/voice/devices": {"components": {}},
+                "/api/voice/speaker": speaker or {"check": False, "why_off": "until you teach Kairo your voice"}}
+        return httpx.Response(200, json=body[req.url.path])
+    return handler
+
+
+def test_the_harness_looks_before_it_calls_and_never_hangs_up_a_call_that_is_under_way():
+    now = _dt.datetime(2026, 10, 23, 12, 0, tzinfo=_dt.timezone.utc)
+
+    def call(status, hours_ago):
+        return {"id": 1, "status": status, "created_at": (now - _dt.timedelta(hours=hours_ago)).isoformat()}
+
+    async def go():
+        info = await bv.preflight(_kairo(_answers()), now=now)
+        assert info["health"]["version"] == "2026.10.23.0600-abc1234" and info["speaker"]["check"] is False
+        with pytest.raises(bv.BenchError, match="no_tailnet|Tailscale is down"):
+            await bv.preflight(_kairo(_answers(rtc={"available": False, "reason": "no_tailnet"})), now=now)
+        with pytest.raises(bv.BenchError, match="would replace it"):
+            await bv.preflight(_kairo(_answers(calls=[call("answered", 0.2)])), now=now)
+        await bv.preflight(_kairo(_answers(calls=[call("answered", 0.2)])), force=True, now=now)
+        await bv.preflight(_kairo(_answers(calls=[call("answered", 5), call("ended", 0.1)])), now=now)      # stale, or over
+    asyncio.run(go())
+
+
+def test_the_setup_of_the_measured_kairo_comes_from_its_own_device_report():
+    devices = {"components": {"whisper": {"device": "cuda", "model": "large-v3-turbo", "loaded": True},
+                              "kokoro": {"device": "cuda", "model": "kokoro-v1.0.fp16.onnx"},
+                              "piper": {"device": "cpu", "model": "de_DE-thorsten-medium"},
+                              "voice_model": {"model": "lfm2.5-2.6b", "loaded": True, "state": "ready"}}}
+    c = bv.config_info(devices)
+    assert c["stt_model"] == "large-v3-turbo" and c["stt_compute_type"] == "float16" and c["llm_model"] == "lfm2.5-2.6b"
+    assert c["tts_en"].startswith("kokoro kokoro-v1.0.fp16.onnx (") and "cuda" in c["tts_en"] and "de_DE-thorsten-medium" in c["tts_de"]
+    assert c["vad_stop_s"] == 0.2 and set(c) == bv.CONFIG_KEYS
+    cpu = bv.config_info({"components": {"whisper": {"device": "cpu", "model": "small"}, "voice_model": {"model": "x", "loaded": False}}})
+    assert cpu["stt_compute_type"] == "int8" and cpu["llm_model"] is None
+    unknown = bv.config_info(None)
+    assert unknown["stt_model"] == "unknown" and unknown["stt_compute_type"] == "unknown" and set(unknown) == bv.CONFIG_KEYS
+
+
+def test_the_machine_and_the_version_are_recorded():
+    m = bv.machine_info()
+    assert set(m) == bv.MACHINE_KEYS and m["cpu"] and isinstance(m["cpu"], str) and (m["ram_gb"] is None or m["ram_gb"] > 0.5)
+    assert m["ram_gb"] is not None, "RAM must be readable on Windows and Linux (the CI runs both)"
+    card = bv.machine_info({"name": "NVIDIA GeForce RTX 3060", "total_mb": 12288}, local=False)
+    assert card == {"gpu": "NVIDIA GeForce RTX 3060", "vram_gb": 12.0, "ram_gb": None, "cpu": "another machine (not reported)"}
+    assert bv.version_info("2026.10.23.0600-abc1234") == ("2026.10.23.0600-abc1234", "abc1234")
+    assert bv.version_info("2026.10.23.0600-abc1234-dirty")[1] == "abc1234"
+    version, sha = bv.version_info()
+    assert version and sha

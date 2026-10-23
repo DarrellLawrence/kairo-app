@@ -8,7 +8,7 @@ audible at the client (RMS >= 0.01 like the phone's "playing" mark). The stages 
 numbers for that turn (the data channel's "timing" event, the same `server` dict the phone sends to
 app/turns.py, which turns.steps() turns into steps), joined by turn number; what is left over is "network".
 
-    python -m app.bench_voice [--mock] [--url http://127.0.0.1:8000] [--clips N] [--out DIR]
+    python -m app.bench_voice [--mock] [--url http://127.0.0.1:8000] [--clips N] [--out DIR]   (in server/)
 
 Rates: false_interrupt_rate (a backchannel or noise clip is played while Kairo is talking: did it stop?),
 missed_turn_rate (a real utterance got no reply within 5 s), speaker_false_accept_rate (an other_speaker
@@ -29,11 +29,23 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from . import turns
+import httpx
+
+from . import gpu, outbound, turns, versions
 from .bench_corpus import ANSWERED, PROBES
 from .latency import pct
+from .settings import REPO_ROOT
+from .voice import KOKORO_MODEL, KOKORO_VOICE, PIPER_DE
+from .voicertc import TURN_MAX_SILENCE_S, VAD_STOP_S
 
 SCHEMA = 1
 TARGET_P95_MS = 1000
@@ -277,3 +289,189 @@ def _fmt(v) -> str:
 
 def _pc(v) -> str:
     return "n/a" if v is None else f"{v * 100:.0f}%"
+
+
+# ---------------------------------------------------------------- Kairo's own address
+
+CALL_BLOCKS = {"not_installed": "the voice packages (Pipecat, aiortc) are not installed on that Kairo",
+               "voice_missing": "speech recognition is not installed there (run Update Kairo)",
+               "no_tailnet": "Tailscale is down on that PC: a call over WebRTC needs its tailnet address"}
+CALL_FRESH_H = 3                                         # an "answered" call that never ended counts for 3 hours (voice/calls.py)
+MOCK_CLIPS = 12                                          # a mock run is a quick check: two clips of each kind
+
+
+def check_url(url: str) -> str:
+    """The base address to call: Kairo on this machine (http://127.0.0.1:<port>), or Kairo's own tailnet address
+    (https://<name>.ts.net). Nothing else: the harness never calls a host that isn't Kairo's."""
+    bad = BenchError(f"{url!r} is not Kairo's own address: use http://127.0.0.1:<port> on the PC itself, or its https://<name>.ts.net address")
+    parts = urlsplit(url.strip())
+    try:
+        port = parts.port
+    except ValueError:
+        raise bad from None
+    host = (parts.hostname or "").lower()
+    if parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise bad
+    if not ((parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1"))
+            or (parts.scheme == "https" and port in (None, 443) and outbound.tailnet_url_ok(f"https://{host}"))):
+        raise bad
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def is_local(base: str) -> bool:
+    return (urlsplit(base).hostname or "") in ("127.0.0.1", "localhost", "::1")
+
+
+class Kairo:
+    """Kairo's HTTP API, called the way the owner's phone would. On the PC itself (127.0.0.1) the caller is the
+    owner already (main.is_local_request: loopback, loopback Host, nothing forwarded): no token, no setting, no
+    new door. From another machine only through `tailscale serve`, as the owner's signed-in Tailscale account."""
+
+    def __init__(self, base: str, transport=None) -> None:
+        self.base = base
+        self.http = httpx.AsyncClient(base_url=base, timeout=20, transport=transport)
+
+    async def close(self) -> None:
+        await self.http.aclose()
+
+    async def request(self, method: str, path: str, **kw) -> httpx.Response:
+        try:
+            r = await self.http.request(method, path, **kw)
+        except httpx.TransportError as exc:
+            raise BenchError(f"Kairo isn't answering at {self.base} ({type(exc).__name__}): start it, or give --url") from exc
+        if r.status_code == 403:
+            raise BenchError("Kairo answers only its owner: run the harness on the PC itself with --url http://127.0.0.1:<port> "
+                             "(this machine's own address needs no token)")
+        return r
+
+    async def get(self, path: str):
+        r = await self.request("GET", path)
+        try:
+            return r.json() if r.status_code == 200 else None
+        except ValueError:
+            return None
+
+    async def offer(self, sdp: str, kind: str) -> dict:
+        """The call: the fake phone's offer in, Kairo's answer out. path "call": the line with the speaker check."""
+        r = await self.request("POST", "/api/rtc/offer", json={"sdp": sdp, "type": kind, "path": "call"})
+        if r.status_code == 409:
+            try:
+                why = r.json().get("detail")
+            except (ValueError, AttributeError):
+                why = None
+            raise BenchError("Kairo can't take a call over WebRTC now: " + CALL_BLOCKS.get(why, str(why)))
+        if r.status_code != 200:
+            raise BenchError(f"Kairo refused the call: HTTP {r.status_code} {r.text[:200]}")
+        return r.json()
+
+
+async def preflight(kairo: Kairo, *, force: bool = False, now: dt.datetime | None = None) -> dict:
+    """Is Kairo there, can it take a WebRTC call, is nobody on a call (a new call replaces the old one: the
+    owner's call would be hung up). {"health", "devices", "speaker"} for the report."""
+    health = await kairo.get("/health")
+    if not isinstance(health, dict):
+        raise BenchError(f"{kairo.base}/health did not answer: is that Kairo, and is it running?")
+    rtc = await kairo.get("/api/rtc") or {}
+    if not rtc.get("available"):
+        raise BenchError(CALL_BLOCKS.get(rtc.get("reason"), f"Kairo can't take a call over WebRTC: {rtc.get('reason') or 'unknown'}"))
+    since = (now or dt.datetime.now(dt.timezone.utc)) - dt.timedelta(hours=CALL_FRESH_H)
+    live = []
+    for c in await kairo.get("/api/voice/calls") or []:
+        try:
+            fresh = dt.datetime.fromisoformat(str(c.get("created_at"))) > since
+        except (ValueError, AttributeError):
+            fresh = False
+        if fresh and c.get("status") in ("ringing", "answered"):
+            live.append(c)
+    if live and not force:
+        raise BenchError("a call looks to be under way on Kairo: the harness's call would replace it and hang it up. Hang up first, "
+                         "or pass --force if that call is stale")
+    return {"health": health, "devices": await kairo.get("/api/voice/devices") or {},
+            "speaker": await kairo.get("/api/voice/speaker") or {}}
+
+
+# ---------------------------------------------------------------- what the run is made on
+
+def _ram_gb() -> float | None:
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                            ("avail", ctypes.c_ulonglong), ("page_total", ctypes.c_ulonglong), ("page_avail", ctypes.c_ulonglong),
+                            ("virt_total", ctypes.c_ulonglong), ("virt_avail", ctypes.c_ulonglong), ("ext", ctypes.c_ulonglong)]
+            m = MemoryStatus()
+            m.length = ctypes.sizeof(MemoryStatus)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return round(m.total / 2 ** 30, 1) or None
+        return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30, 1)
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def _cpu_name() -> str:
+    name = ""
+    try:
+        if sys.platform == "win32":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+                name = winreg.QueryValueEx(k, "ProcessorNameString")[0]
+        else:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.lower().startswith("model name"):
+                    name = line.split(":", 1)[1]
+                    break
+    except (OSError, ImportError, IndexError):
+        pass
+    return " ".join((name or platform.processor() or platform.machine() or "unknown").split())
+
+
+def machine_info(card: dict | None = None, *, local: bool = True) -> dict:
+    """{gpu, vram_gb, ram_gb, cpu} of this machine (nvidia-smi for the card). card: the card as a Kairo on another
+    machine reports it (gpu.summary(), in /api/voice/devices); local=False: the rest isn't known."""
+    card = gpu.summary() if card is None and local else card
+    return {"gpu": (card or {}).get("name") or None,
+            "vram_gb": round(card["total_mb"] / 1024, 1) if card and card.get("total_mb") else None,
+            "ram_gb": _ram_gb() if local else None, "cpu": _cpu_name() if local else "another machine (not reported)"}
+
+
+TURN_ANALYZER = f"smart-turn-v3 (pipecat), pause at most {TURN_MAX_SILENCE_S} s"
+
+
+def config_info(devices: dict | None) -> dict:
+    """The voice setup of the Kairo that was measured, from its own /api/voice/devices (where each part runs)."""
+    comps = (devices or {}).get("components") or {}
+    whisper, kokoro, piper, vm = (comps.get(k) or {} for k in ("whisper", "kokoro", "piper", "voice_model"))
+    return {"vad_stop_s": VAD_STOP_S, "turn_analyzer": TURN_ANALYZER,
+            "stt_model": str(whisper.get("model") or "unknown"),
+            "stt_compute_type": {"cuda": "float16", "cpu": "int8"}.get(whisper.get("device"), "unknown"),   # voice.Voice._make_stt
+            "llm_model": str(vm["model"]) if vm.get("loaded") and vm.get("model") else None,
+            "tts_en": f"kokoro {kokoro.get('model') or KOKORO_MODEL} ({KOKORO_VOICE}, {kokoro.get('device') or 'not loaded'})",
+            "tts_de": f"piper {piper.get('model') or PIPER_DE} ({piper.get('device') or 'cpu'})"}
+
+
+def mock_config(delays) -> dict:
+    def waits(s: float) -> str:
+        return f"mock, {round(s * 1000)} ms"
+    return {"vad_stop_s": VAD_STOP_S, "turn_analyzer": TURN_ANALYZER, "stt_model": waits(delays.stt_s), "stt_compute_type": "none",
+            "llm_model": None, "tts_en": waits(delays.tts_s), "tts_de": waits(delays.tts_s)}
+
+
+def version_info(server_version: str | None = None) -> tuple[str, str]:
+    """(version, git sha) of what was measured: the running Kairo's version (yyyy.MM.dd.HHmm-<sha>), else this checkout's."""
+    version = server_version or versions.running() or "dev"
+    m = re.search(r"-([0-9a-f]{7,40})(?:-dirty)?$", version)
+    sha = m.group(1) if m else None
+    if not sha:
+        try:
+            sha = json.loads((REPO_ROOT / "release.json").read_text(encoding="utf-8-sig")).get("git_sha")
+        except (OSError, ValueError, AttributeError):
+            sha = None
+    if not sha and shutil.which("git"):
+        try:
+            out = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, timeout=5)
+            sha = out.stdout.strip() if out.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            sha = None
+    return version, sha or "unknown"
