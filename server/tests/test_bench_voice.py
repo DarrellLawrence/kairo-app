@@ -1,6 +1,6 @@
 """The voice latency harness (app/bench_voice.py): the results schema, the stage arithmetic, the percentiles
-and rates, the results folder, and the fake phone (app/bench_phone.py). What needs the call packages, Pipecat and
-aiortc, skips without them like test_voice_rtc.py."""
+and rates, the results folder, the fake phone (app/bench_phone.py) and a whole run against the mock call. What needs
+the call packages, Pipecat and aiortc, skips without them like test_voice_rtc.py."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from app import bench_corpus as bc
 from app import bench_voice as bv
 from app.bench_corpus import Clip
 from app.latency import pct
@@ -251,3 +252,115 @@ def test_the_fake_phone_asks_no_stun_server_and_the_loopback_rule_is_put_back():
     with ice_rules(loopback=True):
         assert "127.0.0.1" in aioice.ice.get_host_addresses(True, False) and voicertc._allow_loopback is True
     assert aioice.ice.get_host_addresses is before and voicertc._allow_loopback is flag
+
+
+# ---------------------------------------------------------------- a whole mock run
+
+PLAN = ["q_en_01", "q_en_02", "c_en_02", "bc_en_01", "noise_typing", "bc_long", "os_en_01", "os_en_02", "os_de_01"]
+# a backchannel long enough (1.2 s of speech) for the VAD to hear it every time; the manifest's "Mm-hmm." is too short to be sure
+EXTRA = [bc.Clip("bc_long", "en", "Okay yes I see what you mean there.", "backchannel")]
+DEAF = "c_en_02"                    # the stand-in Whisper hears nothing in this one: a missed turn
+STT, LLM, TTS = 0.12, 0.15, 0.08
+TOLERANCE_MS = 45                   # a stage is found within this of the wait built into the stand-in (Windows timers: 16 ms)
+
+
+def _bench(ids, delays=None, deaf=(), miss_after_s=5.0):
+    """Run the fake phone against the mock pipeline; (records, world, notes, where each probe played)."""
+    from app import bench_phone as bp
+    clips = {c.id: c for c in [*bc.load_manifest(), *EXTRA]}
+    world = bp.MockWorld(delays=delays or bp.MockDelays(STT, LLM, TTS), deaf=set(deaf))
+    notes: list[str] = []
+    windows: list = []
+
+    async def go():
+        pipe, phone = bp.MockPipeline(world), bp.Phone(still_s=0.6)
+        with bp.ice_rules(loopback=True):
+            try:
+                await phone.connect(pipe.signal)
+                bench = bp.Bench(phone, bp.mock_clips([clips[i] for i in ids]), speaker_check=True, warmup=1, before=world.before,
+                                 notes=notes, miss_after_s=miss_after_s)
+                try:
+                    return await bench.run()
+                finally:
+                    windows.extend(bench.probe_windows)
+            finally:
+                await phone.close()
+                await pipe.stop()
+    return asyncio.run(go()), world, notes, windows
+
+
+@pytest.fixture(scope="module")
+def mock_run():
+    _needs_pipecat()
+    return _bench(PLAN, deaf=(DEAF,))
+
+
+def test_a_mock_run_finds_the_delays_built_into_the_stand_ins(mock_run):
+    records, world, *_ = mock_run
+    heard = [r for r in records if r["total_ms"] is not None]
+    assert [r["clip"] for r in heard] == ["q_en_01", "q_en_02"]
+    for r in heard:
+        st = r["stages_ms"]
+        assert st["vad_stop"] == 200                                              # the VAD's pause, as built into voicertc
+        assert st["stt_final"] == pytest.approx(STT * 1000, abs=TOLERANCE_MS), r
+        assert st["llm_first_token"] == pytest.approx(LLM * 1000, abs=TOLERANCE_MS), r
+        assert st["tts_first_audio"] == pytest.approx(TTS * 1000, abs=TOLERANCE_MS), r
+        assert 0 <= st["turn_decision"] < 800 and 0 <= st["network"] < 600, r
+        assert sum(st.values()) == pytest.approx(r["total_ms"], abs=4), r         # the stages explain the whole wait
+        assert r["total_ms"] >= 200 + STT * 1000 + LLM * 1000 + TTS * 1000       # and it can't be quicker than what was built in
+        assert r["speaker_accept"] is True and r["interrupted"] is None and r["missed"] is False
+
+
+def test_a_turn_nobody_answered_is_a_missed_turn_and_the_rate_says_so(mock_run):
+    records, *_ = mock_run
+    gone = next(r for r in records if r["clip"] == DEAF)
+    assert gone["missed"] is True and gone["total_ms"] is None and set(gone["stages_ms"].values()) == {None}
+    assert bv.summarize(records)["missed_turn_rate"] == pytest.approx(1 / 3, abs=1e-4)      # 1 of the 3 real utterances
+
+
+def test_false_interrupts_match_what_the_pipeline_really_did(mock_run):
+    records, world, _, windows = mock_run
+    probes = [r for r in records if r["kind"] in ("backchannel", "noise")]
+    assert sorted(r["clip"] for r in probes) == ["bc_en_01", "bc_long", "noise_typing"]
+    assert all(r["interrupted"] is not None for r in probes), probes                   # Kairo was talking each time
+    for r in probes:                                                                  # the PC's own record of cutting its answer
+        start, end = next((s, e) for clip_id, s, e in windows if clip_id == r["clip"])
+        cut = any(mid and start - 0.05 <= t <= end + 2.0 for t, _, mid in world.interrupts)
+        assert r["interrupted"] is cut, (r, world.interrupts, windows)
+    assert next(r for r in probes if r["clip"] == "noise_typing")["interrupted"] is False        # a noise isn't speech
+    assert next(r for r in probes if r["clip"] == "bc_long")["interrupted"] is True              # speech is, and cuts the answer
+    expected = sum(r["interrupted"] for r in probes) / 3
+    assert bv.summarize(records)["false_interrupt_rate"] == pytest.approx(expected, abs=1e-4)
+
+
+def test_the_speaker_check_verdicts_are_read_from_the_data_channel(mock_run):
+    records, world, *_ = mock_run
+    strangers = [r for r in records if r["kind"] == "other_speaker"]
+    assert [(r["clip"], r["speaker_accept"]) for r in strangers] == world.verdicts == [
+        ("os_en_01", True), ("os_en_02", False), ("os_de_01", False)]              # the stand-in admits the 1st of every 3
+    assert bv.summarize(records)["speaker_false_accept_rate"] == pytest.approx(1 / 3, abs=1e-4)
+
+
+def test_a_mock_run_makes_a_valid_result_and_its_percentiles_are_right(mock_run):
+    records, *_ = mock_run
+    result = bv.build_result(records, mode="mock", version="x", git_sha="y", machine=MACHINE, config=CONFIG)
+    assert bv.validate(result) == []
+    totals = [r["total_ms"] for r in records if r["total_ms"] is not None]
+    s = result["summary"]
+    assert s["n"] == len(totals) == 2 and s["p50_ms"] == pct(totals, .5) and s["p95_ms"] == pct(totals, .95)
+    assert s["pass"] is False                                                      # the missed turn fails it
+    assert {k: v for k, v in s["by_stage"]["stt_final"].items()}["p50"] == pytest.approx(STT * 1000, abs=TOLERANCE_MS)
+
+
+def test_other_delays_are_found_just_as_well_so_the_numbers_are_measured_not_remembered():
+    _needs_pipecat()
+    from app import bench_phone as bp
+    slow, *_ = _bench(["q_en_02", "c_en_01"], bp.MockDelays(0.25, 0.45, 0.2))
+    assert len(slow) == 2
+    for r in slow:
+        st = r["stages_ms"]
+        assert st["stt_final"] == pytest.approx(250, abs=TOLERANCE_MS), r
+        assert st["llm_first_token"] == pytest.approx(450, abs=TOLERANCE_MS), r
+        assert st["tts_first_audio"] == pytest.approx(200, abs=TOLERANCE_MS), r
+        assert sum(st.values()) == pytest.approx(r["total_ms"], abs=4)
+        assert r["total_ms"] > 200 + 250 + 450 + 200 - TOLERANCE_MS            # the wait the stand-ins add up to

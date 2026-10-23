@@ -1,4 +1,4 @@
-"""The fake phone of the voice latency harness (app/bench_voice.py).
+"""The fake phone of the voice latency harness (app/bench_voice.py), and the mock call it can talk to.
 
 Phone: an aiortc peer that does what the iPhone PWA does (web/src/rtclink.js): a microphone track that plays the
 corpus clips at real time (20 ms frames at 48 kHz, silence between), the same data channel ("kairo", with the
@@ -15,6 +15,11 @@ How "interrupted" is decided, from the phone's side only: Kairo was speaking whe
 reply frames in the half second before), the PC's VAD heard it (a "speech" event on the data channel, which
 is what makes Pipecat cut the answer), and the reply then went silent for 0.5 s or more. All three are needed:
 a reply that ends by itself at that moment has no "speech" event, a noise the VAD ignores has none either.
+
+MockPipeline: the real call pipeline (voicertc.build_call: Silero VAD, Smart Turn v3, Pipecat) in this process, with
+the models faked by stand-ins that wait fixed, known times (MockDelays): speech to text, the voice model's
+first word, the voice. The stand-in "speech to text" is told which clip is playing (MockWorld.current), the
+stand-in speaker check admits every third stranger. The harness's tests rest on those known numbers.
 """
 
 from __future__ import annotations
@@ -23,13 +28,18 @@ import asyncio
 import contextlib
 import fractions
 import functools
+import io
 import json
 import logging
 import time
+import wave
 from collections import deque
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Awaitable, Callable
 
-from .bench_corpus import ANSWERED, PROBES, Rendered
+from . import bench_corpus as bc
+from .bench_corpus import ANSWERED, PROBES, Clip, Rendered
 from .bench_voice import MISSED_AFTER_S, BenchError, stages_from_server, turn_record
 
 log = logging.getLogger("kairo.bench")
@@ -345,6 +355,143 @@ class Bench:
         elif what is not None or transcript is not None:
             self._note("the speaker check is off or has no voiceprint: other_speaker clips can't be labelled")
         self.records.append(turn_record(rc.clip, speaker_accept=accept))
+
+
+# ---------------------------------------------------------------- the mock call
+
+@dataclass
+class MockDelays:
+    """What the stand-in models wait, in seconds: the numbers a run has to find again."""
+    stt_s: float = 0.12
+    llm_s: float = 0.15
+    tts_s: float = 0.08
+
+
+@dataclass
+class MockWorld:
+    """What the stand-ins know that the real models would hear: which clip is playing, and what happened."""
+    delays: MockDelays = field(default_factory=MockDelays)
+    current: Clip | None = None
+    long_reply: bool = False
+    stranger_every: int = 3                                  # the stand-in speaker check admits every 3rd stranger
+    deaf: set = field(default_factory=set)                   # clip ids the stand-in speech to text hears nothing in
+    interrupts: list = field(default_factory=list)           # (monotonic, turn number, cut mid-speech?) each time the PC stops its answer
+    verdicts: list = field(default_factory=list)             # (clip id, admitted) for each stranger, in the order they came
+    answers: list = field(default_factory=list)              # (turn number, text)
+    audio_until: float = 0.0                                 # when the voice's queued audio would be played out (monotonic)
+
+    def before(self, rc: Rendered, long_reply: bool) -> None:
+        self.current, self.long_reply = rc.clip, long_reply
+
+
+def _tone_wav(seconds: float, rate: int = 24000) -> bytes:
+    import numpy as np
+    t = np.arange(int(seconds * rate)) / rate
+    pcm = (8000 * np.sin(2 * np.pi * 440 * t)).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+class MockVoice:
+    """Whisper and Kairo's voice as stand-ins (voicertc's `voice`): fixed waits, fixed content."""
+
+    def __init__(self, world: MockWorld) -> None:
+        self.world = world
+
+    def transcribe_pcm(self, pcm: bytes, language=None):
+        time.sleep(self.world.delays.stt_s)
+        clip = self.world.current
+        text = "" if clip is None or clip.kind == "noise" or clip.id in self.world.deaf else clip.text
+        return SimpleNamespace(text=text, language=clip.lang if clip else "en", seconds=len(pcm) / 32000)
+
+    def speak(self, text: str, language=None):
+        time.sleep(self.world.delays.tts_s)
+        seconds = 0.25 + 0.07 * len(text.split())
+        self.world.audio_until = max(self.world.audio_until, time.monotonic()) + seconds
+        return _tone_wav(seconds), language or "en"
+
+
+SHORT_REPLY = ("Right, I have that for you.",)
+LONG_REPLY = tuple(f"Here is part {i} of a longer answer." for i in range(1, 5))        # about 3.5 s of voice
+
+
+class MockPipeline:
+    """The call pipeline (voicertc.build_call) with MockVoice, a stand-in voice model and a stand-in speaker check."""
+
+    def __init__(self, world: MockWorld) -> None:
+        self.world, self.conn, self.call, self.run = world, None, None, None
+
+    async def signal(self, sdp: str, kind: str) -> dict:
+        from . import voicertc
+        w = self.world
+        self.conn = await voicertc.connect(sdp, kind, allow_loopback=True)
+
+        async def answer(text, language, number, speaker):
+            w.answers.append((number, text))
+            await asyncio.sleep(w.delays.llm_s)
+            for line in (LONG_REPLY if w.long_reply else SHORT_REPLY):
+                speaker.feed(line + " ")
+            speaker.finish()
+            return {"route": "talk"}
+
+        async def gate() -> bool:
+            clip = w.current
+            if clip is None or clip.kind != "other_speaker":
+                return True
+            known = dict(w.verdicts)                         # one verdict per clip, even if the PC heard it as two turns
+            admitted = known[clip.id] if clip.id in known else len(known) % w.stranger_every == 0
+            if clip.id not in known:
+                w.verdicts.append((clip.id, admitted))
+            if not admitted:
+                self.conn.send_app_message({"type": "ignored", "reason": "not_you", "score": 0.1})
+            return admitted
+
+        class NoCache(voicertc.OpenerCache):
+            """Short lines would be played from the cache after the first time: the voice's wait must show every time."""
+
+            def get(self, text, lang):
+                return None
+
+            def put(self, *args, **kwargs):
+                return None
+
+        def interrupt(number: int) -> None:
+            """The PC calls this whenever the owner starts talking after an answer began (also long after it
+            ended); it is a real cut only while that answer's voice was still being played."""
+            now = time.monotonic()
+            w.interrupts.append((now, number, now < w.audio_until - 0.3))
+            w.audio_until = 0.0
+
+        self.call = voicertc.build_call(self.conn, voice=MockVoice(w), answer=answer, openers=NoCache(lambda t, lang: (b"", 24000)),
+                                        interrupt=interrupt, gate=gate)
+        self.run = asyncio.get_running_loop().create_task(self.call.run())
+        ans = self.conn.get_answer()
+        return {"sdp": ans["sdp"], "type": ans["type"]}
+
+    async def stop(self) -> None:
+        if self.call is not None:
+            with contextlib.suppress(Exception):
+                await self.call.stop()
+        if self.run is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.gather(self.run, return_exceptions=True), 10)
+
+
+def mock_clips(clips: list[Clip]) -> list[Rendered]:
+    """The corpus as speech-like audio made on the spot (bench_corpus.synth_speech / synth_noise)."""
+    out = []
+    for c in clips:
+        if bc.recipe_of(c):
+            x, rate = bc.synth_noise(c), 24000
+        else:
+            x, rate = bc.synth_speech(c.text), 16000
+        out.append(Rendered(c, x, rate, bc.speech_end_s(x, rate), "synthetic", "synthetic"))
+    return out
 
 
 # ---------------------------------------------------------------- the network rules
