@@ -29,3 +29,9 @@ vault/
 .envrc
 .env-*
 capture-token*
+
+# The voice latency harness (bench/): its results and rendered clips live in the data folder; a run that
+# writes into a checkout leaves nothing in git but the README.
+bench/results/*
+!bench/results/.gitkeep
+!bench/results/README.md

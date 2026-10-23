@@ -233,7 +233,7 @@ jobs:
           path: voice-models
           key: voice-models-v1
       - run: pip install -r server/requirements-dev.txt -r server/requirements-voice.txt
-      - run: python -m pytest -o addopts="" tests/test_voice.py tests/test_voicelab.py tests/test_voice_rtc.py tests/test_speaker.py tests/test_outbound.py -s
+      - run: python -m pytest -o addopts="" tests/test_voice.py tests/test_voicelab.py tests/test_voice_rtc.py tests/test_speaker.py tests/test_outbound.py tests/test_bench_corpus.py tests/test_bench_voice.py -s
         working-directory: server
 
   # Owner's report 2026-10-17: the voice folder exactly as the installer builds it on kairo-home (Kairo.psm1
@@ -275,7 +275,7 @@ jobs:
             ForEach-Object { ($_.Line -split '\s+')[0] } | Set-Content rtc-req.txt
           Get-Content rtc-req.txt
           pip install -r server/requirements-dev.txt -r rtc-req.txt
-      - run: python -m pytest -o addopts="" tests/test_voice_rtc.py tests/test_speaker.py tests/test_outbound.py -s
+      - run: python -m pytest -o addopts="" tests/test_voice_rtc.py tests/test_speaker.py tests/test_outbound.py tests/test_bench_corpus.py tests/test_bench_voice.py -s
         working-directory: server
 
   # v8 C6: the real embedding model (Qwen3-Embedding, CPU int8) in its own process, its packages in a

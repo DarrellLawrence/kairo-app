@@ -436,8 +436,11 @@ class Voice:
             self._piper = PiperVoice.load(model)
         return self._piper
 
-    def speak(self, text: str, language: str | None = None) -> tuple[bytes, str]:
-        """WAV bytes and the language used. Long texts are cut at a sentence end."""
+    def speak(self, text: str, language: str | None = None, *, voice: str | None = None,
+              speed: float | None = None) -> tuple[bytes, str]:
+        """WAV bytes and the language used. Long texts are cut at a sentence end. voice / speed: a Kokoro
+        voice other than KOKORO_VOICE, a speaking rate (1.0 = as made); the voice latency harness renders its
+        clips with several (app/bench_corpus.py). Calls and replies never pass them."""
         text = _clean_for_speech(text)
         if not text:
             raise VoiceError("nothing to say")
@@ -445,17 +448,21 @@ class Voice:
         with self._lock:
             if lang == "de":
                 try:
-                    voice = self._load_piper()
+                    piper_voice = self._load_piper()
                 except NotInstalled:
                     lang = "en"   # better an English voice than none
             if lang != "de":
                 kokoro = self._load_kokoro()
         if lang == "de":
             buf = io.BytesIO()
+            config = None
+            if speed:
+                from piper import SynthesisConfig
+                config = SynthesisConfig(length_scale=1.0 / speed)
             with wave.open(buf, "wb") as w:
-                voice.synthesize_wav(text, w)
+                piper_voice.synthesize_wav(text, w, syn_config=config)
             return buf.getvalue(), "de"
-        samples, rate = kokoro.create(text, voice=KOKORO_VOICE, lang="en-us")
+        samples, rate = kokoro.create(text, voice=voice or KOKORO_VOICE, speed=speed or 1.0, lang="en-us")
         return to_wav(sound(samples), rate), "en"
 
     # ---------------------------------------------------------------- downloads (installer)
