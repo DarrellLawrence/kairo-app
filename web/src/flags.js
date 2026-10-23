@@ -14,6 +14,7 @@ export const DEFAULTS = {
   'g7.call_logs': true,
   'g7.no_aec_warning': true,
   'g7.listen_on_barge_in': true,
+  'g7.sound_check_rtc': true,
 }
 
 let known = null   // name -> on, from the PC's last list

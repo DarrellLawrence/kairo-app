@@ -43,6 +43,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g7.listen_on_barge_in": (True, "The call screen switches to 'Listening' when the PC says you talked over Kairo (or that its answer was cut off), "
                                      "not when the phone hears any sound. A cough or an 'mhm' no longer flips the screen while Kairo goes on talking. "
                                      "Off: the old way, any loud sound on the phone."),
+    "g7.sound_check_rtc": (True, "The sound check's call test starts the real call connection and has the PC say a line over it, instead of playing a "
+                                  "sound inside the app, so it proves what a call really sounds like. Off: the old test."),
 
     # -- G8 Windows
 
