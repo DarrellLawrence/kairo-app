@@ -429,6 +429,8 @@ def _edge_after(ch: str) -> str:
 def _word_regex(word: str) -> str:
     """One word of a term, in the folded alphabet. a, o, u (and the umlauts) may carry an e after them: the umlaut as
     a plain vowel (Muller), as the two-letter form (Mueller) or as the letter itself (folded to the two-letter form)."""
+    if any(c.isdigit() for c in word):                # numbers (phone, IBAN): any grouping, so a separator may sit anywhere
+        return _SEP.join(re.escape(fold(c)) for c in word)
     out: list[str] = []
     after_vowel = False
     for ch in word:
@@ -459,8 +461,8 @@ def _term_regex(raw: str) -> re.Pattern | None:
     digits = "".join(words)
     if digits.isdigit() and len(digits) >= 9 and words[0].startswith("0"):
         # a national number (0 ...) is also written with the country code (+41 ..., 0041 ...)
-        rest = _SEP.join(p for p in [re.escape(words[0][1:]), *map(re.escape, words[1:])] if p)
-        alts.append(r"(?:0|(?:\+|00)\d{1,3}[\W_]*0?)" + rest + _edge_after(words[-1][-1]))
+        rest = _SEP.join(re.escape(c) for c in digits[1:])
+        alts.append(r"(?:0|(?:\+|00)\d{1,3}[\W_]*(?:0[\W_]*)?)" + rest + _edge_after(words[-1][-1]))
     pattern = alts[0] if len(alts) == 1 else "(?:" + "|".join(alts) + ")"
     return re.compile(pattern)
 

@@ -906,6 +906,18 @@ def test_a_term_with_digits_matches_any_grouping_and_the_country_code(tmp_path):
     no_leak(out, PHONE, "5551234", "3199")
 
 
+def test_a_number_matches_when_its_digits_are_grouped_differently(tmp_path):
+    """The groups in the list are not the groups people write: any separators between any two digits."""
+    lines = ["call " + x for x in ("07 95 55 12 34", "0795 5512 34", "0 79 555 12 34", "+41 795 551 234",
+                                   "0041 7955 51234", "+41 (0)79 555 12 34")]
+    lines += ["IBAN CH44 3199 9123 000 88 9012", "IBAN C-H-4-4-3199912300088-9012"]
+    code, out = hit(tmp_path, "\n".join(lines) + "\n", terms=[PHONE, IBAN])
+    assert code == 1
+    for n in range(1, 9):
+        assert f"a.txt:{n}: personal term #{1 if n <= 6 else 2}" in out, (n, out)
+    no_leak(out, PHONE, "5551234", "3199")
+
+
 def test_numbers_keep_their_edges_against_other_digits_only(tmp_path):
     digits = PHONE.replace(" ", "")
     code, out = hit(tmp_path, "id 1" + digits + "\nid " + digits + "5\nref 12" + PHONE + "\n", terms=[PHONE])
