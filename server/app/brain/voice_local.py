@@ -62,9 +62,19 @@ ASK_KAIRO = {
 
 _CALL_TAGS = {"<|tool_call_start|>": "<|tool_call_end|>", "<tool_call>": "</tool_call>"}
 _STRAY = ("<|tool_call_end|>", "</tool_call>")
+# Gemma 4 (overnight build 2026-10-23, g3.gemma_markup): `<|tool_call>call:NAME{key:<|"|>text<|"|>}<tool_call|>`, and
+# `<|tool_response>` after a call (its chat template, llama.cpp b11292). On a turn where the tool is off (tool_choice
+# "none") llama-server leaves them in the words, so they have to come out here like the other models' markers.
+_GEMMA_CALL_TAGS = {"<|tool_call>": "<tool_call|>"}
+_GEMMA_STRAY = ("<tool_call|>", "<|tool_response>", "<tool_response|>")
+_GEMMA_QUOTE = '<|"|>'
+_GEMMA_CALL = re.compile(r"\s*call:([A-Za-z_]\w*)\s*\{(.*)\}\s*$", re.S)
+_GEMMA_KEY = re.compile(r"[\s,]*([A-Za-z_]\w*):")
+_GEMMA_LITERAL = re.compile(r"\s*(-?\d+(?:\.\d+)?|true|false|null)\s*(?=,|$)")
 _SPECIAL = re.compile(r"<\|[^<>|\s]{1,40}\|>")            # any other special token (<|im_end|>, ...)
 _MAYBE_SPECIAL = re.compile(r"<\|[^<>|\s]{0,40}\|?")      # could still become one: wait for more
-_CALL_NAME = re.compile(r"""\s*\[?\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(|\s*\[?\s*\{\s*"name"\s*:\s*"([^"]{1,80})\"""")
+_CALL_NAME = re.compile(r"""\s*\[?\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(|\s*\[?\s*\{\s*"name"\s*:\s*"([^"]{1,80})"|"""
+                        r"""\s*call:([A-Za-z_]\w*)\s*\{""")
 MAX_CALL_CHARS = 4000
 
 
@@ -97,6 +107,27 @@ def check_call(name: str, args, offered: dict) -> str | None:
     return None
 
 
+def _gemma_args(inner: str) -> dict | None:
+    """`key:<|"|>text<|"|>,key2:12` -> {key: text, key2: 12}; None when it cannot be read whole."""
+    args, pos = {}, 0
+    while pos < len(inner):
+        m = _GEMMA_KEY.match(inner, pos)
+        if not m:
+            return None if inner[pos:].strip(" ,\r\n\t") else args
+        key, pos = m.group(1), m.end()
+        if inner.startswith(_GEMMA_QUOTE, pos):
+            end = inner.find(_GEMMA_QUOTE, pos + len(_GEMMA_QUOTE))
+            if end < 0:
+                return None
+            args[key], pos = inner[pos + len(_GEMMA_QUOTE):end], end + len(_GEMMA_QUOTE)
+            continue
+        lit = _GEMMA_LITERAL.match(inner, pos)
+        if not lit:
+            return None
+        args[key], pos = json.loads(lit.group(1)), lit.end()
+    return args
+
+
 def _parse_body(body: str, offered: dict) -> list[tuple[str, dict | None]]:
     """[(name, args or None when unreadable)] from what was between the tags. Pythonic calls are read with
     ast (literals only: ast.literal_eval, never eval); JSON with json."""
@@ -121,6 +152,9 @@ def _parse_body(body: str, offered: dict) -> list[tuple[str, dict | None]]:
                     args = None
             out.append((str(d.get("name") or "?"), args if isinstance(args, dict) else None))
         return out
+    g = _GEMMA_CALL.match(b)
+    if g:
+        return [(g.group(1), _gemma_args(g.group(2)))]
     try:
         tree = ast.parse(b, mode="eval").body
     except (SyntaxError, ValueError):
@@ -151,8 +185,10 @@ class TextCalls:
     line can start), tool_call (complete and valid; arguments as a JSON string, like the OpenAI-style path).
     Invalid or not-offered calls are dropped without a word: only the tool's name and the reason are logged."""
 
-    def __init__(self, tools: list[dict] | None):
+    def __init__(self, tools: list[dict] | None, gemma: bool = True):
         self.offered = _offered(tools)
+        self.tags = {**_CALL_TAGS, **(_GEMMA_CALL_TAGS if gemma else {})}      # opener -> its end tag
+        self.stray = (*_STRAY, *(_GEMMA_STRAY if gemma else ()))               # a lone end tag is dropped
         self.buf = ""
         self.closer: str | None = None       # inside a call: the tag that ends it
         self.started = False                 # tool_start given for the call being written
@@ -182,15 +218,15 @@ class TextCalls:
                 self._text(self.buf[:i], out)
                 self.buf = self.buf[i:]
             rest = self.buf
-            opener = next((o for o in _CALL_TAGS if rest.startswith(o)), None)
+            opener = next((o for o in self.tags if rest.startswith(o)), None)
             if opener is not None:
-                self.closer, self.started, self.buf = _CALL_TAGS[opener], False, rest[len(opener):]
+                self.closer, self.started, self.buf = self.tags[opener], False, rest[len(opener):]
                 continue
-            stray = next((s for s in _STRAY if rest.startswith(s)), None)
+            stray = next((s for s in self.stray if rest.startswith(s)), None)
             if stray is not None:
                 self.buf = rest[len(stray):]
                 continue
-            if any(t.startswith(rest) for t in (*_CALL_TAGS, *_STRAY)):
+            if any(t.startswith(rest) for t in (*self.tags, *self.stray)):
                 return out                                      # could still be a tag: wait for more
             m = _SPECIAL.match(rest)
             if m:
@@ -206,7 +242,7 @@ class TextCalls:
         out = self.feed("")
         if self.closer is not None:                              # cut off before its end tag (max tokens)
             log.info("voice model: a tool call was dropped (%s: not finished)", self._name(self.buf))
-        elif self.buf and not any(t.startswith(self.buf) for t in (*_CALL_TAGS, *_STRAY)) \
+        elif self.buf and not any(t.startswith(self.buf) for t in (*self.tags, *self.stray)) \
                 and not _MAYBE_SPECIAL.fullmatch(self.buf):
             self._text(self.buf, out)
         self.buf, self.closer = "", None
@@ -218,13 +254,13 @@ class TextCalls:
 
     def _name(self, body: str) -> str:
         m = _CALL_NAME.match(body)
-        return _safe((m.group(1) or m.group(2)) if m else "?")
+        return _safe((m.group(1) or m.group(2) or m.group(3)) if m else "?")
 
     def _early_start(self, out: list[dict], body: str | None = None) -> None:
         if self.started:
             return
         m = _CALL_NAME.match(self.buf if body is None else body)
-        name = (m.group(1) or m.group(2)) if m else None
+        name = (m.group(1) or m.group(2) or m.group(3)) if m else None
         if name in self.offered:
             self.started = True
             out.append({"kind": "tool_start", "name": name})
@@ -416,12 +452,15 @@ class VoiceModel:
                 self._set("starting")          # busy or restarting; checked again next round
             return self.state
 
+    def take_options(self, got: dict) -> dict:
+        self.opts = {**DEFAULT_OPTIONS, **{k: bool(v) for k, v in (got or {}).items() if k in DEFAULT_OPTIONS}}
+        return self.opts
+
     def read_options(self) -> dict:
         """The owner's switches now (a failing reader keeps what was read before: the voice never waits on it)."""
         if self.options is not None:
             try:
-                got = self.options() or {}
-                self.opts = {**DEFAULT_OPTIONS, **{k: bool(v) for k, v in got.items() if k in DEFAULT_OPTIONS}}
+                self.take_options(self.options())
             except Exception:
                 log.exception("voice model: reading the switches")
         return self.opts
@@ -491,7 +530,7 @@ class VoiceModel:
         "timings", "usage"} at the end. Closing the generator (talked over) closes the connection, and the
         server stops writing."""
         self.turns += 1
-        texts = TextCalls(tools)
+        texts = TextCalls(tools, gemma=self.opts.get("gemma_markup", True))
         body = {"messages": messages, "stream": True, "temperature": temperature, "max_tokens": max_tokens,
                 "cache_prompt": True, "stream_options": {"include_usage": True},
                 "chat_template_kwargs": {"enable_thinking": False}}

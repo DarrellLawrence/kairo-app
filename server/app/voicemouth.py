@@ -41,7 +41,8 @@ log = logging.getLogger("kairo.mouth")
 def g3_options(s) -> dict:
     """The G3 switches (app/flags.py) as the voice model's server and the call read them: the server's when it
     starts, the call's at its start (never per audio frame)."""
-    return {"llama_flags": flags.on(s, "g3.llama_flags"), "swa_full": flags.on(s, "g3.swa_full")}
+    return {"llama_flags": flags.on(s, "g3.llama_flags"), "swa_full": flags.on(s, "g3.swa_full"),
+            "gemma_markup": flags.on(s, "g3.gemma_markup")}
 
 
 FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}

@@ -19,7 +19,7 @@ from app.voicemouth import g3_options
 from tests.test_voice_llm import FAKE, free_port
 
 #            flag                  default  what an owner who turns it on gets
-DEFAULTS = {"g3.llama_flags": True, "g3.swa_full": False}
+DEFAULTS = {"g3.llama_flags": True, "g3.gemma_markup": True, "g3.swa_full": False}
 
 
 def test_the_g3_switches_have_the_planned_defaults():
@@ -30,13 +30,14 @@ def test_the_g3_switches_have_the_planned_defaults():
 
 def test_the_options_follow_the_switches_both_ways(migrated):
     with Session(make_engine(migrated.db_url)) as s:
-        assert g3_options(s) == {"llama_flags": True, "swa_full": False}
+        assert g3_options(s) == {"llama_flags": True, "swa_full": False, "gemma_markup": True}
         flags.set_flag(s, "g3.llama_flags", False)
         flags.set_flag(s, "g3.swa_full", True)
-        assert g3_options(s) == {"llama_flags": False, "swa_full": True}
-        flags.set_flag(s, "g3.llama_flags", None)
-        flags.set_flag(s, "g3.swa_full", None)
-        assert g3_options(s) == {"llama_flags": True, "swa_full": False}
+        flags.set_flag(s, "g3.gemma_markup", False)
+        assert g3_options(s) == {"llama_flags": False, "swa_full": True, "gemma_markup": False}
+        for name in DEFAULTS:
+            flags.set_flag(s, name, None)
+        assert g3_options(s) == {"llama_flags": True, "swa_full": False, "gemma_markup": True}
 
 
 def test_the_app_gives_its_voice_model_the_owners_switches(migrated):

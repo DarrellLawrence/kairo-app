@@ -24,6 +24,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g3.llama_flags": (True, "The voice model's server keeps no extra copies of old prompts in the PC's memory "
                              "(--cache-ram 0) and at most 8 saved checkpoints (--ctx-checkpoints 8): the memory use "
                              "grew about 33 MiB with every call. Applies the next time the voice model starts."),
+    "g3.gemma_markup": (True, "Gemma's tool-call markup (<|tool_call>...<tool_call|>) is taken out of what Kairo says on a call, "
+                              "like the other models' markers; without it the voice would read it out when Gemma talks."),
     "g3.swa_full": (False, "Gemma's cache kept whole (--swa-full): +280 MiB of graphics-card memory, so the cached start of the "
                            "prompt survives from one turn to the next. Wait for the PC check (the card's memory) before "
                            "turning it on. Applies the next time the voice model starts."),

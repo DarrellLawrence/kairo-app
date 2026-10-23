@@ -1517,6 +1517,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s_:
             items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
             language = realtime.load_settings(s_).get("language", "auto")
+            app.state.voice_llm.take_options(g3_options(s_))      # the owner's G3 switches, read once per call
         spec = voicellm.spec(app.state.voice_llm.model_id) or {}
 
         def place() -> str | None:

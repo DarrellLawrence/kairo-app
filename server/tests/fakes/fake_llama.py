@@ -11,6 +11,8 @@ answer is here -> "Okay. <the answer>". Anything else -> "Sure, happy to help wi
 
 FAKE_LLAMA_LOAD_S: seconds of 503 on /health before the model is "loaded".
 FAKE_LLAMA_TOKEN_MS: delay between pieces (default 5). FAKE_LLAMA_FIRST_MS: before the first piece.
+FAKE_LLAMA_GEMMA_TOOLS=1: with FAKE_LLAMA_TEXT_TOOLS the calls are written the way Gemma 4 does it
+(<|tool_call>call:ask_kairo{request:<|"|>...<|"|>}<tool_call|><|tool_response>).
 FAKE_LLAMA_RECORD: every request body is appended there as one JSON line.
 FAKE_LLAMA_ARGV: the flags this server was started with are written there (one JSON list), so a test can see them.
 FAKE_LLAMA_NO_TOOLS=1: never calls the tool (a model that ignores tools). FAKE_LLAMA_ALWAYS_TOOL=1: always calls it.
@@ -35,6 +37,7 @@ STARTED = time.monotonic()
 LOAD_S = float(os.environ.get("FAKE_LLAMA_LOAD_S", "0"))
 TOKEN_S = float(os.environ.get("FAKE_LLAMA_TOKEN_MS", "5")) / 1000
 FIRST_S = float(os.environ.get("FAKE_LLAMA_FIRST_MS", "0")) / 1000
+GEMMA = bool(os.environ.get("FAKE_LLAMA_GEMMA_TOOLS"))
 if os.environ.get("FAKE_LLAMA_ARGV"):
     with open(os.environ["FAKE_LLAMA_ARGV"], "w", encoding="utf-8") as _f:
         json.dump(ARGS, _f)
@@ -121,11 +124,13 @@ class Handler(BaseHTTPRequestHandler):
         elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
             call = json.dumps({"request": text}, ensure_ascii=False)
         elif os.environ.get("FAKE_LLAMA_TEXT_TOOLS") and os.environ.get("FAKE_LLAMA_ALWAYS_TOOL"):
-            pieces = ["<|tool_", "call_start|>[ask_kairo(", ")]<|tool_call_end|>"]   # no tool offered, no request
+            pieces = (["<|tool_", "call>call:ask_kairo{", "}<tool_call|>", "<|tool_response>"] if GEMMA else
+                      ["<|tool_", "call_start|>[ask_kairo(", ")]<|tool_call_end|>"])   # no tool offered, no request
         else:
             pieces = ["Sure, ", "happy ", "to ", "help ", "with ", "that."]
         if call is not None and os.environ.get("FAKE_LLAMA_TEXT_TOOLS"):
-            said = "<|tool_call_start|>[ask_kairo(request=" + json.dumps(json.loads(call)["request"]) + ")]<|tool_call_end|>"
+            said = ('<|tool_call>call:ask_kairo{request:<|"|>' + json.loads(call)["request"] + '<|"|>}<tool_call|><|tool_response>' if GEMMA
+                    else "<|tool_call_start|>[ask_kairo(request=" + json.dumps(json.loads(call)["request"]) + ")]<|tool_call_end|>")
             pieces, call = [said[i:i + 7] for i in range(0, len(said), 7)], None
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")

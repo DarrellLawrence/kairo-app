@@ -149,6 +149,17 @@ def test_the_call_prompt_is_read_once_before_the_first_words(local):
     assert reqs[0]["messages"][0] == reqs[1]["messages"][0]          # same start: the cache holds
 
 
+def test_a_call_reads_the_owners_g3_switches_when_it_starts(local):
+    """Switches are read at the start of a call (never per audio frame): flipped now, used by the next call."""
+    assert local.vm.opts["gemma_markup"] is True
+    assert local.put("/api/flags/g3.gemma_markup", json={"on": False}).status_code == 200
+    local.voice.text = "hey how are you"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        frames_until(ws)
+    assert local.vm.opts["gemma_markup"] is False and local.vm.opts["llama_flags"] is True
+
+
 # ---------------------------------------------------------------- smart endpointing (owner's request 2026-10-16)
 
 class Turny:
@@ -407,6 +418,31 @@ def test_a_model_that_writes_its_tool_call_as_text_still_reaches_claude_and_no_m
     said = " ".join(t for t, _ in local.voice.spoken)
     for raw in ("<|", "|>", "tool_call", "ask_kairo"):
         assert raw not in _all_text(fr) and raw not in said, raw
+
+
+@pytest.mark.llama_env("FAKE_LLAMA_TEXT_TOOLS", "FAKE_LLAMA_GEMMA_TOOLS")
+def test_a_gemma_call_written_as_text_reaches_claude_and_no_marker_is_said(local):
+    """G3 (switch g3.gemma_markup, on): Gemma 4's own call markup, on a real call, end to end."""
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)                                                              # "Remind me to call the dentist tomorrow"
+        fr = frames_until(ws, limit=400)
+    deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+    assert deltas.startswith("Sec, checking.") and "echo: (spoken, on a call) Remind me" in deltas
+    said = " ".join(t for t, _ in local.voice.spoken)
+    for raw in ("<|", "|>", "tool_call", "tool_response", "ask_kairo", "call:ask"):
+        assert raw not in _all_text(fr) and raw not in said, raw
+
+
+@pytest.mark.llama_env("FAKE_LLAMA_TEXT_TOOLS", "FAKE_LLAMA_GEMMA_TOOLS", "FAKE_LLAMA_ALWAYS_TOOL")
+def test_small_talk_answered_with_only_a_gemma_call_gets_a_short_line_not_silence_or_markup(local):
+    from app.voicemouth import NEUTRAL
+    local.voice.text = "thanks"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"] == NEUTRAL["en"] and [t for t, _ in local.voice.spoken] == [NEUTRAL["en"]]
+    assert "<|" not in _all_text(fr) and "tool_call" not in _all_text(fr)
 
 
 @pytest.mark.llama_env("FAKE_LLAMA_TEXT_TOOLS", "FAKE_LLAMA_ALWAYS_TOOL")
