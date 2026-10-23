@@ -16,6 +16,7 @@ G7 = {
     "g7.mic_constraints": True,
     "g7.call_audio_mode": True,
     "g7.call_logs": True,
+    "g7.no_aec_warning": True,
 }
 
 

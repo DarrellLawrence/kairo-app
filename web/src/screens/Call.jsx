@@ -35,6 +35,7 @@ export default function Call({ callId: initialId, onClose }) {
   const [phase, setPhase] = useState(outgoing ? 'connecting' : 'ringing')
   const [log, setLog] = useState([])
   const [err, setErr] = useState('')
+  const [warn, setWarn] = useState('')           // a heads-up that stays for the call (echo cancelling off)
   const [needTap, setNeedTap] = useState(false)   // iOS didn't play Kairo's voice: "Tap to play"
   const [talking, setTalking] = useState(false)   // the line hears a turn of yours: a tap on the orb ends it
   const [engine, setEngine] = useState(null)      // 'realtime' (OpenAI), 'webrtc' (the PC's own voice over WebRTC) or 'local' (the old line)
@@ -126,6 +127,7 @@ export default function Call({ callId: initialId, onClose }) {
         },
         answered: () => { if (l.endAfter && l.on) hangup(true) },
         error: (f) => { if (f.message) setErr(f.message) },
+        warn: (w) => setWarn(w.message || ''),
         needTap: () => setNeedTap(true),
       },
     })
@@ -203,6 +205,7 @@ export default function Call({ callId: initialId, onClose }) {
         <p className="k-call-sub">{phase === 'error' ? err : ringing && call ? call.reason : talkingNow ? TALKING_HINT : HINT[phase] || ''}</p>
         {engine && !over && <p className="k-call-sub" style={{ opacity: 0.55 }}>{engine === 'realtime' ? 'Realtime voice' : engine === 'webrtc' ? 'Local voice · WebRTC' : 'Local voice'}</p>}
         {err && phase !== 'error' && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{err}</p>}
+        {warn && !over && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{warn}</p>}
         {(needTap || phase === 'speaking') && (
           <button type="button" className={needTap ? 'k-btn primary sm' : 'k-btn ghost sm'} style={{ marginTop: 10 }} onClick={tapToPlay}>
             {needTap ? 'Tap to play Kairo' : 'No sound? Tap to play'}

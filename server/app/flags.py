@@ -38,6 +38,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g7.call_logs": (True, "A call writes more about the microphone and the audio to the PC's log: what the phone asked for and got, whether the iPhone "
                            "muted the microphone, every audio-mode change, and how the first sound from Kairo arrived. Nothing you say. "
                            "Off: the usual short log."),
+    "g7.no_aec_warning": (True, "A call warns you on screen when the phone says echo cancelling is off, because Kairo could then hear itself and cut itself off. "
+                                 "Off: no warning."),
 
     # -- G8 Windows
 

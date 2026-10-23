@@ -220,3 +220,30 @@ test('g7.call_logs off: none of those lines (the usual short log stays)', async 
   for (const name of ['mic.settings', 'mic.track', 'audio.session', 'rtc.audio']) assert.deepEqual(logged(rec, name), [], name)
   assert.equal(logged(rec, 'rtc.start').length, 1)         // what was always logged still is
 })
+
+// ---------------------------------------------------------------- g7.no_aec_warning: the phone says echo cancelling is off
+
+test('g7.no_aec_warning on: a mic that reports echo cancelling off warns the call screen once', async () => {
+  const warns = []
+  await withLine({ warn: (w) => warns.push(w) }, { settings: { echoCancellation: false, sampleRate: 48000 } }, ({ rec }) => {
+    assert.equal(warns.length, 1)
+    assert.equal(warns[0].reason, 'no-aec')
+    assert.match(warns[0].message, /echo/i)
+    assert.equal(logged(rec, 'rtc.warn').length, 1)                      // and it is on record
+  })
+})
+
+test('g7.no_aec_warning on: no warning when echo cancelling is on, unknown, or the track can\'t say', async () => {
+  for (const settings of [{ echoCancellation: true }, { sampleRate: 48000 }, null]) {
+    const warns = []
+    await withLine({ warn: (w) => warns.push(w) }, { settings }, () => {})
+    assert.deepEqual(warns, [], JSON.stringify(settings))
+  }
+})
+
+test('g7.no_aec_warning off: no warning even when echo cancelling is off', async () => {
+  applyFlags([flag('g7.no_aec_warning', false)])
+  const warns = []
+  await withLine({ warn: (w) => warns.push(w) }, { settings: { echoCancellation: false } }, () => {})
+  assert.deepEqual(warns, [])
+})

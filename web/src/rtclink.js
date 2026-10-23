@@ -17,7 +17,7 @@
 import { clientLog, device } from './clientlog.js'
 import { startTurn } from './turns.js'
 import { flagOn } from './flags.js'
-import { closeMic, logMic, micStream, outputContext, unlockAudio } from './voice.js'
+import { closeMic, logMic, micSettings, micStream, outputContext, unlockAudio } from './voice.js'
 import { makeVad } from './voicelink.js'
 
 const FRAME_MS = 20
@@ -137,6 +137,7 @@ export async function pathStats(pc) {
 export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   const call = path === 'call'
   const logs = flagOn('g7.call_logs')     // read once, when the call starts
+  const warnAec = flagOn('g7.no_aec_warning')
   const meter = makeRtcMeter(path)
   const lastVoice = makeLastVoice()
   let pc = null
@@ -320,7 +321,14 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       mic = await micStream()                  // the mic first: then Safari shows its tailnet address
       if (closed) return false
       mic.buf = mic.buf || new Float32Array(mic.analyser.fftSize)
-      logMic(mic.stream.getAudioTracks()[0], path)
+      const track = mic.stream.getAudioTracks()[0]
+      logMic(track, path)
+      // g7.no_aec_warning: the phone says it does not cancel the echo (iOS reports it in getSettings), so Kairo's
+      // own voice can come back in through the mic and cut it off. Only a plain `false` counts.
+      if (warnAec && micSettings(track)?.echoCancellation === false) {
+        clientLog('rtc.warn', { reason: 'no-aec', path, ...device() })
+        on.warn?.({ reason: 'no-aec', message: 'Echo cancelling is off for this call, so Kairo may hear itself and stop talking. Try AirPods, or turn the volume down.' })
+      }
       pc = new RTCPeerConnection({ iceServers: [] })
       pc.addTransceiver(mic.stream.getAudioTracks()[0], { direction: 'sendrecv', streams: [mic.stream] })
       audio = new Audio()

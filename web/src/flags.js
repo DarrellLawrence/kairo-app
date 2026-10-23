@@ -12,6 +12,7 @@ export const DEFAULTS = {
   'g7.mic_constraints': true,
   'g7.call_audio_mode': true,
   'g7.call_logs': true,
+  'g7.no_aec_warning': true,
 }
 
 let known = null   // name -> on, from the PC's last list
