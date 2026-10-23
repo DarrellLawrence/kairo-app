@@ -17,6 +17,7 @@ from app import bench_corpus as bc
 from app import bench_voice as bv
 from app.bench_corpus import Clip
 from app.latency import pct
+from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model and Claude)
 
 MACHINE = {"gpu": None, "vram_gb": None, "ram_gb": 16.0, "cpu": "Test CPU"}
 CONFIG = {"vad_stop_s": 0.2, "turn_analyzer": "smart-turn-v3", "stt_model": "mock", "stt_compute_type": "none",
@@ -497,3 +498,157 @@ def test_the_machine_and_the_version_are_recorded():
     assert bv.version_info("2026.10.23.0600-abc1234-dirty")[1] == "abc1234"
     version, sha = bv.version_info()
     assert version and sha
+
+
+def test_run_is_a_plain_function_also_from_inside_a_running_event_loop():
+    async def three():
+        return 3
+    assert bv._sync(three()) == 3
+
+    async def inside():
+        return bv._sync(three())              # a caller that already has a loop (kairo diag, a server)
+    assert asyncio.run(inside()) == 3
+
+    async def broken():
+        raise bv.BenchError("nope")
+
+    async def inside_broken():
+        return bv._sync(broken())
+    with pytest.raises(bv.BenchError, match="nope"):
+        asyncio.run(inside_broken())
+
+
+def test_the_command_line_prints_the_table_the_notes_and_where_the_results_are(tmp_path, monkeypatch, capsys):
+    result = doc([turn(total=600), turn(total=800, i=2)])
+    seen = {}
+
+    async def fake(mock, url, out, **kw):
+        seen.update(mock=mock, url=url, out=out, **kw)
+        kw["notes"].append("the speaker check is off")
+        return result, Path(out) / "voice-x.json"
+    monkeypatch.setattr(bv, "execute", fake)
+    assert bv.main(["--mock", "--clips", "3", "--out", str(tmp_path), "--data-dir", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "TOTAL (n=2)" in out and "RESULT: PASS" in out and "note: the speaker check is off" in out and "voice-x.json" in out
+    assert seen["mock"] is True and seen["clips"] == 3 and seen["url"] is None and seen["warmup"] == 1
+    bad = doc([turn(total=1500)])
+
+    async def failing(mock, url, out, **kw):
+        return bad, Path(out) / "voice-y.json"
+    monkeypatch.setattr(bv, "execute", failing)
+    assert bv.main(["--out", str(tmp_path), "--data-dir", str(tmp_path)]) == 0 and bv.main(["--strict", "--out", str(tmp_path), "--data-dir", str(tmp_path)]) == 1
+
+    async def broken(mock, url, out, **kw):
+        raise bv.BenchError("Kairo isn't answering")
+    monkeypatch.setattr(bv, "execute", broken)
+    assert bv.main(["--out", str(tmp_path), "--data-dir", str(tmp_path)]) == 1
+    assert "voice bench: Kairo isn't answering" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- a whole run: mock, and live against a Kairo that is the mock
+
+def test_run_does_a_whole_mock_run_saves_it_and_latest_finds_it(tmp_path):
+    _needs_pipecat()
+    notes: list[str] = []
+    result = bv.run(True, None, tmp_path / "bench" / "results", clips=2, notes=notes)
+    assert bv.validate(result) == [] and result["mode"] == "mock" and result["summary"]["n"] == 2
+    assert [t["kind"] for t in result["turns"]] == ["question", "question"] and {t["lang"] for t in result["turns"]} == {"en", "de"}
+    assert result["config"]["stt_model"] == "mock, 120 ms" and result["config"]["vad_stop_s"] == 0.2
+    assert result["machine"]["cpu"] and result["version"] and result["git_sha"]
+    saved = sorted((tmp_path / "bench" / "results").glob("voice-*-mock.json"))
+    assert len(saved) == 1 and json.loads(saved[0].read_text()) == result
+    assert bv.latest(tmp_path / "bench" / "results") == result
+    for t in result["turns"]:
+        assert t["stages_ms"]["stt_final"] == pytest.approx(120, abs=TOLERANCE_MS) and t["total_ms"] > 550
+
+
+def test_a_live_run_without_rendered_clips_or_with_a_foreign_address_says_what_to_do(tmp_path):
+    _needs_pipecat()
+    with pytest.raises(bv.BenchError, match="python -m app.bench_corpus render"):
+        bv._sync(bv.execute(False, "http://127.0.0.1:8000", tmp_path / "r", clips=3, data_dir=tmp_path))
+    with pytest.raises(bv.BenchError, match="not Kairo's own address"):
+        bv._sync(bv.execute(False, "http://192.168.1.20:8000", tmp_path / "r", clips=3, data_dir=tmp_path))
+    assert not (tmp_path / "r").exists()
+
+
+def test_a_live_run_reads_the_setup_from_kairo_and_calls_its_offer_endpoint(tmp_path, monkeypatch):
+    """The live path end to end except the network card: Kairo is an httpx transport that answers the way the app does
+    and hands the offer to the mock pipeline; the clips are rendered ones, the speaker check says it is on."""
+    _needs_pipecat()
+    from app import bench_phone as bp
+    from tests.test_bench_corpus import FakeTTS
+    real = bp.ice_rules
+    monkeypatch.setattr(bp, "ice_rules", lambda loopback: real(True))        # both ends are in this process: 127.0.0.1
+    chosen = [c for c in bc.load_manifest() if c.id in ("q_en_02", "os_en_01")]
+    data = tmp_path / "data"
+    assert bc.render(data, FakeTTS(), chosen, say=lambda *_: None)["rendered"] == 2
+    world = bp.MockWorld()
+    pipe = bp.MockPipeline(world)
+    devices = {"components": {"whisper": {"device": "cuda", "model": "large-v3-turbo"},
+                              "kokoro": {"device": "cuda", "model": "kokoro-v1.0.fp16.onnx"},
+                              "piper": {"device": "cpu", "model": "de_DE-thorsten-medium"},
+                              "voice_model": {"model": "lfm2.5-2.6b", "loaded": True}},
+               "gpu": {"name": "NVIDIA GeForce RTX 3060", "total_mb": 12288}}
+    seen, notes = [], []
+
+    async def kairo(request):
+        seen.append((request.method, request.url.path, dict(request.headers).get("host")))
+        path = request.url.path
+        if path == "/api/rtc/offer":
+            body = json.loads(request.content)
+            assert body["path"] == "call" and body["type"] == "offer"
+            return httpx.Response(200, json={**await pipe.signal(body["sdp"], body["type"]), "path": "call"})
+        reply = {"/health": {"status": "ok", "version": "2026.10.23.0600-abc1234"}, "/api/rtc": {"available": True, "reason": None},
+                 "/api/voice/calls": [], "/api/voice/devices": devices, "/api/voice/speaker": {"check": True, "why_off": None}}
+        return httpx.Response(200, json=reply[path])
+
+    async def go():
+        try:
+            return await bv.execute(False, "http://127.0.0.1:8123", tmp_path / "results", clips=chosen, data_dir=data, warmup=0,
+                                    transport=httpx.MockTransport(kairo), before=world.before, notes=notes)
+        finally:
+            await pipe.stop()
+    result, path = asyncio.run(go())
+    assert bv.validate(result) == [] and result["mode"] == "live" and path.name.endswith("-live.json")
+    assert result["version"] == "2026.10.23.0600-abc1234" and result["git_sha"] == "abc1234"
+    assert result["config"] == {**result["config"], "stt_model": "large-v3-turbo", "stt_compute_type": "float16", "llm_model": "lfm2.5-2.6b"}
+    assert result["machine"]["cpu"] and result["machine"]["ram_gb"]                    # 127.0.0.1: this machine
+    assert [(t["clip"], t["speaker_accept"]) for t in result["turns"]] == [("q_en_02", True), ("os_en_01", True)]
+    assert result["turns"][0]["total_ms"] > 500 and result["turns"][0]["stages_ms"]["stt_final"] == pytest.approx(120, abs=TOLERANCE_MS)
+    assert ("POST", "/api/rtc/offer", "127.0.0.1:8123") in seen                         # by its own address, no token anywhere
+    assert any("none of the questions is your own recording" in n for n in notes), notes      # the synthetic-voices warning
+
+
+# ---------------------------------------------------------------- through the real app
+
+def test_the_fake_phone_measures_a_call_through_the_app_s_own_offer_endpoint(local, monkeypatch):
+    _needs_pipecat()
+    from app import bench_phone as bp
+    from app import voicertc
+    from app.voicertc import OpenerCache
+    from tests.test_voice_rtc import ToneVoice
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    local.voice.text = "hey how are you"
+    local.app.state.voice = ToneVoice(local.voice)
+    local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))        # no warm-up noise
+    clip = bc.Clip("q_en_02", "en", "Hey, how are you?", "question")
+
+    async def signal(sdp, kind):
+        r = await asyncio.to_thread(local.post, "/api/rtc/offer", json={"sdp": sdp, "type": kind, "path": "call"})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    async def go():
+        phone = bp.Phone(still_s=0.6)
+        with bp.ice_rules(loopback=True):
+            try:
+                await phone.connect(signal)
+                return await bp.Bench(phone, bp.mock_clips([clip]), warmup=0).run()
+            finally:
+                await phone.close()
+    [rec] = asyncio.run(go())
+    st = rec["stages_ms"]
+    assert rec["total_ms"] and rec["missed"] is False and rec["speaker_accept"] is None       # no check on in this app
+    assert all(st[k] is not None for k in bv.STAGES), st                                      # the app's own timing event, every stage
+    assert st["vad_stop"] == 200 and sum(st.values()) == pytest.approx(rec["total_ms"], abs=4)
+    assert bv.validate(bv.build_result([rec], mode="live", version="x", git_sha="y", machine=MACHINE, config=CONFIG)) == []

@@ -27,6 +27,8 @@ true one, and it is never negative (turns.steps clamps it).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import json
 import os
@@ -35,15 +37,17 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 
-from . import gpu, outbound, turns, versions
+from . import bench_corpus as bc
+from . import gpu, outbound, turns, versions, voicertc
 from .bench_corpus import ANSWERED, PROBES
 from .latency import pct
-from .settings import REPO_ROOT
+from .settings import REPO_ROOT, get_settings
 from .voice import KOKORO_MODEL, KOKORO_VOICE, PIPER_DE
 from .voicertc import TURN_MAX_SILENCE_S, VAD_STOP_S
 
@@ -475,3 +479,118 @@ def version_info(server_version: str | None = None) -> tuple[str, str]:
         except (OSError, subprocess.SubprocessError):
             sha = None
     return version, sha or "unknown"
+
+
+# ---------------------------------------------------------------- one run
+
+async def execute(mock: bool, url: str | None, out_dir: Path, *, clips=None, data_dir: Path | None = None, warmup: int = 1,
+                  notes: list[str] | None = None, force: bool = False, delays=None, transport=None, before=None) -> tuple[dict, Path]:
+    """Run the corpus against the mock call (mock=True) or against Kairo at `url` (default: this PC, port $KAIRO_PORT or
+    8000), save the result in out_dir and return (result, its file). clips: a count (a balanced few), a list of
+    bench_corpus.Clip, or None (all; a mock run: MOCK_CLIPS). notes: gets what a person should know about the run.
+    transport, before: for tests (an httpx transport for Kairo; a hook called before each clip)."""
+    notes = notes if notes is not None else []
+    if not voicertc.available():
+        raise BenchError("the call packages (Pipecat, aiortc) are not installed here: pip install -r server/requirements-voice.txt")
+    from . import bench_phone as bp
+    chosen = list(clips) if isinstance(clips, (list, tuple)) else bc.select(bc.load_manifest(), clips if clips is not None
+                                                                             else (MOCK_CLIPS if mock else None))
+    if not chosen:
+        raise BenchError("no clips to play")
+    async with contextlib.AsyncExitStack() as stack:
+        if mock:
+            world = bp.MockWorld(delays=delays or bp.MockDelays())
+            pipeline = bp.MockPipeline(world)
+            stack.push_async_callback(pipeline.stop)
+            stack.enter_context(bp.ice_rules(loopback=True))
+            rendered, signal, check, still, before = bp.mock_clips(chosen), pipeline.signal, True, 0.6, world.before
+            machine, config, (version, sha) = machine_info(), mock_config(world.delays), version_info()
+        else:
+            base = check_url(url or f"http://127.0.0.1:{get_settings().port}")
+            kairo = Kairo(base, transport=transport)
+            stack.push_async_callback(kairo.close)
+            data = Path(data_dir) if data_dir else get_settings().data_dir
+            rendered = [bc.load(data, c) for c in chosen]
+            absent = [c.id for c, r in zip(chosen, rendered) if r is None]
+            if absent:
+                raise BenchError(f"{len(absent)} of {len(chosen)} clips are not rendered yet ({', '.join(absent[:4])}…): run  "
+                                 f"python -m app.bench_corpus render   (your own recordings go to {bc.own_dir(data)})")
+            info = await preflight(kairo, force=force)
+            on = bool((info["speaker"] or {}).get("check"))
+            if not on:
+                notes.append("the speaker check is off or has no voiceprint, so other_speaker clips can't be labelled "
+                             f"({(info['speaker'] or {}).get('why_off') or 'no information'})")
+            elif not any(r.source == "own" for r in rendered if r.clip.kind in bc.ANSWERED):
+                notes.append("the speaker check is on and none of the questions is your own recording: Kairo refuses these synthetic "
+                             f"voices as not you (not counted as missed). Put recordings in {bc.own_dir(data)}")
+            stack.enter_context(bp.ice_rules(loopback=False))
+            signal, check, still = kairo.offer, on or None, bp.STILL_S
+            local = is_local(base)
+            machine = machine_info(None if local else (info["devices"] or {}).get("gpu"), local=local)
+            config = config_info(info["devices"])
+            version, sha = version_info(str(info["health"].get("version") or ""))
+        phone = bp.Phone(still_s=still)
+        stack.push_async_callback(phone.close)
+        await phone.connect(signal)
+        records = await bp.Bench(phone, rendered, speaker_check=check, warmup=warmup, before=before, notes=notes).run()
+    result = build_result(records, mode="mock" if mock else "live", version=version, git_sha=sha, machine=machine, config=config)
+    return result, save(result, out_dir)
+
+
+def _sync(coro):
+    """Run the coroutine to its end from sync code, also when this thread already has an event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            box["value"] = asyncio.run(coro)
+        except BaseException as exc:      # handed back to the caller's thread
+            box["error"] = exc
+    t = threading.Thread(target=work, name="bench-voice", daemon=True)
+    t.start()
+    t.join()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def run(mock: bool, url: str | None, out_dir: Path, **kw) -> dict:
+    """The harness as a function (for `kairo diag`): run, save to out_dir, return the results document (the schema
+    validate() checks). mock=True: the in-process mock call, no models or Kairo needed (about a minute). Else Kairo at
+    url (None: this PC). Keywords: clips, data_dir, warmup, notes, force, delays. Raises BenchError."""
+    return _sync(execute(mock, url, Path(out_dir), **kw))[0]
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m app.bench_voice", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--mock", action="store_true", help="the same client and pipeline with fake models of known speed (no Kairo needed)")
+    ap.add_argument("--url", default=None, help="Kairo's address (default http://127.0.0.1:$KAIRO_PORT); only this PC or its own .ts.net")
+    ap.add_argument("--clips", type=int, default=None, metavar="N", help=f"a balanced N clips (default: all; --mock: {MOCK_CLIPS})")
+    ap.add_argument("--out", type=Path, default=None, help="results folder (default <data>/bench/results)")
+    ap.add_argument("--data-dir", type=Path, default=None, help="Kairo's data folder (default KAIRO_DATA_DIR / devdata)")
+    ap.add_argument("--warmup", type=int, default=1, help="turns played first and not measured (default 1)")
+    ap.add_argument("--force", action="store_true", help="call even if a call looks to be under way (it will be replaced)")
+    ap.add_argument("--strict", action="store_true", help="exit 1 when the run fails its targets")
+    args = ap.parse_args(argv)
+    data_dir = args.data_dir or get_settings().data_dir
+    notes: list[str] = []
+    try:
+        result, path = _sync(execute(args.mock, args.url, args.out or bc.results_dir(data_dir), clips=args.clips, data_dir=data_dir,
+                                     warmup=args.warmup, notes=notes, force=args.force))
+    except (BenchError, bc.CorpusError) as exc:
+        print(f"voice bench: {exc}", file=sys.stderr)
+        return 1
+    print(format_table(result))
+    for n in notes:
+        print(f"  note: {n}")
+    print(f"\nresults: {path}")
+    return 1 if args.strict and not result["summary"]["pass"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
