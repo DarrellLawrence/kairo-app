@@ -31,6 +31,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G7 phone
 
     # -- G8 Windows
+    "g8.embed_batch4": (True, "The memory search reads your notes 4 pieces at a time instead of 16. While it works it keeps about half "
+                              "the main memory (1.4 GB instead of 2.9 GB on the processor, measured on a test machine) and gives the "
+                              "same answers; building the index takes a little longer. Takes effect the next time the memory model starts."),
 
     # -- G9 speech text
 

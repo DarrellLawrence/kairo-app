@@ -439,9 +439,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     memory_site = tool_sites.site("memory", settings.data_dir)
     app.state.memory = semantic.MemoryIndex(
         settings.data_dir / "memory" / "index.sqlite", vault_dir=settings.vault_dir, engine=engine,
-        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site, cpu_only=lambda: _memory_on_cpu())
+        embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site, cpu_only=lambda: _memory_on_cpu(),
+                                   batch=lambda: _embed_batch())
         if tool_sites.configured("memory") else None)
     tools.memory = app.state.memory
+
+    def _embed_batch() -> int:
+        """G8: pieces through the embedding model at once, asked at every start of its process (flag g8.embed_batch4)."""
+        from . import flags as flags_mod
+        with session_for(engine) as s_:
+            return semantic.embed_batch(flags_mod.on(s_, "g8.embed_batch4"))
+    app.state.embed_batch = _embed_batch
 
     MEMORY_VRAM_MB = 3000   # the embedding model in fp16 and its batches
 

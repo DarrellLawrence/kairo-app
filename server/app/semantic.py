@@ -61,6 +61,12 @@ START_TIMEOUT_S = 180                        # loading the model (GPU init inclu
 CALL_TIMEOUT_S = 120
 RETRY_AFTER_S = 600                          # a worker that failed to start: not again on every message
 PACKAGES = ("onnxruntime", "tokenizers", "numpy")
+EMBED_BATCH = 4                              # pieces through the model at once (embed_worker.BATCH)
+EMBED_BATCH_BEFORE = 16                      # what it was; the owner's switch g8.embed_batch4 off gives it back
+
+
+def embed_batch(fixed: bool) -> int:
+    return EMBED_BATCH if fixed else EMBED_BATCH_BEFORE
 
 
 class NotInstalled(RuntimeError):
@@ -77,9 +83,10 @@ class Embedder:
     """Client for app/embed_worker.py. The model runs in a separate python (see there why)."""
 
     def __init__(self, models_dir: Path, site_dir: Path | None = None, python: str | None = None,
-                 cpu_only=None) -> None:
+                 cpu_only=None, batch=None) -> None:
         self.models_dir = Path(models_dir)
         self.cpu_only = cpu_only or (lambda: False)   # local voice (2026-10-16): the GPU is the voice's first
+        self.batch = batch or (lambda: None)          # pieces per model call, asked at every start (None: the worker's own)
         self.site_dir = Path(site_dir) if site_dir else None
         self.python = python or sys.executable
         self.device: str | None = None
@@ -128,6 +135,9 @@ class Embedder:
             cmd += ["--site", str(self.site_dir)]
         if self.cpu_only():
             cmd += ["--cpu"]
+        batch = self.batch()
+        if batch:
+            cmd += ["--batch", str(int(batch))]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                       text=True, encoding="utf-8", bufsize=1, creationflags=flags)
