@@ -156,8 +156,10 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
   let reply = ''
   let talking = false         // the PC hears a turn of yours (speech, or words not answered yet): a tap ends it
   let tappedAt = null
-  let audioLogged = false     // g7.call_logs: 'rtc.audio' is written once per call
-  let inbound = null          // the latest inbound audio stats
+  let soundHeard = false      // Kairo's voice has been heard on this phone (the incoming audio rose above silence)
+  let started = false         // the line connected: there is a call's audio to describe at hang-up
+  let startedAt = 0
+  let inbound = null          // the latest inbound audio stats (packets, loss, jitter), up to a second old
 
   const set = (s) => { if (state !== s) { state = s; on.state?.(s) } }
   const hear = (v) => { if (talking !== v) { talking = v; on.hearing?.(v) } }
@@ -285,6 +287,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       const r = rmsOf(remote.analyser, remote.buf)
       outLevel = Math.min(1, r * 8)
       meter.level(r)
+      if (!soundHeard && r >= PLAYING_RMS) { soundHeard = true; logFirstSound() }
     }
     if (pc && ['disconnected', 'failed'].includes(pc.connectionState)) {
       disconnectedAt ??= t
@@ -294,16 +297,23 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
     }
   }
 
-  /* g7.call_logs: how the call's audio stands, once per call: when the first sound from Kairo arrives, or at
-     hang-up when none ever did (that silence is the finding). */
-  const logAudio = (when) => {
-    if (!logs || audioLogged) return
-    audioLogged = true
-    clientLog('rtc.audio', {
-      when, path, inbound,
-      audio: audio ? { muted: audio.muted, paused: audio.paused, hasStream: Boolean(audio.srcObject) } : null,
-      ...device(),
-    })
+  /* g7.call_logs: how the call's audio stood, in two lines. The PC sends silent packets from the moment the line
+     connects (Pipecat's audio_out_auto_silence), so "packets arrived" says nothing about Kairo: the first line waits
+     for a sound that is really heard here. */
+  const audioState = () => (audio ? { muted: audio.muted, paused: audio.paused, hasStream: Boolean(audio.srcObject) } : null)
+  const callSecs = () => Math.round((performance.now() - startedAt) / 1000)
+
+  /* Once per call, the first time Kairo's voice is heard on this phone: the audio element and the packets so far. */
+  const logFirstSound = () => {
+    if (!logs) return
+    clientLog('rtc.audio', { when: 'first-sound', path, secs: callSecs(), inbound, audio: audioState(), ...device() })
+  }
+
+  /* At hang-up of a call that connected: how long, whether Kairo was ever heard (no: that silence is the finding), and
+     the last packets received and lost and the jitter (P11's phone half). */
+  const logAudioEnd = () => {
+    if (!logs || !started) return
+    clientLog('rtc.audio_end', { path, secs: callSecs(), heard: soundHeard, inbound, audio: audioState(), ...device() })
   }
 
   const measure = async () => {
@@ -313,7 +323,6 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       if (net?.rtt_ms != null) meter.rtt(net.rtt_ms)
       if (net) on.path?.(net)
       inbound = heard
-      if (heard?.received > 0) logAudio('first-audio')
     } catch { /* stats are a nice-to-have */ }
     send('ping')        // the PC's transport counts the line as alive while pings come
   }
@@ -377,6 +386,8 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       const got = await r.json()
       await pc.setRemoteDescription({ type: 'answer', sdp: got.sdp })
       if (!(await opened)) { fallback('webrtc', 'Couldn’t reach the PC over WebRTC from this phone.'); return false }
+      started = true
+      startedAt = performance.now()
       timer = setInterval(tick, FRAME_MS)
       statsTimer = setInterval(measure, 1000)
       measure()
@@ -452,7 +463,7 @@ export function startRtc({ path = 'call', callId = null, on = {} } = {}) {
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onHidden)
       meter.end('hung up')
       clearTimeout(settleTimer)
-      logAudio('close')
+      logAudioEnd()
       teardown()
       closeMic()                               // iOS: the mic indicator goes off with the call
     },

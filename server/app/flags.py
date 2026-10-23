@@ -36,7 +36,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                  "the echo. Applies to calls, the voice button and the sound check's call test. "
                                  "Off: the old start (normal audio first, then call mode, with silent test sounds)."),
     "g7.call_logs": (True, "A call writes more about the microphone and the audio to the PC's log: what the phone asked for and got, whether the iPhone "
-                           "muted the microphone, every audio-mode change, and how the first sound from Kairo arrived. Nothing you say. "
+                           "muted the microphone, every audio-mode change, the first time Kairo's voice is really heard on the phone, and at hang-up how "
+                           "long the call was, whether Kairo was ever heard, and how many sound packets arrived or were lost. Nothing you say. "
                            "Off: the usual short log."),
     "g7.no_aec_warning": (True, "A call warns you on screen when the phone says echo cancelling is off, because Kairo could then hear itself and cut itself off. "
                                  "Off: no warning."),
