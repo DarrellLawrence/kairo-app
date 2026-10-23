@@ -523,19 +523,21 @@ class VoiceModel:
     # ---------------------------------------------------------------- one turn
 
     async def stream(self, messages: list[dict], *, tools: list[dict] | None = None, temperature: float = 0.6,
-                     max_tokens: int = 300) -> AsyncIterator[dict]:
+                     max_tokens: int = 300, tool_choice: str | None = None) -> AsyncIterator[dict]:
         """Events: {"kind": "text", "text"} as it is written; {"kind": "tool_start", "name"} when an offered
         tool's call begins; {"kind": "tool_call", "id", "name", "arguments"} once a valid call is complete
         (OpenAI-style deltas or written as text, TextCalls); {"kind": "done", "finish", "first_token_ms",
         "timings", "usage"} at the end. Closing the generator (talked over) closes the connection, and the
-        server stops writing."""
+        server stops writing.
+        tool_choice "none" (g3.constant_tools): the request carries the tools, so the prompt the server has cached
+        stays the same, but the model may not call them: a call it writes anyway is not offered on this turn."""
         self.turns += 1
-        texts = TextCalls(tools, gemma=self.opts.get("gemma_markup", True))
+        texts = TextCalls(None if tool_choice == "none" else tools, gemma=self.opts.get("gemma_markup", True))
         body = {"messages": messages, "stream": True, "temperature": temperature, "max_tokens": max_tokens,
                 "cache_prompt": True, "stream_options": {"include_usage": True},
                 "chat_template_kwargs": {"enable_thinking": False}}
         if tools:
-            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+            body.update(tools=tools, tool_choice=tool_choice or "auto", parallel_tool_calls=False)
         started = time.monotonic()
         first = None
         calls: dict[int, dict] = {}

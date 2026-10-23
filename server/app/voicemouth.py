@@ -42,7 +42,12 @@ def g3_options(s) -> dict:
     """The G3 switches (app/flags.py) as the voice model's server and the call read them: the server's when it
     starts, the call's at its start (never per audio frame)."""
     return {"llama_flags": flags.on(s, "g3.llama_flags"), "swa_full": flags.on(s, "g3.swa_full"),
-            "gemma_markup": flags.on(s, "g3.gemma_markup")}
+            "gemma_markup": flags.on(s, "g3.gemma_markup"), "constant_tools": flags.on(s, "g3.constant_tools")}
+
+
+def mouth_args(opts: dict) -> dict:
+    """The Mouth(...) arguments the call-layout switches in `opts` (g3_options) choose: the call, the voice lab."""
+    return {"constant_tools": bool(opts.get("constant_tools"))}
 
 
 FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
@@ -300,8 +305,9 @@ class Mouth:
                  clock: Callable | None = None, place: Callable[[], str | None] | None = None,
                  context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None,
                  late: Callable[[str, str], None] | None = None, greeting: str | None = None,
-                 delivered: Callable[[bringup.Item], None] | None = None):
+                 delivered: Callable[[bringup.Item], None] | None = None, constant_tools: bool = False):
         self.model, self.ask = model, ask
+        self.constant_tools = constant_tools    # g3.constant_tools: the same tools with every request, "none" when off
         self.delivered = delivered          # an item said on the call: it isn't pushed as well (owner's rule 2026-10-20)
         self._delivered: set[str] = set()
         self._real = False                  # this turn is something real the owner asked or said
@@ -339,6 +345,14 @@ class Mouth:
         return {"role": "system", "content": SYSTEM.format(
             name=self.name, language=LANGUAGE.get(self.language_mode, LANGUAGE["auto"]),
             context=context or "(none)", items=bringup.render(self.items))}
+
+    def _tools(self, allowed: bool) -> tuple[list[dict] | None, dict]:
+        """(tools, extra arguments for model.stream) for a round that may call the tool (allowed) or not. Without
+        constant tools a round that may not call it sends no tools at all (the prompt then differs from the others);
+        with them it sends the same list and tool_choice "none"."""
+        if allowed:
+            return [ASK_KAIRO], {}
+        return ([ASK_KAIRO], {"tool_choice": "none"}) if self.constant_tools else (None, {})
 
     # ---------------------------------------------------------------- outside news
 
@@ -417,12 +431,13 @@ class Mouth:
         if greeting_only(owner_text):
             return False                                   # the greeting needs no model
         msgs = self.messages + [{"role": "user", "content": self._content(owner_text)}]
-        tools = [ASK_KAIRO] if self.max_tool_rounds > 0 and not small_talk(owner_text, self._asked_last()) else None
-        spec = _Spec(_key(msgs) + ("|tools" if tools else "|talk"))
+        allowed = self.max_tool_rounds > 0 and not small_talk(owner_text, self._asked_last())
+        tools, extra = self._tools(allowed)
+        spec = _Spec(_key(msgs) + ("|tools" if allowed else "|talk"))
 
         async def run() -> None:
             try:
-                gen = self.model.stream(msgs, tools=tools, temperature=self.temperature, max_tokens=MAX_REPLY_TOKENS)
+                gen = self.model.stream(msgs, tools=tools, temperature=self.temperature, max_tokens=MAX_REPLY_TOKENS, **extra)
                 async with contextlib.aclosing(gen):
                     async for ev in gen:
                         spec.queue.put_nowait(ev)
@@ -488,9 +503,9 @@ class Mouth:
                 self.messages.append(last)
             rounds = 0
             while not greet:
-                tools = [ASK_KAIRO] if rounds < self.max_tool_rounds and not chat_only else None
+                tools, extra = self._tools(rounds < self.max_tool_rounds and not chat_only)
                 raw, call = await self._round(tools, MAX_ANSWER_TOKENS if rounds else MAX_REPLY_TOKENS, speaker,
-                                              result, said, started, lang, source=early if not rounds else None)
+                                              result, said, started, lang, source=early if not rounds else None, extra=extra)
                 if not isinstance(call, dict) or call.get("name") != "ask_kairo":
                     last = {"role": "assistant", "content": raw.strip()}
                     self.messages.append(last)
@@ -558,7 +573,7 @@ class Mouth:
         return result
 
     async def _round(self, tools, max_tokens: int, speaker, result: Turn, said: _Said, started: float, lang: str,
-                     source: _Spec | None = None):
+                     source: _Spec | None = None, extra: dict | None = None):
         """One generation: the words go to the voice as they come (plain speech: speech.PlainStream); a tool
         call gets the holding line. Returns (what the model wrote, markers and all, or what was said when the
         sanitizer took something out; its tool call or None). source: the same generation, started early at
@@ -575,7 +590,7 @@ class Mouth:
                     result.first_text_ms = int((time.monotonic() - started) * 1000)
 
         gen = source.events() if source is not None else self.model.stream(
-            self.messages, tools=tools, temperature=self.temperature, max_tokens=max_tokens)
+            self.messages, tools=tools, temperature=self.temperature, max_tokens=max_tokens, **(extra or {}))
         async with contextlib.aclosing(gen):
             async for ev in gen:
                 if ev["kind"] in ("text", "tool_start") and result.first_token_ms is None:
@@ -738,7 +753,8 @@ class Mouth:
                                   f"({p.request[:120]}) is here: {answer}\nSay it now, in your own words.</kairo-note>"})
             said.line("")                                      # a new stream starts
             speaker.feed(" ")                                  # ... after the last sentence, not glued to it
-            raw, _ = await self._round(None, MAX_ANSWER_TOKENS, speaker, result, said, started, lang)
+            tools, extra = self._tools(False)
+            raw, _ = await self._round(tools, MAX_ANSWER_TOKENS, speaker, result, said, started, lang, extra=extra)
             self.messages.append({"role": "assistant", "content": raw.strip()})
 
 

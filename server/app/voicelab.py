@@ -50,7 +50,7 @@ from . import bringup, gpu, voicellm
 from .brain.voice_local import PORT, VoiceModel
 from .db import SettingKV
 from .latency import pct
-from .voicemouth import FILLERS, Mouth, g3_options
+from .voicemouth import FILLERS, Mouth, g3_options, mouth_args
 
 log = logging.getLogger("kairo.voicelab")
 
@@ -222,7 +222,7 @@ def stats(values: list) -> dict:
 
 # ---------------------------------------------------------------- the language models
 
-async def _run_model(vm: VoiceModel, temperature: float) -> dict:
+async def _run_model(vm: VoiceModel, temperature: float, layout: dict | None = None) -> dict:
     out = {"ttft": [], "first_text": [], "tok_s": [], "cold_ms": {}, "need": 0, "hits": 0, "small": 0, "false": 0,
            "facts_n": 0, "facts_ok": 0, "card_n": 0, "card_pc": 0, "card_wrong": 0, "card_claude": 0,
            "replies": {"en": [], "de": []}, "errors": []}
@@ -237,7 +237,7 @@ async def _run_model(vm: VoiceModel, temperature: float) -> dict:
             return _answers.get(last) or ("Done." if _lang == "en" else "Erledigt."), False
         mouth = Mouth(vm, ask=brain, context=dict(LAB_CARD), items=LAB_ITEMS, name="Sam", temperature=temperature,
                       ask_timeout_s=120,     # the lab scores Claude's answers: no call cap here
-                      clock=lambda: dt.datetime(2026, 10, 16, 6, 55))
+                      clock=lambda: dt.datetime(2026, 10, 16, 6, 55), **(layout or {}))
         for i, case in enumerate(cases):
             ear = _Ear()
             try:
@@ -448,7 +448,7 @@ class Lab:
                 after = nvidia_smi()
                 if before and after:
                     entry["vram_mb"] = after["used_mb"] - before["used_mb"]
-                raw = asyncio.run(_run_model(vm, float(spec.get("temperature", 0.6))))
+                raw = asyncio.run(_run_model(vm, float(spec.get("temperature", 0.6)), mouth_args(self._options())))
                 entry.update(_summary(raw))
                 entry["_replies"] = raw["replies"]
             except Exception as exc:

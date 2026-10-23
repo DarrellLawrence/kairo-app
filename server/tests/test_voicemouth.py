@@ -40,8 +40,8 @@ class Model:
     def __init__(self, *replies, delay=0.0):
         self.replies, self.delay, self.calls = list(replies), delay, []
 
-    async def stream(self, messages, *, tools=None, temperature=0.6, max_tokens=300):
-        self.calls.append({"messages": json.loads(json.dumps(messages)), "tools": tools})
+    async def stream(self, messages, *, tools=None, temperature=0.6, max_tokens=300, tool_choice=None):
+        self.calls.append({"messages": json.loads(json.dumps(messages)), "tools": tools, "tool_choice": tool_choice})
         reply = self.replies.pop(0)
         for ev in reply(messages) if callable(reply) else reply:
             await asyncio.sleep(self.delay)
@@ -593,3 +593,67 @@ def test_yes_to_a_question_kairo_asked_keeps_the_tool():
         return await mo.turn("yes", "en", Speaker())
     r = run(go())
     assert m.calls[1]["tools"] is not None and brain.asked and r.route == "claude"
+
+
+# ---------------------------------------------------------------- G3: constant tools (switch g3.constant_tools)
+# The tools block is part of the prompt the voice model caches. Offering the tool on one turn and not on the next made
+# every flip a full re-read of the prompt (0.30-0.75 s on the 3060, estimated). With constant tools the same list goes
+# with every request, and a turn that must not call it says tool_choice "none" (same prompt, measured).
+
+def test_without_the_switch_small_talk_still_sends_no_tools_and_no_tool_choice():
+    m = Model(text("Anytime!"))
+    run(mouth(m).turn("thanks a lot", "en", Speaker()))
+    assert m.calls[0]["tools"] is None and m.calls[0]["tool_choice"] is None
+
+
+def test_with_constant_tools_small_talk_sends_the_tool_and_says_none():
+    m, brain = Model(text("Anytime!")), Brain()
+    r = run(mouth(m, brain, constant_tools=True).turn("thanks a lot", "en", Speaker()))
+    assert [t["function"]["name"] for t in m.calls[0]["tools"]] == ["ask_kairo"] and m.calls[0]["tool_choice"] == "none"
+    assert brain.asked == [] and r.route == "talk"                                  # still never Claude
+
+
+def test_with_constant_tools_a_data_question_may_call_it_and_the_next_round_says_none():
+    m, brain = Model(tool("tasks"), text("You have two tasks.")), Brain()
+    run(mouth(m, brain, constant_tools=True, max_tool_rounds=1).turn("what are my tasks?", "en", Speaker()))
+    assert m.calls[0]["tool_choice"] is None and m.calls[0]["tools"]                # auto: the model may call
+    assert m.calls[1]["tool_choice"] == "none" and m.calls[1]["tools"]              # the rounds are used up: said, not called
+
+
+def test_with_constant_tools_every_request_of_a_call_carries_the_same_tools():
+    m = Model(text("Good, you?"), tool("tasks"), text("You have two tasks."), text("Bye!"))
+    mo = mouth(m, constant_tools=True)
+    for words in ("how's it going", "what are my tasks?", "thanks, bye"):
+        run(mo.turn(words, "en", Speaker()))
+    assert len(m.calls) == 4 and len({json.dumps(c["tools"], sort_keys=True) for c in m.calls}) == 1
+    assert [c["tool_choice"] for c in m.calls] == ["none", None, None, "none"]       # chat, ask, (answer: rounds left), thanks
+
+
+def test_with_constant_tools_a_pending_answer_is_said_with_the_tool_off():
+    brain = Brain(delay=0.3)
+    m = Model(tool("what's on tomorrow?"), text("Hm?"), text("School at 8."))
+    mo = mouth(m, brain, constant_tools=True, items=[], ask_timeout_s=2)
+
+    async def go():
+        t = asyncio.create_task(mo.turn("What's on tomorrow?", "en", Speaker()))
+        await asyncio.sleep(0.05)
+        t.cancel()                                                               # talked over while Claude works
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        return await mo.turn("never mind", "en", Speaker())
+    run(go())
+    delivered = [c for c in m.calls if "is here:" in c["messages"][-1]["content"]]
+    assert delivered and all(c["tools"] and c["tool_choice"] == "none" for c in delivered)
+
+
+def test_with_constant_tools_the_early_round_at_the_pause_sends_the_same_tools():
+    m, sp = Model(text("Sure, ", "I'll remind you."), delay=0.01), Speaker()
+    mo = mouth(m, constant_tools=True)
+
+    async def go():
+        assert mo.speculate("thanks a lot")                                      # small talk: runs ahead, tool off
+        await asyncio.sleep(0.05)
+        return await mo.turn("thanks a lot", "en", sp)
+    run(go())
+    assert len(m.calls) == 1 and mo.speculation_used == 1
+    assert m.calls[0]["tools"] and m.calls[0]["tool_choice"] == "none"

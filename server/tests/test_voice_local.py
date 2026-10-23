@@ -160,6 +160,23 @@ def test_a_call_reads_the_owners_g3_switches_when_it_starts(local):
     assert local.vm.opts["gemma_markup"] is False and local.vm.opts["llama_flags"] is True
 
 
+@pytest.mark.parametrize("on", [False, True])
+def test_small_talk_on_a_call_sends_the_tools_with_none_only_when_the_switch_is_on(local, on):
+    """g3.constant_tools: the voice model's prompt is the same with and without the tool (it stays cached)."""
+    assert local.put("/api/flags/g3.constant_tools", json={"on": on}).status_code == 200
+    local.voice.text = "hey how are you"
+    with local.websocket_connect("/ws/voice") as ws:
+        utter(ws)
+        fr = frames_until(ws)
+    done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"] == "Sure, happy to help with that."
+    last = requests_seen(local)[-1]
+    if on:
+        assert [t["function"]["name"] for t in last["tools"]] == ["ask_kairo"] and last["tool_choice"] == "none"
+    else:
+        assert "tools" not in last and "tool_choice" not in last
+
+
 # ---------------------------------------------------------------- smart endpointing (owner's request 2026-10-16)
 
 class Turny:

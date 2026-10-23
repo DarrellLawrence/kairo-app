@@ -408,7 +408,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
-    from .voicemouth import Mouth, g3_options
+    from .voicemouth import Mouth, g3_options, mouth_args
     _vl_site = voicellm.site(settings.data_dir)
 
     def _voice_llm_resolve():
@@ -1517,7 +1517,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s_:
             items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
             language = realtime.load_settings(s_).get("language", "auto")
-            app.state.voice_llm.take_options(g3_options(s_))      # the owner's G3 switches, read once per call
+            g3 = g3_options(s_)                                   # the owner's G3 switches, read once per call
+        app.state.voice_llm.take_options(g3)
         spec = voicellm.spec(app.state.voice_llm.model_id) or {}
 
         def place() -> str | None:
@@ -1527,7 +1528,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
-                      greeting=_greeting(), delivered=_delivered)
+                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
         line.mouth = mouth
         try:
             gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
