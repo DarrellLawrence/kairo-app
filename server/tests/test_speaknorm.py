@@ -237,9 +237,47 @@ def test_german_numeric_dates(text, said):
 
 
 def test_a_dotted_number_without_a_year_is_a_date_only_after_a_date_word():
-    """"Raum 2.01." could be a date or a room; with a year, or after am / bis / vom / a weekday, it is a date."""
+    """"Raum 2.01." could be a date or a room; with a year, or after a word that brings a date (am, vom, zum,
+    der Termin ...), it is a date."""
     for text in ("Zimmer 3.14 und Raum 2.01.", "Kapitel 4.10. Danach.", "Die Zahl 7.12. ist es."):
         assert normalize(text, "de") == text, text
+
+
+@pytest.mark.parametrize("text", [
+    # Swiss grades and other dot decimals (x.1 .. x.9 are all valid months): never a date after everyday words
+    "Die Note ist 5.5.",
+    "Deine Note in Mathe war 4.5.",
+    "Dein Schnitt ist 4.5. Das ist gut.",
+    "Der Durchschnitt von Mathe ist 5.1.",
+    "Der Preis liegt bei 4.8.",
+    "Der Preis liegt bei 2.5. Danach",
+    "Die Prüfung war für 4.5. angesetzt.",
+    "Er hat auf 4.5 gerundet und auf 4.5. nicht.",
+    "Der Zug fährt um 9.10.",
+    "Der Zug fährt um 9.10. und kommt um 9.40. an.",
+    "Du brauchst 4.5. oder 5.5.",
+    "Die Noten waren 4.5 und 5.5.",
+    "Sie liegt zwischen 4.0 und 5.5.",
+    "Von 3.5 bis 4.5.",                              # a range of grades: "bis" at a sentence end with a small day
+    "Bestanden ist ab 4.5. Dann ist es gut.",
+])
+def test_a_dot_decimal_that_ends_a_sentence_is_no_date(text):
+    assert normalize(text, "de") == text
+
+
+@pytest.mark.parametrize("text,said", [
+    ("Der Test ist am 4.5.", "Der Test ist am vierten Mai."),                         # the sentence's full stop stays
+    ("Der Test ist am 4.5. Danach ist frei.", "Der Test ist am vierten Mai. Danach ist frei."),
+    ("Der Test ist am 4.5. um 9 Uhr.", "Der Test ist am vierten Mai um neun Uhr."),
+    ("Heute ist der 24.10. Morgen nicht.", "Heute ist der vierundzwanzigste Oktober. Morgen nicht."),
+    ("Termin 3.11.", "Termin dritten November."),
+    ("Abgabe bis 24.10.", "Abgabe bis vierundzwanzigsten Oktober."),                  # "bis" + a day no grade has
+    ("Abgabe bis 4.5. ist knapp.", "Abgabe bis vierten Mai ist knapp."),               # "bis", not at a sentence end
+    ("Preise gelten ab 1.10. bis zum 31.12.", "Preise gelten ab ersten Oktober bis zum einunddreißigsten Dezember."),
+    ("Das gilt zwischen 4.5. und 6.5. für alle.", "Das gilt zwischen vierten Mai und sechsten Mai für alle."),
+])
+def test_a_date_after_a_word_that_brings_a_date_keeps_the_full_stop_that_ends_the_sentence(text, said):
+    assert normalize(text, "de") == said
 
 
 @pytest.mark.parametrize("text,said", [

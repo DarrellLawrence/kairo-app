@@ -137,11 +137,16 @@ _DE_MONTH_OF = {"jan": 0, "feb": 1, "mär": 2, "mrz": 2, "apr": 3, "mai": 4, "ju
 _MONTH_DE = (r"(?:Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember|"
              r"(?:Jan|Feb|Mär|Mrz|Apr|Jun|Jul|Aug|Sept?|Okt|Nov|Dez)\.?)(?![a-zäöüß])")
 _VERSIONISH = {"version", "v", "ver", "python", "ios", "android", "windows", "build", "release", "node", "java", "port"}
-# "3.11." without a year is a date only after one of these ("Raum 2.01." is a room); with a year it always is.
-_DATE_WORDS = {"am", "bis", "ab", "vom", "von", "zum", "zu", "seit", "vor", "nach", "den", "dem", "der", "beim", "bei", "und",
-               "oder", "für", "zwischen", "ist", "war", "wäre", "auf", "gegen", "um", "ende", "anfang", "mitte", "datum", "termin",
-               "frist", "stichtag", "deadline", "geburtstag", "fällig", "montag", "dienstag", "mittwoch", "donnerstag", "freitag",
-               "samstag", "sonntag", "mo", "di", "mi", "do", "fr", "sa", "so"}
+# "3.11." without a year is a date only after a word that brings a date ("Raum 2.01." is a room, "ist 4.5." a grade;
+# every x.1 to x.9 is a valid month, so a dot decimal at the end of a sentence must never be read as a date because of
+# an everyday word like ist, war, bei, um, für, auf). With a year it always is.
+_DATE_WORDS = {"am", "vom", "zum", "dem", "den", "der", "datum", "termin", "frist", "stichtag", "deadline", "geburtstag",
+               "fällig", "montag", "dienstag", "mittwoch", "donnerstag", "freitag", "samstag", "sonntag", "mo", "di", "mi",
+               "do", "fr", "sa"}
+# These can bring a date ("bis 24.10.", "ab 1.10. bis zum ...") or a number ("bis 4.5.", "ab 4.5."): a date when the dot
+# does not end the sentence ("bis 3.5. ist zu"), or when the day is one no grade has (Swiss grades run 1 to 6).
+_DATE_WORDS_MAYBE = {"bis", "ab", "seit", "vor", "nach", "und", "oder", "von", "zwischen", "so", "ende", "anfang", "mitte"}
+_SENTENCE_STARTS = re.compile(r"\s*$|\s+[A-ZÄÖÜ]")           # what follows a full stop that ends a sentence
 _ISO = re.compile(r"(?<![\w.:/-])(\d{4})-(\d{2})-(\d{2})(?![\w-]|[.:/]\d)")
 
 
@@ -265,9 +270,15 @@ def _year_de(y: int) -> str:
 
 def _date_de(m: re.Match, day: int, month: int, year: int | None) -> str:
     before = _prev_word(m.string, m.start())
-    if not _valid_date(day, month) or before in _VERSIONISH or (year is None and before not in _DATE_WORDS):
+    if not _valid_date(day, month) or before in _VERSIONISH:
         return m.group(0)
-    return f"{_ordinal_de(day, m.string, m.start())} {_DE_MONTHS[month - 1]}" + (f" {_year_de(year)}" if year else "")
+    stop = ""
+    if year is None:
+        ends = bool(_SENTENCE_STARTS.match(m.string, m.end()))
+        if not (before in _DATE_WORDS or (before in _DATE_WORDS_MAYBE and (not ends or day > 6))):
+            return m.group(0)
+        stop = "." if ends else ""                  # "am 4.5." ends the sentence with the date's own dot: keep it
+    return f"{_ordinal_de(day, m.string, m.start())} {_DE_MONTHS[month - 1]}" + (f" {_year_de(year)}" if year else "") + stop
 
 
 def _day_month_de(m: re.Match) -> str:
