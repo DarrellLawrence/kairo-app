@@ -545,3 +545,14 @@ def test_a_language_finding_that_broke_is_a_warning_with_the_reason(pc, speech_o
 def test_an_older_server_without_the_compute_type_adds_no_check(pc, speech_only):
     _, by_id = run(pc, live=live())
     assert "whisper.compute" not in by_id
+
+
+def test_diag_says_how_many_repeating_pieces_whisper_dropped_and_stays_green(pc, speech_only):
+    # temperature 0 has no retry for a decode that only repeats itself: it is dropped, and the count is shown
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", loops_dropped=3)))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "PASS" and "3 repeating pieces dropped" in c["detail"]
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", loops_dropped=1)))
+    assert "1 repeating piece dropped" in by_id["whisper.compute"]["detail"]
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", loops_dropped=0)))
+    assert "repeating" not in by_id["whisper.compute"]["detail"]

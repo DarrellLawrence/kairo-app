@@ -46,6 +46,7 @@ WARM_FRESH_S = 15        # a call connecting this soon after a decode finds Whis
 # real sentence of a call meets kernels that already ran with speech of that length.
 WARM_TEXT = {"en": "Remind me to call the dentist tomorrow at three in the afternoon.",
              "de": "Erinnere mich morgen um drei Uhr nachmittags an den Zahnarzt."}
+LOOP_RATIO = 2.4         # Whisper's own limit for "this only repeats itself" (gzip ratio of a segment's text)
 GPU_RUNTIME = re.compile(r"cuda|cublas|cudnn|\.dll|library", re.I)
 MAX_AUDIO = 15 * 1024 * 1024
 MAX_SPEAK = 3000
@@ -250,6 +251,7 @@ class Voice:
         self._warm_audio: dict[str, bytes] | None = None
         self._last_language: str | None = None   # the language of the last turn with words (this call)
         self._single_failed: str | None = None   # why the one-pass language finding was given up (None: working)
+        self.loops_dropped = 0               # call-path segments dropped because they only repeated themselves
         self._stt_failed = 0.0
         self._tts_device = None
         self._tts_why: str | None = None
@@ -520,11 +522,11 @@ class Voice:
                 for lang, pcm in clips.items():
                     if self._active:
                         break
-                    self._stt_run(lambda pcm=pcm: _samples(pcm), lang, **self._call_options())
+                    self._call_run(lambda pcm=pcm: _samples(pcm), lang)
             else:
                 import numpy as np
                 noise = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32)
-                self._stt_run(lambda: noise, "en", vad_filter=False, **self._call_options())
+                self._call_run(lambda: noise, "en", vad_filter=False)
             self.warm_ms["whisper"] = int((time.monotonic() - t0) * 1000)
         except Exception as exc:
             log.warning("voice warm-up run (whisper): %s", exc)
@@ -540,7 +542,7 @@ class Voice:
                    "ctranslate2": _ct2_version(),
                    "language_detection": ("one pass, English or German" if self.tuning.single_encode_langid and not self._single_failed
                                           else "Whisper's own (two passes, 99 languages)"),
-                   "language_detection_note": self._single_failed}
+                   "language_detection_note": self._single_failed, "loops_dropped": self.loops_dropped}
         if not inst["stt"]:
             whisper.update(ok=False, reason="not installed")
         elif not stt_loaded:
@@ -583,11 +585,10 @@ class Voice:
         if len(pcm) > MAX_AUDIO:
             raise VoiceError("recording too long")
         fixed = language if language not in (None, "", "auto") else None
-        opts = self._call_options()
         if fixed is None and self.tuning.single_encode_langid:     # "English and German": found in the same pass
-            tr = self._stt_run(lambda: _samples(pcm), None, detect=True, prev_language=self._last_language, **opts)
+            tr = self._call_run(lambda: _samples(pcm), None, detect=True, prev_language=self._last_language)
         else:
-            tr = self._stt_run(lambda: _samples(pcm), fixed, **opts)
+            tr = self._call_run(lambda: _samples(pcm), fixed)
         if tr.text and tr.language in langid.LANGUAGES:
             self._last_language = tr.language
         return tr
@@ -600,10 +601,19 @@ class Voice:
             opts["temperature"] = 0.0      # one decode, no random re-tries (Whisper's default list goes up to 1.0)
         return opts
 
+    def _call_run(self, audio, language: str | None, **kw) -> Transcript:
+        """A spoken turn (or its warm-up) through Whisper: the call path's options, and with temperature 0 the
+        one guard Whisper's retries gave: a piece that only repeats itself is dropped (see _stt_run)."""
+        return self._stt_run(audio, language, drop_loops=self.tuning.temperature_zero, **self._call_options(), **kw)
+
     def _stt_run(self, audio, language: str | None, vad_filter: bool = True, *, detect: bool = False,
-                 prev_language: str | None = None, **opts) -> Transcript:
+                 prev_language: str | None = None, drop_loops: bool = False, **opts) -> Transcript:
         """detect: find English or German in the same encoder pass (langid.py) instead of Whisper's own
-        language=None, which encodes twice; prev_language: what an unsure turn falls back to."""
+        language=None, which encodes twice; prev_language: what an unsure turn falls back to; drop_loops: leave
+        out every piece whose compression ratio is above LOOP_RATIO (Whisper's "too repetitive" limit). With
+        its default temperature list Whisper would decode such a piece again, at up to five higher
+        temperatures (each retry on degraded audio took 5 to 20 s on the sandbox CPU); at temperature 0 there
+        is no retry, so a decode that came out as "cut, cut, cut, ..." must not go on as the owner's words."""
         with self._lock:
             model = self._load_stt()
         t = time.monotonic()
@@ -622,7 +632,13 @@ class Voice:
                     segments, info = model.transcribe(audio(), language=None, vad_filter=vad_filter, **opts)
             else:
                 segments, info = model.transcribe(audio(), language=language, vad_filter=vad_filter, **opts)
-            text = " ".join(s.text.strip() for s in segments).strip()
+            pieces = list(segments)          # faster-whisper decodes while this is read: errors surface here
+            kept = [s for s in pieces if not (drop_loops and getattr(s, "compression_ratio", 0.0) > LOOP_RATIO)]
+            if len(kept) < len(pieces):
+                self.loops_dropped += len(pieces) - len(kept)
+                log.warning("Whisper: %d piece(s) that only repeated themselves were dropped (ratio %.1f)",
+                            len(pieces) - len(kept), max(getattr(s, "compression_ratio", 0.0) for s in pieces))
+            text = " ".join(s.text.strip() for s in kept).strip()
         except Exception as exc:
             if self._stt_device == "cuda" and GPU_RUNTIME.search(str(exc)):
                 # CUDA loaded the model but can't run it (cuBLAS/cuDNN DLL missing): CPU from now on
@@ -633,7 +649,8 @@ class Voice:
                     except Exception as exc2:
                         self._stt, self.last_error = None, f"load: {type(exc2).__name__}: {exc2}"
                         raise NotInstalled(f"Speech recognition could not start on the PC: {self.last_error}") from exc2
-                return self._stt_run(audio, language, vad_filter, detect=detect, prev_language=prev_language, **opts)
+                return self._stt_run(audio, language, vad_filter, detect=detect, prev_language=prev_language,
+                                     drop_loops=drop_loops, **opts)
             self.last_error = f"transcribe: {exc}"
             raise VoiceError(f"could not understand the audio ({type(exc).__name__})") from exc
         finally:

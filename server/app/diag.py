@@ -201,7 +201,8 @@ def _whisper_compute(ctx: Ctx) -> list[Check]:
     if not d or not d.get("loaded") or not d.get("compute_type"):
         return []
     bits = [str(d["compute_type"])] + ([f"ctranslate2 {d['ctranslate2']}"] if d.get("ctranslate2") else []) \
-        + ([f"language: {d['language_detection']}"] if d.get("language_detection") else [])
+        + ([f"language: {d['language_detection']}"] if d.get("language_detection") else []) \
+        + ([f"{d['loops_dropped']} repeating piece{'s' if d['loops_dropped'] != 1 else ''} dropped"] if d.get("loops_dropped") else [])
     notes = [str(n) for n in (d.get("compute_note"), d.get("language_detection_note")) if n]
     if notes:
         return [warn("whisper.compute", "compute type", ", ".join(bits) + ". " + " ".join(notes))]

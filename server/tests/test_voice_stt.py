@@ -27,6 +27,7 @@ class Whisper:
         self.made, self.calls = [], []
         self.fail_on, self.language, self.text = set(fail_on), language, text
         self.multilingual = True
+        self.segments = None          # [(text, compression_ratio)]: what faster-whisper's Segment carries; None: just the text
         outer = self
         mod = types.ModuleType("faster_whisper")
 
@@ -42,12 +43,21 @@ class Whisper:
             def transcribe(self, audio, **kw):
                 outer.calls.append(kw)
                 info = types.SimpleNamespace(language=kw.get("language") or outer.language, duration=1.0)
+                if outer.segments is not None:
+                    return iter([segment(t, r) for t, r in outer.segments]), info
                 text = outer.text.get(info.language, "") if isinstance(outer.text, dict) else outer.text   # a text per language
                 return iter([types.SimpleNamespace(text=text)]), info
 
         mod.WhisperModel = WhisperModel
         monkeypatch.setitem(sys.modules, "faster_whisper", mod)
         monkeypatch.setattr(Voice, "installed", staticmethod(lambda: {"stt": True, "en": False, "de": False}))
+
+
+def segment(text, ratio):
+    return types.SimpleNamespace(text=text, compression_ratio=ratio, avg_logprob=-0.1)
+
+
+LOOP = "Cut, cut, cut, cut, cut, cut, cut, cut, cut, cut, cut, cut, cut, cut, cut, cut."
 
 
 @pytest.fixture
@@ -112,6 +122,47 @@ def test_temperature_zero_off_leaves_whisper_its_own_retries(voice, whisper):
     voice.tuning = voice_mod.Tuning(temperature_zero=False)
     voice.transcribe_pcm(PCM, "en")
     assert "temperature" not in whisper.calls[0] and whisper.calls[0]["vad_filter"] is True
+
+
+def test_a_decode_that_only_repeats_itself_never_reaches_the_brain_as_the_owners_words(voice, whisper):
+    # with the retries gone (temperature 0), Whisper's own "too repetitive: try again" would no longer fire
+    whisper.segments = [(LOOP, 29.4)]
+    assert voice.transcribe_pcm(PCM, "en").text == ""
+    assert voice.devices()["whisper"]["loops_dropped"] == 1
+
+
+def test_only_the_repeating_piece_is_dropped_the_words_around_it_stay(voice, whisper):
+    whisper.segments = [("Remind me to call the dentist.", 1.3), (LOOP, 9.0), ("And buy milk.", 1.1)]
+    assert voice.transcribe_pcm(PCM, "en").text == "Remind me to call the dentist. And buy milk."
+    assert voice.devices()["whisper"]["loops_dropped"] == 1
+
+
+@pytest.mark.parametrize("ratio,kept", [(1.3, True), (2.4, True), (2.41, False)])
+def test_the_limit_is_whispers_own_above_two_point_four(voice, whisper, ratio, kept):
+    whisper.segments = [("a sentence", ratio)]
+    assert (voice.transcribe_pcm(PCM, "en").text == "a sentence") is kept
+
+
+def test_a_fake_segment_without_a_ratio_is_kept(voice, whisper):
+    assert voice.transcribe_pcm(PCM, "en").text == "hello" and voice.devices()["whisper"]["loops_dropped"] == 0
+
+
+def test_with_the_switch_off_whispers_own_retries_are_the_guard_and_nothing_is_dropped_here(voice, whisper):
+    voice.tuning = voice_mod.Tuning(temperature_zero=False)
+    whisper.segments = [(LOOP, 29.4)]
+    assert voice.transcribe_pcm(PCM, "en").text == LOOP and voice.devices()["whisper"]["loops_dropped"] == 0
+
+
+def test_a_recording_is_left_to_whispers_own_retries_too(voice, whisper):
+    whisper.segments = [(LOOP, 29.4)]
+    assert voice.transcribe(b"m4a bytes", language="en").text == LOOP and voice.devices()["whisper"]["loops_dropped"] == 0
+
+
+def test_a_dropped_turn_teaches_the_voice_nothing_and_is_counted_per_turn(voice, whisper):
+    whisper.segments = [(LOOP, 29.4)]
+    voice.transcribe_pcm(PCM, "de")
+    voice.transcribe_pcm(PCM, "de")
+    assert voice._last_language is None and voice.devices()["whisper"]["loops_dropped"] == 2
 
 
 def test_a_recording_is_still_decoded_with_beam_five_and_never_at_temperature_zero(voice, whisper):
@@ -381,7 +432,7 @@ class OnePass:
 
     def __init__(self, monkeypatch, language="de", text="guten morgen"):
         from app.voice import langid
-        self.calls, self.language, self.text, self.error = [], language, text, None
+        self.calls, self.language, self.text, self.error, self.ratio = [], language, text, None, 1.2
         monkeypatch.setattr(langid, "transcribe_en_de", self)
 
     def __call__(self, model, audio, *, prev_language=None, vad_filter=True, **opts):
@@ -389,7 +440,7 @@ class OnePass:
         if self.error is not None:
             raise self.error
         info = types.SimpleNamespace(language=self.language, language_probability=0.9, accepted=True, duration=1.0)
-        return [types.SimpleNamespace(text=self.text)], info
+        return [segment(self.text, self.ratio)], info
 
 
 def test_single_encode_waits_for_the_pc_test_so_it_is_off_until_the_owner_says_otherwise(tmp_path):
@@ -433,6 +484,14 @@ def test_the_last_turns_language_is_what_an_unsure_turn_falls_back_to(voice, whi
     one.text = "hello"
     voice.transcribe_pcm(PCM, "auto")
     assert [c["prev"] for c in one.calls] == [None, "de", "en", "en"]
+
+
+def test_the_one_pass_path_drops_a_repeating_decode_too(voice, whisper, monkeypatch):
+    one = OnePass(monkeypatch, language="de", text=LOOP)
+    one.ratio = 12.0
+    voice.tuning = voice_mod.Tuning(single_encode_langid=True)
+    t = voice.transcribe_pcm(PCM, "auto")
+    assert t.text == "" and voice.devices()["whisper"]["loops_dropped"] == 1 and voice._last_language is None
 
 
 def test_a_new_call_starts_without_the_last_calls_language(voice, whisper, monkeypatch, db):

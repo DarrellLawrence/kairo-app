@@ -748,7 +748,8 @@ function VoiceDevices({ dev }) {
           if (!c) return null
           const where = c.device === 'cuda' || c.device === 'gpu' ? 'GPU' : c.device === 'cpu' ? 'CPU' : '–'
           const bits = [c.model, c.loaded ? c.compute_type : null, c.layers ? `${c.layers} layers` : null, c.loaded ? 'loaded' : 'not loaded',
-            c.load_ms != null ? `load ${secs(c.load_ms)}` : null, c.warm_ms != null ? `warm-up ${secs(c.warm_ms)}` : null].filter(Boolean)
+            c.load_ms != null ? `load ${secs(c.load_ms)}` : null, c.warm_ms != null ? `warm-up ${secs(c.warm_ms)}` : null,
+            c.loops_dropped ? `${c.loops_dropped} repeating piece${c.loops_dropped === 1 ? '' : 's'} dropped` : null].filter(Boolean)
           const notes = [c.note, c.checked, c.compute_note, c.language_detection_note].filter(Boolean)       // the speaker check: off until taught, a runtime skipped
           const idle = k === 'piper' || (k === 'speaker' && c.ok && !c.loaded)
           return (

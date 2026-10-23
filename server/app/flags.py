@@ -20,7 +20,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
 
     # -- G2 Whisper
     "g2.temperature_zero": (True, "On calls, Whisper writes each sentence down once and never retries with random variation "
-                                  "when it is unsure: the same words every time, and no slow second pass."),
+                                  "when it is unsure: the same words every time, and no slow second pass. A piece that only "
+                                  "repeats itself (\"cut, cut, cut ...\") is dropped instead of retried, and counted in Voice speed."),
     "g2.offline_models": (True, "Whisper only loads the model files the installer already downloaded and never goes online to look "
                                 "for them while Kairo runs. A missing model is reported, not fetched in the middle of a sentence."),
     "g2.int8_float16": (False, "Whisper runs in a lighter number format on the graphics card (int8_float16): about 0.8 GB less "
