@@ -1,10 +1,13 @@
 """The voice latency harness (app/bench_voice.py): the results schema, the stage arithmetic, the percentiles
-and rates, the results folder. The fake phone and the mock pipeline are in the second half (they need the
-call packages, Pipecat and aiortc, like test_voice_rtc.py, and skip without them)."""
+and rates, the results folder, and the fake phone (app/bench_phone.py). What needs the call packages, Pipecat and
+aiortc, skips without them like test_voice_rtc.py."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +174,80 @@ def test_the_summary_table_names_every_stage_and_the_verdict():
     for word in (*bv.STAGES, "TOTAL (n=2)", "PASS", "p95 target 1000 ms", "mock run"):
         assert word in text
     assert "FAIL" in bv.format_table(doc([turn(total=1500)]))
+
+
+# ================================================================ the fake phone (needs the call packages)
+
+def _needs_pipecat():
+    pytest.importorskip("pipecat")
+    pytest.importorskip("aiortc")
+    pytest.importorskip("numpy")
+
+
+def _frames(phone, loud_at, *, until, step=0.02):
+    """Reply frames for a phone that wasn't on a call: loud at the times in loud_at, silent between."""
+    t, loud = 0.0, sorted(loud_at)
+    while t <= until:
+        phone.frames.append((t, 0.1 if any(abs(t - x) < step / 2 for x in loud) else 0.0))
+        t += step
+
+
+def _phone_with(loud_from_to, events, until=10.0):
+    """A phone that has heard Kairo's voice at the given (from, to) seconds and the data channel's events (time, type);
+    its clock reads `until`."""
+    from app.bench_phone import Phone
+    p = Phone()
+    ticks = []
+    for a, b in loud_from_to:
+        ticks += [a + i * 0.02 for i in range(int((b - a) / 0.02) + 1)]
+    _frames(p, ticks, until=until)
+    p.events = [(t, {"type": k}) for t, k in events]
+    return p
+
+
+def test_a_probe_cut_the_reply_only_when_kairo_was_talking_its_vad_heard_it_and_the_voice_then_stopped():
+    _needs_pipecat()
+
+    def cut(loud, events, until=10.0):
+        return _phone_with(loud, events, until).was_cut(2.0, 2.4, now=until)       # a probe plays from 2.0 to 2.4 s
+    speech = [(2.3, "speech")]                                                     # the PC's VAD hears it at 2.3 s
+    assert cut([(0.0, 2.45)], speech) is True                                      # and Pipecat stops the voice a moment later
+    assert cut([(0.0, 2.45), (6.0, 7.0)], speech) is True                          # it spoke again later: answering the probe
+    assert cut([(0.0, 2.9)], speech, until=4.0) is True                            # the voice took a moment to stop
+    assert cut([(0.0, 2.45)], []) is False                                         # the VAD never heard it (noise): the answer ended by itself
+    assert cut([(0.0, 8.0)], speech) is False                                      # heard, but Kairo talked on
+    assert cut([(0.0, 1.0)], speech) is False                                      # it was quiet already: nothing to cut
+    assert cut([(0.0, 2.9), (3.2, 8.0)], speech) is False                          # a 0.3 s pause between sentences
+    assert cut([(0.0, 3.6)], speech, until=5.0) is False                           # it stopped long after: not because of the probe
+
+
+def test_the_line_is_quiet_when_kairo_stopped_talking_and_said_it_is_done():
+    _needs_pipecat()
+    from app.bench_phone import Phone
+
+    async def go():
+        p = Phone(still_s=0.15)
+        assert await p.quiet(1.0) is True                                  # nothing heard yet
+        p.last_loud = time.monotonic()
+        assert await p.quiet(0.2) is False                                 # just spoke
+        p.events.append((time.monotonic() + 0.01, {"type": "spoken"}))
+        assert await p.quiet(1.0) is True                                  # done, and silent for still_s
+        p.events.clear()
+        p.last_loud = time.monotonic() - 0.1
+        t = time.monotonic()
+        assert await p.quiet(2.0) is True and time.monotonic() - t > 0.4   # no "spoken" event: four times as long
+    asyncio.run(go())
+
+
+def test_the_fake_phone_asks_no_stun_server_and_the_loopback_rule_is_put_back():
+    src = (Path(bv.__file__).parent / "bench_phone.py").read_text(encoding="utf-8")
+    assert "iceServers=[]" in src and "stun:" not in src                # the default would ask a public STUN server
+    _needs_pipecat()
+    import aioice.ice
+
+    from app import voicertc
+    from app.bench_phone import ice_rules
+    before, flag = aioice.ice.get_host_addresses, voicertc._allow_loopback
+    with ice_rules(loopback=True):
+        assert "127.0.0.1" in aioice.ice.get_host_addresses(True, False) and voicertc._allow_loopback is True
+    assert aioice.ice.get_host_addresses is before and voicertc._allow_loopback is flag

@@ -15,7 +15,7 @@ input, mail, web page, file or setting can point them anywhere else.
   Hugging Face (checked against Hugging Face's sha256), downloaded by the installer (voicellm.py), the
   speaker check's model too (owner's approval 2026-10-20: one file, pinned revision and sha256).
   speaker.py itself never touches the network.
-- The voice latency harness (bench_voice.py): a fake phone that calls Kairo itself, on 127.0.0.1 or its own
+- The voice latency harness (bench_voice.py, bench_phone.py): a fake phone that calls Kairo itself, on 127.0.0.1 or its own
   tailnet address, to time the voice. Run by the owner or `kairo diag`; the model can't start it.
 - Calls over WebRTC (owner's request 2026-10-16, voice only): the call's audio to the owner's phone on
   the tailnet only. This PC offers only its Tailscale addresses, takes only the phone's tailnet
@@ -33,6 +33,7 @@ PUSH_HOST_SUFFIXES = (".notify.windows.com",)        # Edge (WNS): wns2-<region>
 TAILNET_SUFFIX = ".ts.net"
 
 MODULES = {
+    "bench_phone.py": "the voice latency harness's fake phone (WebRTC), and the mock call it talks to in this process: tailnet addresses only, no STUN/TURN",
     "bench_voice.py": "the voice latency harness: its fake phone calls Kairo's own /api/rtc/offer (127.0.0.1 or Kairo's *.ts.net address), by hand or from `kairo diag`; never the model",
     "brain/voice_local.py": "the local voice model's server on 127.0.0.1 (nothing else)",
     "executor.py": "Google writes (after the gate)",
