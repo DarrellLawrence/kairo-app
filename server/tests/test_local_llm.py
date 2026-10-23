@@ -316,6 +316,12 @@ def test_a_call_that_opens_mid_job_stops_it_and_it_is_not_the_models_fault():
     opened.cancel()
 
 
+def test_a_call_that_is_already_open_means_the_model_is_not_even_asked():
+    m = FakeModel()
+    a = ask(m, call_open=lambda: True)
+    assert not a.ok and a.reason == "a call opened: the model stays with the voice" and a.fault is False and m.calls == []
+
+
 def test_an_answer_that_fails_is_the_models_fault_and_a_check_that_is_never_true_changes_nothing():
     assert ask(FakeModel(pieces=("nope",))).fault is True
     assert ask(FakeModel(pieces=('{"a": 1}',)), call_open=lambda: False).ok

@@ -192,6 +192,8 @@ class LocalLLM:
                              call_open: Callable[[], bool] | None) -> tuple[str, str | None]:
         """_collect, but stopped when the time is up (TimeoutError) or a call opens (_CallOpened). Stopping cancels the
         read, which closes the connection to the server: it stops writing."""
+        if call_open is not None and _call_is_open(call_open):      # the line opened since the job was routed
+            raise _CallOpened
         loop = asyncio.get_running_loop()
         end = loop.time() + timeout_s
         task = asyncio.ensure_future(self._collect(messages, max_tokens, slot))
