@@ -39,6 +39,7 @@ from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
 from . import conversation
 from . import memory
+from . import router as router_mod
 from . import turns
 from . import speech, voicelink
 from . import selftest as selftest_mod
@@ -189,6 +190,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                               quiet_s=float(os.environ.get("KAIRO_OWNER_QUIET_S", chat.OWNER_QUIET_S)))
     from . import models as model_table
     runner.on_usage = lambda purpose, usage, ok, reason=None: model_table.record(engine, purpose, usage, ok, reason=reason)
+
+    def _people_names() -> list[str]:
+        """The people list: a prompt that has one of these names is about a person (router scanner, G11)."""
+        from .db import Person
+        with session_for(engine) as s_:
+            return [n for n in s_.exec(select(Person.name)).all() if n]
+
+    model_router = router_mod.Router(engine, settings.config_dir, names=_people_names)   # G11: which route, and why (More -> Usage)
+    runner.router = model_router
     model_tools = tool_names(gate)
     try:
         with session_for(engine) as _s:
@@ -379,6 +389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Kairo", lifespan=lifespan)
     app.state.settings = settings
     app.state.runner = runner
+    app.state.router = model_router
     app.state.system_prompt = system_prompt
     app.state.gate = gate
     app.state.tool_token = tool_token
@@ -530,8 +541,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.info("loops after triage: %s", exc)
         return out
 
+    from .brain import local_llm as local_llm_mod
+
+    def _local_model_fingerprint() -> str:
+        """Which model the voice model's server runs now, as the router lab knows it (routing.yaml local.lab_model_hash)."""
+        mid = app.state.voice_llm.model_id
+        return local_llm_mod.fingerprint(mid, voicellm.model_path(_vl_site, mid) if mid else None)
+
     app.state.jobs = Jobs(
         engine=engine, pusher=pusher, profile=profile, schedule=_load_schedule(settings.config_dir),
+        router=model_router, local=local_llm_mod.LocalLLM(app.state.voice_llm, identify=_local_model_fingerprint),
+        call_open=lambda: runner.lines_open() > 0,
         ask=lambda prompt, system, images=None, purpose="summary", model=None: chat.ask_sync(
             runner, prompt, system=system, images=images, purpose=purpose, model=model),
         bodies={"email_triage": lambda ctx: _triage_then_loops(ctx),
@@ -3935,6 +3955,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {**model_table.usage(s, max(1, min(days, 366))), "models": {p: model_table.pick(p, app.state.jobs.schedule)
                                                                               for p in model_table.DEFAULTS},
                     "realtime": realtime.budget(s, dt.datetime.now(profile.tz), profile.tz)}   # real money, vs the cap
+
+    @app.get("/api/router")
+    def router_get(days: int = 7):
+        """More -> Usage -> Routes (G11): the rules in force and the routes taken, each with its reason. Owner only like every
+        route. Never a prompt: the log holds the class, what the scanner found (kinds) and the reason."""
+        return model_router.view(max(1, min(days, router_mod.KEEP_DAYS)), local_model=app.state.jobs.local.fingerprint())
 
     @app.get("/api/backups")
     def backups_list():
