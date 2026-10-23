@@ -489,3 +489,34 @@ def test_devices_say_which_language_finding_is_in_use(voice, whisper, monkeypatc
     voice.tuning = voice_mod.Tuning(single_encode_langid=True)
     w = voice.devices()["whisper"]
     assert w["language_detection"] == "one pass, English or German" and w["language_detection_note"] is None
+
+
+# ---------------------------------------------------------------- the owner's switches also apply to the start-up load
+
+def test_the_start_up_load_follows_the_owners_switches_not_the_defaults(migrated, tmp_path, whisper, monkeypatch):
+    monkeypatch.delenv("KAIRO_WHISPER_COMPUTE", raising=False)
+    put_models(tmp_path, voice_mod.WHISPER_GPU, voice_mod.WHISPER_CPU)
+    engine = make_engine(migrated.db_url)
+    with Session(engine) as s:
+        flags.set_flag(s, "g2.int8_float16", True)               # chosen after the PC test, then Kairo restarted
+        flags.set_flag(s, "g2.temperature_zero", False)
+    v = Voice(tmp_path, engine=engine)
+    monkeypatch.setattr(v, "_load_kokoro", lambda: None)
+    v.warm()
+    assert [m["compute"] for m in whisper.made] == ["int8_float16"]      # loaded once, in the owner's type
+    assert v.tuning.int8_float16 is True and v.tuning.temperature_zero is False
+    assert whisper.calls and all("temperature" not in kw for kw in whisper.calls)     # and the warm-up asks the same way
+
+
+def test_a_start_up_without_a_database_uses_the_defaults(voice, whisper, monkeypatch):
+    monkeypatch.setattr(voice, "_load_kokoro", lambda: None)
+    voice.warm()
+    assert voice.tuning == voice_mod.Tuning() and whisper.made[0]["compute"] == "float16"
+
+
+def test_a_database_that_cannot_be_read_at_start_up_does_not_stop_the_warm_up(tmp_path, whisper, monkeypatch):
+    put_models(tmp_path, voice_mod.WHISPER_GPU, voice_mod.WHISPER_CPU)
+    v = Voice(tmp_path, engine=object())
+    monkeypatch.setattr(v, "_load_kokoro", lambda: None)
+    v.warm()
+    assert v.tuning == voice_mod.Tuning() and whisper.made and whisper.made[0]["compute"] == "float16"

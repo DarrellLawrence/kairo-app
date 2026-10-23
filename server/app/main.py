@@ -404,7 +404,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                               transport=lambda: getattr(app.state, "google_transport", None))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
     _voice_site = tool_sites.site("voice", settings.data_dir)
-    app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site)
+    app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site, engine=engine)
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel

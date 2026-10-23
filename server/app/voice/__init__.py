@@ -229,7 +229,8 @@ class Tuning:
 
 
 class Voice:
-    def __init__(self, models_dir: Path, site_dir: Path | None = None):
+    def __init__(self, models_dir: Path, site_dir: Path | None = None, engine=None):
+        self.engine = engine                 # Kairo's database: the owner's g2.* switches are read at start-up (warm)
         self.models_dir = Path(models_dir)
         self.site_dir = Path(os.environ["KAIRO_VOICE_SITE"]) if os.environ.get("KAIRO_VOICE_SITE") else site_dir
         use_site(self.site_dir)
@@ -403,7 +404,9 @@ class Voice:
     def warm(self) -> None:
         """Load the models once, at start, and run each once (CUDA kernels, cuDNN plans), so no turn
         ever waits for a model load. Called in the background when Kairo starts. Whisper runs last, on
-        speech made by Kairo's own voice, through the call path."""
+        speech made by Kairo's own voice, through the call path. The owner's g2.* switches are read first, so a
+        compute type chosen last week is the one the model starts in."""
+        self._read_flags_at_start()
         for name, load in (("whisper", self._load_stt), ("kokoro", self._load_kokoro)):
             try:
                 with self._lock:
@@ -421,6 +424,16 @@ class Voice:
                 log.warning("voice warm-up run (%s): %s", name, exc)
         if self._stt is not None:
             self._warm_whisper()
+
+    def _read_flags_at_start(self) -> None:
+        if self.engine is None:
+            return
+        try:
+            from ..db import session_for
+            with session_for(self.engine) as s:
+                self.read_flags(s)
+        except Exception as exc:   # the defaults stay: a database hiccup must not keep the voice from loading
+            log.warning("voice: the g2 switches could not be read at start (%s); the defaults are used", exc)
 
     def call_started(self, s) -> threading.Thread | None:
         """A call or the voice button connects (s: a database session). The owner's switches are read now, once;
