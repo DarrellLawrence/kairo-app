@@ -317,6 +317,16 @@ def health(port: int = PORT, timeout: float = 2.0) -> bool:
         return False
 
 
+def props(port: int = PORT, timeout: float = 2.0) -> dict | None:
+    """llama-server's own settings (GET /props: context size, slots, chat template) for `kairo diag`, or None."""
+    try:
+        r = httpx.get(f"http://{HOST}:{port}/props", timeout=timeout)
+        body = r.json() if r.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
 class VoiceModel:
     """Keeps the active voice model loaded and hands out turns.
 

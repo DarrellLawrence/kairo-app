@@ -218,6 +218,18 @@ Check (@($ids | Where-Object { $_ -match '\\Users$|^Everyone$|Authenticated User
 $codeAcl = (Get-Acl (Join-Path $Root 'app')).Access | Where-Object { $_.IdentityReference.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name }
 Check (@($codeAcl | Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl' }).Count -eq 0) 'code folder: owner cannot modify (read/run only)'
 Check ((Test-Path (Join-Path $Root 'Update Kairo.bat')) -and (Test-Path (Join-Path $Root 'Kairo Check.bat'))) 'Update/Rollback/Uninstall/Check .bat files placed in the Kairo folder'
+# ---- kairo diag: kairo.cmd in C:\Kairo\bin, on the machine PATH, changeable by administrators only
+Check (Test-Path (Join-Path $Root 'bin\kairo.cmd')) 'kairo.cmd placed in C:\Kairo\bin'
+$onPath = @(([Environment]::GetEnvironmentVariable('Path', 'Machine')) -split ';' | Where-Object { $_.TrimEnd('\') -ieq (Join-Path $Root 'bin') })
+Check ($onPath.Count -eq 1) 'C:\Kairo\bin is on the machine PATH, once'
+$binWrite = @((Get-Acl (Join-Path $Root 'bin')).Access | Where-Object { $_.IdentityReference.Value -match 'kairo-svc' -and $_.FileSystemRights -match 'Write|Modify|FullControl' })
+Check ($binWrite.Count -eq 0) 'bin: Kairo''s own account cannot change it (nothing it runs can plant a program on the administrators'' PATH)'
+$diagRaw = & (Join-Path $Root 'bin\kairo.cmd') diag --json --local 2>$null
+$diagExit = $LASTEXITCODE
+$diagJson = $null
+try { $diagJson = ($diagRaw -join "`n") | ConvertFrom-Json } catch { }
+Check ($null -ne $diagJson -and $diagJson.schema -eq 1 -and @($diagJson.checks).Count -gt 10) 'kairo diag --json --local prints its report'
+Check (@(0, 1) -contains $diagExit) "kairo diag exits 0 or 1 (it exited $diagExit; 2 would mean the tool itself broke)"
 Check ((Invoke-Install $s1) -eq 0) 'running the same version again is harmless'
 
 # ---- config in layers (fix P0.4): new actions arrive, the owner's edit stays, older versions keep a full copy
@@ -543,6 +555,9 @@ Check (-not (Get-ScheduledTask -TaskName 'Kairo Sync' -TaskPath '\Kairo\' -Error
 Check (-not (Get-NetFirewallRule -DisplayName 'Kairo Sync (Tailscale only)' -ErrorAction SilentlyContinue)) 'sync firewall rule removed'
 Check (-not (Get-NetFirewallRule -DisplayName 'Kairo calls (WebRTC, Tailscale only)' -ErrorAction SilentlyContinue)) 'calls firewall rule removed'
 Check (-not (Test-Path (Join-Path $Root 'app'))) 'program files removed'
+Check (-not (Test-Path (Join-Path $Root 'bin'))) 'kairo.cmd removed'
+$onPathLeft = @(([Environment]::GetEnvironmentVariable('Path', 'Machine')) -split ';' | Where-Object { $_.TrimEnd('\') -ieq (Join-Path $Root 'bin') })
+Check ($onPathLeft.Count -eq 0) 'C:\Kairo\bin is off the machine PATH again'
 Check (Test-Path (Join-Path $Root 'data\db\kairo.sqlite')) 'data kept'
 Check ($null -eq (Get-HealthObj)) 'nothing listening any more'
 Write-Host 'ALL INSTALLER CHECKS PASSED' -ForegroundColor Green

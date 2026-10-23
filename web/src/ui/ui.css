@@ -223,6 +223,12 @@
 .k-approval-actions { display: flex; gap: var(--s-3); }
 .k-approval-actions .k-btn { flex: 1; }
 .k-approval-hint { font: var(--t-caption); color: var(--text-3); text-align: center; margin-top: var(--s-2); }
+/* A bar for a number (Voice check): the fill is the value, the thin line the target. */
+.k-meter { position: relative; display: block; height: 8px; margin-top: var(--s-2); border-radius: var(--r-pill); background: var(--glass-fill-2); overflow: hidden; }
+.k-meter-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: var(--r-pill); background: var(--ok); }
+.k-meter-fill.light { opacity: 0.35; background: var(--text-2); }
+.k-meter-fill.over { background: var(--danger); }
+.k-meter-target { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); opacity: 0.7; }
 .k-pre { font: 13px/1.45 var(--font-mono); white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.25); padding: var(--s-3); border-radius: var(--r-md); margin: 0; }
 
 /* ---------------------------------------------------------------- chat */

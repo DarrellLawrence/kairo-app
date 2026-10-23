@@ -1070,6 +1070,8 @@ function SystemPage() {
               onClick={() => stack.push('Voice speed', () => <VoiceSpeedPage />)} />
             <ListRow icon={<IconMic />} title="Voice lab" subtitle="The local voice models measured on this PC, and the pick" chevron
               onClick={() => stack.push('Voice lab', () => <VoiceLabPage />)} />
+            <ListRow icon={<IconCheck />} title="Voice check" subtitle="Is the whole voice stack healthy? The same as kairo diag on the PC" chevron
+              onClick={() => { window.location.hash = '#/diag/voice' }} />
             {speed.map((r) => (
               <ListRow key={r.kind} icon={<IconBolt />} title={r.title} subtitle={`Typical ${secs(r.p50_ms)} · slow ones ${secs(r.p95_ms)} · ${r.n}×`} />
             ))}

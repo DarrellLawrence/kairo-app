@@ -1,0 +1,112 @@
+{
+ "schema": 1,
+ "version": "2026.10.22.1830-abc1234",
+ "git_sha": "abc1234def5678abc1234def5678abc1234def56",
+ "at": "2026-10-22T18:45:00+00:00",
+ "mode": "live",
+ "machine": {
+  "gpu": "NVIDIA GeForce RTX 3060",
+  "vram_gb": 12,
+  "ram_gb": 16,
+  "cpu": "Example CPU 6-Core"
+ },
+ "config": {
+  "vad_stop_s": 0.2,
+  "turn_analyzer": "smart-turn-v3.2",
+  "stt_model": "large-v3-turbo",
+  "stt_compute_type": "float16",
+  "llm_model": "lfm2.5-2.6b",
+  "tts_en": "kokoro-v1.0.fp16",
+  "tts_de": "de_DE-thorsten-medium"
+ },
+ "turns": [
+  {
+   "clip": "hello_en",
+   "lang": "en",
+   "kind": "chat",
+   "stages_ms": {
+    "vad_stop": 200,
+    "turn_decision": 25,
+    "stt_final": 140,
+    "llm_first_token": 210,
+    "tts_first_audio": 150,
+    "network": 40
+   },
+   "total_ms": 765,
+   "interrupted": false,
+   "missed": false,
+   "speaker_accept": true
+  },
+  {
+   "clip": "appointment_de",
+   "lang": "de",
+   "kind": "tool",
+   "stages_ms": {
+    "vad_stop": 200,
+    "turn_decision": 30,
+    "stt_final": 160,
+    "llm_first_token": 260,
+    "tts_first_audio": 180,
+    "network": 45
+   },
+   "total_ms": 875,
+   "interrupted": false,
+   "missed": false,
+   "speaker_accept": true
+  },
+  {
+   "clip": "weather_en",
+   "lang": "en",
+   "kind": "card",
+   "stages_ms": {
+    "vad_stop": 200,
+    "turn_decision": 28,
+    "stt_final": 150,
+    "llm_first_token": 300,
+    "tts_first_audio": 160,
+    "network": 38
+   },
+   "total_ms": 876,
+   "interrupted": false,
+   "missed": false,
+   "speaker_accept": true
+  }
+ ],
+ "summary": {
+  "n": 3,
+  "p50_ms": 875,
+  "p90_ms": 876,
+  "p95_ms": 876,
+  "by_stage": {
+   "vad_stop": {
+    "p50": 200,
+    "p95": 200
+   },
+   "turn_decision": {
+    "p50": 28,
+    "p95": 30
+   },
+   "stt_final": {
+    "p50": 150,
+    "p95": 160
+   },
+   "llm_first_token": {
+    "p50": 260,
+    "p95": 300
+   },
+   "tts_first_audio": {
+    "p50": 160,
+    "p95": 180
+   },
+   "network": {
+    "p50": 40,
+    "p95": 45
+   }
+  },
+  "false_interrupt_rate": 0.0,
+  "missed_turn_rate": 0.0,
+  "speaker_false_accept_rate": 0.0,
+  "target_p95_ms": 1000,
+  "pass": true
+ }
+}

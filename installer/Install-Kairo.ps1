@@ -129,6 +129,7 @@ try {
         foreach ($bat in @('Update Kairo.bat', 'Rollback Kairo.bat', 'Uninstall Kairo.bat', 'Kairo Logins.bat', 'Kairo Check.bat')) {
             Copy-Item -Force (Join-Path $PSScriptRoot "bat\$bat") (Join-Path $Root $bat)
         }
+        Install-Launcher $P (Join-Path $PSScriptRoot 'bat\kairo.cmd')
         # The .bat files only work from C:\Kairo; copies in installer\bat only confused.
         $batCopies = Join-Path $P.Installer 'bat'
         if (Test-Path $batCopies) { Remove-Item -Recurse -Force $batCopies }

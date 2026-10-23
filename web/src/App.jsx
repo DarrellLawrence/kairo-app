@@ -15,6 +15,7 @@ import Call from './screens/Call.jsx'
 import Life from './screens/Life.jsx'
 import Onboarding from './screens/Onboarding.jsx'
 import Loops from './screens/Loops.jsx'
+import DiagVoice from './screens/DiagVoice.jsx'
 
 const DevComponents = lazy(() => import('./screens/DevComponents.jsx'))
 
@@ -25,13 +26,14 @@ const TABS = [
   { id: 'more', label: 'More', Icon: IconMore },
 ]
 // Screens without their own tab, and the tab that stays lit while they are open.
-const HIDDEN = { loops: 'today', reviews: 'more', board: 'more', school: 'more', lerndoku: 'more', life: 'more' }
+const HIDDEN = { loops: 'today', reviews: 'more', board: 'more', school: 'more', lerndoku: 'more', life: 'more', diagvoice: 'more' }
 
-// Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components
+// Routes: #today, #chat, #approvals, #reviews, #reviews/12 (push link), #more, #onboarding, #/dev/components, #/diag/voice (or /diag/voice)
 function readRoute() {
   const hash = window.location.hash.replace(/^#\/?/, '')
   if (hash === 'dev/components' || window.location.pathname === '/dev/components') return 'dev'
   if (hash === 'onboarding') return 'onboarding'
+  if (hash === 'diag/voice' || (!hash && window.location.pathname === '/diag/voice')) return 'diagvoice'
   if (/^call\/(\d+|new)$/.test(hash)) return 'call'
   const base = hash.split('/')[0]
   return TABS.some((t) => t.id === base) || base in HIDDEN ? base : 'today'
@@ -82,6 +84,7 @@ export default function App() {
     school: <School />,
     lerndoku: <Lerndoku />,
     life: <Life />,
+    diagvoice: <DiagVoice />,
     call: <Call key={param} callId={param} onClose={() => { window.location.hash = '#chat' }} />,
     onboarding: <Onboarding onClose={() => { window.location.hash = '#today' }} />,
     chat: <Chat />,
