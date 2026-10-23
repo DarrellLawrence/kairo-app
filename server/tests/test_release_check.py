@@ -31,6 +31,8 @@ def layout(tmp: Path, *, ship=("app", "mcp_kairo", "hooks", "migrations")) -> Pa
     (app / "web" / "dist").mkdir(parents=True)
     (app / "web" / "dist" / "index.html").write_text("<html></html>")
     shutil.copytree(REPO_ROOT / "config", app / "config")
+    (app / "bench" / "voice").mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "bench" / "voice" / "corpus.json", app / "bench" / "voice" / "corpus.json")
     (app / "release.json").write_text(json.dumps({"version": "x"}))
     return app
 
@@ -59,6 +61,14 @@ def test_import_of_unshipped_first_party_module_fails(tmp_path):
     (app / "server" / "app" / "uses_ghost.py").write_text("import ghostpkg\n")
     problems = check_release.check_app_dir(app, names=check_release.first_party() | {"ghostpkg"})
     assert any("imports 'ghostpkg'" in p for p in problems)
+
+
+def test_the_release_without_the_bench_corpus_fails_and_the_build_script_ships_it(tmp_path):
+    app = layout(tmp_path)
+    (app / "bench" / "voice" / "corpus.json").unlink()
+    assert any("bench/voice/corpus.json" in p for p in check_release.check_app_dir(app))
+    script = (REPO_ROOT / "scripts" / "build-release.sh").read_text()
+    assert 'cp bench/voice/corpus.json "$root/app/bench/voice/"' in script
 
 
 def test_build_script_ships_the_tool_bridge():
