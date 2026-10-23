@@ -1,0 +1,42 @@
+# Kairo's model router (G11): which provider may receive which kind of content, and which are on.
+# Read by server/app/router.py. Default-deny: a provider that is not listed here is off, and so is one
+# that has no adapter in the code (today: only "claude" and "local" have one). This file can switch on
+# only what the code already knows. It can never make a provider more trusted than the code allows: a
+# class that is looser than the code's floor switches that provider off, and More -> Usage says so.
+#
+# Provider classes, and the most private content each may receive:
+#   R0  local            llama-server on this PC (127.0.0.1)          public, low, personal, secret
+#   R1  subscription     Claude through the Claude Code CLI           public, low, personal, secret
+#   R2  free cloud that does not train on what it gets              public, low
+#   R3  free cloud that trains, or unknown                          public only
+# Content classes, per purpose, are in server/app/router.py (CEILINGS). Mail, calendar, tasks, notes, chat,
+# money, documents and anything with a name from your people list are personal or secret: never R2 or R3.
+version: 1
+
+providers:
+  claude: { class: R1, enabled: true }       # the default for every purpose
+  local:  { class: R0, enabled: true, host: 127.0.0.1 }   # still off: needs g11.local_route AND a purpose below
+
+  # FREE CLOUD: every provider is off. There is no adapter for any of them and no host in
+  # server/app/outbound.py. Turning one on needs a dated owner outbound decision (voice recipe 16.8)
+  # that names the hosts and covers public/low content only, then an adapter and an outbound.py entry,
+  # each reviewed on its own. Changing "enabled" here alone does nothing.
+  groq:         { class: R2, enabled: false, host: api.groq.com/openai/v1 }                              # 30-day abuse logs, US
+  cloudflare:   { class: R2, enabled: false, host: api.cloudflare.com/client/v4/accounts/ACCOUNT/ai/v1 }  # Workers AI
+  ollama_cloud: { class: R2, enabled: false, host: ollama.com/v1 }
+  # R3 can only ever see public text:
+  mistral_free:    { class: R3, enabled: false }     # trains on free-tier input by default
+  openrouter_free: { class: R3, enabled: false }     # :free models: unknown providers behind them
+  gemini_free:     { class: R3, enabled: false }     # Google's terms: Paid Services only for clients offered in Switzerland
+  # Not used: FreeLLMAPI. An explicit model id does not pin the provider, the route is nondeterministic
+  #   (cache, fusion), it binds :: and phones home unless configured, and it needs Node on kairo-home.
+  # Not used: Colibri. Nothing measured supports it (3060-class hardware: 3.1 s or more for 45 tokens).
+
+# The local model (the voice model's llama-server, as a second slot). A purpose may run there only when
+# ALL of these hold: g11.local_route is on, the purpose is in this list, lab_model_hash is the hash of the
+# model the router lab passed it on (PC measurement P21), and it is one of the few purposes the code allows
+# (triage, reply_check, summary: no dates or times, no tools). The list is empty until the lab has passed.
+local:
+  purposes: []
+  lab_model_hash: ""
+  timeout_s: { small: 4, batch: 15 }

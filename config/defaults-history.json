@@ -225,6 +225,83 @@
     "48c4ee8f1739566a5ab22826"
    ]
   },
+  "routing.yaml": {
+   "[\"local\", \"lab_model_hash\"]": [
+    "12ae32cb1ec02d01eda3581b"
+   ],
+   "[\"local\", \"purposes\"]": [
+    "4f53cda18c2baa0c0354bb5f"
+   ],
+   "[\"local\", \"timeout_s\", \"batch\"]": [
+    "e629fa6598d732768f7c726b"
+   ],
+   "[\"local\", \"timeout_s\", \"small\"]": [
+    "4b227777d4dd1fc61c6f884f"
+   ],
+   "[\"providers\", \"claude\", \"class\"]": [
+    "5521d24b8cf3e07b14fc0809"
+   ],
+   "[\"providers\", \"claude\", \"enabled\"]": [
+    "b5bea41b6c623f7c09f1bf24"
+   ],
+   "[\"providers\", \"cloudflare\", \"class\"]": [
+    "85bd79b38a3e0897c5ad9341"
+   ],
+   "[\"providers\", \"cloudflare\", \"enabled\"]": [
+    "fcbcf165908dd18a9e49f7ff"
+   ],
+   "[\"providers\", \"cloudflare\", \"host\"]": [
+    "194bdafb6ce9c42538002667"
+   ],
+   "[\"providers\", \"gemini_free\", \"class\"]": [
+    "a86fef590dda28bb6793201f"
+   ],
+   "[\"providers\", \"gemini_free\", \"enabled\"]": [
+    "fcbcf165908dd18a9e49f7ff"
+   ],
+   "[\"providers\", \"groq\", \"class\"]": [
+    "85bd79b38a3e0897c5ad9341"
+   ],
+   "[\"providers\", \"groq\", \"enabled\"]": [
+    "fcbcf165908dd18a9e49f7ff"
+   ],
+   "[\"providers\", \"groq\", \"host\"]": [
+    "5a35e8179126e0f74b86781e"
+   ],
+   "[\"providers\", \"local\", \"class\"]": [
+    "94c89e73816dd083cfe9cec3"
+   ],
+   "[\"providers\", \"local\", \"enabled\"]": [
+    "b5bea41b6c623f7c09f1bf24"
+   ],
+   "[\"providers\", \"local\", \"host\"]": [
+    "882704996deded13b0c5e741"
+   ],
+   "[\"providers\", \"mistral_free\", \"class\"]": [
+    "a86fef590dda28bb6793201f"
+   ],
+   "[\"providers\", \"mistral_free\", \"enabled\"]": [
+    "fcbcf165908dd18a9e49f7ff"
+   ],
+   "[\"providers\", \"ollama_cloud\", \"class\"]": [
+    "85bd79b38a3e0897c5ad9341"
+   ],
+   "[\"providers\", \"ollama_cloud\", \"enabled\"]": [
+    "fcbcf165908dd18a9e49f7ff"
+   ],
+   "[\"providers\", \"ollama_cloud\", \"host\"]": [
+    "67654047dfc458de0694d0b7"
+   ],
+   "[\"providers\", \"openrouter_free\", \"class\"]": [
+    "a86fef590dda28bb6793201f"
+   ],
+   "[\"providers\", \"openrouter_free\", \"enabled\"]": [
+    "fcbcf165908dd18a9e49f7ff"
+   ],
+   "[\"version\"]": [
+    "6b86b273ff34fce19d6b804e"
+   ]
+  },
   "schedule.yaml": {
    "[\"brain\", \"max_runs_per_day\"]": [
     "39fa9ec190eee7b6f4dff110"
