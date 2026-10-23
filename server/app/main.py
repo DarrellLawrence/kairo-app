@@ -3189,7 +3189,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/voice/turns")
     def voice_turns(days: int = 7):
         with session_for(engine) as s:
-            return turns.summary(s, days=min(max(days, 1), 30))
+            summary = turns.summary(s, days=min(max(days, 1), 30))
+        # notes: what the brain wants the owner to see next to the numbers ({id, title, what}), e.g. Claude's tail
+        notes = getattr(runner.brain, "tail_notes", None)
+        return {**summary, "notes": notes() if notes else []}
 
     @app.get("/api/latency")
     def latency_get(days: int = 7):

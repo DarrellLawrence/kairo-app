@@ -556,3 +556,115 @@ def test_the_app_reads_the_owners_switch_for_the_conversation_process(migrated, 
         assert converse(ws, "three")["type"] == "done"
         assert NO_SUMMARY not in json.loads(rec.read_text())["env"]
         client.app.state.runner.brain.close_warm()
+
+
+# ---------------------------------------------------------------- the alarm: a tail over 0.5 s (voice G1)
+# With the switch off the tail is expected (about 2 s); with it on, a tail means the Claude Code version
+# no longer honours the setting. Either way it is logged and shown on Voice speed (tail_notes).
+
+def slow_notes(brain):
+    return [(n["id"], n["title"], n["what"]) for n in brain.tail_notes()]
+
+
+def test_a_tail_over_half_a_second_is_logged(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger="kairo.brain"):
+        run(make(tmp_path))                                                 # no tail
+        assert not [r for r in caplog.records if "tail" in r.getMessage()]
+        run(make(tmp_path, KAIRO_HOOK_FAKE_TAIL_S="0.8"))
+    logged = [r for r in caplog.records if "tail" in r.getMessage()]
+    assert len(logged) == 1 and logged[0].levelno == logging.WARNING
+    assert "g1.cli_no_summary" in logged[0].getMessage()                    # off: says what would remove it
+
+
+def test_a_tail_with_the_switch_on_says_the_setting_stopped_working(tmp_path, caplog):
+    import logging
+    brain = make(tmp_path, flag=lambda name: True, KAIRO_HOOK_FAKE_TAIL_S="0.8", KAIRO_HOOK_FAKE_TAIL_ALWAYS="1")
+    with caplog.at_level(logging.INFO, logger="kairo.brain"):
+        usage = run(brain)[-1].data["usage"]
+    assert usage["no_summary"] is True and usage["tail_ms"] >= 700
+    text = " ".join(r.getMessage() for r in caplog.records if "tail" in r.getMessage())
+    assert "CLAUDE_CODE_CLASSIFIER_SUMMARY=0" in text and "g1.cli_no_summary" not in text
+
+
+def test_the_log_line_comes_at_most_every_ten_minutes(tmp_path, caplog):
+    import logging
+    brain = make(tmp_path)
+
+    def logged():
+        return [r.getMessage() for r in caplog.records if "tail" in r.getMessage()]
+    with caplog.at_level(logging.INFO, logger="kairo.brain"):
+        for i in range(3):
+            brain._note_tail(900, False, now=1000.0 + 5 * i)
+        assert len(logged()) == 1
+        brain._note_tail(900, False, now=1000.0 + 5 * 2 + 600)           # ten minutes after the first line
+    assert len(logged()) == 2 and "3 slow answers" in logged()[1]        # what happened in between is counted
+    brain._note_tail(400, False, now=5000.0)                             # a short tail is no alarm
+    assert len(logged()) == 2
+
+
+def test_voice_speed_has_no_note_while_tails_are_short(tmp_path):
+    brain = make(tmp_path)
+    assert brain.tail_notes() == []
+    run(brain)
+    run(brain)
+    assert brain.tail_notes() == []
+
+
+def test_voice_speed_says_what_the_tail_costs_and_what_removes_it(tmp_path):
+    brain = make(tmp_path)
+    for ms in (2100, 1900, 300):
+        brain._note_tail(ms, False)
+    [(note_id, title, what)] = slow_notes(brain)
+    assert note_id == "claude_tail" and "2.1 s" in title
+    assert "2 of the last 3" in what and "Experiments" in what and "g1.cli_no_summary" in what
+
+
+def test_voice_speed_warns_when_the_setting_does_not_work(tmp_path):
+    brain = make(tmp_path)
+    brain._note_tail(1900, True)
+    [(note_id, title, what)] = slow_notes(brain)
+    assert note_id == "claude_tail" and "still" in title.lower()
+    assert "1 of the last 1" in what and "update" in what.lower()
+
+
+def test_the_note_follows_the_switch(tmp_path):
+    """Slow tails from before the owner switched it on don't count against the new setting."""
+    brain = make(tmp_path)
+    for _ in range(5):
+        brain._note_tail(2000, False)
+    assert brain.tail_notes()
+    brain._note_tail(20, True)
+    assert brain.tail_notes() == []
+    brain._note_tail(1800, True)
+    assert "still" in brain.tail_notes()[0]["title"].lower()
+
+
+def test_the_note_keeps_only_the_last_answers(tmp_path):
+    brain = make(tmp_path)
+    brain._note_tail(2000, False)
+    for _ in range(25):
+        brain._note_tail(10, False)
+    assert brain.tail_notes() == []
+
+
+def test_voice_speed_shows_the_brains_note(migrated, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    def converse(ws, text):
+        ws.send_json({"type": "message", "text": text, "thread_id": None})
+        while (frame := ws.receive_json())["type"] not in ("done", "error"):
+            pass
+
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_TAIL_S", "0.8")
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        assert client.get("/api/voice/turns").json()["notes"] == []
+        converse(ws, "one")
+        [note] = client.get("/api/voice/turns").json()["notes"]
+        assert note["id"] == "claude_tail" and "g1.cli_no_summary" in note["what"]
+        client.put("/api/flags/g1.cli_no_summary", json={"on": True})
+        converse(ws, "two")                                                  # a new process with the setting: no tail
+        converse(ws, "three")
+        assert client.get("/api/voice/turns").json()["notes"] == []
+        client.app.state.runner.brain.close_warm()

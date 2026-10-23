@@ -46,6 +46,7 @@ from __future__ import annotations
 import base64
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -57,6 +58,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .base import BrainEvent, BrainStatus, EventKind
+
+log = logging.getLogger("kairo.brain")
 
 # Only these variables reach the CLI process. The backend's own secrets (for
 # example the write-scoped Google token) must never be visible to the model's
@@ -102,6 +105,10 @@ ENV_PREFIX_ALLOWLIST = ("KAIRO_HOOK_",)  # settings the gate hook needs
 # the owner switches the flag on, and the tail is watched at run time (tail_notes): a CLI update may drop it.
 NO_SUMMARY_FLAG = "g1.cli_no_summary"
 NO_SUMMARY_ENV = {"CLAUDE_CODE_CLASSIFIER_SUMMARY": "0"}
+# The alarm: a result that comes more than this after the end of the answer (log, and a note in Voice speed).
+TAIL_ALARM_MS = 500
+TAIL_LOG_EVERY_S = 600       # one log line per ten minutes, with the count of what it skipped
+TAIL_WINDOW = 20             # the note speaks about the last answers
 
 # A warm process (fix plan 30) is closed after this long without a turn, and is not used for
 # a turn when it started longer ago than WARM_MAX_AGE_S (its system prompt, e.g. "Right now", is stale).
@@ -166,6 +173,10 @@ class ClaudeCLIBrain:
         self._stop_reason: str | None = None   # of the message being streamed (message_delta), read at message_stop
         self._t0 = 0.0                         # when this run (or warm turn) started
         self._timing: dict[str, Any] = {}
+        self._tails: deque[tuple[int, bool]] = deque(maxlen=TAIL_WINDOW)   # (tail_ms, summary off) of the last answers
+        self._tail_lock = threading.Lock()
+        self._tail_logged_at: float | None = None
+        self._tail_unlogged = 0
         self._turn_warm: _Warm | None = None     # the warm process answering right now (interrupt)
         self._interrupted = threading.Event()   # the owner talked over the answer: not a failure
 
@@ -569,6 +580,7 @@ class ClaudeCLIBrain:
             self._timing["result_ms"] = self._ms()
             if "message_end_ms" in self._timing:
                 self._timing["tail_ms"] = self._timing["result_ms"] - self._timing["message_end_ms"]
+                self._note_tail(self._timing["tail_ms"], bool(self._timing.get("no_summary")))
             usage = {**_usage(msg), **self._timing}
             if self._interrupted.is_set() and msg.get("subtype") == "error_during_execution":
                 yield BrainEvent(EventKind.error, text="Interrupted.", session_id=sid, status=self._status,
@@ -585,6 +597,51 @@ class ClaudeCLIBrain:
 
     def _ms(self) -> int:
         return int((time.monotonic() - self._t0) * 1000)
+
+    # -- the tail alarm (voice G1) -----------------------------------------
+
+    def _note_tail(self, tail_ms: int, no_summary: bool, now: float | None = None) -> None:
+        """One answer's tail (end of the answer -> result). Over TAIL_ALARM_MS it is logged (at most every
+        TAIL_LOG_EVERY_S) and tail_notes() shows it in Voice speed. no_summary: the process had the setting."""
+        now = time.monotonic() if now is None else now
+        with self._tail_lock:
+            self._tails.append((tail_ms, no_summary))
+            if tail_ms <= TAIL_ALARM_MS:
+                return
+            self._tail_unlogged += 1
+            if self._tail_logged_at is not None and now - self._tail_logged_at < TAIL_LOG_EVERY_S:
+                return
+            n, self._tail_unlogged, self._tail_logged_at = self._tail_unlogged, 0, now
+        slow = f"{n} slow answer{'s' if n != 1 else ''} since the last note"
+        if no_summary:
+            log.warning("claude tail: %d ms between the end of the answer and the result although "
+                        "CLAUDE_CODE_CLASSIFIER_SUMMARY=0 is set (%s). This Claude Code version may no longer honour "
+                        "the setting.", tail_ms, slow)
+        else:
+            log.warning("claude tail: %d ms between the end of the answer and the result (%s). Flag %s would "
+                        "remove it.", tail_ms, slow, NO_SUMMARY_FLAG)
+
+    def tail_notes(self) -> list[dict]:
+        """For Voice speed: what the tail after Claude's answers costs now, [] while the last answers were
+        quick. Only answers run under the current setting count (the newest answer says which)."""
+        with self._tail_lock:
+            rows = list(self._tails)
+        if not rows:
+            return []
+        mine = [ms for ms, no_summary in rows if no_summary == rows[-1][1]]
+        slow = [ms for ms in mine if ms > TAIL_ALARM_MS]
+        if not slow:
+            return []
+        worst, counts = max(slow) / 1000, f"{len(slow)} of the last {len(mine)} answers"
+        if rows[-1][1]:
+            return [{"id": "claude_tail", "title": f"Claude still takes up to {worst:.1f} s to finish an answer",
+                     "what": f"{counts} waited more than 0.5 s for Claude's summary of the turn although the switch "
+                             f"{NO_SUMMARY_FLAG} is on. The Claude Code on this PC may have dropped the setting in an "
+                             "update: look at it after every Claude update."}]
+        return [{"id": "claude_tail", "title": f"Claude takes up to {worst:.1f} s to finish an answer after its last word",
+                 "what": f"{counts} waited more than 0.5 s for Claude's summary of the turn before the next message "
+                         f"could start. The switch {NO_SUMMARY_FLAG} (More → System → Experiments) removes the wait; it "
+                         "uses a Claude Code setting that is not documented, so it stays off until you decide."}]
 
 
 class _Warm:

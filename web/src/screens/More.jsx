@@ -813,6 +813,11 @@ function VoiceSpeedPage() {
   const pathsOf = (v) => Object.entries(v?.paths || {})
   return (
     <Page title="Voice speed" onRefresh={load}>
+      {(rep.notes || []).length > 0 && (
+        <List>
+          {rep.notes.map((n) => <ListRow key={n.id} icon={<IconWarn />} title={n.title} subtitle={n.what} />)}
+        </List>
+      )}
       <VoiceDevices dev={dev} />
       <SpeakerTurns s={spk} />
       {!now ? <p className="k-muted k-small k-pad">No turns measured yet: talk to Kairo (Chat or a call) and come back.</p> : null}

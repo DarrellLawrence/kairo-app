@@ -13,7 +13,8 @@ because the adapter only passes allow-listed variables through):
 
 FAKE_CLAUDE_TAIL_S=<seconds>: like the real CLI (2.1.296) the turn ends with a system/post_turn_summary event that
 takes this long after the last message_stop, before the result; CLAUDE_CODE_CLASSIFIER_SUMMARY=0 in the process
-environment removes it (measured with the real CLI 2.1.296). Unset: no tail.
+environment removes it (measured with the real CLI 2.1.296). FAKE_CLAUDE_TAIL_ALWAYS=1: a CLI version that
+dropped the setting, the tail stays. Unset: no tail.
 
 FAKE_CLAUDE_NO_TOOLS=1: init lists no tools although MCP connected. FAKE_CLAUDE_SKIP_TOOLS=1: the
 "model" ignores [[fake-tool]] directives (asks instead of acting).
@@ -212,7 +213,7 @@ def tail(sid):
     the result only then; CLAUDE_CODE_CLASSIFIER_SUMMARY=0 turns that off. Read from the process environment
     itself, as the real CLI does: the brain has to pass it on."""
     wait = float(env("FAKE_CLAUDE_TAIL_S") or 0)
-    if wait and os.environ.get("CLAUDE_CODE_CLASSIFIER_SUMMARY") != "0":
+    if wait and (env("FAKE_CLAUDE_TAIL_ALWAYS") or os.environ.get("CLAUDE_CODE_CLASSIFIER_SUMMARY") != "0"):
         time.sleep(wait)
         out({"type": "system", "subtype": "post_turn_summary", "session_id": sid})
 
