@@ -115,7 +115,9 @@ jobs:
   # What actually ships (owner's master prompt 0.6): exactly the zip the build job made, with the owner's terms from
   # the PERSONAL_TERMS secret, then gitleaks on the unpacked zip. --ci makes a missing secret an error on main and
   # anything that could not be scanned an error. The release job needs this job, so a release is never published
-  # without the terms check. The secret is only given to the scanner's step, in a job that runs no project code.
+  # without the terms check. A pull request from this repository is red already when the secret is missing, so it is
+  # noticed before the merge, not as a release that silently stops. The secret is only given to the scanner's step,
+  # in a job that runs no project code.
   privacy-zip:
     needs: build
     runs-on: ubuntu-24.04
@@ -152,6 +154,15 @@ jobs:
           fi
           echo "SCANNER=$scanner" >> "$GITHUB_ENV"
           echo "GITLEAKS_CONFIG=$config" >> "$GITHUB_ENV"
+      - name: The PERSONAL_TERMS secret is set (without it the zip's terms cannot be checked and nothing is released)
+        if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+        env:
+          HAS_TERMS: ${{ secrets.PERSONAL_TERMS != '' }}
+        run: |
+          if [ "$HAS_TERMS" != "true" ]; then
+            echo "::error::The repository secret PERSONAL_TERMS is missing or empty, so the setup zip cannot be checked for personal terms and no release is published. The owner adds it: Settings, Secrets and variables, Actions, New repository secret, name PERSONAL_TERMS, one term per line (CONTRIBUTING.md)."
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           name: setup-zip
@@ -159,7 +170,7 @@ jobs:
       - name: Personal terms, secrets and forbidden paths in the setup zip
         env:
           KAIRO_PERSONAL_TERMS: ${{ secrets.PERSONAL_TERMS }}
-        run: python "$SCANNER" --zip dist/Kairo-Setup-*.zip   # no --ci: a missing terms secret is flagged by the privacy job, it must not stop releases
+        run: python "$SCANNER" --ci --zip dist/Kairo-Setup-*.zip
       - name: Get gitleaks (pinned release, checksum verified)
         if: ${{ !cancelled() }}
         run: |

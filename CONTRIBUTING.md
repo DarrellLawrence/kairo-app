@@ -129,9 +129,14 @@ In tests use made-up names and places only.
   and the author, which are not masked in the log); only rule, file, line and commit are printed.
 - A pull request is judged by the scanner and the gitleaks config of its **base branch**, not by its own copy, so a pull
   request cannot weaken the check that judges it.
-- Job `privacy-zip` (needs `build`): the exact zip the build made, scanned with the terms and unpacked for gitleaks.
-  The `release` job needs it, so a release is never published without the terms check; without the secret it is red
-  on `main` and nothing is released. The terms secret is given to no other job (the build job runs npm scripts).
+- Job `privacy-zip` (needs `build`): the exact zip the build made, scanned with the terms (`--ci`) and unpacked for
+  gitleaks. The `release` job needs it, so a release is never published without the terms check; without the secret
+  it is red on `main` and nothing is released. A pull request from this repository is red too when the secret is
+  missing or empty, so that shows before the merge and not as releases that stop. The terms secret is given to no
+  other job (the build job runs npm scripts).
+- The `release` job does not wait for the job `privacy` (the whole history): that job stays red until the old history
+  is rewritten (task 97). What ships is the zip, and `privacy-zip` checks exactly that file. Add `privacy` to the
+  release's `needs` once it is green on `main`.
 - Job `build`: the setup zip is scanned (secrets and paths) before it is uploaded; `scripts/build-release.sh` deletes a
   zip that fails (it also checks the terms if this machine has a list).
 - Because a pull request is judged by the old scanner, a pull request that changes the scanner and needs a new

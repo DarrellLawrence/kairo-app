@@ -405,6 +405,9 @@ def test_the_terms_secret_only_goes_to_privacy_steps_and_never_to_the_build():
     for name in holders:
         for step in jobs[name]["steps"]:
             if "secrets.PERSONAL_TERMS" in yaml.safe_dump(step):
+                if step.get("env", {}).get("HAS_TERMS") == "${{ secrets.PERSONAL_TERMS != '' }}":
+                    assert "secrets." not in step["run"] and len(step["env"]) == 1, step     # only whether it is set
+                    continue
                 assert "privacy_scan.py" in step["run"] or "SCANNER" in step["run"], step         # only the scanner's own steps
     build_scan = next(s for s in jobs["build"]["steps"] if "privacy_scan.py" in s.get("run", ""))
     assert "--zip" in build_scan["run"] and "--secrets-only" in build_scan["run"]
@@ -418,8 +421,13 @@ def test_the_zip_is_checked_with_the_terms_in_its_own_job_and_the_release_waits_
     assert job["needs"] == "build" and job["permissions"] == {"contents": "read"}
     assert any(str(s.get("uses", "")).startswith("actions/download-artifact") and s["with"]["name"] == "setup-zip" for s in job["steps"])
     scan = next(s for s in job["steps"] if "--zip" in s.get("run", "") and "SCANNER" in s["run"])
-    # findings stop the release; a missing terms secret does not (the privacy job flags that on main)
-    assert "--ci" not in scan["run"].split("#")[0] and scan["env"]["KAIRO_PERSONAL_TERMS"] == "${{ secrets.PERSONAL_TERMS }}"
+    # a missing or empty terms secret stops the release (--ci: an error on main), it never ships unchecked
+    assert "--ci" in scan["run"].split("#")[0] and scan["env"]["KAIRO_PERSONAL_TERMS"] == "${{ secrets.PERSONAL_TERMS }}"
+    # ... and a pull request from this repository is red already, before it is merged (forks get no secrets)
+    guard = next(s for s in job["steps"] if s.get("env", {}).get("HAS_TERMS"))
+    assert job["steps"].index(guard) < job["steps"].index(scan)
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in guard["if"] and "push" in guard["if"]
+    assert "exit 1" in guard["run"] and "::error::" in guard["run"] and "PERSONAL_TERMS" in guard["run"]
     zip_gl = next(r for r in run_steps(job) if "gitleaks/gitleaks" in r and " dir " in r)
     assert "--verbose" not in zip_gl and "--max-archive-depth" in zip_gl and "unzip" in zip_gl
     release = jobs["release"]
