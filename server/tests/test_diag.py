@@ -3,17 +3,21 @@ here against a made-up Kairo folder and made-up answers from the running server;
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
+import types
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
-from app import diag, tool_sites
+from app import diag, tool_sites, voicellm
 from app import voice as voice_mod
+from app.brain import voice_local
 from app.main import create_app
 from tests.conftest import SERVER_DIR
 from tests.test_voice_devices import DeviceVoice
@@ -41,6 +45,12 @@ def pc(tmp_path, monkeypatch):
     return root / "data"
 
 
+@pytest.fixture
+def speech_only(monkeypatch):
+    """Only the speech parts judged: the tests below are about how one part is read, not about the whole PC."""
+    monkeypatch.setattr(diag, "CHECKS", [diag._kairo, diag._whisper, diag._kokoro, diag._piper])
+
+
 def comp(device="cuda", **kw):
     return {"device": device, "model": "m", "loaded": True, "load_ms": 2300, "warm_ms": 140, "ok": device == "cuda",
             "reason": None if device == "cuda" else "on the CPU: Library cublas64_12.dll is not found", **kw}
@@ -57,7 +67,7 @@ def run(data, strict=False, **kw):
     return report, {c["id"]: c for c in report["checks"]}
 
 
-def test_a_healthy_voice_passes_and_exits_zero(pc):
+def test_a_healthy_voice_passes_and_exits_zero(pc, speech_only):
     report, by_id = run(pc, live=live(), source="server")
     assert [c["status"] for c in report["checks"]] == ["PASS"] * len(report["checks"])
     assert report["ok"] is True and report["exit_code"] == 0 and report["counts"] == {"pass": len(report["checks"]), "warn": 0, "fail": 0}
@@ -66,7 +76,7 @@ def test_a_healthy_voice_passes_and_exits_zero(pc):
     assert by_id["piper.device"]["detail"].startswith("on the CPU by design")
 
 
-def test_a_part_on_the_cpu_that_should_be_on_the_gpu_is_a_fail_with_its_reason(pc):
+def test_a_part_on_the_cpu_that_should_be_on_the_gpu_is_a_fail_with_its_reason(pc, speech_only):
     report, by_id = run(pc, live=live(whisper=comp("cpu")))
     c = by_id["whisper.device"]
     assert c["status"] == "FAIL" and "should be on the GPU" in c["detail"] and "cublas64_12.dll" in c["detail"]
@@ -74,12 +84,12 @@ def test_a_part_on_the_cpu_that_should_be_on_the_gpu_is_a_fail_with_its_reason(p
     assert report["exit_code"] == 1 and report["ok"] is False and report["counts"]["fail"] == 1
 
 
-def test_loaded_but_never_warmed_up_is_a_warning(pc):
+def test_loaded_but_never_warmed_up_is_a_warning(pc, speech_only):
     _, by_id = run(pc, live=live(kokoro=comp(warm_ms=None)))
     assert by_id["kokoro.loaded"]["status"] == "WARN" and "not warmed up" in by_id["kokoro.loaded"]["detail"]
 
 
-def test_not_loaded_is_a_fail_except_for_the_german_voice_which_loads_on_first_use(pc):
+def test_not_loaded_is_a_fail_except_for_the_german_voice_which_loads_on_first_use(pc, speech_only):
     _, by_id = run(pc, live=live(whisper={"device": None, "loaded": False, "ok": False, "reason": "not loaded yet (it loads when Kairo starts)"},
                                  piper={"device": "cpu", "loaded": False, "ok": True}))
     assert by_id["whisper.loaded"]["status"] == "FAIL" and "not loaded yet" in by_id["whisper.loaded"]["detail"]
@@ -87,7 +97,7 @@ def test_not_loaded_is_a_fail_except_for_the_german_voice_which_loads_on_first_u
     assert by_id["piper.loaded"]["status"] == "WARN" and by_id["piper.device"]["status"] == "WARN"
 
 
-def test_a_package_that_cannot_be_used_is_a_fail(pc, monkeypatch):
+def test_a_package_that_cannot_be_used_is_a_fail(pc, speech_only, monkeypatch):
     monkeypatch.setattr(tool_sites, "is_real_package",
                         lambda name: (False, "faster_whisper: folder found but not readable by this account") if name == "faster_whisper" else (True, ""))
     _, by_id = run(pc, live=live())
@@ -95,7 +105,7 @@ def test_a_package_that_cannot_be_used_is_a_fail(pc, monkeypatch):
     assert by_id["kokoro.installed"]["status"] == "PASS"
 
 
-def test_a_missing_model_file_is_a_fail(pc):
+def test_a_missing_model_file_is_a_fail(pc, speech_only):
     next((pc.parent / "tools" / "voice" / "models" / "whisper").rglob("model.bin")).unlink()
     (pc.parent / "tools" / "voice" / "models" / "kokoro" / "voices-v1.0.bin").unlink()
     _, by_id = run(pc, live=live())
@@ -103,7 +113,7 @@ def test_a_missing_model_file_is_a_fail(pc):
     assert by_id["kokoro.installed"]["status"] == "FAIL" and "voices-v1.0.bin" in by_id["kokoro.installed"]["detail"]
 
 
-def test_without_the_running_server_nothing_can_be_called_loaded(pc):
+def test_without_the_running_server_nothing_can_be_called_loaded(pc, speech_only):
     report, by_id = run(pc, live=None)
     assert by_id["kairo.running"]["status"] == "FAIL"
     for cid in ("whisper.loaded", "whisper.device", "kokoro.loaded", "piper.device"):
@@ -112,7 +122,7 @@ def test_without_the_running_server_nothing_can_be_called_loaded(pc):
     assert report["exit_code"] == 1
 
 
-def test_strict_turns_a_warning_into_exit_one(pc):
+def test_strict_turns_a_warning_into_exit_one(pc, speech_only):
     ok_live = live(piper={"device": "cpu", "loaded": False, "ok": True})
     assert run(pc, live=ok_live)[0]["exit_code"] == 0
     assert run(pc, live=ok_live, strict=True)[0]["exit_code"] == 1
@@ -127,7 +137,7 @@ def test_a_check_that_crashes_is_a_fail_of_its_own_and_the_rest_still_run(pc, mo
     assert by_id["whisper.device"]["status"] == "PASS" and report["exit_code"] == 1
 
 
-def test_the_json_has_a_fixed_shape(pc):
+def test_the_json_has_a_fixed_shape(pc, speech_only):
     report, _ = run(pc, live=live(), source="server")
     assert set(report) == {"schema", "at", "source", "ok", "exit_code", "counts", "host", "checks"}
     assert report["schema"] == 1 and set(report["host"]) == {"version", "python", "platform"}
@@ -136,7 +146,7 @@ def test_the_json_has_a_fixed_shape(pc):
     json.dumps(report)
 
 
-def test_the_text_is_one_ascii_line_per_check_with_a_verdict(pc):
+def test_the_text_is_one_ascii_line_per_check_with_a_verdict(pc, speech_only):
     report, _ = run(pc, live=live(whisper=comp("cpu")))
     text = diag.render(report)
     text.encode("ascii")
@@ -187,7 +197,7 @@ def reply(status=200, body=None):
     return lambda url, **kw: httpx.Response(status, json=body, request=httpx.Request("GET", url))
 
 
-def test_main_prints_the_running_servers_report_and_applies_strict_itself(pc, monkeypatch, capsys):
+def test_main_prints_the_running_servers_report_and_applies_strict_itself(pc, speech_only, monkeypatch, capsys):
     monkeypatch.setenv("KAIRO_DATA_DIR", str(pc))
     report, _ = run(pc, live=live(piper={"device": "cpu", "loaded": False, "ok": True}), source="server")
     report = {**report, "ok": True, "exit_code": 0, "counts": {"pass": 99, "warn": 0, "fail": 0}}     # a server can't talk us into a green
@@ -267,3 +277,180 @@ def test_the_endpoint_is_owner_only(migrated, monkeypatch):
         (strict.data_dir / "logs" / "boot-check.json").write_text(json.dumps({"tailnet_login": "owner@example.com"}), encoding="utf-8")
         assert c.get("/api/diag/voice", headers=me).status_code == 200
         assert c.get("/api/diag/voice", headers={"tailscale-user-login": "guest@example.com"}).status_code == 403
+
+
+# ---------------------------------------------------------------- the voice model, the turn parts, the speaker, the memory
+
+LLAMA_LOG = ("build: 11292\nggml_cuda_init: found 1 CUDA devices\nusing device CUDA0 (NVIDIA GeForce RTX 3060)\n"
+             "load_tensors: offloaded {n}/33 layers to GPU\n")
+PROPS = {"default_generation_settings": {"n_ctx": 8192}, "total_slots": 1, "chat_template": "{{ messages }}"}
+
+
+def sha(p):
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+@pytest.fixture
+def vl(pc, monkeypatch):
+    """tools\\voicellm-<hash> in miniature: what the installer recorded, and a running llama-server that is on the GPU."""
+    site = pc.parent / "tools" / "voicellm"
+    files = {"exe": site / "llama" / "llama-server", "model": site / "models" / "lfm2.5-2.6b" / "m.gguf",
+             "speaker": site / "speaker" / "spk.onnx", "turn": site / "smart-turn" / "smart-turn-v3.2-cpu.onnx"}
+    for name, f in files.items():
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes((name[0].encode() * 300))
+    rel = lambda f: f.relative_to(site).as_posix()
+    real = voicellm.manifest()
+    (site / "installed.json").write_text(json.dumps({
+        "llama": {"tag": real["llama_cpp"]["tag"], "server": rel(files["exe"]), "files": []},
+        "models": {"lfm2.5-2.6b": {"file": rel(files["model"]), "sha256": sha(files["model"]), "size": 300, "quant": "Q4_K_M"}},
+        "smart_turn": {"file": rel(files["turn"]), "sha256": sha(files["turn"])}, "speaker": {"file": rel(files["speaker"])},
+        "skipped": []}), encoding="utf-8")
+    (site / ".complete").write_text("ok\n", encoding="ascii")
+    pinned = {**real, "speaker": {**real["speaker"], "size": 300, "sha256": sha(files["speaker"])}}
+    monkeypatch.setattr(voicellm, "manifest", lambda: pinned)
+    (pc / "logs").mkdir()
+    (pc / "logs" / "voice-llm.log").write_text(LLAMA_LOG.format(n=33), encoding="utf-8")
+    monkeypatch.setattr(voice_local, "health", lambda port=8091, timeout=2.0: True)
+    monkeypatch.setattr(voice_local, "props", lambda port=8091, timeout=2.0: dict(PROPS))
+    monkeypatch.setattr(diag, "pipecat_model", lambda ctx, sub, pat: files["turn"] if "turn" in sub else files["speaker"])
+    monkeypatch.setattr(diag, "probe_smart_turn", lambda path: (14, None))
+    monkeypatch.setattr(diag, "probe_silero", lambda path: (6, None))
+    return types.SimpleNamespace(site=site, **files)
+
+
+def voice_parts(**over):
+    return live(**{"voice_model": {"model": "lfm2.5-2.6b", "state": "ready", "loaded": True}, **over})
+
+
+def test_a_healthy_voice_model_passes_all_four_checks(pc, vl):
+    _, by_id = run(pc, live=voice_parts())
+    got = {k: (c["status"], c["value"]) for k, c in by_id.items() if k.startswith("llama.")}
+    assert got == {"llama.installed": ("PASS", 0), "llama.running": ("PASS", None), "llama.flags": ("PASS", 8192), "llama.device": ("PASS", None)}
+    assert "size matches" in by_id["llama.installed"]["detail"] and "33/33 layers on the GPU" in by_id["llama.device"]["detail"]
+    assert "RTX 3060" in by_id["llama.device"]["detail"] and "state: ready" in by_id["llama.running"]["detail"]
+
+
+def test_a_whole_healthy_stack_exits_zero_with_only_the_expected_warnings(pc, vl):
+    idle = {"device": None, "loaded": False, "on": False, "ok": True, "reason": "until you teach Kairo your voice"}
+    report, by_id = run(pc, live=voice_parts(speaker=idle), source="server")
+    assert report["counts"]["fail"] == 0 and report["exit_code"] == 0 and report["ok"] is True
+    assert sorted(i for i, c in by_id.items() if c["status"] == "WARN") == ["embeddings.installed", "speaker.enrolled"]
+    assert run(pc, live=voice_parts(speaker=idle), strict=True)[0]["exit_code"] == 1
+
+
+def test_a_model_file_of_the_wrong_size_is_a_fail_and_the_checksum_is_only_read_with_deep(pc, vl):
+    vl.model.write_bytes(b"x" * 300)                         # same size, other content: the checksum is the only thing that knows
+    assert run(pc, live=voice_parts())[1]["llama.installed"]["status"] == "PASS"
+    deep = run(pc, live=voice_parts(), deep=True)[1]["llama.installed"]
+    assert deep["status"] == "FAIL" and "damaged or replaced" in deep["detail"]
+    vl.model.write_bytes(b"m" * 10)
+    assert "it is 10 bytes, the pin says 300" in run(pc, live=voice_parts())[1]["llama.installed"]["detail"]
+
+
+def test_llama_cpp_of_another_tag_than_the_release_pins_is_a_fail(pc, vl):
+    rec = json.loads((vl.site / "installed.json").read_text())
+    rec["llama"]["tag"] = "b1"
+    (vl.site / "installed.json").write_text(json.dumps(rec), encoding="utf-8")
+    c = run(pc, live=voice_parts())[1]["llama.installed"]
+    assert c["status"] == "FAIL" and "b1 is installed" in c["detail"]
+
+
+def test_a_voice_model_that_does_not_answer_is_a_fail_with_what_kairo_says(pc, vl, monkeypatch):
+    monkeypatch.setattr(voice_local, "health", lambda port=8091, timeout=2.0: False)
+    _, by_id = run(pc, live=voice_parts(voice_model={"model": "lfm2.5-2.6b", "state": "failed", "reason": "llama-server did not start (no log)"}))
+    assert by_id["llama.running"]["status"] == "FAIL" and "127.0.0.1:8091" in by_id["llama.running"]["detail"]
+    assert "failed: llama-server did not start" in by_id["llama.running"]["detail"]
+    assert by_id["llama.flags"]["status"] == "FAIL" and "not running" in by_id["llama.flags"]["detail"]
+
+
+def test_context_slots_and_template_are_judged_against_what_kairo_starts_it_with(pc, vl, monkeypatch):
+    def props(n_ctx=8192, slots=1, template="x"):
+        monkeypatch.setattr(voice_local, "props", lambda port=8091, timeout=2.0: {
+            "default_generation_settings": {"n_ctx": n_ctx}, "total_slots": slots, "chat_template": template})
+        return run(pc, live=voice_parts())[1]["llama.flags"]
+    assert props()["status"] == "PASS"
+    small = props(n_ctx=4096)
+    assert small["status"] == "FAIL" and "context 4096 tokens, Kairo starts it with 8192" in small["detail"] and small["value"] == 4096
+    no_template = props(template="")
+    assert no_template["status"] == "FAIL" and "--jinja" in no_template["detail"]
+    assert props(slots=4)["status"] == "WARN"
+    monkeypatch.setattr(voice_local, "props", lambda port=8091, timeout=2.0: None)
+    assert run(pc, live=voice_parts())[1]["llama.flags"]["status"] == "WARN"
+
+
+def test_layers_off_the_gpu_are_a_fail_with_llama_cpps_own_reason(pc, vl):
+    (pc / "logs" / "voice-llm.log").write_text(LLAMA_LOG.format(n=20), encoding="utf-8")
+    c = run(pc, live=voice_parts())[1]["llama.device"]
+    assert c["status"] == "FAIL" and "only 20/33 layers on the GPU" in c["detail"]
+
+
+def test_smart_turn_and_silero_must_be_there_load_and_answer(pc, vl, monkeypatch):
+    _, by_id = run(pc, live=voice_parts())
+    assert by_id["smart_turn.installed"]["status"] == "PASS" and "checksum ok (old line)" in by_id["smart_turn.installed"]["detail"]
+    assert (by_id["smart_turn.loaded"]["value"], by_id["silero.loaded"]["value"]) == (14, 6)
+    assert by_id["smart_turn.device"]["status"] == by_id["silero.device"]["status"] == "PASS"
+    vl.turn.write_bytes(b"t" * 299 + b"x")
+    c = run(pc, live=voice_parts())[1]["smart_turn.installed"]
+    assert c["status"] == "FAIL" and "damaged or replaced" in c["detail"]
+    monkeypatch.setattr(diag, "probe_smart_turn", lambda path: (None, "InvalidProtobuf: bad model"))
+    monkeypatch.setattr(diag, "probe_silero", lambda path: (None, "NoSuchFile"))
+    _, by_id = run(pc, live=voice_parts())
+    assert "InvalidProtobuf: bad model" in by_id["smart_turn.loaded"]["detail"] and by_id["silero.loaded"]["status"] == "FAIL"
+    monkeypatch.setattr(diag, "pipecat_model", lambda ctx, sub, pat: None)
+    _, by_id = run(pc, live=voice_parts())
+    assert by_id["smart_turn.installed"]["status"] == by_id["silero.installed"]["status"] == "FAIL"
+    assert "pipecat" in by_id["silero.installed"]["detail"]
+
+
+def test_a_model_that_cannot_be_loaded_is_reported_not_raised(tmp_path):
+    junk = tmp_path / "junk.onnx"
+    junk.write_bytes(b"not a model")
+    ms, why = diag.probe_smart_turn(junk)
+    assert ms is None and why
+    ms, why = diag.probe_silero(junk)
+    assert ms is None and why
+
+
+def test_the_speaker_model_must_match_the_pin_in_voicellm_json(pc, vl):
+    c = run(pc, live=voice_parts())[1]["speaker.installed"]
+    assert c["status"] == "PASS" and "match the pin" in c["detail"]
+    vl.speaker.write_bytes(b"s" * 299 + b"x")                 # right size, wrong bytes
+    c = run(pc, live=voice_parts())[1]["speaker.installed"]
+    assert c["status"] == "FAIL" and "not the pinned one" in c["detail"] and "voicellm.json" in c["detail"]
+    vl.speaker.unlink()
+    assert "isn't downloaded" in run(pc, live=voice_parts())[1]["speaker.installed"]["detail"]
+
+
+def test_the_real_manifest_does_pin_the_speaker_model():
+    pin = json.loads(Path(voicellm.MANIFEST).read_text(encoding="utf-8"))["speaker"]
+    assert pin["size"] > 1_000_000 and len(pin["sha256"]) == 64 and len(pin["revision"]) == 40
+
+
+def test_the_speaker_is_a_warning_until_it_is_enrolled_and_a_fail_on_the_cpu_once_it_is(pc, vl):
+    idle = {"device": None, "loaded": False, "on": False, "ok": True, "reason": "until you teach Kairo your voice"}
+    _, by_id = run(pc, live=voice_parts(speaker=idle))
+    assert by_id["speaker.enrolled"]["status"] == "WARN" and "speaker.loaded" not in by_id          # off: said once
+    (pc / "voice").mkdir()
+    (pc / "voice" / "voiceprint.bin").write_bytes(b"VOICEPRINT-BYTES")
+    _, by_id = run(pc, live=voice_parts(speaker={**comp("cpu"), "on": True}))
+    assert by_id["speaker.enrolled"]["status"] == "PASS" and "never shown" in by_id["speaker.enrolled"]["detail"]
+    assert by_id["speaker.device"]["status"] == "FAIL" and "should be on the GPU" in by_id["speaker.device"]["detail"]
+    assert "VOICEPRINT-BYTES" not in json.dumps(by_id)
+
+
+def test_the_embeddings_start_with_the_first_search_but_must_not_run_on_the_cpu(pc, vl, monkeypatch):
+    from app import semantic
+    _, by_id = run(pc, live=voice_parts())
+    assert by_id["embeddings.installed"]["status"] == "WARN" and "isn't set up" in by_id["embeddings.installed"]["detail"]
+    monkeypatch.setattr(tool_sites, "configured", lambda kind: True)
+    monkeypatch.setattr(semantic.Embedder, "installed", lambda self: True)
+    idle = {"device": None, "loaded": False, "ok": False, "reason": "not started yet (it starts with the first memory search)"}
+    _, by_id = run(pc, live=voice_parts(embeddings=idle))
+    assert by_id["embeddings.installed"]["status"] == "PASS" and by_id["embeddings.loaded"]["status"] == "WARN"
+    _, by_id = run(pc, live=voice_parts(embeddings={"device": "cpu", "loaded": True, "ok": False, "reason": "on the CPU: only 900 MB free on the GPU"}))
+    assert by_id["embeddings.device"]["status"] == "FAIL" and "only 900 MB free" in by_id["embeddings.device"]["detail"]
+    _, by_id = run(pc, live=voice_parts(embeddings={"device": "cuda", "loaded": True, "ok": True}))
+    assert by_id["embeddings.device"]["status"] == "PASS"
+    monkeypatch.setattr(semantic.Embedder, "installed", lambda self: False)
+    assert run(pc, live=voice_parts())[1]["embeddings.installed"]["status"] == "FAIL"

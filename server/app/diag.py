@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import functools
+import importlib.util
 import json
 import os
 import platform
@@ -41,6 +42,11 @@ GROUPS = {
     "whisper": "Speech to text (Whisper)",
     "kokoro": "English voice (Kokoro)",
     "piper": "German voice (Piper)",
+    "llama": "Voice model (llama.cpp)",
+    "smart_turn": "Turn detector (Smart Turn)",
+    "silero": "Voice activity (Silero VAD)",
+    "speaker": "Speaker check (CAM++)",
+    "embeddings": "Memory search (embeddings)",
 }
 
 
@@ -192,7 +198,168 @@ def _piper(ctx: Ctx) -> list[Check]:
     return [first] + live_checks(ctx, "piper", "piper", gpu_required=False, lazy=True)
 
 
-CHECKS = [_kairo, _whisper, _kokoro, _piper]
+# ---------------------------------------------------------------- files, pinned or recorded
+
+def verify(path: Path, *, size: int | None, sha256: str | None, hash_it: bool = True) -> str | None:
+    """None when the file is what was pinned (voicellm.json) or recorded (installed.json); else why not."""
+    try:
+        actual = path.stat().st_size
+        if size is not None and actual != size:
+            return f"it is {actual} bytes, the pin says {size}"
+        if sha256 and hash_it and (got := voicellm._sha256(path)) != sha256.lower():
+            return f"its sha256 ({got[:12]}) is not the pinned one ({sha256[:12]}): damaged or replaced"
+    except OSError as exc:
+        return f"it can't be read ({type(exc).__name__})"
+    return None
+
+
+def pipecat_model(ctx: Ctx, subdir: str, pattern: str) -> Path | None:
+    """A model file inside the pipecat package (Silero and Smart Turn ship in its wheel), found without importing it."""
+    ctx.voice                      # the voice packages' folder must be on sys.path
+    try:
+        spec = importlib.util.find_spec("pipecat")
+    except (ImportError, ValueError):
+        return None
+    for base in (spec.submodule_search_locations or []) if spec else []:
+        hits = sorted((Path(base) / subdir).glob(pattern))
+        if hits:
+            return hits[-1]
+    return None
+
+
+def probe_smart_turn(path: Path) -> tuple[int | None, str | None]:
+    """(ms, None) when the model loads and answers once (on the CPU, as in a call), else (None, why)."""
+    from . import smartturn
+    if smartturn.np is None:
+        return None, "numpy isn't installed (the voice packages)"
+    st = smartturn.SmartTurn(path)
+    st.probability(b"\x00\x00" * smartturn.RATE)
+    return (st.last_ms, None) if st.last_ms is not None else (None, st.failed or "no answer")
+
+
+def probe_silero(path: Path) -> tuple[int | None, str | None]:
+    """(ms, None) when the VAD model loads on the CPU (a call loads its own copy), else (None, why)."""
+    import time
+    try:
+        import onnxruntime as ort
+        t0 = time.monotonic()
+        ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        return int((time.monotonic() - t0) * 1000), None
+    except Exception as exc:   # ImportError, a damaged file
+        return None, f"{type(exc).__name__}: {exc}"[:200]
+
+
+def active_model(ctx: Ctx) -> str | None:
+    """The voice model that talks: the server's, else the first installed one."""
+    return (ctx.dev("voice_model") or {}).get("model") or next(iter(voicellm.available(ctx.vl_site)), None)
+
+
+# ---------------------------------------------------------------- the voice model, the turn parts, the speaker, the memory
+
+def _llama(ctx: Ctx) -> list[Check]:
+    from .brain import voice_local
+    pin, rec, mid = voicellm.manifest(), ctx.recorded, active_model(ctx)
+    binary, model = voicellm.server_binary(ctx.vl_site), (voicellm.model_path(ctx.vl_site, mid) if mid else None)
+    if not rec:
+        first = bad("llama.installed", "installed", "the voice model folder isn't installed (run Update Kairo)")
+    elif binary is None or model is None:
+        first = bad("llama.installed", "installed", "llama-server is missing" if binary is None else "no voice model file is downloaded (run Update Kairo)")
+    elif (rec.get("llama") or {}).get("tag") != pin["llama_cpp"]["tag"]:
+        first = bad("llama.installed", "installed", f"llama.cpp {(rec.get('llama') or {}).get('tag')} is installed, this release pins {pin['llama_cpp']['tag']} (run Update Kairo)")
+    else:
+        r = (rec.get("models") or {}).get(mid) or {}
+        why = verify(model, size=r.get("size"), sha256=r.get("sha256"), hash_it=ctx.deep)
+        size = model.stat().st_size / 1024 ** 2
+        first = (bad("llama.installed", "installed", f"{mid}: {why}") if why else
+                 ok("llama.installed", "installed", f"llama.cpp {pin['llama_cpp']['tag']}; {mid} {r.get('quant', '')} ({mb(size)}), size matches"
+                    + (", sha256 matches" if ctx.deep else " (--deep also checks the sha256)"), round(size), "MB"))
+    port = voice_local.PORT
+    up = voice_local.health(port)
+    state = ctx.dev("voice_model") or {}
+    running = (ok("llama.running", "answers", f"answers on {voice_local.HOST}:{port}" + (f" (state: {state['state']})" if state.get("state") else ""))
+               if up else bad("llama.running", "answers", f"nothing answers on {voice_local.HOST}:{port}"
+                              + (f"; Kairo says it is {state['state']}: {state.get('reason')}" if state.get("state") else "")))
+    props = voice_local.props(port) if up else None
+    want = int((voicellm.spec(mid) or {}).get("context", 8192)) if mid else None
+    if props is None:
+        flags = (warn if up else bad)("llama.flags", "context and flags", "it answers /health but not /props" if up else "not running, so its settings can't be read")
+    else:
+        n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
+        slots, template = props.get("total_slots"), bool(props.get("chat_template"))
+        wrong = ([f"context {n_ctx} tokens, Kairo starts it with {want}"] if want and n_ctx != want else []) \
+            + ([] if template else ["no chat template (started without --jinja: no tool calls)"])
+        flags = (bad("llama.flags", "context and flags", "; ".join(wrong) + " (restart Kairo)", n_ctx, "tokens") if wrong else
+                 warn("llama.flags", "context and flags", f"{slots} slots; Kairo uses 1 (-np 1) so the prompt cache stays", n_ctx, "tokens") if slots != 1 else
+                 ok("llama.flags", "context and flags", f"context {n_ctx} tokens, 1 slot, chat template on (-c, -np 1, --jinja)", n_ctx, "tokens"))
+    dev = gpu.llama_device(ctx.data_dir / "logs" / "voice-llm.log")
+    layers = (ok("llama.device", "on the GPU", f"{dev['layers']} layers on the GPU" + (f" ({dev['gpu']})" if dev.get("gpu") else ""))
+              if dev["ok"] else bad("llama.device", "on the GPU", str(dev["reason"])))
+    return [first, running, flags, layers]
+
+
+def _smart_turn(ctx: Ctx) -> list[Check]:
+    """WebRTC calls use pipecat's own copy of the model; the old line uses the one the installer downloaded."""
+    own = pipecat_model(ctx, "audio/turn/smart_turn/data", "smart-turn-v3*cpu*.onnx")
+    copy = voicellm.smart_turn_path(ctx.vl_site)
+    rec = ctx.recorded.get("smart_turn") or {}
+    why = verify(copy, size=None, sha256=rec.get("sha256")) if copy else None
+    if own is None:
+        first = bad("smart_turn.installed", "installed", "pipecat's Smart Turn model isn't there: calls can't tell when you are done (run Update Kairo)")
+    elif why:
+        first = bad("smart_turn.installed", "installed", f"the downloaded copy {copy.name}: {why}")
+    else:
+        first = ok("smart_turn.installed", "installed", f"{own.name} ({mb(own.stat().st_size / 1024 ** 2)}, WebRTC calls)"
+                   + (f"; {copy.name} checksum ok (old line)" if copy else "; the old line's copy isn't downloaded (it uses the plain quiet rule)"),
+                   round(own.stat().st_size / 1024 ** 2), "MB")
+    ms, problem = probe_smart_turn(own or copy) if (own or copy) else (None, "no model file")
+    loaded = (ok("smart_turn.loaded", "loaded", f"loads and answers in {ms} ms", ms, "ms") if ms is not None else
+              bad("smart_turn.loaded", "loaded", f"the model doesn't load or answer: {problem}"))
+    return [first, loaded, ok("smart_turn.device", "where it runs", "on the CPU by design (about 8M parameters, tens of ms)")]
+
+
+def _silero(ctx: Ctx) -> list[Check]:
+    path = pipecat_model(ctx, "audio/vad/data", "silero_vad*.onnx")
+    if path is None:
+        return [bad("silero.installed", "installed", "pipecat's Silero VAD model isn't there: calls can't hear when you talk (run Update Kairo)")]
+    ms, problem = probe_silero(path)
+    return [ok("silero.installed", "installed", f"{path.name} ({mb(path.stat().st_size / 1024 ** 2)})", round(path.stat().st_size / 1024 ** 2), "MB"),
+            ok("silero.loaded", "loaded", f"loads in {ms} ms (every call loads its own copy)", ms, "ms") if ms is not None else
+            bad("silero.loaded", "loaded", f"the model doesn't load: {problem}"),
+            ok("silero.device", "where it runs", "on the CPU by design (one thread)")]
+
+
+def _speaker(ctx: Ctx) -> list[Check]:
+    from . import speaker as sp
+    pin = voicellm.manifest()["speaker"]
+    path = voicellm.speaker_path(ctx.vl_site)
+    why = verify(path, size=pin.get("size"), sha256=pin.get("sha256")) if path else None
+    first = (bad("speaker.installed", "installed", "the speaker model isn't downloaded (run Update Kairo): calls work, but anyone is answered")
+             if path is None else bad("speaker.installed", "installed", f"{path.name}: {why} (pinned in voicellm.json)") if why else
+             ok("speaker.installed", "installed", f"{path.name} ({mb(path.stat().st_size / 1024 ** 2)}), size and sha256 {pin['sha256'][:12]} match the pin",
+                round(path.stat().st_size / 1024 ** 2), "MB"))
+    print_ = ctx.data_dir / sp.VOICEPRINT
+    taught = print_.is_file() and print_.stat().st_size > 0
+    enrolled = (ok("speaker.enrolled", "your voice is enrolled", "your voiceprint is on the PC (encrypted, never shown)") if taught else
+                warn("speaker.enrolled", "your voice is enrolled", "no voiceprint yet: teach Kairo your voice (More -> Settings -> Voice); until then the speaker check is off"))
+    d = ctx.dev("speaker") or {}
+    if d.get("on", taught):
+        return [first, *live_checks(ctx, "speaker", "speaker", gpu_required=True), enrolled]
+    # the check is off (not taught, or switched off): nothing is meant to be loaded, so "enrolled" says it once
+    return [first, enrolled] + ([warn("speaker.loaded", "loaded", f"the check is off: {d.get('note') or 'switched off'}")] if taught else [])
+
+
+def _embeddings(ctx: Ctx) -> list[Check]:
+    from . import semantic
+    if not tool_sites.configured("memory"):
+        return [warn("embeddings.installed", "installed", "semantic memory isn't set up for this release: search finds keywords only")]
+    site = tool_sites.site("memory", ctx.data_dir)
+    first = (ok("embeddings.installed", "installed", f"packages and model found in {ctx.rel(site)}") if semantic.Embedder(site / "model", site_dir=site).installed()
+             else bad("embeddings.installed", "installed", f"packages or model missing in {ctx.rel(site)} (run Update Kairo)"))
+    # the model starts with the first memory search: not started yet is normal, on the CPU is not
+    return [first, *live_checks(ctx, "embeddings", "embeddings", gpu_required=True, lazy=True)]
+
+
+CHECKS = [_kairo, _whisper, _kokoro, _piper, _llama, _smart_turn, _silero, _speaker, _embeddings]
 
 
 # ---------------------------------------------------------------- the report
