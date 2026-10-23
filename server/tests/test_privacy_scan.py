@@ -1594,3 +1594,30 @@ def test_a_gitleaks_allow_comment_is_a_finding_outside_the_folders_for_fakes(tmp
     commit(repo, tmp_path, "quiet please", {"cfg.toml": f"key = 1  # {GL_ALLOW}\n", ".gitleaksignore": "abc:cfg.toml:generic:1\n"})
     code, out = scan(tmp_path, "--history", "HEAD~1..HEAD", terms=[NAME], cwd=repo)
     assert code == 1 and "cfg.toml:1: secret: gitleaks allow comment" in out and ".gitleaksignore: forbidden path" in out, out
+
+
+# ---------------------------------------------------------------- VAPID keys with the public key first
+
+VAPID_PUB = "B" + (RND43 * 2)[:86]                            # a public key is 87 characters, so it pushed "private" out of reach
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps({"vapid": {"public": VAPID_PUB, "private": RND43}}),
+    json.dumps({"vapid": {"subject": "mailto:owner@example.org", "public": VAPID_PUB, "private": RND43}}, indent=2),
+    "vapid:\n  public: " + VAPID_PUB + "\n  priv" + "ate: " + RND43,
+    "[vapid]\npublic = \"" + VAPID_PUB + "\"\npriv" + "ate = \"" + RND43 + "\"",
+    "=" * 39 + "\n\nPublic Key:\n" + VAPID_PUB + "\n\nPriv" + "ate Key:\n" + RND43 + "\n\n" + "=" * 39,     # web-push generate-vapid-keys
+], ids=["json", "json-indented", "yaml", "toml", "web-push-output"])
+def test_a_vapid_private_key_after_the_public_key_is_found(ps, text):
+    found = ps.scan_secrets(text + "\n")
+    assert any(name == "VAPID private key" for _line, name in found), (text, found)
+
+
+def test_the_gitleaks_vapid_rule_reaches_past_the_public_key():
+    import tomllib
+    rule = next(r for r in tomllib.loads((REPO_ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))["rules"]
+                if r["id"] == "kairo-vapid-private-key")
+    import re
+    for text in (json.dumps({"vapid": {"public": VAPID_PUB, "private": RND43}}),
+                 "[vapid]\npublic = \"" + VAPID_PUB + "\"\npriv" + "ate = \"" + RND43 + "\""):
+        assert re.search(rule["regex"].replace("(?i)", ""), text, re.I), text

@@ -820,9 +820,12 @@ _RULES: list[SecretRule] = [
                lambda m: not _trivial(m["body"]), ("hc-ping.com",)),
     SecretRule("private JWK", re.compile(r"[\"']d[\"']\s*:\s*[\"'](?P<body>[A-Za-z0-9_\-]{43,})[\"']"),
                lambda m: ("kty" in m.string) and not _trivial(m["body"]) and not _placeholder(m["body"]), ("kty",)),
-    SecretRule("VAPID private key", re.compile(
-        r"vapid[\s\S]{0,100}?private[\"']?\s*[:=]\s*[\"']?(?P<body>[A-Za-z0-9_\-+/=]{40,})", re.I),
+    SecretRule("VAPID private key", re.compile(              # (the window spans an 87-character public key before it)
+        r"vapid[\s\S]{0,300}?private[\"']?\s*[:=]\s*[\"']?(?P<body>[A-Za-z0-9_\-+/=]{40,})", re.I),
                lambda m: not _trivial(m["body"]) and not _placeholder(m["body"]), ("vapid",), True),
+    SecretRule("VAPID private key", re.compile(              # what `web-push generate-vapid-keys` prints
+        r"(?im)^[ \t]*private key:[ \t]*\r?\n[ \t]*(?P<body>[A-Za-z0-9_\-]{43})=?[ \t]*\r?$"),
+               lambda m: not _trivial(m["body"]) and not _placeholder(m["body"]), ("private key:",), True),
 ]
 
 # gitleaks skips every line that holds its allow comment, whatever config CI uses (built from pieces so that this file
