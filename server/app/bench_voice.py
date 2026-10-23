@@ -6,15 +6,17 @@ plays each clip of the corpus (app/bench_corpus.py, bench/voice/corpus.json) at 
 records the reply audio. Per turn: total_ms = the clip's true end of speech -> the first reply frame that is
 audible at the client (RMS >= 0.01 like the phone's "playing" mark). The stages come from the server's own
 numbers for that turn (the data channel's "timing" event, the same `server` dict the phone sends to
-app/turns.py, which turns.steps() turns into steps), joined by turn number; what is left over is "network".
+app/turns.py, which turns.steps() turns into steps; the first one after the clip began, as the clips are played one at
+a time on a quiet line); what is left over is "network".
 
     python -m app.bench_voice [--mock] [--url http://127.0.0.1:8000] [--clips N] [--out DIR]   (in server/)
+    bench_voice.run(mock, url, out_dir) -> results dict      bench_voice.latest(results_dir) -> newest valid results or None
 
 Rates: false_interrupt_rate (a backchannel or noise clip is played while Kairo is talking: did it stop?),
 missed_turn_rate (a real utterance got no reply within 5 s), speaker_false_accept_rate (an other_speaker
 clip answered although the speaker check is on: null when the check is off or has no voiceprint, as the
-check's per-turn label is the only evidence). Results: one JSON per run in <data>/bench/results/ (schema
-below), with pass = p95 <= 1000 ms and no missed turn and false interrupts <= 5 %.
+check's per-turn label is the only evidence). Results: one JSON per run in <data>/bench/results/ (the schema is
+validate() below and bench/results/README.md), with pass = p95 <= 1000 ms, no missed turn, false interrupts <= 5 %.
 
 --mock runs the same client against the same Pipecat pipeline (Silero VAD, Smart Turn) in this process, with
 fake speech to text, voice model and voice that have fixed, known delays, so the harness itself can be tested
