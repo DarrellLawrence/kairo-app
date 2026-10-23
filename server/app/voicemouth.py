@@ -38,6 +38,7 @@ from .speech import PlainStream, plain
 
 log = logging.getLogger("kairo.mouth")
 
+
 def g3_options(s) -> dict:
     """The G3 switches (app/flags.py) as the voice model's server and the call read them: the server's when it
     starts, the call's at its start (never per audio frame)."""
@@ -196,7 +197,6 @@ def static_system(name: str | None, language_mode: str = "auto") -> str:
 
 
 _CONTEXT_TAGS = re.compile(r"</?kairo-(?:context|note)>", re.I)
-
 
 
 _SENTENCE_END = re.compile(r"[.!?…]+[\"'”’»)\]]*(?:\s+|$)|\n+")
