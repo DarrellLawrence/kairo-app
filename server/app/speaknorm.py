@@ -127,22 +127,38 @@ def _whole(token: str) -> int | None:
 _FEMININE = re.compile(r"(?:ung|keit|heit|schaft|tion|ität|ik|ur|ie)$|^(?:Stunde|Minute|Sekunde|Woche|Nachricht|Mail|"
                        r"E-Mail|Aufgabe|Notiz|Frage|Erinnerung|Seite|Zeile|Zahl|Sache|Person|Karte|Rechnung|Tasche|"
                        r"Datei|Liste|Nummer|Stelle|Runde|Gruppe)$")
-_EIN = {"Uhr", "Tag", "Termin", "Monat", "Jahr", "Mal", "Moment", "Euro", "Franken", "Rappen", "Cent", "Dollar",
-        "Kilometer", "Meter", "Liter", "Gramm", "Kilo", "Grad", "Stück", "Zimmer", "Platz", "Stock", "Ticket", "Treffen",
-        "Spiel", "Thema", "Problem", "Projekt", "Event", "Foto", "Dokument", "Kind", "Buch", "Fach", "Test"}
+_NEUTER = {"Mal", "Jahr", "Zimmer", "Spiel", "Treffen", "Ticket", "Thema", "Problem", "Projekt", "Event", "Foto", "Dokument",
+           "Kind", "Buch", "Fach", "Stück", "Gramm", "Kilo", "Semester", "Quartal", "Kapitel"}
+_MASCULINE = {"Tag", "Termin", "Monat", "Moment", "Euro", "Franken", "Rappen", "Cent", "Dollar", "Kilometer", "Meter", "Liter",
+              "Grad", "Platz", "Stock", "Test", "Versuch", "Anruf", "Brief", "Besuch", "Kurs", "Auftrag"}
+_DATIVE_AFTER = {"in", "vor", "nach", "seit", "mit", "bei", "von", "aus", "zu", "ab", "an", "binnen", "innerhalb", "außer"}
 
 
-def _one_de(rest: str) -> str | None:
-    """How a lone 1 is said before the words in `rest`: "ein", "eine", or None when the gender is unclear (the
-    digit stays; the engine says "eins", as it always did)."""
-    for word in re.findall(r"[A-Za-zÄÖÜäöüß-]+", rest[:60])[:1]:
-        if word[0].isupper() and _FEMININE.search(word):
-            return "eine"
-        if word in _EIN:
-            return "ein"
-        if word[0].islower():                          # an adjective ("neue", "wichtiger"): its ending has the gender
-            return "eine" if word.endswith("e") else "ein" if word.endswith(("es", "er")) else None
-    return None
+def _prev_word(text: str, pos: int) -> str:
+    found = re.findall(r"[\wäöüÄÖÜß]+", text[max(0, pos - 30):pos])
+    return found[-1].lower() if found else ""
+
+
+def _one_de(m: re.Match) -> str | None:
+    """A lone 1 before a noun, as it is said there: "eine Stunde", "ein Mal", "einen Termin", "in einer Minute".
+    None when the gender is unclear (the digit stays and the engine says "eins", as it always did)."""
+    words = re.findall(r"[A-Za-zÄÖÜäöüß-]+", m.string[m.end():m.end() + 60])[:1]
+    if not words:
+        return None
+    word, dative = words[0], _prev_word(m.string, m.start()) in _DATIVE_AFTER
+    if word == "Uhr":
+        return "ein"
+    if word[0].islower():                              # an adjective ("neue", "wichtigen"): its ending says the gender
+        gender = {"e": "f", "es": "n", "er": "m", "en": "m"}.get(next((e for e in ("es", "er", "en", "e") if word.endswith(e)), ""))
+    elif _FEMININE.search(word):
+        gender = "f"
+    else:
+        gender = "n" if word in _NEUTER else "m" if word in _MASCULINE else None
+    if gender is None:
+        return None
+    if dative:
+        return "einer" if gender == "f" else "einem"
+    return {"f": "eine", "n": "ein", "m": "ein" if word.endswith("er") and word[0].islower() else "einen"}[gender]
 
 
 def _german(t: str) -> str:
@@ -161,10 +177,7 @@ def _integer_de(m: re.Match) -> str:
     n = _whole(m.group(1))
     if n is None:
         return m.group(0)
-    if n == 1:
-        one = _one_de(m.string[m.end():])
-        return one or m.group(0)
-    return de_cardinal(n)
+    return (_one_de(m) or m.group(0)) if n == 1 else de_cardinal(n)
 
 
 # ---------------------------------------------------------------- English

@@ -100,13 +100,25 @@ def test_german_integers_become_one_word_each():
     assert normalize("Es sind 0 Treffer.", "de") == "Es sind null Treffer."
 
 
-def test_a_german_one_is_ein_eine_or_left_alone():
-    assert normalize("Du hast 1 neue Nachricht.", "de") == "Du hast eine neue Nachricht."
+def test_a_german_one_takes_the_article_of_the_noun_after_it():
+    assert normalize("Du hast 1 neue Nachricht.", "de") == "Du hast eine neue Nachricht."          # feminine
     assert normalize("Ich brauche 1 Stunde.", "de") == "Ich brauche eine Stunde."
-    assert normalize("Es ist 1 Uhr.", "de") == "Es ist ein Uhr."
-    assert normalize("Du hast 1 wichtigen Termin und 1 Termin.", "de") == "Du hast 1 wichtigen Termin und ein Termin."
-    assert normalize("Platz 1.", "de") == "Platz 1."                      # unknown: the engine says "eins", as before
+    assert normalize("Es ist 1 Uhr.", "de") == "Es ist ein Uhr."                                   # the idiom
+    assert normalize("Das war 1 Mal.", "de") == "Das war ein Mal."                                 # neuter
+    assert normalize("Du hast 1 wichtigen Termin und 1 Termin.", "de") == "Du hast einen wichtigen Termin und einen Termin."
+    assert normalize("Da ist 1 neuer Termin.", "de") == "Da ist ein neuer Termin."                 # the ending says: nominative
+    assert normalize("Das kostet 1 Franken.", "de") == "Das kostet einen Franken."
+
+
+def test_a_german_one_after_a_dative_preposition_is_einer_or_einem():
+    assert normalize("In 1 Minute, vor 1 Woche, nach 1 Tag, seit 1 Jahr.", "de") == \
+        "In einer Minute, vor einer Woche, nach einem Tag, seit einem Jahr."
+
+
+def test_a_german_one_that_is_not_clear_stays_a_digit():
+    assert normalize("Platz 1.", "de") == "Platz 1."                      # the engine says "eins", as before
     assert normalize("Du hast 1 Ding.", "de") == "Du hast 1 Ding."
+    assert normalize("Es ist 1.", "de") == "Es ist 1."
 
 
 def test_german_decimals_say_komma_and_the_digits_one_by_one():
