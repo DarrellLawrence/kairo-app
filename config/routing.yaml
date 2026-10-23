@@ -31,9 +31,8 @@ providers:
   mistral_free:    { class: R3, enabled: false }     # trains on free-tier input by default
   openrouter_free: { class: R3, enabled: false }     # :free models: unknown providers behind them
   gemini_free:     { class: R3, enabled: false }     # Google's terms: Paid Services only for clients offered in Switzerland
-  # Not used: FreeLLMAPI. An explicit model id does not pin the provider, the route is nondeterministic
-  #   (cache, fusion), it binds :: and phones home unless configured, and it needs Node on kairo-home.
-  # Not used: Colibri. Nothing measured supports it (3060-class hardware: 3.1 s or more for 45 tokens).
+  # Not used: FreeLLMAPI. A model id does not pin the provider (nondeterministic route: cache, fusion), it needs Node, and it binds :: and phones home.
+  # Not used: Colibri. Nothing measured supports it: 3.1 s or more for 45 tokens on 3060-class hardware (voice recipe 10).
 
 # The local model (the voice model's llama-server, as a second slot). A purpose may run there only when
 # ALL of these hold: g11.local_route is on, the purpose is in this list, the model that is running now is the

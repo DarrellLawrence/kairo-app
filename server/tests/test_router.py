@@ -144,6 +144,11 @@ def test_the_shipped_routing_yaml_lists_every_class_with_free_cloud_off():
 def test_the_shipped_file_says_why_freellmapi_and_colibri_are_not_used_and_what_free_cloud_needs():
     text = (SHIPPED / "routing.yaml").read_text(encoding="utf-8")
     assert "Not used: FreeLLMAPI" in text and "Not used: Colibri" in text
+    lines = text.splitlines()
+    fl = next(i for i, ln in enumerate(lines) if "Not used: FreeLLMAPI" in ln)
+    assert "Not used: Colibri" in lines[fl + 1]                              # one line each, the reason on the same line
+    assert "nondeterministic" in lines[fl] or "does not pin" in lines[fl]
+    assert "3060" in lines[fl + 1] or "nothing measured" in lines[fl + 1]
     assert "dated owner outbound decision" in text and "no adapter" in text
     assert "freellmapi:" not in text and "colibri:" not in text              # comments, not providers
     assert "18 or" in text and "public/low content only" in text             # recipe 16.8: what the decision must cover
