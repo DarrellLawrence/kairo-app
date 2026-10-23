@@ -83,10 +83,12 @@ class Embedder:
     """Client for app/embed_worker.py. The model runs in a separate python (see there why)."""
 
     def __init__(self, models_dir: Path, site_dir: Path | None = None, python: str | None = None,
-                 cpu_only=None, batch=None) -> None:
+                 cpu_only=None, batch=None, may_start=None) -> None:
         self.models_dir = Path(models_dir)
         self.cpu_only = cpu_only or (lambda: False)   # local voice (2026-10-16): the GPU is the voice's first
         self.batch = batch or (lambda: None)          # pieces per model call, asked at every start (None: the worker's own)
+        self.may_start = may_start or (lambda: True)  # False while Kairo's start loads the voice models first (G8, bootload.py)
+        self._deferred = False                        # a start was asked for while may_start() said no
         self.site_dir = Path(site_dir) if site_dir else None
         self.python = python or sys.executable
         self.device: str | None = None
@@ -107,6 +109,11 @@ class Embedder:
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def gate_opened(self) -> None:
+        """may_start() turned True: start the model now if it was asked for in the meantime (no earlier, no later)."""
+        if self._deferred:
+            self.warm()
+
     def warm(self) -> None:
         """Start the model in the background (a chat message never waits for it)."""
         if self.running() or self._warming:
@@ -121,11 +128,17 @@ class Embedder:
                 log.info("embedding model not started: %s", exc)
             finally:
                 self._warming = False
+            if self._deferred and self.may_start():    # the gate opened while this attempt was being refused
+                self.warm()
         threading.Thread(target=go, name="memory-model", daemon=True).start()
 
-    def _start(self) -> None:
+    def _start(self, *, force: bool = False) -> None:
         if self.running():
             return
+        if not force and not self.may_start():
+            self._deferred = True
+            raise NotReady("the memory model starts after the voice models have loaded")
+        self._deferred = False
         if not self.installed():
             raise NotInstalled("semantic memory is not installed (Update Kairo installs it)")
         if self._failed_at and time.monotonic() - self._failed_at < RETRY_AFTER_S:
@@ -218,6 +231,8 @@ class Embedder:
     def selftest(self) -> dict:
         """A German question must find the English note that answers it, ahead of an unrelated one."""
         try:
+            with self._lock:
+                self._start(force=True)      # an explicit check (the installer's, right after a start) never waits for the boot order
             notes = ["Boxing training is on Monday at 18:30.", "The phone bill of CHF 49 is due on Friday."]
             q = self.embed(["Wann ist mein Training?"], query=True)[0]
             sims = [cosine(q, d) for d in self.embed(notes)]

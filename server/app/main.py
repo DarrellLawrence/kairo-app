@@ -351,11 +351,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.pusher.notify("Kairo", health_mod.crash_loop_text(starts), "/#more", source="health")
             app.state.jobs.start()
             background.append(asyncio.create_task(acceptance_after_release(app)))
-            background.append(asyncio.create_task(memory_loop(app)))
-            if hasattr(app.state.voice, "warm"):   # first call/word shouldn't wait for model loading
-                asyncio.get_running_loop().run_in_executor(None, _warm_voice)
+            # the voice model (loaded day and night), Whisper and Kokoro (first call/word shouldn't wait for them) and the
+            # memory index: one after the other (G8, flag g8.stagger_boot) so each sees what the card has left
+            background.append(asyncio.create_task(_boot_loads()))
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
-            app.state.voice_llm.watch()    # local voice: the voice model loaded day and night
             app.state.today_card.start()   # the Today card: always fresh, before any call
             background.append(asyncio.create_task(_lab_auto()))
         yield
@@ -437,19 +436,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.data_dir / speaker_mod.VOICEPRINT, engine)
     # v8 C6: the model and its packages sit in tools\memory-<hash> (model\ inside), the index in data\memory.
     memory_site = tool_sites.site("memory", settings.data_dir)
+    app.state.memory_gate = threading.Event()   # closed while the start loads the voice models first (G8); open otherwise
+    app.state.memory_gate.set()
+    app.state.boot_trail = []                   # what each staged load took, for /api/voice/devices
     app.state.memory = semantic.MemoryIndex(
         settings.data_dir / "memory" / "index.sqlite", vault_dir=settings.vault_dir, engine=engine,
         embedder=semantic.Embedder(memory_site / "model", site_dir=memory_site, cpu_only=lambda: _memory_on_cpu(),
-                                   batch=lambda: _embed_batch())
+                                   batch=lambda: _embed_batch(), may_start=app.state.memory_gate.is_set)
         if tool_sites.configured("memory") else None)
     tools.memory = app.state.memory
 
-    def _embed_batch() -> int:
-        """G8: pieces through the embedding model at once, asked at every start of its process (flag g8.embed_batch4)."""
+    def _flag_on(name: str) -> bool:
         from . import flags as flags_mod
         with session_for(engine) as s_:
-            return semantic.embed_batch(flags_mod.on(s_, "g8.embed_batch4"))
+            return flags_mod.on(s_, name)
+
+    def _embed_batch() -> int:
+        """G8: pieces through the embedding model at once, asked at every start of its process (flag g8.embed_batch4)."""
+        return semantic.embed_batch(_flag_on("g8.embed_batch4"))
     app.state.embed_batch = _embed_batch
+
+    async def _boot_loads() -> None:
+        """The loads that need the graphics card. With g8.stagger_boot (on): the voice model first, then Whisper and Kokoro,
+        each after the one before has settled and the free graphics memory has been read; the memory model is let in last (its
+        process checks the free card when it starts). The memory index itself (keywords) needs no card and starts at once.
+        Off: everything at once, as before G8."""
+        from . import bootload, gpu as gpu_mod
+        vl, gate = app.state.voice_llm, app.state.memory_gate
+        staged = _flag_on("g8.stagger_boot")
+        if staged:
+            gate.clear()
+        memory = asyncio.create_task(memory_loop(app))
+        try:
+            if not staged:
+                if hasattr(app.state.voice, "warm"):
+                    asyncio.get_running_loop().run_in_executor(None, _warm_voice)
+                vl.watch()
+                await memory
+                return
+
+            def start_voice_model() -> None:
+                try:
+                    vl.ensure()            # starts llama-server (or says why not) before the next stage looks at the card
+                finally:
+                    vl.watch()             # and keeps it loaded day and night
+
+            stages = [bootload.Stage("voice model (llama.cpp)", start=start_voice_model,
+                                     settled=lambda: vl.status()["state"] != "starting", timeout_s=bootload.LLAMA_WAIT_S)]
+            if hasattr(app.state.voice, "warm"):
+                stages.append(bootload.Stage("voice (Whisper, Kokoro)", start=_warm_voice, timeout_s=bootload.VOICE_WAIT_S))
+            app.state.boot_trail.clear()
+            try:
+                await bootload.run(stages, free_mb=gpu_mod.free_mb, trail=app.state.boot_trail)
+            finally:
+                gate.set()
+            emb = getattr(app.state.memory, "embedder", None)
+            if emb is not None:
+                emb.gate_opened()
+            await memory
+        finally:
+            gate.set()
+            memory.cancel()
+    app.state.boot_loads = _boot_loads
 
     MEMORY_VRAM_MB = 3000   # the embedding model in fp16 and its batches
 
