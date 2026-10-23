@@ -355,20 +355,6 @@ def test_a_mock_run_makes_a_valid_result_and_its_percentiles_are_right(mock_run)
     assert {k: v for k, v in s["by_stage"]["stt_final"].items()}["p50"] == pytest.approx(STT * 1000, abs=TOLERANCE_MS)
 
 
-def test_other_delays_are_found_just_as_well_so_the_numbers_are_measured_not_remembered():
-    _needs_pipecat()
-    from app import bench_phone as bp
-    slow, *_ = _bench(["q_en_02", "c_en_01"], bp.MockDelays(0.25, 0.45, 0.2))
-    assert len(slow) == 2
-    for r in slow:
-        st = r["stages_ms"]
-        assert st["stt_final"] == pytest.approx(250, abs=TOLERANCE_MS), r
-        assert st["llm_first_token"] == pytest.approx(450, abs=TOLERANCE_MS), r
-        assert st["tts_first_audio"] == pytest.approx(200, abs=TOLERANCE_MS), r
-        assert sum(st.values()) == pytest.approx(r["total_ms"], abs=4)
-        assert r["total_ms"] > 200 + 250 + 450 + 200 - TOLERANCE_MS            # the wait the stand-ins add up to
-
-
 # ================================================================ live mode: Kairo's address, the call, the setup
 
 @pytest.mark.parametrize("url,ok", [
@@ -547,19 +533,25 @@ def test_the_command_line_prints_the_table_the_notes_and_where_the_results_are(t
 
 # ---------------------------------------------------------------- a whole run: mock, and live against a Kairo that is the mock
 
-def test_run_does_a_whole_mock_run_saves_it_and_latest_finds_it(tmp_path):
+def test_run_does_a_whole_mock_run_with_other_delays_saves_it_and_latest_finds_it(tmp_path):
+    """The public function, end to end. Other waits than the usual 120 / 150 / 80 ms: the numbers are measured, not remembered."""
     _needs_pipecat()
-    notes: list[str] = []
-    result = bv.run(True, None, tmp_path / "bench" / "results", clips=2, notes=notes)
+    from app import bench_phone as bp
+    out = tmp_path / "bench" / "results"
+    result = bv.run(True, None, out, clips=2, delays=bp.MockDelays(0.25, 0.45, 0.2))
     assert bv.validate(result) == [] and result["mode"] == "mock" and result["summary"]["n"] == 2
     assert [t["kind"] for t in result["turns"]] == ["question", "question"] and {t["lang"] for t in result["turns"]} == {"en", "de"}
-    assert result["config"]["stt_model"] == "mock, 120 ms" and result["config"]["vad_stop_s"] == 0.2
+    assert result["config"]["stt_model"] == "mock, 250 ms" and result["config"]["vad_stop_s"] == 0.2
     assert result["machine"]["cpu"] and result["version"] and result["git_sha"]
-    saved = sorted((tmp_path / "bench" / "results").glob("voice-*-mock.json"))
-    assert len(saved) == 1 and json.loads(saved[0].read_text()) == result
-    assert bv.latest(tmp_path / "bench" / "results") == result
+    saved = sorted(out.glob("voice-*-mock.json"))
+    assert len(saved) == 1 and json.loads(saved[0].read_text()) == result and bv.latest(out) == result
     for t in result["turns"]:
-        assert t["stages_ms"]["stt_final"] == pytest.approx(120, abs=TOLERANCE_MS) and t["total_ms"] > 550
+        st = t["stages_ms"]
+        assert st["stt_final"] == pytest.approx(250, abs=TOLERANCE_MS), t
+        assert st["llm_first_token"] == pytest.approx(450, abs=TOLERANCE_MS), t
+        assert st["tts_first_audio"] == pytest.approx(200, abs=TOLERANCE_MS), t
+        assert sum(st.values()) == pytest.approx(t["total_ms"], abs=4)
+        assert t["total_ms"] > 200 + 250 + 450 + 200 - TOLERANCE_MS            # at least the wait the stand-ins add up to
 
 
 def test_a_live_run_without_rendered_clips_or_with_a_foreign_address_says_what_to_do(tmp_path):

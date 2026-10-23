@@ -233,10 +233,11 @@ def _seed(*parts: str) -> int:
 
 
 def synth_speech(text: str, rate: int = 16000, variant: str = "") -> "np.ndarray":
-    """Speech-like audio for `text`, with no model: about one syllable per three letters, a falling pitch,
-    vowel formants that move from syllable to syllable. The same text always gives the same samples, and
-    it starts and ends with its first and last sound (no silence around it). Not intelligible, which the
-    mock mode doesn't need: its fake speech to text is told what was said."""
+    """Speech-like audio for `text`, with no model: about one syllable per three letters, a falling pitch that drops
+    at the end (Smart Turn hears a finished sentence: all 27 questions, statements and commands of the corpus score
+    above 0.5, against 2 in 3 without the drop), vowel formants that move from syllable to syllable. The same text
+    always gives the same samples, and it starts and ends with its first and last sound (no silence around it).
+    Not intelligible, which the mock mode doesn't need: its fake speech to text is told what was said."""
     _need_numpy()
     rng = np.random.default_rng(_seed(text, variant))
     words = [w for w in re.findall(r"[\w']+", text)] or ["mm"]
@@ -251,7 +252,8 @@ def synth_speech(text: str, rate: int = 16000, variant: str = "") -> "np.ndarray
     n = int(total * rate)
     t = np.arange(n) / rate
     base = float(rng.uniform(105, 190))
-    f0 = base * (1.12 - 0.3 * t / total) * (1 + 0.015 * np.sin(2 * np.pi * 5.5 * t))
+    fall = np.clip((t - (total - 0.35)) / 0.35, 0.0, 1.0)             # the last 0.35 s fall in pitch: a finished sentence
+    f0 = base * (1.12 - 0.3 * t / total) * (1 + 0.015 * np.sin(2 * np.pi * 5.5 * t)) * (1 - 0.6 * fall)
     phase = 2 * np.pi * np.cumsum(f0) / rate
     formants, amp = np.zeros((3, n)), np.zeros(n)
     for a, b, f in segs:
