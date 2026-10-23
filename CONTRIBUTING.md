@@ -94,17 +94,18 @@ purpose (for a step that has no list; another job checks the terms).
 
 It reads text files of any size (in pieces), UTF-8, Windows-1252 and UTF-16/32 text (with or without a BOM), the
 strings of binaries (text chunks of PNG, tags of WAV and MP3, EXIF, SQLite files), PDFs (metadata and the text of
-their compressed streams), office files, zip, gzip, bzip2, xz and tar files inside each other (a `.tar.gz`, an
-installer stub in front of a zip ...), zip comments, commit objects (all headers, not only author and message),
-annotated tags and the names of files, refs and zip members (also symlinks and files that only a merge commit
-introduced).
+their compressed streams), office files, zip, gzip, bzip2, xz (also several streams in one file), zlib and tar files
+inside each other (a `.tar.gz`, an installer stub in front of a zip ...), zip comments, commit objects (all headers,
+not only author and message), annotated tags and the names of files, refs and zip members (also symlinks and files
+that only a merge commit introduced).
 
-What it **cannot** do: 7z, rar and zstd archives, encrypted or damaged members and anything nested deeper than 8
-archives are reported as "not scanned" (an error in CI and for a zip; a warning on your machine). PDFs whose text is in
-fonts without a text map, scanned pages and photos cannot be searched at all, so documents and photos
-(`.pdf`, `.jpg`, `.heic`, `.docx` ...) are forbidden outside `web/public/`. A name that is cut apart (`"Example" + "town"`),
-hyphenated over a line break, abbreviated (`Muellerstr.`), compounded (`Exampletowner`), reduced to initials, or
-transliterated or reversed letter by letter is not found. Keep such text out of the repo.
+What it **cannot** do: 7z, rar, zstd, lz4 and lzip archives, encrypted or damaged members and anything nested deeper
+than 8 archives are reported as "not scanned" (an error in CI and for a zip; a warning on your machine); a brotli file
+has no header to know it by and is read as plain bytes. PDFs whose text is in fonts without a text map, scanned pages
+and photos cannot be searched at all, so documents and photos (`.pdf`, `.jpg`, `.heic`, `.docx` ...) are forbidden
+outside `web/public/`. A name that is cut apart (`"Example" + "town"`), hyphenated over a line break, abbreviated
+(`Muellerstr.`), compounded (`Exampletowner`), reduced to initials, or transliterated or reversed letter by letter is
+not found. Keep such text out of the repo.
 
 ## Secrets
 

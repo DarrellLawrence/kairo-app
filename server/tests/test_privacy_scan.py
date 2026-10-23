@@ -1002,6 +1002,7 @@ def nested_zip(levels: int, payload: dict[str, str | bytes]) -> bytes:
     return data
 
 
+NOISE = __import__("random").Random(7).randbytes(6000)
 ARCHIVES: dict[str, tuple[str, bytes]] = {
     "gzip": ("app/notes.txt.gz", gzip.compress(TEXT.encode())),
     "tar.gz": ("app/bundle.tar.gz", tar_bytes({"private/seed.md": TEXT.encode()}, "w:gz")),
@@ -1015,6 +1016,13 @@ ARCHIVES: dict[str, tuple[str, bytes]] = {
     "zip in zip, six deep": ("app/inner.zip", nested_zip(6, {"notes.txt": TEXT})),
     "office file": ("app/letter.docx", zbytes({"word/document.xml": f"<w:t>{NAME}</w:t>"})),
     "gzip inside a tar inside a zip": ("app/x.zip", zbytes({"y.tar": tar_bytes({"z.txt.gz": gzip.compress(TEXT.encode())})})),
+    # pbzip2 and `cat a.xz b.xz` write several streams; only the first one used to be read (the first stream here
+    # is noise that does not compress, so the second starts past the first 2 KB, which are also read as they are)
+    "bzip2 in two streams": ("app/dump.sql.bz2", bz2.compress(NOISE) + bz2.compress(TEXT.encode() * 40)),
+    "xz in two streams": ("app/notes.txt.xz", lzma.compress(NOISE) + lzma.compress(TEXT.encode() * 40)),
+    "xz in two streams with padding": ("app/notes.xz", lzma.compress(NOISE) + b"\x00" * 4 + lzma.compress(TEXT.encode() * 40)),
+    "text after a bzip2 stream": ("app/notes.bz2", bz2.compress(NOISE) + TEXT.encode()),
+    "zlib stream": ("app/cache.bin", zlib.compress(TEXT.encode() * 40)),
 }
 
 
@@ -1047,6 +1055,8 @@ def test_archives_nested_too_deep_and_archives_that_cannot_be_opened_are_errors_
         "zstd": ("app/pack.zst", b"\x28\xb5\x2f\xfd" + b"\x00" * 64),
         "7z": ("app/pack.7z", b"7z\xbc\xaf\x27\x1c" + b"\x00" * 64),
         "rar": ("app/pack.rar", b"Rar!\x1a\x07\x00" + b"\x00" * 64),
+        "lz4": ("app/pack.lz4", b"\x04\x22\x4d\x18" + b"\x00" * 64),
+        "lzip": ("app/pack.lz", b"LZIP\x01" + b"\x00" * 64),
         "truncated gzip": ("app/cut.gz", gzip.compress(TEXT.encode() * 100)[:40]),
     }
     for label, (name, data) in cases.items():

@@ -38,9 +38,10 @@ Two detectors, plus a list of paths that must never be committed:
    databases (by name and by their SQLite header), the terms list, key stores, Google client secrets, Kairo's own
    secret stores (by their header), documents and photos (PDF, Office, JPEG ...) outside web/public.
 
-Everything is read inside archives too: zip, gzip, bzip2, xz and tar (any depth up to MAX_ARCHIVE_DEPTH), office files,
-PNG text chunks, PDF streams, binary strings (latin-1, UTF-8, UTF-16). What cannot be read (too big, encrypted, 7z,
-rar, zstd, damaged) is reported as "not scanned": a warning, but an error (exit 2) with --ci, --zip or --strict.
+Everything is read inside archives too: zip, gzip, bzip2, xz, zlib and tar (any depth up to MAX_ARCHIVE_DEPTH; every
+stream of a multi-stream file), office files, PNG text chunks, PDF streams, binary strings (latin-1, UTF-8, UTF-16).
+What cannot be read (too big, encrypted, 7z, rar, zstd, lz4, lzip, damaged) is reported as "not scanned": a warning,
+but an error (exit 2) with --ci, --zip or --strict.
 
 Exit codes: 0 clean, 1 findings, 2 could not do the check (bad list, no list on main in CI, bad zip, shallow clone in
 CI, something that could not be scanned in strict mode).
@@ -1136,7 +1137,7 @@ def _text_forms(data: bytes) -> list[tuple[str, bool]]:
 
 # ---------------------------------------------------------------- archives
 
-_ARCHIVE_SUFFIX = {"gz": (".gz", ".gzip"), "bz2": (".bz2",), "xz": (".xz", ".lzma")}
+_ARCHIVE_SUFFIX = {"gz": (".gz", ".gzip"), "bz2": (".bz2",), "xz": (".xz", ".lzma"), "zlib": (".zz", ".zlib")}
 
 
 def _archive_kind(data: bytes) -> str | None:
@@ -1163,10 +1164,16 @@ def _archive_kind(data: bytes) -> str | None:
         return "ar"
     if head[:2] == b"\x1f\x9d":
         return "compress"
+    if head[:4] in (b"\x04\x22\x4d\x18", b"\x02\x21\x4c\x18"):
+        return "lz4"
+    if head[:4] == b"LZIP":
+        return "lzip"
     if len(data) > 22:                                          # a zip with data in front (an installer stub, junk)
         tail = data.rfind(b"PK\x05\x06", max(0, len(data) - 70_000))
         if tail >= 0 and data.find(b"PK\x03\x04") >= 0:
             return "zip"
+    if head[:2] in (b"\x78\x01", b"\x78\x9c", b"\x78\xda"):            # a raw zlib stream (if it unpacks)
+        return "zlib"
     return None
 
 
@@ -1194,18 +1201,31 @@ def _other_zip_names(info: zipfile.ZipInfo) -> list[str]:
     return out
 
 
-def _decompress(kind: str, data: bytes) -> bytes:
+def _decompress(kind: str, data: bytes) -> tuple[bytes, bytes]:
+    """The unpacked bytes and what follows the last compressed stream. A bzip2, xz or zlib file can hold several
+    streams one after the other (pbzip2 writes them, so does `cat a.xz b.xz`): every one is unpacked."""
     limit = MAX_BYTES
-    if kind == "gz":
+    if kind == "gz":                                     # GzipFile reads every member itself
         with gzip.GzipFile(fileobj=io.BytesIO(data)) as f:
             out = f.read(limit + 1)
-    elif kind == "bz2":
-        out = bz2.BZ2Decompressor().decompress(data, limit + 1)
-    else:
-        out = lzma.LZMADecompressor().decompress(data, max_length=limit + 1)
-    if len(out) > limit:
-        raise _TooBig
-    return out
+        if len(out) > limit:
+            raise _TooBig
+        return out, b""
+    buf, rest = bytearray(), data
+    while rest:
+        dec = {"bz2": bz2.BZ2Decompressor, "xz": lzma.LZMADecompressor, "zlib": zlib.decompressobj}[kind]()
+        try:
+            buf += dec.decompress(rest, limit + 1 - len(buf))
+        except (OSError, ValueError, EOFError, lzma.LZMAError, zlib.error):
+            if not buf:
+                raise
+            break                                        # not another stream: `rest` is what follows the last one
+        if len(buf) > limit:
+            raise _TooBig
+        if not dec.eof:                                  # cut short: what there was has been read
+            return bytes(buf), b""
+        rest = dec.unused_data.lstrip(b"\x00") if kind == "xz" else dec.unused_data     # (xz pads with NULs)
+    return bytes(buf), rest
 
 
 def _walk_zip_local_headers(data: bytes) -> Iterator[tuple[str, bytes | None, str]]:
@@ -1364,16 +1384,20 @@ class Scanner:
             return False
         if kind == "zip":
             return self._scan_zip_bytes(path, where, data, extra, depth)
-        if kind in ("gz", "bz2", "xz"):
+        if kind in ("gz", "bz2", "xz", "zlib"):
             try:
-                inner = _decompress(kind, data)
+                inner, rest = _decompress(kind, data)
             except _TooBig:
                 self.unscanned(path, "it unpacks to more than the size limit")
                 return False
             except Exception as exc:                   # a damaged or truncated stream, bad data, not enough memory
+                if kind == "zlib":
+                    return False                       # it only looked like a zlib stream: read as it is
                 self.unscanned(path, f"could not be unpacked ({type(exc).__name__})")
                 return False
             self._archive_budget -= len(inner)
+            if rest:                                   # bytes after the last stream are read as a file of their own
+                self.scan_blob(f"{path}!/(after the compressed data)", rest, extra=extra, depth=depth + 1)
             name = PurePosixPath(path.replace("\\", "/")).name
             low = name.lower()
             inner_name = "content"
