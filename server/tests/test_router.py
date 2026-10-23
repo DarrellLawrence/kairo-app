@@ -141,6 +141,8 @@ def test_the_shipped_file_says_why_freellmapi_and_colibri_are_not_used_and_what_
     assert "Not used: FreeLLMAPI" in text and "Not used: Colibri" in text
     assert "dated owner outbound decision" in text and "no adapter" in text
     assert "freellmapi:" not in text and "colibri:" not in text              # comments, not providers
+    assert "18 or" in text and "public/low content only" in text             # recipe 16.8: what the decision must cover
+    assert "model-improvement" in text                                       # recipe 16.12: the owner's check of the one cloud that has everything
 
 
 def test_free_cloud_has_no_host_in_outbound_py_and_no_adapter_in_the_code():

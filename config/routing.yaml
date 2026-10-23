@@ -7,6 +7,8 @@
 # Provider classes, and the most private content each may receive:
 #   R0  local            llama-server on this PC (127.0.0.1)          public, low, personal, secret
 #   R1  subscription     Claude through the Claude Code CLI           public, low, personal, secret
+#                        (your personal data already goes there: check that the model-improvement setting of
+#                        your Claude account is off, voice recipe 16.12)
 #   R2  free cloud that does not train on what it gets              public, low
 #   R3  free cloud that trains, or unknown                          public only
 # Content classes, per purpose, are in server/app/router.py (CEILINGS). Mail, calendar, tasks, notes, chat,
@@ -19,8 +21,9 @@ providers:
 
   # FREE CLOUD: every provider is off. There is no adapter for any of them and no host in
   # server/app/outbound.py. Turning one on needs a dated owner outbound decision (voice recipe 16.8)
-  # that names the hosts and covers public/low content only, then an adapter and an outbound.py entry,
-  # each reviewed on its own. Changing "enabled" here alone does nothing.
+  # that names the hosts, covers public/low content only and confirms that each account holder is 18 or
+  # older (Groq, Ollama, OpenRouter and Google terms), then an adapter and an outbound.py entry, each
+  # reviewed on its own. Changing "enabled" here alone does nothing.
   groq:         { class: R2, enabled: false, host: api.groq.com/openai/v1 }                              # 30-day abuse logs, US
   cloudflare:   { class: R2, enabled: false, host: api.cloudflare.com/client/v4/accounts/ACCOUNT/ai/v1 }  # Workers AI
   ollama_cloud: { class: R2, enabled: false, host: ollama.com/v1 }
