@@ -34,13 +34,17 @@ providers:
   # Not used: FreeLLMAPI. A model id does not pin the provider (nondeterministic route: cache, fusion), it needs Node, and it binds :: and phones home.
   # Not used: Colibri. Nothing measured supports it: 3.1 s or more for 45 tokens on 3060-class hardware (voice recipe 10).
 
-# The local model (the voice model's llama-server, as a second slot). A purpose may run there only when
-# ALL of these hold: g11.local_route is on, the purpose is in this list, the model that is running now is the
-# one the router lab passed (PC measurement P21), and it is one of the few purposes the code allows (today only
-# reply_check: yes/no/unsure per mail, no dates, no times, no safety judgment, no tools; triage is not one of
-# them because it returns a deadline and the prompt-injection flag). lab_model_hash is that model's fingerprint, 12 hex
-# digits; More -> Usage shows the fingerprint of the model running now, copy it here after the lab passed.
-# A different model, or none, is not that model: the job goes to Claude. The list is empty until the lab has passed.
+# The local model is the voice model's llama-server. It runs ONE slot today (-np 1) and the mouth's cached start of its
+# prompt lives there: a job on that slot would wipe the cache, and a call opening meanwhile would wait behind the job. So
+# a job may run locally only when ALL of these hold: g11.local_route is on; the purpose is in this list; the model that is
+# running now is the one the router lab passed (PC measurement P21); the server also has a second slot that only jobs use
+# (started with -np 2 and room for a job in each; the request is pinned to it); no call is open (and one that opens
+# mid-job stops the job: it goes to Claude); and the purpose is one the code allows (today only reply_check: yes/no/unsure
+# per mail, no dates, no times, no safety judgment, no tools; triage is not one, it returns a deadline and the
+# prompt-injection flag). The answer must also be exactly the right JSON, or the job goes to Claude.
+# lab_model_hash is the model's fingerprint, 12 hex digits; More -> Usage shows the fingerprint of the model running now,
+# copy it here after the lab passed. A different model, or none, is not that model: the job goes to Claude.
+# The list is empty until the lab has passed, and More -> Usage says "off: ... second slot" until the server has one.
 local:
   purposes: []
   lab_model_hash: ""

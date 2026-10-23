@@ -3960,7 +3960,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def router_get(days: int = 7):
         """More -> Usage -> Routes (G11): the rules in force and the routes taken, each with its reason. Owner only like every
         route. Never a prompt: the log holds the class, what the scanner found (kinds) and the reason."""
-        return model_router.view(max(1, min(days, router_mod.KEEP_DAYS)), local_model=app.state.jobs.local.fingerprint())
+        local = app.state.jobs.local
+        return model_router.view(max(1, min(days, router_mod.KEEP_DAYS)), local_model=local.fingerprint(), local_why=local.unavailable())
 
     @app.get("/api/backups")
     def backups_list():

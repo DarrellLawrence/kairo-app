@@ -40,10 +40,11 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g11.router": (False, "Kairo writes down, for every call to the model, which route it took and why (More -> Usage, "
                           "\"Routes\"), after checking the privacy class of the content. Today the route is always your "
                           "Claude subscription, so nothing else changes. Off: no log and no check, as before."),
-    "g11.local_route": (False, "Small background jobs (sorting mail, checking whether a mail needs a reply, summarising "
-                               "the conversation) may run on the voice model on this PC instead of Claude, but only the jobs "
-                               "the router lab has passed (none yet: the lab needs the PC) and never while a call is open; "
-                               "a bad answer goes to Claude. Needs g11.router too. Off: everything runs on Claude."),
+    "g11.local_route": (False, "The check whether a mail needs a reply (only that job) may run on the voice model on this PC "
+                               "instead of Claude, but only after the router lab has passed it (not yet: the lab needs the "
+                               "PC), only when the voice model's server has a second slot for jobs, and never while a call "
+                               "is open; an answer that is not exactly right goes to Claude. Needs g11.router too. Off: "
+                               "everything runs on Claude."),
 
 }
 

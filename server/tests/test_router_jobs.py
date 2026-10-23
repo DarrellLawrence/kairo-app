@@ -28,16 +28,20 @@ LAB = {"providers": {"claude": {"class": "R1", "enabled": True}, "local": {"clas
 class FakeLocal:
     def __init__(self, answer=None, ready=True, model="abc"):
         self.answer = answer or LocalAnswer(True, '{"ok": true}', "ok", 3)
-        self._ready, self._model, self.calls = ready, model, []
+        self._ready, self._model, self.calls, self.kw = ready, model, [], []
 
     def ready(self):
         return self._ready
+
+    def unavailable(self):
+        return "" if self._ready else "the local model is not running"
 
     def fingerprint(self):
         return self._model
 
     def ask(self, prompt, system, *, timeout_s, **kw):
         self.calls.append((prompt, system, timeout_s))
+        self.kw.append(kw)
         return self.answer
 
 
@@ -229,6 +233,41 @@ def test_a_purpose_without_an_answer_check_is_never_asked_locally(engine, tmp_pa
     assert jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check").text == "from claude"
     assert model.calls == [] and claude.calls == [("reply_check", "haiku")]
     assert "no answer check" in log(engine)[-1].reason
+
+
+def test_the_job_hands_the_local_model_a_way_to_see_a_call_open(engine, tmp_path):
+    local = FakeLocal()
+    opened = {"now": False}
+    jobs, _, _ = setup(engine, tmp_path, local=local)
+    jobs.call_open = lambda: opened["now"]
+    jobs.ask_brain("a mail", "rules", purpose="reply_check")
+    assert callable(local.kw[0]["call_open"]) and local.kw[0]["call_open"]() is False
+    opened["now"] = True
+    assert local.kw[0]["call_open"]() is True
+
+
+def test_a_local_model_without_a_job_slot_leaves_the_job_to_claude_and_the_log_says_why(engine, tmp_path):
+    model = FakeModel(pieces=('{"m1": "yes", "m2": "no", "m3": "no"}',), job_slot=None)
+    jobs, rt, claude = setup(engine, tmp_path, local=local_llm.LocalLLM(model, identify=lambda: "abc"))
+    assert jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check").text == "from claude"
+    assert model.calls == [] and claude.calls == [("reply_check", "haiku")]
+    (row,) = log(engine)
+    assert row.route == "claude" and "second slot" in row.reason and "-np 2" in row.reason
+    assert rt.fails() == 0                                            # nothing was asked, nothing failed
+
+
+def test_a_call_that_opens_while_the_local_model_answers_sends_the_job_to_claude_without_blaming_the_model(engine, tmp_path):
+    import threading
+    model = FakeModel(pieces=('{"m1": "yes", ', '"m2": "no", ', '"m3": "no"}'), delay=0.4)
+    opened = {"now": False}
+    jobs, rt, claude = setup(engine, tmp_path, local=local_llm.LocalLLM(model, identify=lambda: "abc"))
+    jobs.call_open = lambda: opened["now"]
+    threading.Timer(0.2, lambda: opened.update(now=True)).start()
+    assert jobs.ask_brain(reply_prompt(), "rules", purpose="reply_check").text == "from claude"
+    assert model.cancelled and claude.calls == [("reply_check", "haiku")]
+    got = log(engine)
+    assert [(r.route, r.fallback_from) for r in got] == [("local", None), ("claude", "local")]
+    assert "a call opened" in got[1].reason and rt.fails() == 0 and not rt.breaker_open()
 
 
 def check_replies(env, tmp_path, local, claude):

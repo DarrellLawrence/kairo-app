@@ -276,6 +276,18 @@ def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
     assert router.decide(bare, "reply_check", **ok).route == "claude"
 
 
+def test_a_local_model_without_a_job_slot_is_not_used_and_the_reason_says_so(tmp_path):
+    """The voice model's server has one slot today: a job would wipe the mouth's cache (review of G11)."""
+    rules = lab_passed(tmp_path)
+    ok = dict(content="personal", local_flag=True, local_model="abc")
+    why = "the voice model's server has one slot; the local route needs a second slot for jobs (-np 2)"
+    d = router.decide(rules, "reply_check", local_ready=False, local_why=why, **ok)
+    assert d.route == "claude" and why in d.reason
+    d = router.decide(rules, "reply_check", local_ready=False, **ok)                 # no reason given: the old words
+    assert d.route == "claude" and "the local model is not running" in d.reason
+    assert router.decide(rules, "reply_check", local_ready=True, local_why=why, **ok).route == "local"   # ready wins: why is only the words
+
+
 def test_the_lab_passes_one_model_and_only_that_model_runs_locally(tmp_path):
     """lab_model_hash is the fingerprint of the model the router lab passed (More -> Usage shows the running one). A
     different model, an unknown one or none is not that model: the job goes to the subscription."""

@@ -21,8 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-MAX_PROMPT_CHARS = 12_000       # about 3-4k tokens: the voice model's server runs a small context (8192 by default)
+MAX_PROMPT_CHARS = 12_000       # about 3-4k tokens: a job's slot has voice_local.JOB_MIN_CONTEXT (6144) tokens or more
 MAX_TOKENS = 700
+CALL_POLL_S = 0.05              # how often a running job looks whether a call has opened
+CALL_OPENED = "a call opened: the model stays with the voice"
+NO_JOB_SLOT = ("the voice model's server has one slot, and a job on it would wipe the mouth's cached start and make a call "
+               "wait; the local route needs a second slot for jobs (-np 2) on the server")
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,7 @@ class LocalAnswer:
     text: str
     reason: str       # "ok", or why the answer was refused (shown under More -> Usage; never a server message)
     ms: int
+    fault: bool = True   # False when the model did nothing wrong (a call opened): it doesn't count toward the breaker
 
 
 def fingerprint(model_id: str | None, path: Path | None) -> str:
@@ -118,25 +123,49 @@ class LocalLLM:
         except Exception:
             return ""
 
-    def ready(self) -> bool:
+    def job_slot(self) -> int | None:
+        """The slot of the voice model's server that only jobs use, None when it has no such slot (or doesn't know slots)."""
         try:
-            return bool(self.model.ready())
+            slot = getattr(self.model, "job_slot", None)
         except Exception:
-            return False
+            return None
+        return slot if isinstance(slot, int) and not isinstance(slot, bool) else None
 
-    def ask(self, prompt: str, system: str, *, timeout_s: float, check: Check, max_tokens: int = MAX_TOKENS) -> LocalAnswer:
+    def unavailable(self) -> str:
+        """'' when a job can run on the local model now, else why not, in words (More -> Usage and the route log show it)."""
+        try:
+            up = bool(self.model.ready())
+        except Exception:
+            up = False
+        if not up:
+            return "the local model is not running"
+        return "" if self.job_slot() is not None else NO_JOB_SLOT
+
+    def ready(self) -> bool:
+        return not self.unavailable()
+
+    def ask(self, prompt: str, system: str, *, timeout_s: float, check: Check, call_open: Callable[[], bool] | None = None,
+            max_tokens: int = MAX_TOKENS) -> LocalAnswer:
         """check(prompt, answer) -> why the parsed answer is refused, or None. There is no way to ask without one: a
-        local answer that nothing looked at is the failure mode this route must not have."""
+        local answer that nothing looked at is the failure mode this route must not have.
+
+        The request goes to the job slot, never the mouth's. call_open is looked at while the model writes: when a call
+        opens the ask is dropped (the connection closes, the server stops) and the job goes to Claude."""
         started = time.monotonic()
 
-        def done(ok: bool, text: str, reason: str) -> LocalAnswer:
-            return LocalAnswer(ok, text, reason, int((time.monotonic() - started) * 1000))
+        def done(ok: bool, text: str, reason: str, fault: bool = True) -> LocalAnswer:
+            return LocalAnswer(ok, text, reason, int((time.monotonic() - started) * 1000), fault)
 
         if len(prompt) + len(system) > MAX_PROMPT_CHARS:
             return done(False, "", "prompt too long for the local model")
+        slot = self.job_slot()
+        if slot is None:
+            return done(False, "", NO_JOB_SLOT, fault=False)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
         try:
-            text, finish = _run(asyncio.wait_for(self._collect(messages, max_tokens), timeout_s))
+            text, finish = _run(self._collect_until(messages, max_tokens, slot, timeout_s, call_open))
+        except _CallOpened:
+            return done(False, "", CALL_OPENED, fault=False)
         except asyncio.TimeoutError:
             return done(False, "", f"no answer within {timeout_s:g} s")
         except Exception as exc:       # the server's own message is not kept: it may quote the prompt
@@ -159,15 +188,48 @@ class LocalLLM:
             return done(False, "", f"answer refused: {why}")
         return done(True, text, "ok")
 
-    async def _collect(self, messages: list[dict], max_tokens: int) -> tuple[str, str | None]:
+    async def _collect_until(self, messages: list[dict], max_tokens: int, slot: int, timeout_s: float,
+                             call_open: Callable[[], bool] | None) -> tuple[str, str | None]:
+        """_collect, but stopped when the time is up (TimeoutError) or a call opens (_CallOpened). Stopping cancels the
+        read, which closes the connection to the server: it stops writing."""
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout_s
+        task = asyncio.ensure_future(self._collect(messages, max_tokens, slot))
+        try:
+            while True:
+                left = end - loop.time()
+                if left <= 0:
+                    raise asyncio.TimeoutError
+                finished, _ = await asyncio.wait({task}, timeout=min(CALL_POLL_S, left))
+                if finished:
+                    return task.result()
+                if call_open is not None and _call_is_open(call_open):
+                    raise _CallOpened
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def _collect(self, messages: list[dict], max_tokens: int, slot: int) -> tuple[str, str | None]:
         parts: list[str] = []
         finish = None
-        async for ev in self.model.stream(messages, temperature=0.0, max_tokens=max_tokens):
+        async for ev in self.model.stream(messages, temperature=0.0, max_tokens=max_tokens, slot=slot):
             if ev.get("kind") == "text":
                 parts.append(ev.get("text") or "")
             elif ev.get("kind") == "done":
                 finish = ev.get("finish")
         return "".join(parts), finish
+
+
+class _CallOpened(Exception):
+    """A voice line opened while a job was being answered."""
+
+
+def _call_is_open(call_open: Callable[[], bool]) -> bool:
+    try:
+        return bool(call_open())
+    except Exception:         # cannot tell: the voice goes first
+        return True
 
 
 def _run(coro):

@@ -7,32 +7,39 @@ import asyncio
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from app import loops, outbound, router
-from app.brain import local_llm
+from app.brain import local_llm, voice_local
 from app.settings import REPO_ROOT
 from app.tools import untrusted
 
 
 class FakeModel:
-    """What VoiceModel offers: ready() and an async stream() of {"kind": "text"|"done", ...} events."""
+    """What VoiceModel offers: ready(), job_slot (the slot a job may use without touching the mouth's: None when the
+    server has only one) and an async stream() of {"kind": "text"|"done", ...} events."""
 
-    def __init__(self, pieces=('{"a": 1}',), finish="stop", delay=0.0, error=None, ready=True):
-        self.pieces, self.finish, self.delay, self.error, self._ready = pieces, finish, delay, error, ready
+    def __init__(self, pieces=('{"a": 1}',), finish="stop", delay=0.0, error=None, ready=True, job_slot=1):
+        self.pieces, self.finish, self.delay, self.error, self._ready, self.job_slot = pieces, finish, delay, error, ready, job_slot
         self.calls = []
+        self.cancelled = False
 
     def ready(self):
         return self._ready
 
-    async def stream(self, messages, *, tools=None, temperature=0.6, max_tokens=300):
-        self.calls.append({"messages": messages, "tools": tools, "temperature": temperature, "max_tokens": max_tokens})
+    async def stream(self, messages, *, tools=None, temperature=0.6, max_tokens=300, slot=None):
+        self.calls.append({"messages": messages, "tools": tools, "temperature": temperature, "max_tokens": max_tokens, "slot": slot})
         if self.error:
             raise self.error
-        for p in self.pieces:
-            await asyncio.sleep(self.delay)
-            yield {"kind": "text", "text": p}
+        try:
+            for p in self.pieces:
+                await asyncio.sleep(self.delay)
+                yield {"kind": "text", "text": p}
+        except asyncio.CancelledError:             # the connection to the server is closed: it stops writing
+            self.cancelled = True
+            raise
         yield {"kind": "done", "finish": self.finish}
 
 
@@ -208,3 +215,115 @@ def test_the_reply_check_cannot_be_fooled_by_a_mail_that_looks_like_the_end_of_t
 def test_without_a_list_of_mails_in_the_prompt_nothing_can_be_checked_so_nothing_is_accepted(prompt):
     got = local_llm.ANSWER_CHECKS["reply_check"](prompt, {"m1": "yes"})
     assert got and "which mails" in got
+
+
+# ---------------------------------------------------------------- a slot of its own (review of G11)
+# The voice model's server runs one slot (-np 1) with the mouth's start of the prompt cached in it. A job on that
+# slot wipes the cache (cache_prompt is on) and a call opening meanwhile waits behind the job. So the local route needs a
+# second slot (-np 2) that only jobs use (id_slot), and it gives way when a call opens (voice recipe 13).
+
+def server(np=None, context=16384, flag="-np"):
+    srv = voice_local.LlamaServer(["llama-server"], Path("m.gguf"), context=context)
+    if np is not None:
+        i = srv.cmd.index("-np")
+        srv.cmd[i:i + 2] = [flag, str(np)]
+    return srv
+
+
+def voice_model(tmp_path, srv, state="ready", transport=None):
+    v = voice_local.VoiceModel(lambda: None, log_dir=tmp_path, transport=transport)
+    v.server, v.state = srv, state
+    return v
+
+
+@pytest.mark.parametrize("srv, expected", [
+    (server(), None),                                    # the shipped flags: one slot
+    (server(np=1), None),
+    (server(np=2), 1),                                   # -np 2 -c 16384: 8192 tokens each
+    (server(np=2, flag="--parallel"), 1),
+    (server(np=4, context=32768), 1),
+    (server(np=2, context=8192), None),                  # 4096 each: too small for a job's prompt and answer
+    (None, None)])
+def test_a_job_slot_exists_only_when_the_server_runs_two_roomy_slots(tmp_path, srv, expected):
+    assert voice_model(tmp_path, srv).job_slot == expected
+
+
+def test_a_server_that_is_not_ready_has_no_job_slot(tmp_path):
+    assert voice_model(tmp_path, server(np=2), state="starting").job_slot is None
+    assert voice_model(tmp_path, server(np=2), state="failed").job_slot is None
+
+
+def sse(*chunks):
+    return "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+
+
+def bodies_of(tmp_path, srv, **stream_kw):
+    import httpx
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, text=sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}),
+                              headers={"content-type": "text/event-stream"})
+    v = voice_model(tmp_path, srv, transport=httpx.MockTransport(handler))
+
+    async def run():
+        return [ev async for ev in v.stream([{"role": "user", "content": "hi"}], **stream_kw)]
+    asyncio.run(run())
+    return seen[0]
+
+
+def test_a_request_can_be_pinned_to_a_slot(tmp_path):
+    assert bodies_of(tmp_path, server(np=2), slot=1)["id_slot"] == 1
+
+
+def test_the_mouth_is_unchanged_on_a_one_slot_server_and_pinned_to_slot_zero_when_jobs_have_one(tmp_path):
+    assert "id_slot" not in bodies_of(tmp_path, server())                         # exactly as before
+    assert "id_slot" not in bodies_of(tmp_path, server(np=1))
+    assert bodies_of(tmp_path, server(np=2))["id_slot"] == 0                      # the job slot never takes the mouth's work
+
+
+def test_the_local_route_is_not_ready_without_a_job_slot_and_says_why():
+    one = local_llm.LocalLLM(FakeModel(job_slot=None))
+    assert not one.ready() and "-np 2" in one.unavailable() and "second slot" in one.unavailable()
+    assert local_llm.LocalLLM(FakeModel(ready=False)).unavailable() == "the local model is not running"
+    two = local_llm.LocalLLM(FakeModel(job_slot=1))
+    assert two.ready() and two.unavailable() == ""
+
+    class Old:                                           # a model object that does not know about slots
+        def ready(self):
+            return True
+    assert not local_llm.LocalLLM(Old()).ready()
+
+
+def test_a_job_is_asked_on_the_job_slot_and_never_without_one():
+    m = FakeModel(job_slot=1)
+    assert ask(m).ok and m.calls[0]["slot"] == 1
+    none = FakeModel(job_slot=None)
+    a = ask(none)
+    assert not a.ok and "slot" in a.reason and none.calls == []                   # the slot went away since ready(): not asked
+
+
+def test_a_call_that_opens_mid_job_stops_it_and_it_is_not_the_models_fault():
+    m = FakeModel(pieces=('{"a":', ' 1}'), delay=0.5)
+    opened = threading.Timer(0.15, lambda: flag.update(open=True))
+    flag = {"open": False}
+    opened.start()
+    t0 = time.monotonic()
+    a = ask(m, timeout_s=10, call_open=lambda: flag["open"])
+    assert not a.ok and a.reason == "a call opened: the model stays with the voice" and a.fault is False
+    assert time.monotonic() - t0 < 3 and m.cancelled                              # stopped at once, the connection closed
+    opened.cancel()
+
+
+def test_an_answer_that_fails_is_the_models_fault_and_a_check_that_is_never_true_changes_nothing():
+    assert ask(FakeModel(pieces=("nope",))).fault is True
+    assert ask(FakeModel(pieces=('{"a": 1}',)), call_open=lambda: False).ok
+    assert ask(FakeModel(pieces=('{"a":', ' 1}'), delay=0.5), timeout_s=0.2, call_open=lambda: False).reason == "no answer within 0.2 s"
+
+
+def test_a_call_check_that_breaks_counts_as_a_call_being_open():
+    def boom():
+        raise RuntimeError("x")
+    a = ask(FakeModel(pieces=('{"a":', ' 1}'), delay=0.3), timeout_s=5, call_open=boom)
+    assert not a.ok and a.fault is False and "call opened" in a.reason

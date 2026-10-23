@@ -249,14 +249,15 @@ class Jobs:
                 got = LocalAnswer(False, "", "no answer check for this purpose", 0)
             else:
                 kind = LOCAL_KIND.get(decision.purpose, "small")
-                got = self.local.ask(prompt, system, timeout_s=self.router.rules.timeout_s[kind], check=check)
+                got = self.local.ask(prompt, system, timeout_s=self.router.rules.timeout_s[kind], check=check,
+                                     call_open=self.call_open)
         except Exception as exc:
             got = LocalAnswer(False, "", f"{type(exc).__name__} from the local model", 0)
         if got.ok:
             return AskResult(got.text), decision
         with Session(self.engine) as s:
             hold = self._hold(self.brain_state(s))
-        return None, self.router.escalate(decision, got.reason, model=model, claude_hold=hold)
+        return None, self.router.escalate(decision, got.reason, model=model, claude_hold=hold, fault=got.fault)
 
     def ask_brain(self, prompt: str, system: str, images=None, purpose: str = "summary"):
         """One model run for a job, counted against the daily budget. With the router on (g11.router) the run is logged
@@ -269,9 +270,9 @@ class Jobs:
         if self.router is not None:
             with Session(self.engine) as s:
                 hold = self._hold(self.brain_state(s))
+            local_why = self.local.unavailable() if self.local is not None else "there is no local model"
             decision = self.router.route(purpose, prompt, mode="job", model=model, images=bool(images), claude_hold=hold,
-                                         call_open=bool(self.call_open()),
-                                         local_ready=self.local is not None and self.local.ready(),
+                                         call_open=bool(self.call_open()), local_ready=not local_why, local_why=local_why,
                                          local_model=self.local.fingerprint() if self.local is not None else "")
             if decision.route == "local":
                 answer, decision = self._route_local(prompt, system, decision, model)

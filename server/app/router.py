@@ -253,14 +253,17 @@ _SUBSCRIPTION_ONLY = Rules({"claude": Provider("claude", "R1", True)})
 
 def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job", model: str | None = None,
            tools: bool = False, images: bool = False, claude_hold: str = "", call_open: bool = False,
-           local_flag: bool = False, local_ready: bool = False, local_model: str = "", hits: tuple[str, ...] = (),
-           exclude: frozenset[str] = frozenset(), fallback_from: str | None = None, fallback_why: str = "") -> Decision:
+           local_flag: bool = False, local_ready: bool = False, local_why: str = "", local_model: str = "",
+           hits: tuple[str, ...] = (), exclude: frozenset[str] = frozenset(), fallback_from: str | None = None,
+           fallback_why: str = "") -> Decision:
     """The route for one model call. First allowed wins: a free-cloud provider (none has an adapter), then the
     local model, then the subscription. `content` is the class to protect, ceiling_of(purpose) tightened by scan():
     a caller can't pass anything looser than the ceiling.
 
     local_model: the fingerprint of the model that is running (brain/local_llm.fingerprint); the local route needs it to
     be the one routing.yaml says the lab passed.
+    local_ready / local_why: whether a job can run on the local model right now (it is up AND has a slot of its own for
+    jobs, brain/local_llm.LocalLLM.unavailable) and, when not, why in words; the words only change the reason.
 
     A provider is skipped when it isn't listed, isn't enabled, has no adapter, is a class not allowed to see this
     content (MAY_RECEIVE), or doesn't fit the call (tools, images, mode, a call open, not ready, on hold: claude_hold says why)."""
@@ -273,7 +276,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
     for name in order:
         skip = _skip(rules, name, purpose=purpose, content=content, mode=mode, tools=tools, images=images,
                      claude_hold=claude_hold, call_open=call_open, local_flag=local_flag, local_ready=local_ready,
-                     local_model=local_model, excluded=name in exclude)
+                     local_why=local_why, local_model=local_model, excluded=name in exclude)
         if skip:
             why[name] = skip
             continue
@@ -293,7 +296,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
 
 
 def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, claude_hold, call_open, local_flag,
-          local_ready, local_model, excluded) -> str | None:
+          local_ready, local_why, local_model, excluded) -> str | None:
     """Why this provider can't take the call, or None when it can."""
     prov = rules.providers.get(name)
     if prov is None:
@@ -322,7 +325,7 @@ def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, cla
         if call_open:
             return "a call is open and the voice needs the model"
         if not local_ready:
-            return "the local model is not running"
+            return local_why or "the local model is not running"
         if local_model != rules.lab_model_hash:
             return "the model that is running is not the model the router lab passed"
         return None
@@ -389,7 +392,7 @@ class Router:
 
     def route(self, purpose: str, text: str | None = "", *, mode: str = "job", model: str | None = None, tools: bool = False,
               images: bool = False, claude_hold: str = "", call_open: bool = False, local_ready: bool = False,
-              local_model: str = "") -> Decision:
+              local_why: str = "", local_model: str = "") -> Decision:
         """text is scanned and never stored. model: Claude's alias for this purpose (models.pick)."""
         try:
             with Session(self.engine) as s:
@@ -398,17 +401,19 @@ class Router:
                 klass, hits = scan(text or "", self._name_set())
                 d = decide(self.rules, purpose, content=klass, mode=mode, model=model, tools=tools, images=images,
                            claude_hold=claude_hold, call_open=call_open, local_flag=flags.on(s, FLAG_LOCAL),
-                           local_ready=local_ready and not self.breaker_open(), local_model=local_model, hits=hits)
+                           local_ready=local_ready and not self.breaker_open(),
+                           local_why="" if local_ready else local_why, local_model=local_model, hits=hits)
                 self._write(s, d)
                 return d
         except Exception as exc:       # the router never stops a call
             log.warning("router failed: %s", exc, exc_info=True)
             return self._plain(purpose, mode, model, f"router error ({type(exc).__name__}): the subscription, as always")
 
-    def escalate(self, d: Decision, why: str, *, model: str | None = None, claude_hold: str = "") -> Decision:
+    def escalate(self, d: Decision, why: str, *, model: str | None = None, claude_hold: str = "", fault: bool = True) -> Decision:
         """The route's answer was refused (local: not valid, too unsure, too slow): the next route, logged as a second
-        decision with where it came from. Counts toward the local breaker."""
-        if d.route == "local":
+        decision with where it came from. Counts toward the local breaker, unless the model did nothing wrong
+        (fault=False: a call opened and the job gave way)."""
+        if d.route == "local" and fault:
             self.local_failed()
         try:
             with Session(self.engine) as s:
@@ -446,9 +451,10 @@ class Router:
 
     # -- More -> Usage
 
-    def view(self, days: int = 7, local_model: str = "") -> dict:
+    def view(self, days: int = 7, local_model: str = "", local_why: str = "") -> dict:
         """What the owner sees: the rules in force, and the routes taken with their reasons (newest first).
-        local_model: the fingerprint of the model running now, shown so it can be copied into routing.yaml once the lab passed it."""
+        local_model: the fingerprint of the model running now, shown so it can be copied into routing.yaml once the lab passed it.
+        local_why: why a job can't run on the local model right now (not running, no slot of its own for jobs), or ''."""
         with Session(self.engine) as s:
             router_on, local_on = flags.on(s, FLAG_ROUTER), flags.on(s, FLAG_LOCAL)
             rows = s.exec(select(RouteLog).where(RouteLog.ts >= utcnow() - dt.timedelta(days=days))
@@ -470,6 +476,8 @@ class Router:
                 status = "off: g11.local_route is off"
             elif name == "local" and not (rules and rules.local_purposes and rules.lab_model_hash):
                 status = "off: no purpose has passed the router lab"
+            elif name == "local" and local_why:
+                status = f"off: {local_why}"
             else:
                 status = "on"
             providers.append({"name": name, "tier": p.tier, "enabled": p.enabled, "status": status})

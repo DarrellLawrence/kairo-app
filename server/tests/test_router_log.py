@@ -55,6 +55,8 @@ def test_both_flags_are_off_by_default_and_say_in_plain_words_what_they_do():
         default, what = flags.FLAGS[name]
         assert default is False and len(what) > 60 and "Claude" in what, name
     assert "router lab" in flags.FLAGS["g11.local_route"][1] and "PC" in flags.FLAGS["g11.local_route"][1]
+    local = flags.FLAGS["g11.local_route"][1]                                   # says only what the code allows (review of G11)
+    assert "second slot" in local and "reply" in local and "sorting" not in local and "summaris" not in local
     assert [n for n in flags.FLAGS if n.startswith("g11.")] == ["g11.router", "g11.local_route"]
 
 
@@ -162,6 +164,26 @@ def test_a_rejected_local_answer_is_logged_and_goes_to_the_subscription(engine, 
     assert [x.route for x in got] == ["local", "claude"] and got[1].fallback_from == "local"
     assert "not valid JSON" in got[1].reason and got[1].model == "haiku"
     assert r.fails() == 1                                                       # and it counts toward the breaker
+
+
+def test_a_job_dropped_because_a_call_opened_is_logged_but_is_not_a_failure_of_the_model(engine, tmp_path):
+    set_flags(engine, router=True, local_route=True)
+    r = make(engine, tmp_path, LAB)
+    first = r.route("reply_check", "mail", local_ready=True, local_model="abc", model="haiku")
+    second = r.escalate(first, "a call opened: the model stays with the voice", model="haiku", fault=False)
+    assert (second.route, second.fallback_from) == ("claude", "local") and "a call opened" in second.reason
+    assert r.fails() == 0 and not r.breaker_open()
+
+
+def test_the_reason_the_local_model_cannot_run_reaches_the_log_and_the_view(engine, tmp_path):
+    set_flags(engine, router=True, local_route=True)
+    r = make(engine, tmp_path, LAB)
+    why = "the voice model's server has one slot (-np 1)"
+    d = r.route("reply_check", "mail", local_ready=False, local_why=why, local_model="abc")
+    assert d.route == "claude" and why in d.reason and why in rows(engine)[-1].reason
+    status = {p["name"]: p["status"] for p in r.view(local_model="abc", local_why=why)["providers"]}
+    assert status["local"] == f"off: {why}"
+    assert {p["name"]: p["status"] for p in r.view(local_model="abc")["providers"]}["local"] == "on"
 
 
 def test_escalating_with_the_router_off_is_the_subscription_without_a_log(engine, tmp_path):
