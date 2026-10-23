@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -315,5 +316,98 @@ def test_a_conversation_process_lives_long(tmp_path):
         w = brain._warm
         w.started -= 2 * 3600                       # two hours old: still usable (the call process: 15 min)
         assert brain.warm_ready("conv", None)
+    finally:
+        brain.close_warm()
+
+
+# ---------------------------------------------------------------- the end of the answer, and the tail after it (voice G1)
+# Real stream (Claude Code 2.1.296, measured): the answer ends with stream_event message_delta
+# (delta.stop_reason) + message_stop; then the CLI writes a summary of the turn (system/post_turn_summary,
+# 1.9-3.4 s on Haiku) and only then sends the result. A tool turn has several message_stop events, only the
+# last one has stop_reason end_turn.
+
+def stream_line(event_type, **fields):
+    return json.dumps({"type": "stream_event", "event": {"type": event_type, **fields}, "session_id": "s"})
+
+
+def parsed(brain, *lines):
+    return [e for line in lines for e in brain._parse_line(line)]
+
+
+def test_message_end_is_sent_once_when_the_answer_ends(tmp_path):
+    kinds = [e.kind for e in run(make(tmp_path), "hello")]
+    assert kinds.count(EventKind.message_end) == 1
+    assert kinds[-2:] == [EventKind.message_end, EventKind.result]       # after the last words, before the result
+    assert kinds.index(EventKind.message_end) > max(i for i, k in enumerate(kinds) if k is EventKind.text)
+
+
+def test_only_end_turn_ends_the_answer(tmp_path):
+    brain = make(tmp_path)
+    def stops(reason):
+        return parsed(brain, stream_line("message_start"), stream_line("message_delta", delta={"stop_reason": reason}),
+                      stream_line("message_stop"))
+    assert [e.kind for e in stops("end_turn")] == [EventKind.message_end]
+    for reason in ("tool_use", "max_tokens", "refusal", None):
+        assert stops(reason) == [], reason
+    # a message_stop without its message_delta is no end either, and a reason never carries over to the next message
+    assert parsed(brain, stream_line("message_stop")) == []
+    parsed(brain, stream_line("message_delta", delta={"stop_reason": "end_turn"}), stream_line("message_stop"))
+    assert parsed(brain, stream_line("message_stop")) == []
+
+
+def test_a_tool_turn_has_one_message_end_after_the_tool_call(tmp_path):
+    marker = tmp_path / "marker"
+    mcp = tmp_path / "mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"probe": {
+        "command": sys.executable, "args": [str(FAKE_CLAUDE.parent / "probe_mcp.py")], "env": {"PROBE_MARKER": str(marker)}}}}))
+    brain = make(tmp_path)
+    brain.mcp_config = mcp
+    events = run(brain, "touch it [[fake-tool touch {}]]", tools=["mcp__probe__touch"])
+    kinds = [e.kind for e in events]
+    assert marker.exists() and kinds.count(EventKind.tool_use) == 1
+    assert kinds.count(EventKind.message_end) == 1                      # the tool call's message_stop (tool_use) is no end
+    assert kinds.index(EventKind.tool_use) < kinds.index(EventKind.message_end) < kinds.index(EventKind.result)
+
+
+def test_the_tail_after_the_answer_is_measured(tmp_path):
+    events = run(make(tmp_path, KAIRO_HOOK_FAKE_TAIL_S="0.8"), "hello")
+    usage = events[-1].data["usage"]
+    assert usage["first_text_ms"] <= usage["last_text_ms"] <= usage["message_end_ms"] <= usage["result_ms"]
+    assert usage["tail_ms"] == usage["result_ms"] - usage["message_end_ms"]
+    assert 700 <= usage["tail_ms"] < 5000                               # the fake's 0.8 s, with room for a busy machine
+    assert usage["message_end_ms"] <= usage["summary_ms"] <= usage["result_ms"]     # the summary event is what the tail was
+
+
+def test_no_tail_without_a_summary(tmp_path):
+    usage = run(make(tmp_path), "hello")[-1].data["usage"]
+    assert 0 <= usage["tail_ms"] < 700 and "summary_ms" not in usage
+
+
+def test_the_tail_is_measured_on_a_warm_process_too(tmp_path):
+    brain = make(tmp_path, KAIRO_HOOK_FAKE_TAIL_S="0.8")
+    brain.warm_up(key="conv", session_id=None, system="s", tools=[])
+    try:
+        usage = list(brain.run("hi", session_id=None, system="s", tools=[], warm="conv"))[-1].data["usage"]
+        assert usage["warm"] is True and 700 <= usage["tail_ms"] < 5000
+    finally:
+        brain.close_warm()
+
+
+def test_a_turn_that_never_ended_has_no_tail(tmp_path):
+    usage = run(make(tmp_path, KAIRO_HOOK_FAKE_MODE="usage_limit"))[-1].data["usage"]
+    assert "tail_ms" not in usage and "message_end_ms" not in usage
+
+
+def test_the_interrupted_answer_ends_without_message_end(tmp_path):
+    brain = make(tmp_path, KAIRO_HOOK_FAKE_MODE="long")
+    brain.warm_up(key="conv", session_id=None, system="s", tools=[], model="haiku")
+    try:
+        events = []
+        for ev in brain.run("tell me a long story", session_id=None, system="s", tools=[], warm="conv", model="haiku"):
+            events.append(ev)
+            if ev.kind is EventKind.text and len([e for e in events if e.kind is EventKind.text]) == 3:
+                brain.interrupt()
+        assert events[-1].kind is EventKind.error
+        assert EventKind.message_end not in [e.kind for e in events]
     finally:
         brain.close_warm()

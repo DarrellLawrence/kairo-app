@@ -31,6 +31,14 @@ Flags verified against Claude Code 2.1.296 (`claude --help` and real runs):
 Stream events seen: system/init (session_id), stream_event (event.delta),
 assistant (message.content), rate_limit_event (rate_limit_info.status), result
 (is_error, result, api_error_status, session_id).
+
+The end of an answer (voice G1, measured with 2.1.296): stream_event message_delta carries
+delta.stop_reason and message_stop closes the message. A tool turn has one message_stop per model
+message, only the last has stop_reason end_turn: that one is EventKind.message_end. The result
+comes later: the CLI first writes a summary of the turn (system/post_turn_summary, 1.9-3.4 s on
+Haiku). usage carries the times (ms since the turn began): first_text_ms, last_text_ms,
+message_end_ms, summary_ms (when the summary event came), result_ms, and tail_ms = result_ms -
+message_end_ms.
 """
 
 from __future__ import annotations
@@ -144,6 +152,7 @@ class ClaudeCLIBrain:
         self._warm: _Warm | None = None
         self._warm_lock = threading.Lock()
         self._streamed = False                 # this message's text already went out as deltas
+        self._stop_reason: str | None = None   # of the message being streamed (message_delta), read at message_stop
         self._t0 = 0.0                         # when this run (or warm turn) started
         self._timing: dict[str, Any] = {}
         self._turn_warm: _Warm | None = None     # the warm process answering right now (interrupt)
@@ -323,6 +332,7 @@ class ClaudeCLIBrain:
         self._cancelled.clear()
         self._interrupted.clear()
         self._streamed = False
+        self._stop_reason = None
         self._t0 = time.monotonic()
         self._timing = {}
 
@@ -484,15 +494,26 @@ class ClaudeCLIBrain:
                 self.mcp_status = {str(x.get("name")): str(x.get("status")) for x in servers}
             yield BrainEvent(EventKind.session, session_id=msg.get("session_id"),
                              data={"mcp_servers": servers, "tools": msg.get("tools") or []})
+        elif kind == "system" and msg.get("subtype") == "post_turn_summary":
+            self._timing.setdefault("summary_ms", self._ms())       # what the tail after the answer is made of
         elif kind == "stream_event":
             ev = msg.get("event") or {}
             if ev.get("type") == "message_start":
                 self._streamed = False
+                self._stop_reason = None
+            elif ev.get("type") == "message_delta":
+                self._stop_reason = (ev.get("delta") or {}).get("stop_reason")
+            elif ev.get("type") == "message_stop":
+                reason, self._stop_reason = self._stop_reason, None
+                if reason == "end_turn":                  # a tool call's message ends with tool_use: not the end
+                    now = self._timing["message_end_ms"] = self._ms()
+                    yield BrainEvent(EventKind.message_end, data={"ms": now})
             elif ev.get("type") == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
                 text = ev["delta"].get("text") or ""
                 if text:
                     self._streamed = True
                     self._timing.setdefault("first_text_ms", self._ms())
+                    self._timing["last_text_ms"] = self._ms()
                     yield BrainEvent(EventKind.text, text=text)
         elif kind == "assistant":
             for block in (msg.get("message") or {}).get("content") or []:
@@ -500,6 +521,7 @@ class ClaudeCLIBrain:
                     if self._streamed:
                         continue          # already sent, delta by delta
                     self._timing.setdefault("first_text_ms", self._ms())
+                    self._timing["last_text_ms"] = self._ms()
                     yield BrainEvent(EventKind.text, text=block["text"])
                 elif block.get("type") == "tool_use":
                     yield BrainEvent(EventKind.tool_use, data={"name": block.get("name"), "input": block.get("input")})
@@ -511,6 +533,9 @@ class ClaudeCLIBrain:
             yield BrainEvent(EventKind.usage, data=info)
         elif kind == "result":
             sid = msg.get("session_id")
+            self._timing["result_ms"] = self._ms()
+            if "message_end_ms" in self._timing:
+                self._timing["tail_ms"] = self._timing["result_ms"] - self._timing["message_end_ms"]
             usage = {**_usage(msg), **self._timing}
             if self._interrupted.is_set() and msg.get("subtype") == "error_during_execution":
                 yield BrainEvent(EventKind.error, text="Interrupted.", session_id=sid, status=self._status,

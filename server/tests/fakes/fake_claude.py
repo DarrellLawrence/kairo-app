@@ -11,6 +11,10 @@ because the adapter only passes allow-listed variables through):
   pause        1.5 s pause in the middle of the answer (hang-up tests)
   bad_flag     exit 1 like the real CLI does on a missing --verbose
 
+FAKE_CLAUDE_TAIL_S=<seconds>: like the real CLI (2.1.296) the turn ends with a system/post_turn_summary event that
+takes this long after the last message_stop, before the result; CLAUDE_CODE_CLASSIFIER_SUMMARY=0 in the process
+environment removes it (measured with the real CLI 2.1.296). Unset: no tail.
+
 FAKE_CLAUDE_NO_TOOLS=1: init lists no tools although MCP connected. FAKE_CLAUDE_SKIP_TOOLS=1: the
 "model" ignores [[fake-tool]] directives (asks instead of acting).
 FAKE_CLAUDE_PROBE=<report.json> (+ FAKE_CLAUDE_PROBE_PATHS=a;b): write who ran
@@ -170,7 +174,7 @@ def run_hooks(tool_name, tool_input):
     return True, ""
 
 
-def tool_calls(prompt, args, clients, sid):
+def tool_calls(prompt, args, clients, sid, partial=False):
     """Run every [[fake-tool NAME {json}]] directive. Returns reply lines."""
     allowed = set(args[args.index("--allowedTools") + 1].split(",")) if "--allowedTools" in args else set()
     lines = []
@@ -183,6 +187,7 @@ def tool_calls(prompt, args, clients, sid):
             continue
         out({"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:12], "name": full, "input": tool_input}]}, "session_id": sid})
+        message_stop(sid, "tool_use", partial)      # a tool turn has more than one message_stop
         ok, why = run_hooks(full, tool_input)
         if not ok:
             lines.append(f"TOOL-BLOCKED {name}: {why}")
@@ -191,6 +196,25 @@ def tool_calls(prompt, args, clients, sid):
         text = " ".join(c.get("text", "") for c in result.get("content", []))
         lines.append(f"TOOL-{'ERROR' if result.get('isError') else 'RESULT'} {name}: {text}")
     return lines
+
+
+def message_stop(sid, stop_reason, partial):
+    """The end of one model message, like the real stream (only with --include-partial-messages):
+    message_delta carries the stop reason, message_stop closes the message."""
+    if partial:
+        out({"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                                               "usage": {"output_tokens": 5}}, "session_id": sid})
+        out({"type": "stream_event", "event": {"type": "message_stop"}, "session_id": sid})
+
+
+def tail(sid):
+    """The real CLI writes an LLM summary of the turn after the answer (system/post_turn_summary) and sends
+    the result only then; CLAUDE_CODE_CLASSIFIER_SUMMARY=0 turns that off. Read from the process environment
+    itself, as the real CLI does: the brain has to pass it on."""
+    wait = float(env("FAKE_CLAUDE_TAIL_S") or 0)
+    if wait and os.environ.get("CLAUDE_CODE_CLASSIFIER_SUMMARY") != "0":
+        time.sleep(wait)
+        out({"type": "system", "subtype": "post_turn_summary", "session_id": sid})
 
 
 def say(text, sid, partial, pause=0.0):
@@ -205,6 +229,7 @@ def say(text, sid, partial, pause=0.0):
             if i == 0 and pause:
                 time.sleep(pause)
         out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}, "session_id": sid})
+        message_stop(sid, "end_turn", partial)
         return
     half = len(text) // 2
     out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text[:half]}]}, "session_id": sid})
@@ -224,6 +249,7 @@ def say_long(text, sid, interrupted):
                                                "delta": {"type": "text_delta", "text": chunk}}, "session_id": sid})
         time.sleep(0.05)
     out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "".join(pieces)}]}, "session_id": sid})
+    message_stop(sid, "end_turn", True)
     return True
 
 
@@ -235,12 +261,13 @@ def turn(args, prompt, sid, mode, partial, model=None, interrupted=lambda: False
     out({"type": "system", "subtype": "init", "session_id": sid, "tools": listed, "mcp_servers": mcp_status})
     if clients or mcp_status:
         try:
-            lines = ["I'd rather not do that."] if env("FAKE_CLAUDE_SKIP_TOOLS") else tool_calls(prompt, args, clients, sid)
+            lines = ["I'd rather not do that."] if env("FAKE_CLAUDE_SKIP_TOOLS") else tool_calls(prompt, args, clients, sid, partial)
         finally:
             for c in clients.values():
                 c.close()
         reply = "\n".join(lines)
         say(reply, sid, partial)
+        tail(sid)
         out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid})
         return 0
 
@@ -271,6 +298,7 @@ def turn(args, prompt, sid, mode, partial, model=None, interrupted=lambda: False
             return 0
     else:
         say(reply, sid, partial, pause=1.5 if mode == "pause" else 0.0)
+    tail(sid)
     out({"type": "result", "subtype": "success", "is_error": False, "result": reply, "session_id": sid, "modelUsage": usage})
     return 0
 
