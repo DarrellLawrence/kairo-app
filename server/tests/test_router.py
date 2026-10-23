@@ -219,7 +219,7 @@ def lab_passed(tmp_path):
 
 def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
     rules = lab_passed(tmp_path)
-    ok = dict(content="personal", local_flag=True, local_ready=True)
+    ok = dict(content="personal", local_flag=True, local_ready=True, local_model="abc")
     assert router.decide(rules, "triage", **ok).route == "local"
     assert router.decide(rules, "triage", **ok).tier == "R0"
     for change, why in [({"local_flag": False}, "g11.local_route is off"), ({"local_ready": False}, "not running"),
@@ -235,10 +235,22 @@ def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
     assert router.decide(bare, "triage", **ok).route == "claude"
 
 
+def test_the_lab_passes_one_model_and_only_that_model_runs_locally(tmp_path):
+    """lab_model_hash is the fingerprint of the model the router lab passed (More -> Usage shows the running one). A
+    different model, an unknown one or none is not that model: the job goes to the subscription."""
+    rules = lab_passed(tmp_path)
+    ok = dict(content="personal", local_flag=True, local_ready=True)
+    assert router.decide(rules, "triage", local_model="abc", **ok).route == "local"
+    for running in ("abd", "", "ABC", "abc "):
+        d = router.decide(rules, "triage", local_model=running, **ok)
+        assert d.route == "claude" and "not the model the router lab passed" in d.reason, running
+    assert router.decide(rules, "triage", **ok).route == "claude"                      # nothing said: not that model
+
+
 def test_a_rejected_local_answer_goes_to_the_subscription_with_the_reason(tmp_path):
     rules = lab_passed(tmp_path)
-    first = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True, model="haiku")
-    again = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True, model="haiku",
+    first = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True, local_model="abc", model="haiku")
+    again = router.decide(rules, "triage", content="personal", local_flag=True, local_ready=True, local_model="abc", model="haiku",
                           exclude=frozenset({"local"}), fallback_from="local")
     assert first.route == "local" and again.route == "claude" and again.fallback_from == "local"
     assert again.reason.startswith("local did not work out")
@@ -246,7 +258,7 @@ def test_a_rejected_local_answer_goes_to_the_subscription_with_the_reason(tmp_pa
 
 def test_when_the_subscription_is_paused_a_lab_passed_job_still_runs_locally_and_the_rest_wait(tmp_path):
     rules = lab_passed(tmp_path)
-    ok = dict(local_flag=True, local_ready=True, claude_hold="paused (usage limit)")
+    ok = dict(local_flag=True, local_ready=True, local_model="abc", claude_hold="paused (usage limit)")
     assert router.decide(rules, "triage", content="personal", **ok).route == "local"
     d = router.decide(rules, "reply_check", content="personal", **ok)
     assert d.route == "none" and "paused (usage limit)" in d.reason
@@ -268,7 +280,7 @@ def all_calls():
             ALL_PURPOSES, router.CLASSES, router.MODES, (False, True), (False, True), (False, True), (False, True),
             (False, True), (False, True)):
         yield purpose, scanned, dict(mode=mode, tools=tools, images=images, claude_hold="paused (usage limit)" if paused else "", call_open=call_open,
-                                     local_flag=flag, local_ready=ready)
+                                     local_flag=flag, local_ready=ready, local_model="abc123")
 
 
 def test_matrix_no_free_cloud_route_for_personal_or_secret_content_in_any_mode(monkeypatch, tmp_path):

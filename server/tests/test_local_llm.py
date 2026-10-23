@@ -102,3 +102,28 @@ def test_a_voice_model_that_never_finishes_cannot_hold_a_job_longer_than_the_tim
     t0 = time.monotonic()
     a = ask(FakeModel(pieces=("x",) * 50, delay=0.2), timeout_s=0.3)
     assert not a.ok and time.monotonic() - t0 < 3
+
+
+def test_the_fingerprint_names_the_model_file_the_lab_passed_without_reading_it(tmp_path):
+    f = tmp_path / "m-Q4_K_M.gguf"
+    f.write_bytes(b"x" * 1000)
+    a = local_llm.fingerprint("lfm2.5-2.6b", f)
+    assert len(a) == 12 and all(c in "0123456789abcdef" for c in a)
+    assert a == local_llm.fingerprint("lfm2.5-2.6b", f)                      # stable
+    assert a != local_llm.fingerprint("other-model", f)                      # another model
+    g = tmp_path / "m-Q5_K_M.gguf"
+    g.write_bytes(b"x" * 1000)
+    assert a != local_llm.fingerprint("lfm2.5-2.6b", g)                      # another quantisation
+    f.write_bytes(b"x" * 1001)
+    assert a != local_llm.fingerprint("lfm2.5-2.6b", f)                      # a file of another size
+    assert local_llm.fingerprint(None, f) == "" and local_llm.fingerprint("m", None) == ""
+    assert local_llm.fingerprint("m", tmp_path / "missing.gguf") == ""
+
+
+def test_the_adapter_reports_the_running_models_fingerprint_and_survives_a_broken_identify():
+    m = FakeModel()
+    assert local_llm.LocalLLM(m).fingerprint() == ""                         # nothing to tell it by: not any model
+    assert local_llm.LocalLLM(m, identify=lambda: "abc123abc123").fingerprint() == "abc123abc123"
+    def boom():
+        raise OSError("disk gone")
+    assert local_llm.LocalLLM(m, identify=boom).fingerprint() == ""

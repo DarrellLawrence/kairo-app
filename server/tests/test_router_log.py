@@ -119,43 +119,43 @@ def test_a_router_that_breaks_never_stops_the_subscription(engine, tmp_path, mon
 def test_the_local_route_needs_its_own_flag_the_lab_and_a_running_model(engine, tmp_path):
     r = make(engine, tmp_path, LAB)
     set_flags(engine, router=True)
-    assert r.route("triage", "mail", local_ready=True).route == "claude"       # g11.local_route is off
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "claude"       # g11.local_route is off
     set_flags(engine, local_route=True)
-    assert r.route("triage", "mail", local_ready=False).route == "claude"
-    d = r.route("triage", "mail", local_ready=True)
+    assert r.route("triage", "mail", local_ready=False, local_model="abc").route == "claude"
+    d = r.route("triage", "mail", local_ready=True, local_model="abc")
     assert (d.route, d.tier, d.model) == ("local", "R0", "local")
-    assert r.route("chat", "hello", local_ready=True, mode="owner", tools=True).route == "claude"
+    assert r.route("chat", "hello", local_ready=True, local_model="abc", mode="owner", tools=True).route == "claude"
     set_flags(engine, router=False)                                            # no router, no local
-    assert r.route("triage", "mail", local_ready=True).route == "claude"
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "claude"
 
 
 def test_three_failures_in_ten_minutes_open_a_breaker_for_ten_minutes(engine, tmp_path):
     clock = Clock()
     set_flags(engine, router=True, local_route=True)
     r = make(engine, tmp_path, LAB, clock=clock)
-    assert r.route("triage", "mail", local_ready=True).route == "local"
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"
     for _ in range(2):
         r.local_failed()
         clock.t += 60
-    assert r.route("triage", "mail", local_ready=True).route == "local"        # two are not enough
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"        # two are not enough
     r.local_failed()
-    d = r.route("triage", "mail", local_ready=True)
+    d = r.route("triage", "mail", local_ready=True, local_model="abc")
     assert d.route == "claude" and "not running" in d.reason
     clock.t += 9 * 60
-    assert r.route("triage", "mail", local_ready=True).route == "claude"
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "claude"
     clock.t += 2 * 60
-    assert r.route("triage", "mail", local_ready=True).route == "local"
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"
     r.local_failed()
     clock.t += 11 * 60                                                          # old failures age out
     r.local_failed()
     r.local_failed()
-    assert r.route("triage", "mail", local_ready=True).route == "local"
+    assert r.route("triage", "mail", local_ready=True, local_model="abc").route == "local"
 
 
 def test_a_rejected_local_answer_is_logged_and_goes_to_the_subscription(engine, tmp_path):
     set_flags(engine, router=True, local_route=True)
     r = make(engine, tmp_path, LAB)
-    first = r.route("triage", "mail", local_ready=True, model="haiku")
+    first = r.route("triage", "mail", local_ready=True, local_model="abc", model="haiku")
     second = r.escalate(first, "not valid JSON", model="haiku")
     assert (first.route, second.route, second.fallback_from) == ("local", "claude", "local")
     got = rows(engine)
@@ -198,8 +198,18 @@ def test_the_view_lists_routes_and_why_and_the_rules_in_force(engine, tmp_path):
     names = {p["name"]: p for p in v["providers"]}
     assert names["claude"]["status"] == "on" and names["local"]["status"].startswith("off") and "g11.local_route" in names["local"]["status"]
     assert names["groq"]["status"] == "off: switched off in routing.yaml"
-    assert v["local"] == {"purposes": [], "lab_model_hash_set": False, "could_run": ["reply_check", "triage"]}
+    assert v["local"] == {"purposes": [], "lab_model_hash_set": False, "could_run": ["reply_check", "triage"],
+                          "running_model": "", "running_model_is_lab_model": False}
     assert len(v["ceilings"]) == 33 and v["ceilings"]["selftest"] == "public" and v["ceilings"]["money"] == "secret"
+
+
+def test_the_view_shows_the_running_model_so_the_owner_can_copy_it_into_the_file_after_the_lab(engine, tmp_path):
+    r = make(engine, tmp_path, LAB)
+    v = r.view(days=1, local_model="abc")
+    assert v["local"]["running_model"] == "abc" and v["local"]["running_model_is_lab_model"] is True
+    v = r.view(days=1, local_model="other")
+    assert v["local"]["running_model"] == "other" and v["local"]["running_model_is_lab_model"] is False
+    assert r.view(days=1)["local"]["running_model"] == ""
 
 
 def test_the_view_says_so_when_the_file_is_missing_or_a_row_was_refused(engine, tmp_path):

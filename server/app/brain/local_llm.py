@@ -11,9 +11,12 @@ JSON. Anything else is refused with a reason and the job goes to Claude as befor
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
 
 from ..jobkit import extract_json
 
@@ -29,10 +32,32 @@ class LocalAnswer:
     ms: int
 
 
+def fingerprint(model_id: str | None, path: Path | None) -> str:
+    """Who the router lab passed: 12 hex digits of the model id, the file's name (it carries the quantisation) and its
+    size. Not a hash of the multi-GB file (that would take a minute): the file is pinned by sha256 when it is
+    installed (voicellm.json). '' when there is no such file. More -> Usage shows it; routing.yaml
+    local.lab_model_hash holds the one the lab passed."""
+    try:
+        if not model_id or path is None or not Path(path).is_file():
+            return ""
+        raw = f"{model_id}|{Path(path).name}|{Path(path).stat().st_size}"
+    except OSError:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 class LocalLLM:
-    def __init__(self, model) -> None:
-        """model: brain.voice_local.VoiceModel (anything with ready() and an async stream(messages, ...))."""
+    def __init__(self, model, identify: Callable[[], str] | None = None) -> None:
+        """model: brain.voice_local.VoiceModel (anything with ready() and an async stream(messages, ...)).
+        identify: fingerprint() of the model that is running now (main.py knows which file that is)."""
         self.model = model
+        self._identify = identify
+
+    def fingerprint(self) -> str:
+        try:
+            return (self._identify() if self._identify else "") or ""
+        except Exception:
+            return ""
 
     def ready(self) -> bool:
         try:

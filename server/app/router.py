@@ -39,7 +39,7 @@ import threading
 import time
 import unicodedata
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -248,11 +248,14 @@ _SUBSCRIPTION_ONLY = Rules({"claude": Provider("claude", "R1", True)})
 
 def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job", model: str | None = None,
            tools: bool = False, images: bool = False, claude_hold: str = "", call_open: bool = False,
-           local_flag: bool = False, local_ready: bool = False, hits: tuple[str, ...] = (),
+           local_flag: bool = False, local_ready: bool = False, local_model: str = "", hits: tuple[str, ...] = (),
            exclude: frozenset[str] = frozenset(), fallback_from: str | None = None, fallback_why: str = "") -> Decision:
     """The route for one model call. First allowed wins: a free-cloud provider (none has an adapter), then the
     local model, then the subscription. `content` is the class to protect, ceiling_of(purpose) tightened by scan():
     a caller can't pass anything looser than the ceiling.
+
+    local_model: the fingerprint of the model that is running (brain/local_llm.fingerprint); the local route needs it to
+    be the one routing.yaml says the lab passed.
 
     A provider is skipped when it isn't listed, isn't enabled, has no adapter, is a class not allowed to see this
     content (MAY_RECEIVE), or doesn't fit the call (tools, images, mode, a call open, not ready, on hold: claude_hold says why)."""
@@ -265,7 +268,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
     for name in order:
         skip = _skip(rules, name, purpose=purpose, content=content, mode=mode, tools=tools, images=images,
                      claude_hold=claude_hold, call_open=call_open, local_flag=local_flag, local_ready=local_ready,
-                     excluded=name in exclude)
+                     local_model=local_model, excluded=name in exclude)
         if skip:
             why[name] = skip
             continue
@@ -285,7 +288,7 @@ def decide(rules: Rules | None, purpose: str, *, content: str, mode: str = "job"
 
 
 def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, claude_hold, call_open, local_flag,
-          local_ready, excluded) -> str | None:
+          local_ready, local_model, excluded) -> str | None:
     """Why this provider can't take the call, or None when it can."""
     prov = rules.providers.get(name)
     if prov is None:
@@ -315,6 +318,8 @@ def _skip(rules: Rules, name: str, *, purpose, content, mode, tools, images, cla
             return "a call is open and the voice needs the model"
         if not local_ready:
             return "the local model is not running"
+        if local_model != rules.lab_model_hash:
+            return "the model that is running is not the model the router lab passed"
         return None
     if tools or images or mode != "job":
         return "free cloud takes background jobs with no tools and no images"
@@ -378,7 +383,8 @@ class Router:
     # -- one decision
 
     def route(self, purpose: str, text: str | None = "", *, mode: str = "job", model: str | None = None, tools: bool = False,
-              images: bool = False, claude_hold: str = "", call_open: bool = False, local_ready: bool = False) -> Decision:
+              images: bool = False, claude_hold: str = "", call_open: bool = False, local_ready: bool = False,
+              local_model: str = "") -> Decision:
         """text is scanned and never stored. model: Claude's alias for this purpose (models.pick)."""
         try:
             with Session(self.engine) as s:
@@ -387,7 +393,7 @@ class Router:
                 klass, hits = scan(text or "", self._name_set())
                 d = decide(self.rules, purpose, content=klass, mode=mode, model=model, tools=tools, images=images,
                            claude_hold=claude_hold, call_open=call_open, local_flag=flags.on(s, FLAG_LOCAL),
-                           local_ready=local_ready and not self.breaker_open(), hits=hits)
+                           local_ready=local_ready and not self.breaker_open(), local_model=local_model, hits=hits)
                 self._write(s, d)
                 return d
         except Exception as exc:       # the router never stops a call
@@ -435,8 +441,9 @@ class Router:
 
     # -- More -> Usage
 
-    def view(self, days: int = 7) -> dict:
-        """What the owner sees: the rules in force, and the routes taken with their reasons (newest first)."""
+    def view(self, days: int = 7, local_model: str = "") -> dict:
+        """What the owner sees: the rules in force, and the routes taken with their reasons (newest first).
+        local_model: the fingerprint of the model running now, shown so it can be copied into routing.yaml once the lab passed it."""
         with Session(self.engine) as s:
             router_on, local_on = flags.on(s, FLAG_ROUTER), flags.on(s, FLAG_LOCAL)
             rows = s.exec(select(RouteLog).where(RouteLog.ts >= utcnow() - dt.timedelta(days=days))
@@ -465,7 +472,9 @@ class Router:
             "router_on": router_on, "local_on": local_on, "rules_loaded": rules is not None,
             "problems": list(rules.problems) if rules else [], "providers": providers,
             "local": {"purposes": sorted(rules.local_purposes) if rules else [],
-                      "lab_model_hash_set": bool(rules and rules.lab_model_hash), "could_run": sorted(LOCAL_ELIGIBLE)},
+                      "lab_model_hash_set": bool(rules and rules.lab_model_hash), "could_run": sorted(LOCAL_ELIGIBLE),
+                      "running_model": local_model,
+                      "running_model_is_lab_model": bool(rules and rules.lab_model_hash and local_model == rules.lab_model_hash)},
             "ceilings": dict(sorted(CEILINGS.items())), "days": days, "total": len(rows), "by_route": by_route,
             "by_tier": by_tier,
             "recent": [{"ts": r.ts.isoformat(), "purpose": r.purpose, "mode": r.mode, "content": r.content,

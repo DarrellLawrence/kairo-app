@@ -33,9 +33,11 @@ providers:
   # Not used: Colibri. Nothing measured supports it (3060-class hardware: 3.1 s or more for 45 tokens).
 
 # The local model (the voice model's llama-server, as a second slot). A purpose may run there only when
-# ALL of these hold: g11.local_route is on, the purpose is in this list, lab_model_hash is the hash of the
-# model the router lab passed it on (PC measurement P21), and it is one of the few purposes the code allows
-# (triage, reply_check: mail sorting, no dates or times, no tools). The list is empty until the lab has passed.
+# ALL of these hold: g11.local_route is on, the purpose is in this list, the model that is running now is the
+# one the router lab passed (PC measurement P21), and it is one of the few purposes the code allows (triage,
+# reply_check: mail sorting, no dates or times, no tools). lab_model_hash is that model's fingerprint, 12 hex
+# digits; More -> Usage shows the fingerprint of the model running now, copy it here after the lab passed.
+# A different model, or none, is not that model: the job goes to Claude. The list is empty until the lab has passed.
 local:
   purposes: []
   lab_model_hash: ""
