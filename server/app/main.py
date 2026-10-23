@@ -34,6 +34,7 @@ from . import coach as coach_mod
 from . import profile_import as profile_import_mod
 from . import config_layers
 from . import files as files_mod
+from . import diag as diag_mod
 from . import diagnosis as diagnosis_mod
 from . import loop_send as loop_send_mod
 from . import conversation
@@ -3964,6 +3965,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             devices = {"components": {}, "gpu": None, "line": {"reason": f"{type(exc).__name__}: {exc}"}}
         return await asyncio.to_thread(diagnosis_mod.run, db_url=settings.db_url, data_dir=settings.data_dir,
                                        app_root=REPO_ROOT, devices=devices)
+
+    @app.get("/api/diag/voice")
+    async def diag_voice(request: Request, deep: bool = False):
+        """Voice check (More -> System, and `kairo diag`): is the voice stack healthy? The same report as
+        `python -m app.diag --json` (app/diag.py), judged from what this running server has loaded and where
+        it runs. Read-only, redacted; owner only like every route. deep: also hash the multi-GB model files."""
+        notes = []
+        try:
+            live = {"devices": await voice_devices(request)}
+        except Exception as exc:   # the files on disk are still judged
+            live, notes = None, [f"Kairo's own device report failed: {type(exc).__name__}"]
+        return await asyncio.to_thread(diag_mod.collect, data_dir=settings.data_dir, app_root=REPO_ROOT, live=live,
+                                       deep=deep, notes=notes, source="server")
 
     _mount_web(app, settings.web_dist_dir)
     if settings.owner_check:

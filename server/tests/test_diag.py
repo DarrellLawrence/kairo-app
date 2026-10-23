@@ -7,11 +7,17 @@ import json
 import subprocess
 import sys
 
+import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+import app.main as main_mod
 from app import diag, tool_sites
 from app import voice as voice_mod
+from app.main import create_app
 from tests.conftest import SERVER_DIR
+from tests.test_voice_devices import DeviceVoice
+from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model)
 
 
 @pytest.fixture
@@ -46,8 +52,8 @@ def live(**parts):
     return {"devices": {"components": comps, "gpu": None, "line": {"webrtc_ready": True, "reason": None}}}
 
 
-def run(data, **kw):
-    report = diag.collect(data_dir=data, **kw)
+def run(data, strict=False, **kw):
+    report = diag.finish(diag.collect(data_dir=data, **kw), strict)
     return report, {c["id"]: c for c in report["checks"]}
 
 
@@ -110,7 +116,6 @@ def test_strict_turns_a_warning_into_exit_one(pc):
     ok_live = live(piper={"device": "cpu", "loaded": False, "ok": True})
     assert run(pc, live=ok_live)[0]["exit_code"] == 0
     assert run(pc, live=ok_live, strict=True)[0]["exit_code"] == 1
-    assert diag.exit_code([diag.ok("a.b", "n", "d")], strict=True) == 0
 
 
 def test_a_check_that_crashes_is_a_fail_of_its_own_and_the_rest_still_run(pc, monkeypatch):
@@ -154,23 +159,111 @@ def test_nothing_personal_or_secret_leaves_a_report(pc, monkeypatch):
 
 def test_main_prints_the_report_and_exits_with_the_verdict(pc, monkeypatch, capsys):
     monkeypatch.setenv("KAIRO_DATA_DIR", str(pc))
-    assert diag.main(["--json"]) == 1                       # no server answers here
+    assert diag.main(["--local", "--json"]) == 1                       # no server answers here
     report = json.loads(capsys.readouterr().out)
     assert report["source"] == "local" and report["exit_code"] == 1 and report["counts"]["fail"] >= 1
-    assert diag.main([]) == 1
+    assert diag.main(["--local"]) == 1
     assert "NOT HEALTHY" in capsys.readouterr().out
 
 
 def test_main_exits_2_when_the_tool_itself_breaks(pc, monkeypatch, capsys):
     monkeypatch.setenv("KAIRO_DATA_DIR", str(pc))
     monkeypatch.setattr(diag, "collect", lambda **kw: 1 / 0)
-    assert diag.main([]) == 2
+    assert diag.main(["--local"]) == 2
     assert "could not run: ZeroDivisionError" in capsys.readouterr().err
 
 
 def test_python_dash_m_app_diag_runs_and_fails_cleanly_on_a_bare_machine(tmp_path):
-    out = subprocess.run([sys.executable, "-m", "app.diag", "--json"], cwd=SERVER_DIR, capture_output=True, text=True,
+    out = subprocess.run([sys.executable, "-m", "app.diag", "--local", "--json"], cwd=SERVER_DIR, capture_output=True, text=True,
                          env={"PATH": "", "KAIRO_DATA_DIR": str(tmp_path / "data"), "SYSTEMROOT": "C:\\Windows"} | ({} if sys.platform == "win32" else {"HOME": str(tmp_path)}))
     assert out.returncode == 1, out.stderr
     report = json.loads(out.stdout)
     assert report["counts"]["fail"] > 0 and all(c["detail"] for c in report["checks"])
+
+
+# ---------------------------------------------------------------- asking the running Kairo
+
+def reply(status=200, body=None):
+    return lambda url, **kw: httpx.Response(status, json=body, request=httpx.Request("GET", url))
+
+
+def test_main_prints_the_running_servers_report_and_applies_strict_itself(pc, monkeypatch, capsys):
+    monkeypatch.setenv("KAIRO_DATA_DIR", str(pc))
+    report, _ = run(pc, live=live(piper={"device": "cpu", "loaded": False, "ok": True}), source="server")
+    report = {**report, "ok": True, "exit_code": 0, "counts": {"pass": 99, "warn": 0, "fail": 0}}     # a server can't talk us into a green
+    monkeypatch.setattr(httpx, "get", reply(200, report))
+    assert diag.main([]) == 0
+    assert "asked the running Kairo" in capsys.readouterr().out
+    assert diag.main(["--strict", "--json"]) == 1
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["source"] == "server" and printed["counts"]["warn"] == 2 and printed["counts"]["pass"] != 99
+
+
+def test_fetch_only_ever_calls_this_pcs_own_server(monkeypatch):
+    seen = []
+
+    def get(url, **kw):
+        seen.append((url, kw))
+        raise httpx.ConnectError("refused")
+    monkeypatch.setattr(httpx, "get", get)
+    report, why = diag.fetch(8000, deep=True)
+    assert report is None and "didn't answer on 127.0.0.1:8000 (ConnectError)" in why
+    (url, kw), = seen
+    assert url == "http://127.0.0.1:8000/api/diag/voice" and kw["params"] == {"deep": "true"} and kw["trust_env"] is False
+
+
+@pytest.mark.parametrize("answer, expect", [
+    (reply(404), "answered 404"), (reply(403), "answered 403"), (reply(200, {"schema": 2, "checks": []}), "can't read"),
+    (lambda url, **kw: httpx.Response(200, text="<html>", request=httpx.Request("GET", url)), "can't read"),
+])
+def test_a_server_that_cant_give_a_report_is_explained(monkeypatch, answer, expect):
+    monkeypatch.setattr(httpx, "get", answer)
+    report, why = diag.fetch(8000)
+    assert report is None and expect in why
+
+
+def test_without_a_server_the_files_are_still_judged_and_the_reason_is_in_the_report(pc, monkeypatch, capsys):
+    monkeypatch.setenv("KAIRO_DATA_DIR", str(pc))
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: (_ for _ in ()).throw(httpx.ConnectError("refused")))
+    assert diag.main(["--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    by_id = {c["id"]: c for c in report["checks"]}
+    assert report["source"] == "local" and "didn't answer on 127.0.0.1" in by_id["kairo.running"]["detail"]
+    assert by_id["whisper.installed"]["status"] == "PASS"
+
+
+# ---------------------------------------------------------------- GET /api/diag/voice
+
+def test_the_endpoint_returns_the_report_from_the_running_servers_own_state(local, monkeypatch):
+    local.app.state.voice = DeviceVoice(local.voice, {"whisper": comp("cpu"), "kokoro": comp(),
+                                                      "piper": {"device": "cpu", "loaded": False, "ok": True}})
+    r = local.get("/api/diag/voice")
+    assert r.status_code == 200
+    report = r.json()
+    by_id = {c["id"]: c for c in report["checks"]}
+    assert report["source"] == "server" and report["schema"] == 1 and report["ok"] is False
+    assert by_id["kairo.running"]["status"] == "PASS"
+    assert by_id["whisper.device"]["status"] == "FAIL" and "cublas64_12.dll" in by_id["whisper.device"]["detail"]
+    assert by_id["kokoro.device"]["status"] == "PASS" and by_id["piper.loaded"]["status"] == "WARN"
+    assert local.get("/api/diag/voice?deep=true").status_code == 200
+
+
+TAILNET = "https://kairo-home.tail1234.ts.net"
+
+
+def test_the_endpoint_is_owner_only(migrated, monkeypatch):
+    monkeypatch.setattr(main_mod, "LOCAL_HOSTS", {"testclient", "127.0.0.1"})
+    strict = migrated.model_copy(update={"owner_check": True})
+    me = {"tailscale-user-login": "Owner@Example.com"}
+    with TestClient(create_app(strict), base_url="http://127.0.0.1:8000") as c:
+        assert c.get("/api/diag/voice").status_code == 200                                    # on the PC
+        assert c.get("/api/diag/voice", headers={"x-forwarded-for": "100.64.0.2"}).status_code == 403
+    with TestClient(create_app(strict), base_url="http://kairo.example.org") as c:
+        assert c.get("/api/diag/voice", headers=me).status_code == 403                        # not Kairo's tailnet address
+    with TestClient(create_app(strict), base_url=TAILNET) as c:
+        assert c.get("/api/diag/voice").status_code == 403                                    # no Tailscale person
+        assert c.get("/api/diag/voice", headers=me).status_code == 200
+        (strict.data_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (strict.data_dir / "logs" / "boot-check.json").write_text(json.dumps({"tailnet_login": "owner@example.com"}), encoding="utf-8")
+        assert c.get("/api/diag/voice", headers=me).status_code == 200
+        assert c.get("/api/diag/voice", headers={"tailscale-user-login": "guest@example.com"}).status_code == 403

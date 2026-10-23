@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import diagnosis, gpu, tool_sites, voicellm
 from . import voice as voice_mod
+from .serve import HOST
 from .settings import REPO_ROOT
 
 SCHEMA = 1
@@ -67,16 +68,6 @@ def _status(status: str):
 
 
 ok, warn, bad = _status(PASS), _status(WARN), _status(FAIL)
-
-
-def counts(checks: list[Check]) -> dict:
-    return {s.lower(): sum(c.status == s for c in checks) for s in (PASS, WARN, FAIL)}
-
-
-def exit_code(checks: list[Check], strict: bool = False) -> int:
-    """0: nothing failed (and with strict, nothing warned either); 1: something did."""
-    n = counts(checks)
-    return 1 if n["fail"] or (strict and n["warn"]) else 0
 
 
 def mb(n: float | None) -> str:
@@ -207,7 +198,7 @@ CHECKS = [_kairo, _whisper, _kokoro, _piper]
 # ---------------------------------------------------------------- the report
 
 def collect(*, data_dir: Path, app_root: Path = REPO_ROOT, live: dict | None = None, deep: bool = False,
-            notes: list[str] | None = None, strict: bool = False, source: str = "local") -> dict:
+            notes: list[str] | None = None, source: str = "local") -> dict:
     """All checks, as the dict `kairo diag --json` prints and /api/diag/voice returns (already redacted).
     One check that crashes is a FAIL of its own; the others still run."""
     from . import versions
@@ -221,11 +212,36 @@ def collect(*, data_dir: Path, app_root: Path = REPO_ROOT, live: dict | None = N
             checks.append(bad(f"{name}.error", "check", f"the check itself crashed: {type(exc).__name__}: {exc}"[:240],
                               group=GROUPS.get(name, name)))
     now = dt.datetime.now(dt.timezone.utc)
-    return {"schema": SCHEMA, "at": now.isoformat(timespec="seconds"), "source": source,
-            "ok": exit_code(checks, strict) == 0, "exit_code": exit_code(checks, strict), "counts": counts(checks),
-            "host": {"version": versions.running(ctx.app_root) or "dev checkout", "python": platform.python_version(),
-                     "platform": f"{platform.system()} {platform.release()}"},
-            "checks": [c.as_dict() for c in checks]}
+    return finish({"schema": SCHEMA, "at": now.isoformat(timespec="seconds"), "source": source,
+                   "host": {"version": versions.running(ctx.app_root) or "dev checkout", "python": platform.python_version(),
+                            "platform": f"{platform.system()} {platform.release()}"},
+                   "checks": [c.as_dict() for c in checks]})
+
+
+def finish(report: dict, strict: bool = False) -> dict:
+    """The verdict (counts, ok, exit_code) from the checks themselves, never from a field someone else filled in."""
+    n = {s.lower(): sum(c["status"] == s for c in report["checks"]) for s in (PASS, WARN, FAIL)}
+    code = 1 if n["fail"] or (strict and n["warn"]) else 0
+    return {**report, "counts": n, "ok": code == 0, "exit_code": code}
+
+
+def fetch(port: int, deep: bool = False) -> tuple[dict | None, str | None]:
+    """(the running server's own report, None) or (None, why not). The only thing this module sends anywhere:
+    one GET to Kairo's own server on 127.0.0.1 (HOST is fixed, no proxy; outbound.MODULES lists it)."""
+    import httpx
+    url = f"http://{HOST}:{port}/api/diag/voice"
+    try:
+        r = httpx.get(url, params={"deep": "true"} if deep else None, timeout=900 if deep else 90, trust_env=False)
+    except httpx.HTTPError as exc:
+        return None, f"Kairo's server didn't answer on {HOST}:{port} ({type(exc).__name__}). Start it (Task Scheduler -> Kairo) and run this again."
+    if r.status_code != 200:
+        return None, f"Kairo's server answered {r.status_code} on {HOST}:{port}" + (" (this version has no voice check yet: update it)" if r.status_code == 404 else "")
+    try:
+        report = r.json()
+        assert report["schema"] == SCHEMA and isinstance(report["checks"], list)
+    except (ValueError, KeyError, AssertionError, TypeError):
+        return None, "Kairo's server sent a report this version can't read (update one of them)"
+    return report, None
 
 
 def render(report: dict) -> str:
@@ -250,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="print the report as JSON (what /api/diag/voice returns)")
     ap.add_argument("--strict", action="store_true", help="a WARN also makes the exit code 1")
     ap.add_argument("--deep", action="store_true", help="also check the sha256 of the multi-GB model files (slow)")
+    ap.add_argument("--local", action="store_true", help="don't ask the running Kairo; check only what this process can see")
     ap.add_argument("--env-file", type=Path, help="kairo.env written by the installer (the server's own settings)")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -264,7 +281,16 @@ def main(argv: list[str] | None = None) -> int:
             except OSError as exc:
                 notes.append(f"couldn't read the settings file ({type(exc).__name__})")
         from .settings import load_settings
-        report = collect(data_dir=load_settings().data_dir, deep=args.deep, notes=notes, strict=args.strict)
+        settings = load_settings()
+        report = None
+        if args.local:
+            notes.append("checked with --local: the running Kairo wasn't asked")
+        else:
+            report, why = fetch(settings.port, args.deep)
+            notes += [why] if why else []
+        if report is None:
+            report = collect(data_dir=settings.data_dir, deep=args.deep, notes=notes)
+        report = finish(report, args.strict)
     except Exception as exc:   # the tool itself is broken: not "unhealthy", a different exit code
         print(f"kairo diag could not run: {type(exc).__name__}: {diagnosis.redact(str(exc))[:300]}", file=sys.stderr)
         return 2

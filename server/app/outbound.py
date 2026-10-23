@@ -19,6 +19,8 @@ input, mail, web page, file or setting can point them anywhere else.
   the tailnet only. This PC offers only its Tailscale addresses, takes only the phone's tailnet
   candidates and asks no STUN/TURN server (voicertc.tailnet_only, offer_on_tailnet).
 
+- kairo diag (diag.py): one GET to Kairo's own server on 127.0.0.1 (/api/diag/voice), fixed host, no proxy.
+
 MODULES lists every module that may talk to the network; a test fails when another one does.
 """
 
@@ -32,6 +34,7 @@ TAILNET_SUFFIX = ".ts.net"
 
 MODULES = {
     "brain/voice_local.py": "the local voice model's server on 127.0.0.1 (nothing else)",
+    "diag.py": "kairo diag asks Kairo's own server on 127.0.0.1 (nothing else)",
     "executor.py": "Google writes (after the gate)",
     "google/client.py": "Google reads",
     "google/oauth.py": "Google sign-in",
