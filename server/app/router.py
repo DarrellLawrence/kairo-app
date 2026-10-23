@@ -78,11 +78,11 @@ _PERSONAL = ("triage", "capture", "brief", "reminder", "promises", "reply_check"
 CEILINGS: dict[str, str] = {**{p: "secret" for p in _SECRET}, **{p: "personal" for p in _PERSONAL}, "selftest": "public"}
 UNKNOWN_PURPOSE = "personal"
 
-# The only purposes that can ever run on the local model: Haiku jobs that read mail or text and answer a
-# small JSON, no dates or times (a small model got 8 of 39 reminders exactly right), no tools, no images.
-# routing.yaml local.purposes can only choose among these.
-LOCAL_ELIGIBLE = frozenset({"triage", "reply_check", "summary"})
-LOCAL_KIND = {"triage": "small", "reply_check": "small", "summary": "batch"}     # which timeout: 4 s or 15 s
+# The only purposes that can ever run on the local model: Haiku jobs that read mail and answer a small JSON, no
+# dates or times (a small model got 8 of 39 reminders exactly right), no tools, no images. routing.yaml local.purposes
+# can only choose among these. "summary" is not here: it is the catch-all purpose and the memory fold writes prose.
+LOCAL_ELIGIBLE = frozenset({"triage", "reply_check"})
+LOCAL_KIND = {"triage": "batch", "reply_check": "small"}      # which timeout: 4 s for a small ask, 15 s for a batch
 assert not (LOCAL_ELIGIBLE & NEVER_HAIKU)
 
 

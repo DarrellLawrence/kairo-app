@@ -35,7 +35,7 @@ providers:
 # The local model (the voice model's llama-server, as a second slot). A purpose may run there only when
 # ALL of these hold: g11.local_route is on, the purpose is in this list, lab_model_hash is the hash of the
 # model the router lab passed it on (PC measurement P21), and it is one of the few purposes the code allows
-# (triage, reply_check, summary: no dates or times, no tools). The list is empty until the lab has passed.
+# (triage, reply_check: mail sorting, no dates or times, no tools). The list is empty until the lab has passed.
 local:
   purposes: []
   lab_model_hash: ""

@@ -50,7 +50,7 @@ def test_an_unknown_purpose_counts_as_personal_and_only_the_selftest_is_below_pe
 
 
 def test_only_a_few_purposes_can_ever_run_locally_and_none_of_them_is_about_dates_or_judgment():
-    assert router.LOCAL_ELIGIBLE == {"triage", "reply_check", "summary"}
+    assert router.LOCAL_ELIGIBLE == {"triage", "reply_check"}
     assert not router.LOCAL_ELIGIBLE & models.NEVER_HAIKU
     for dated in ("reminder", "capture", "letters", "promises", "brief", "draft", "chat", "call"):
         assert dated not in router.LOCAL_ELIGIBLE
@@ -214,7 +214,7 @@ def test_the_local_route_is_off_for_every_purpose_even_when_the_flag_is_on_and_t
 
 def lab_passed(tmp_path):
     return rules_from(tmp_path, "providers:\n  claude: { class: R1, enabled: true }\n  local: { class: R0, enabled: true }\n"
-                                "local:\n  purposes: [triage, summary]\n  lab_model_hash: abc\n")
+                                "local:\n  purposes: [triage]\n  lab_model_hash: abc\n")
 
 
 def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
@@ -227,7 +227,7 @@ def test_a_lab_passed_purpose_runs_locally_only_when_everything_holds(tmp_path):
                         ({"mode": "owner"}, "background jobs"), ({"mode": "call"}, "background jobs")]:
         d = router.decide(rules, "triage", **{**ok, **change})
         assert d.route == "claude" and why in d.reason, (change, d.reason)
-    for purpose, why in [("reply_check", "router lab has not passed"), ("reminder", "may never"), ("chat", "may never")]:
+    for purpose, why in [("reply_check", "router lab has not passed"), ("summary", "may never"), ("reminder", "may never"), ("chat", "may never")]:
         d = router.decide(rules, purpose, **ok)
         assert d.route == "claude", purpose
     # no hash, no local

@@ -14,7 +14,7 @@ from app.db import Person, RouteLog, make_engine, utcnow
 from app.settings import REPO_ROOT
 
 LAB = {"providers": {"claude": {"class": "R1", "enabled": True}, "local": {"class": "R0", "enabled": True}},
-       "local": {"purposes": ["triage", "summary"], "lab_model_hash": "abc"}}
+       "local": {"purposes": ["triage", "reply_check"], "lab_model_hash": "abc"}}
 
 
 class Clock:
@@ -198,7 +198,7 @@ def test_the_view_lists_routes_and_why_and_the_rules_in_force(engine, tmp_path):
     names = {p["name"]: p for p in v["providers"]}
     assert names["claude"]["status"] == "on" and names["local"]["status"].startswith("off") and "g11.local_route" in names["local"]["status"]
     assert names["groq"]["status"] == "off: switched off in routing.yaml"
-    assert v["local"] == {"purposes": [], "lab_model_hash_set": False, "could_run": ["reply_check", "summary", "triage"]}
+    assert v["local"] == {"purposes": [], "lab_model_hash_set": False, "could_run": ["reply_check", "triage"]}
     assert len(v["ceilings"]) == 33 and v["ceilings"]["selftest"] == "public" and v["ceilings"]["money"] == "secret"
 
 
