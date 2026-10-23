@@ -79,6 +79,9 @@ def test_not_set_is_fine_while_the_card_has_room_and_a_warning_when_it_is_nearly
 def test_the_policy_unread_on_the_server_is_read_by_the_command_itself_and_says_so(pc, only_system, monkeypatch):
     c = sysmem(pc, OFF, monkeypatch=monkeypatch, server=False)
     assert c["status"] == "PASS" and "this command" in c["detail"]
+    # a report built inside Kairo's server (the page, and what `kairo diag` fetches) is read by Kairo's own account
+    c = sysmem(pc, OFF, monkeypatch=monkeypatch, server=False, source="server")
+    assert c["status"] == "PASS" and "Kairo's server" in c["detail"] and "this command" not in c["detail"]
     monkeypatch.setattr(gpu, "sysmem_policy", lambda **k: dict(OFF))
     assert run(pc, live=None)[1]["system.sysmem"]["status"] == "PASS"       # Kairo not answering: this process asks itself
 

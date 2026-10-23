@@ -66,7 +66,10 @@ def test_the_server_gets_the_variable_from_kairo_env_when_it_starts(tmp_path, mo
 # Every place in the server that can reach the Hugging Face hub library at run time, as of this audit. HF_HUB_OFFLINE=1 makes each of
 # them fail fast (no connection) instead of downloading inside a request. A new file here must be audited first: add it with the reason.
 HUB_LIBRARY = {
-    "voice/__init__.py": "faster-whisper: WhisperModel(<local folder or model name>) and download_model() (the installer's download)",
+    # faster-whisper 1.2.1: WhisperModel(<model folder, else the model name>) and download_model() (the installer's download). Inside it
+    # the hub is reached only for a name (snapshot_download) and, if tokenizer.json is missing from the folder, for the "openai/whisper-tiny"
+    # tokenizer; the download always fetches tokenizer.json (its allow_patterns), so a complete folder never reaches the hub.
+    "voice/__init__.py": "faster-whisper model load and download",
 }
 HUB_WORDS = ("huggingface_hub", "from_pretrained", "hf_hub_download", "snapshot_download", "WhisperModel(", "download_model(")
 

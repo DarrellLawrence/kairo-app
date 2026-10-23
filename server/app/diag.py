@@ -108,6 +108,7 @@ class Ctx:
     deep: bool = False                  # also hash the multi-GB model files
     notes: list[str] = field(default_factory=list)
     bench: dict = field(default_factory=lambda: {"installed": False, "mock": None, "latest": None})
+    source: str = "local"               # "server": this report is built inside Kairo's server (its account is the one that reads)
 
     @functools.cached_property
     def voice(self) -> "voice_mod.Voice":
@@ -428,10 +429,10 @@ def _system(ctx: Ctx) -> list[Check]:
     offline = (warn("system.hf_offline", "HF_HUB_OFFLINE", "can't see Kairo's environment: Kairo isn't answering") if ctx.live is None else
                ok("system.hf_offline", "HF_HUB_OFFLINE", "HF_HUB_OFFLINE is set: loading a model never waits for Hugging Face") if value in ("1", "true", "yes", "on") else
                warn("system.hf_offline", "HF_HUB_OFFLINE", "HF_HUB_OFFLINE isn't set for Kairo's voice: a model load can wait for Hugging Face when the network is down"))
-    return [vram, memory, offline, _sysmem(card, vram)]
+    return [vram, memory, offline, _sysmem(ctx, card, vram)]
 
 
-def _sysmem(card: dict | None, vram: Check) -> Check:
+def _sysmem(ctx: Ctx, card: dict | None, vram: Check) -> Check:
     """NVIDIA's CUDA sysmem fallback policy (voice recipe 9). At 1 a full graphics card is an out-of-memory error; otherwise the
     driver may quietly put CUDA memory into shared memory and the voice gets 2 to 28 times slower with no error anywhere. Setting it
     is the owner's choice (the installer does it only with -CudaSysmemPolicy), so not set is a warning only while the card is nearly full."""
@@ -439,7 +440,7 @@ def _sysmem(card: dict | None, vram: Check) -> Check:
     answers = bool(card) and card.get("used_mb") is not None and bool(card.get("total_mb"))
     served = bool(card and card.get("sysmem"))
     pol = card["sysmem"] if served else gpu.sysmem_policy()
-    seen = "read by Kairo's server" if served else "read by this command"
+    seen = "read by Kairo's server" if served or ctx.source == "server" else "read by this command"
     if not pol.get("available"):
         if sys.platform != "win32":
             return ok("system.sysmem", name, "not applicable: it is NVIDIA's Windows driver setting, and this PC isn't Windows")
@@ -629,7 +630,7 @@ def collect(*, data_dir: Path, app_root: Path = REPO_ROOT, live: dict | None = N
     """All checks, as the dict `kairo diag --json` prints and /api/diag/voice returns (already redacted).
     One check that crashes is a FAIL of its own; the others still run."""
     from . import versions
-    ctx = Ctx(Path(data_dir), Path(app_root), live, deep, list(notes or []))
+    ctx = Ctx(Path(data_dir), Path(app_root), live, deep, list(notes or []), source=source)
     checks: list[Check] = []
     for fn in CHECKS:
         try:
