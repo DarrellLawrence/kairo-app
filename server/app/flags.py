@@ -36,6 +36,13 @@ FLAGS: dict[str, tuple[bool, str]] = {
                            "prompt survives from one turn to the next. Wait for the PC check (the card's memory) before "
                            "turning it on. Applies the next time the voice model starts."),
 
+    "g3.gemma_first": (False, "Gemma 4 E4B is the voice model Kairo starts with, and the voice lab picks it whenever it passes "
+                              "the lab's checks, even if another model answers faster. LFM2.5 2.6B was measured speaking its own "
+                              "reasoning aloud (2 of 3 probe turns), which the lab does not catch. Nothing is downloaded or removed: "
+                              "LFM stays installed and can still be picked by hand in Voice lab. A model the lab or you already "
+                              "picked stays until the lab is run again. Gemma uses about 3.5 GiB of graphics memory: turn it on "
+                              "after the PC memory check."),
+
     # -- G4 jitter buffer
 
     # -- G5 hand-off

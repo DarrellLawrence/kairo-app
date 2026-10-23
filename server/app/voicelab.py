@@ -321,8 +321,8 @@ def parse_judge(text: str, labels: list[str]) -> dict:
     return out
 
 
-def pick(models: dict, language_mode: str = "auto") -> tuple[str | None, str]:
-    """The fastest model that passes. (id, why)."""
+def pick(models: dict, language_mode: str = "auto", prefer: str | None = None) -> tuple[str | None, str]:
+    """The fastest model that passes; with `prefer` (g3.gemma_first), that one if it passes. (id, why)."""
     langs = ("en",) if language_mode == "en" else ("en", "de")
     ok, why_not = [], []
     for mid, m in models.items():
@@ -351,6 +351,12 @@ def pick(models: dict, language_mode: str = "auto") -> tuple[str | None, str]:
             why_not.append(f"{mid}: " + ", ".join(problems))
         else:
             ok.append((speed, mid))
+    passing = {mid: speed for speed, mid in ok}
+    if prefer in passing:
+        faster = [f"{mid} {speed} ms" for speed, mid in sorted(ok) if mid != prefer and speed < passing[prefer]]
+        return prefer, (f"preferred, and it passes ({passing[prefer]} ms to its first word)"
+                        + (f"; faster but not picked: {', '.join(faster)}" if faster else "")
+                        + (f"; not picked: {'; '.join(why_not)}" if why_not else ""))
     if ok:
         speed, mid = min(ok)
         return mid, f"fastest that passes ({speed} ms to its first word)" + (f"; not picked: {'; '.join(why_not)}" if why_not else "")
@@ -380,6 +386,11 @@ class Lab:
         with Session(self.engine) as s:
             return g3_options(s)
 
+    def _prefer(self) -> str | None:
+        """g3.gemma_first, read once per run."""
+        with Session(self.engine) as s:
+            return voicellm.preferred(s)
+
     def run(self, language_mode: str = "auto", by: str = "owner") -> dict:
         """by: "owner" (Run) or "auto" (Kairo ran it by itself)."""
         started = time.monotonic()
@@ -393,7 +404,7 @@ class Lab:
             self._speech(report)
             self._kyutai(report)
             report["on_gpu"], report["off_gpu"] = ran_on_gpu(report["models"], self._voice_devices())
-            choice, why = pick(report["models"], language_mode)
+            choice, why = pick(report["models"], language_mode, prefer=self._prefer())
             if choice is None and not report["on_gpu"]:
                 why += "; measured off the GPU, so the voice stays as it was"
             report["pick"] = {"model": choice, "why": why}

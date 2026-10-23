@@ -96,6 +96,22 @@ def available(site_dir: Path) -> list[str]:
     return [m for m in model_ids() if model_path(site_dir, m)]
 
 
+# g3.gemma_first (owner's decision, recipe 6): Gemma 4 E4B goes first in the pick order. voicellm.json is not touched
+# (a new file = a new tools folder and a download); LFM2.5 2.6B, which speaks its reasoning, stays in the list.
+GEMMA = "gemma-4-e4b"
+
+
+def preferred(s: Session) -> str | None:
+    """The model the owner wants tried first (None: the manifest's order)."""
+    from . import flags
+    return GEMMA if flags.on(s, "g3.gemma_first") else None
+
+
+def in_pick_order(have: list[str], first: str | None) -> list[str]:
+    """`have` with `first` (if it is there) moved to the front; the others keep their order."""
+    return ([first] + [m for m in have if m != first]) if first in have else list(have)
+
+
 def smart_turn_path(site_dir: Path) -> Path | None:
     rel = (installed(site_dir).get("smart_turn") or {}).get("file")
     p = Path(site_dir) / rel if rel else None
@@ -133,7 +149,7 @@ def active(s: Session, site_dir: Path) -> str | None:
     """The model that talks: the lab's or the owner's pick if it's installed, else the first installed
     candidate (the smallest, fastest one is first in voicellm.json) until the lab has run. None when the
     lab ran and nothing passed (owner's decision 2026-10-16: then the old voice, until they pick one)."""
-    have = available(site_dir)
+    have = in_pick_order(available(site_dir), preferred(s))
     c = choice(s)
     if lab_rejected(c):
         return None

@@ -19,7 +19,8 @@ from app.voicemouth import g3_options
 from tests.test_voice_llm import FAKE, free_port
 
 #            flag                  default  what an owner who turns it on gets
-DEFAULTS = {"g3.llama_flags": True, "g3.gemma_markup": True, "g3.swa_full": False, "g3.constant_tools": False}
+DEFAULTS = {"g3.llama_flags": True, "g3.gemma_markup": True, "g3.swa_full": False, "g3.constant_tools": False,
+            "g3.gemma_first": False}
 
 
 def test_the_g3_switches_have_the_planned_defaults():
@@ -98,3 +99,81 @@ def test_the_voice_model_warms_up_the_start_every_call_shares(migrated):
         assert vm.warm_messages() == [{"role": "system", "content": static_system(name, "auto")}]
         assert c.put("/api/voice/realtime/settings", json={"language": "en"}).status_code == 200
         assert vm.warm_messages() == [{"role": "system", "content": static_system(name, "en")}]
+
+
+# ---------------------------------------------------------------- g3.gemma_first: the pick order (nothing is downloaded or removed)
+
+def fake_site(tmp_path, ids=("lfm2.5-2.6b", "gemma-4-e4b", "qwen3.5-9b")):
+    """A complete voicellm folder with these models 'installed' (the manifest's order is lfm, gemma, qwen)."""
+    import json
+    site = tmp_path / "voicellm-site"
+    models = {}
+    for mid in ids:
+        f = site / "models" / mid / "m.gguf"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+        models[mid] = {"file": f.relative_to(site).as_posix()}
+    (site / voicellm.INSTALLED).write_text(json.dumps({"models": models, "skipped": []}), encoding="utf-8")
+    (site / voicellm.COMPLETE).write_text("ok\n", encoding="ascii")
+    return site
+
+
+def test_without_the_switch_the_first_installed_model_is_still_the_first_in_the_list(migrated, tmp_path):
+    site = fake_site(tmp_path)
+    with Session(make_engine(migrated.db_url)) as s:
+        assert voicellm.model_ids()[0] == "lfm2.5-2.6b"                  # voicellm.json is untouched: LFM stays in it
+        assert voicellm.available(site) == ["lfm2.5-2.6b", "gemma-4-e4b", "qwen3.5-9b"]
+        assert voicellm.active(s, site) == "lfm2.5-2.6b"
+
+
+def test_with_the_switch_gemma_is_first_and_the_others_keep_their_order(migrated, tmp_path):
+    site = fake_site(tmp_path)
+    with Session(make_engine(migrated.db_url)) as s:
+        flags.set_flag(s, "g3.gemma_first", True)
+        assert voicellm.preferred(s) == "gemma-4-e4b"
+        assert voicellm.in_pick_order(voicellm.available(site), voicellm.preferred(s)) == ["gemma-4-e4b", "lfm2.5-2.6b", "qwen3.5-9b"]
+        assert voicellm.active(s, site) == "gemma-4-e4b"
+        flags.set_flag(s, "g3.gemma_first", None)                         # back to the default: off
+        assert voicellm.preferred(s) is None and voicellm.active(s, site) == "lfm2.5-2.6b"
+
+
+def test_the_switch_changes_nothing_when_gemma_is_not_installed(migrated, tmp_path):
+    site = fake_site(tmp_path, ids=("lfm2.5-2.6b", "qwen3.5-9b"))
+    with Session(make_engine(migrated.db_url)) as s:
+        flags.set_flag(s, "g3.gemma_first", True)
+        assert voicellm.in_pick_order(voicellm.available(site), "gemma-4-e4b") == ["lfm2.5-2.6b", "qwen3.5-9b"]
+        assert voicellm.active(s, site) == "lfm2.5-2.6b"
+
+
+def test_a_pick_the_lab_or_the_owner_made_stands_in_both_positions(migrated, tmp_path):
+    site = fake_site(tmp_path)
+    with Session(make_engine(migrated.db_url)) as s:
+        voicellm.set_choice(s, "qwen3.5-9b", "owner")
+        for on in (False, True, None):
+            flags.set_flag(s, "g3.gemma_first", on)
+            assert voicellm.active(s, site) == "qwen3.5-9b"
+        voicellm.set_choice(s, None, "lab")                               # nothing passed: still the old voice
+        assert voicellm.active(s, site) is None
+
+
+def test_the_lab_prefers_gemma_when_it_passes_even_if_another_model_is_faster():
+    base = {"tool_recall": 1.0, "false_calls": 0.0, "fidelity": 1.0, "natural": {"en": 4.0, "de": 3.5}}
+    models = {"lfm2.5-2.6b": {**base, "first_word_ms": {"p50": 90}}, "gemma-4-e4b": {**base, "first_word_ms": {"p50": 140}}}
+    assert voicelab.pick(models)[0] == "lfm2.5-2.6b"                      # the old rule: the fastest
+    mid, why = voicelab.pick(models, prefer="gemma-4-e4b")
+    assert mid == "gemma-4-e4b" and "preferred" in why and "lfm2.5-2.6b" in why and "90" in why
+    models["gemma-4-e4b"]["tool_recall"] = 0.2                            # it does not pass: the fastest that does
+    mid, why = voicelab.pick(models, prefer="gemma-4-e4b")
+    assert mid == "lfm2.5-2.6b" and "gemma-4-e4b" in why
+    assert voicelab.pick({"gemma-4-e4b": models["gemma-4-e4b"]}, prefer="gemma-4-e4b")[0] is None
+    assert voicelab.pick({"lfm2.5-2.6b": models["lfm2.5-2.6b"]}, prefer="gemma-4-e4b")[0] == "lfm2.5-2.6b"   # not measured
+
+
+def test_the_lab_reads_the_switch_when_it_starts_a_run(migrated, tmp_path, monkeypatch):
+    from tests.test_voicelab import lab, make_site
+    site = make_site(monkeypatch, tmp_path)
+    engine, the_lab = lab(migrated, tmp_path, site, None, monkeypatch)
+    assert the_lab._prefer() is None
+    with Session(engine) as s:
+        flags.set_flag(s, "g3.gemma_first", True)
+    assert the_lab._prefer() == "gemma-4-e4b"
