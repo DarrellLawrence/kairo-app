@@ -71,6 +71,13 @@ def test_the_release_without_the_bench_corpus_fails_and_the_build_script_ships_i
     assert 'cp bench/voice/corpus.json "$root/app/bench/voice/"' in script
 
 
+def test_the_release_without_routing_yaml_fails(tmp_path):
+    """G11: without config/routing.yaml only the subscription can run (safe, but silent): a release must carry the file."""
+    app = layout(tmp_path)
+    (app / "config" / "routing.yaml").unlink()
+    assert any("config/routing.yaml" in p for p in check_release.check_app_dir(app))
+
+
 def test_build_script_ships_the_tool_bridge():
     script = (REPO_ROOT / "scripts" / "build-release.sh").read_text()
     copy = next(line for line in script.splitlines() if line.startswith("cp -r server/"))

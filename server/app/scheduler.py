@@ -32,7 +32,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select
 
 from . import killswitch, reviews
+from .brain.local_llm import ANSWER_CHECKS, LocalAnswer
+from .chat import AskResult
 from .db import JobRun, SettingKV, utcnow
+from .router import LOCAL_KIND
 
 log = logging.getLogger("kairo.scheduler")
 
@@ -170,7 +173,8 @@ class JobContext:
 
 class Jobs:
     def __init__(self, *, engine, pusher, profile, schedule: dict | None = None,
-                 ask: Callable | None = None, bodies: dict[str, Callable] | None = None):
+                 ask: Callable | None = None, bodies: dict[str, Callable] | None = None,
+                 router=None, local=None, call_open: Callable[[], bool] | None = None):
         self.engine = engine
         self.pusher = pusher
         self.profile = profile
@@ -181,6 +185,9 @@ class Jobs:
         except (TypeError, ValueError):
             self.budget = DEFAULT_BUDGET
         self._ask = ask                     # (prompt, system) -> AskResult; None = no model
+        self.router = router                # app/router.Router (G11): which route each ask takes; None = Claude, unlogged
+        self.local = local                  # app/brain/local_llm.LocalLLM: the local route, used only when the router says so
+        self.call_open = call_open or (lambda: False)   # a voice line is open: the local model stays with the voice
         self.bodies: dict[str, Callable] = dict(bodies or {})   # job name -> fn(JobContext)
         self.scheduler: BackgroundScheduler | None = None
         self._queue = threading.Lock()
@@ -225,21 +232,64 @@ class Jobs:
         paused = bool(until and dt.datetime.fromisoformat(until) > utcnow())
         return {"runs_today": used, "budget": self.budget, "paused_until": until if paused else None}
 
+    def _hold(self, st: dict) -> str:
+        """Why Claude can't take a job right now (the router keeps a lab-passed job local meanwhile), or ''."""
+        if st["paused_until"]:
+            return "paused (usage limit)"
+        if st["runs_today"] >= self.budget:
+            return f"daily budget of {self.budget} runs reached"
+        return ""
+
+    def _route_local(self, prompt: str, system: str, decision, model: str):
+        """Run a job the router sent to the local model. (the answer, decision) when it is accepted; (None, the
+        next decision) when it is refused, and the job goes to Claude."""
+        check = ANSWER_CHECKS.get(decision.purpose)
+        try:
+            if check is None:        # cannot happen (a test keeps ANSWER_CHECKS and LOCAL_ELIGIBLE equal); if it does, Claude takes the job
+                got = LocalAnswer(False, "", "no answer check for this purpose", 0)
+            else:
+                kind = LOCAL_KIND.get(decision.purpose, "small")
+                got = self.local.ask(prompt, system, timeout_s=self.router.rules.timeout_s[kind], check=check,
+                                     call_open=self.call_open)
+        except Exception as exc:
+            got = LocalAnswer(False, "", f"{type(exc).__name__} from the local model", 0)
+        if got.ok:
+            return AskResult(got.text), decision
+        with Session(self.engine) as s:
+            hold = self._hold(self.brain_state(s))
+        return None, self.router.escalate(decision, got.reason, model=model, claude_hold=hold, fault=got.fault)
+
     def ask_brain(self, prompt: str, system: str, images=None, purpose: str = "summary"):
-        """One model run for a job, counted against the daily budget."""
+        """One model run for a job, counted against the daily budget. With the router on (g11.router) the run is logged
+        with its route and reason; a lab-passed job may run on the local model and costs no Claude run."""
         if self._ask is None:
             raise Skipped("no model configured")
+        from .models import pick
+        model = pick(purpose, self.schedule)
+        decision = None
+        if self.router is not None:
+            with Session(self.engine) as s:
+                hold = self._hold(self.brain_state(s))
+            local_why = self.local.unavailable() if self.local is not None else "there is no local model"
+            decision = self.router.route(purpose, prompt, mode="job", model=model, images=bool(images), claude_hold=hold,
+                                         call_open=bool(self.call_open()), local_ready=not local_why, local_why=local_why,
+                                         local_model=self.local.fingerprint() if self.local is not None else "")
+            if decision.route == "local":
+                answer, decision = self._route_local(prompt, system, decision, model)
+                if answer is not None:
+                    return answer
         with Session(self.engine) as s:
             st = self.brain_state(s)
             if st["paused_until"]:
                 raise Skipped(f"model paused (usage limit) until {st['paused_until']}")
             if st["runs_today"] >= self.budget:
                 raise Skipped(f"daily model budget of {self.budget} runs reached")
+            if decision is not None and decision.route == "none":
+                raise Skipped(f"no model route is allowed: {decision.reason}")
             self._set_kv(s, f"brain_runs:{self.today().isoformat()}", str(st["runs_today"] + 1))
-        from .models import pick
         kwargs = {"images": images} if images else {}
         if _takes_model(self._ask):
-            result = self._ask(prompt, system, purpose=purpose, model=pick(purpose, self.schedule), **kwargs)
+            result = self._ask(prompt, system, purpose=purpose, model=model, **kwargs)
         else:   # simple test doubles take (prompt, system[, images]); a real run never goes without its model
             result = self._ask(prompt, system, images) if images else self._ask(prompt, system)
         if result.status == "usage_limited":

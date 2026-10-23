@@ -3,6 +3,7 @@ import { api, parseTs } from '../api.js'
 import { clientLog, device } from '../clientlog.js'
 import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
 import { PASSAGE, SECONDS, recordVoice, sendVoice } from '../voiceprint.js'
+import { RoutesView } from './Routes.jsx'
 import {
   Badge, Button, Card, EmptyState, IconBell, IconBolt, IconChart, IconCheck, IconGear, IconHeart, IconInbox, IconKey, IconList, IconMail, IconMic, IconPower,
   IconPulse, IconRefresh, IconPin, IconShield, IconSparkle, IconSpeaker, IconWarn, List, ListRow, Page, SectionTitle, Segmented, Sheet, SkeletonCard, Stack,
@@ -138,6 +139,13 @@ function CapturePage() {
   )
 }
 
+// G11: which route each call to the model took and why (GET /api/router). Never shows a prompt.
+function RoutesSection({ days }) {
+  const [v, setV] = useState(null)
+  useEffect(() => { api(`/api/router?days=${days}`).then(setV).catch(() => setV(null)) }, [days])
+  return v ? <RoutesView v={v} /> : null
+}
+
 function UsagePage() {
   const [days, setDays] = useState(7)
   const [u, setU] = useState(null)
@@ -169,6 +177,7 @@ function UsagePage() {
               ))}</List>
             </>
           )}
+          <RoutesSection days={days} />
           <p className="k-muted k-small k-pad">$ is the list-price equivalent; your Claude subscription covers it (realtime voice above is real money). Cheapest model per job: Haiku for sorting and short replies, Sonnet for writing, Opus only for big planning and long reviews. Chat and calls run on Haiku; "Why not Haiku" shows each of your turns that didn't, and why: the words that made it a judgment call, money, your settings, or Haiku handing it over.</p>
         </>
       )}
@@ -1532,7 +1541,7 @@ function Root() {
               onClick={() => stack.push('Capture', () => <CapturePage />)} />
             <ListRow icon={<IconPin />} title="Location" subtitle="Places, history, pause" chevron
               onClick={() => stack.push('Location', () => <LocationPage />)} />
-            <ListRow icon={<IconChart />} title="Usage" subtitle="Claude runs per model and job, realtime voice spend" chevron
+            <ListRow icon={<IconChart />} title="Usage" subtitle="Claude runs per model and job, where each call went, realtime voice spend" chevron
               onClick={() => stack.push('Usage', () => <UsagePage />)} />
             <ListRow icon={<IconPulse />} title="System" subtitle={issues.length ? issues.join(' · ') : 'Kairo, Claude, Google, backups'} chevron
               value={issues.length ? <Badge tone="warn" pop={false}>{issues.length}</Badge> : <Badge tone="ok" pop={false}>OK</Badge>}

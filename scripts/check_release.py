@@ -27,7 +27,7 @@ from pathlib import Path
 REPO_SERVER = Path(__file__).resolve().parents[1] / "server"
 NOT_SHIPPED = {"tests", "__pycache__", ".venv", ".pytest_cache"}
 LAYOUT = ["server/alembic.ini", "server/migrations/env.py", "server/requirements.txt", "config/defaults-history.json",
-          "web/dist/index.html", "config/permissions.yaml", "config/personality.md", "release.json",
+          "web/dist/index.html", "config/permissions.yaml", "config/personality.md", "config/routing.yaml", "release.json",
           "bench/voice/corpus.json"]
 
 

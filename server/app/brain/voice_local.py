@@ -243,6 +243,21 @@ class TextCalls:
             self.n += 1
 
 
+JOB_SLOT = 1            # the slot background jobs use (router local route) when the server has more than one; the mouth keeps slot 0
+JOB_MIN_CONTEXT = 6144  # tokens a job's slot needs: local_llm.MAX_PROMPT_CHARS is about 4k tokens, plus its answer
+
+
+def _int_flag(cmd: list[str], *names: str) -> int | None:
+    """The number after the first of these flags in a llama-server command line, or None."""
+    for i, arg in enumerate(cmd[:-1]):
+        if arg in names:
+            try:
+                return int(cmd[i + 1])
+            except ValueError:
+                return None
+    return None
+
+
 def server_args(model: Path, *, port: int = PORT, context: int = 8192) -> list[str]:
     """Flags checked against llama.cpp's own argument list (common/arg.cpp, Oct 2026)."""
     return ["-m", str(model), "--host", HOST, "--port", str(port), "-c", str(context),
@@ -447,6 +462,19 @@ class VoiceModel:
     def ready(self) -> bool:
         return self.state == "ready" and not self.paused
 
+    @property
+    def job_slot(self) -> int | None:
+        """The slot a background job may use without touching the mouth's cached start of its prompt, or None.
+        There is one only when the running server was started with two or more slots (-np) that each have room for a job
+        (llama-server splits -c between its slots). With one slot (today's flags) a job would evict the mouth's cached start and a
+        call opening meanwhile would queue behind it, so the router's local route stays off (voice recipe 13)."""
+        srv = self.server
+        if srv is None or not self.ready():
+            return None
+        slots = _int_flag(srv.cmd, "-np", "--parallel") or 1
+        context = _int_flag(srv.cmd, "-c", "--ctx-size") or 0
+        return JOB_SLOT if slots >= 2 and context // slots >= JOB_MIN_CONTEXT else None
+
     def status(self) -> dict:
         return {"state": self.state, "model": self.model_id, "error": self.error, "since": self.since,
                 "port": self.port, "turns": self.turns}
@@ -454,12 +482,14 @@ class VoiceModel:
     # ---------------------------------------------------------------- one turn
 
     async def stream(self, messages: list[dict], *, tools: list[dict] | None = None, temperature: float = 0.6,
-                     max_tokens: int = 300) -> AsyncIterator[dict]:
+                     max_tokens: int = 300, slot: int | None = None) -> AsyncIterator[dict]:
         """Events: {"kind": "text", "text"} as it is written; {"kind": "tool_start", "name"} when an offered
         tool's call begins; {"kind": "tool_call", "id", "name", "arguments"} once a valid call is complete
         (OpenAI-style deltas or written as text, TextCalls); {"kind": "done", "finish", "first_token_ms",
         "timings", "usage"} at the end. Closing the generator (talked over) closes the connection, and the
-        server stops writing."""
+        server stops writing. slot: pin the request to one of the server's slots (a background job passes job_slot);
+        without it the mouth stays on slot 0 when the server has a slot for jobs, and the request is exactly what it
+        was when the server has one."""
         self.turns += 1
         texts = TextCalls(tools)
         body = {"messages": messages, "stream": True, "temperature": temperature, "max_tokens": max_tokens,
@@ -467,6 +497,10 @@ class VoiceModel:
                 "chat_template_kwargs": {"enable_thinking": False}}
         if tools:
             body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+        if slot is None and self.job_slot is not None:
+            slot = 0
+        if slot is not None:
+            body["id_slot"] = slot
         started = time.monotonic()
         first = None
         calls: dict[int, dict] = {}

@@ -48,6 +48,7 @@ class BrainRunner:
         self.current_origin: str | None = None
         self.current_thread_id: int | None = None
         self.on_usage = None   # (purpose, usage dict, ok, reason=None) -> None: More -> Usage
+        self.router = None     # app/router.Router (G11): logs the route of every owner turn; None: no routing
         self.last_owner_wait_ms = 0   # how long the last owner turn waited for the brain (app/turns.py)
 
     def _note(self, purpose: str, event: BrainEvent, reason: str | None = None) -> None:
@@ -61,6 +62,10 @@ class BrainRunner:
     @property
     def busy(self) -> bool:
         return self._held_by is not None
+
+    def lines_open(self) -> int:
+        """Voice lines open right now (a call, a spoken message): the router keeps the local model for them."""
+        return self._lines
 
     def line_open(self) -> None:
         with self._cond:
@@ -136,6 +141,13 @@ class BrainRunner:
                 pass  # the caller's event loop is gone (shutdown); finish the run anyway
 
         def work() -> None:
+            if self.router is not None:   # G11: the owner's turns have tools, so the subscription is the only route; logged
+                d = self.router.route(purpose, prompt, mode="call" if purpose in ("call", "learn_call") else "owner",
+                                      model=model, tools=bool(tools))
+                if d.route == "none":
+                    post(BrainEvent(EventKind.error, text=f"No model route is allowed ({d.reason}). See config/routing.yaml."))
+                    post(None)
+                    return
             asked = time.monotonic()
             with self.hold(owner=True):
                 self.last_owner_wait_ms = int((time.monotonic() - asked) * 1000)
