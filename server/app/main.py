@@ -185,7 +185,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mcp_config = write_workspace(settings.workspace_dir,
                                  tool_url=f"http://127.0.0.1:{settings.port}/internal/tools", token=tool_token)
     hook_env = {"KAIRO_HOOK_CONFIG_DIR": str(settings.config_dir), "KAIRO_HOOK_DB_URL": settings.db_url}
-    runner = chat.BrainRunner(make_brain(settings, mcp_config=mcp_config, hook_env=hook_env),
+
+    def brain_flag(name: str) -> bool:
+        """The owner's switches (app/flags.py), read whenever the brain starts a Claude process."""
+        from . import flags as _flags
+        with session_for(engine) as s_:
+            return _flags.on(s_, name)
+
+    runner = chat.BrainRunner(make_brain(settings, mcp_config=mcp_config, hook_env=hook_env, flag=brain_flag),
                               quiet_s=float(os.environ.get("KAIRO_OWNER_QUIET_S", chat.OWNER_QUIET_S)))
     from . import models as model_table
     runner.on_usage = lambda purpose, usage, ok, reason=None: model_table.record(engine, purpose, usage, ok, reason=reason)

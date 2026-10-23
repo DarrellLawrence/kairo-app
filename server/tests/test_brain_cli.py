@@ -10,10 +10,10 @@ from app.brain.claude_cli import ClaudeCLIBrain, build_env, classify_error
 from tests.conftest import FAKE_CLAUDE
 
 
-def make(tmp_path, **env):
+def make(tmp_path, flag=None, **env):
     base = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path), "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
     base.update({k: str(v) for k, v in env.items()})
-    return ClaudeCLIBrain(claude_bin=str(FAKE_CLAUDE), workspace_dir=tmp_path / "ws", timeout_s=10, env=base)
+    return ClaudeCLIBrain(claude_bin=str(FAKE_CLAUDE), workspace_dir=tmp_path / "ws", timeout_s=10, env=base, flag=flag)
 
 
 def run(brain, prompt="hi", session_id=None, tools=()):
@@ -411,3 +411,148 @@ def test_the_interrupted_answer_ends_without_message_end(tmp_path):
         assert EventKind.message_end not in [e.kind for e in events]
     finally:
         brain.close_warm()
+
+
+# ---------------------------------------------------------------- flag g1.cli_no_summary (voice G1; owner's decision 16.4)
+# CLAUDE_CODE_CLASSIFIER_SUMMARY=0 stops the CLI's summary of each turn (the 2 s tail). The variable is
+# undocumented, so it is only set when the owner switched the flag on; the flag is read whenever a process starts.
+
+NO_SUMMARY = "CLAUDE_CODE_CLASSIFIER_SUMMARY"
+
+
+def recorded_env(tmp_path, flag):
+    rec = tmp_path / "rec.json"
+    run(make(tmp_path, flag=flag, KAIRO_HOOK_FAKE_RECORD=rec))
+    return json.loads(rec.read_text())["env"]
+
+
+def test_the_flag_is_in_the_list_and_off_by_default():
+    from app import flags
+    default, what = flags.FLAGS["g1.cli_no_summary"]
+    assert default is False and "undocumented" in what.lower()
+
+
+def test_without_the_flag_the_cli_environment_is_unchanged(tmp_path):
+    assert NO_SUMMARY not in recorded_env(tmp_path, flag=None)                    # no reader at all
+    assert NO_SUMMARY not in recorded_env(tmp_path, flag=lambda name: False)      # flag off
+    assert NO_SUMMARY not in build_env({"PATH": "/bin"})
+
+
+def test_the_backends_own_setting_never_reaches_the_cli_unless_the_flag_sets_it(tmp_path):
+    rec = tmp_path / "rec.json"
+    run(make(tmp_path, flag=lambda name: False, KAIRO_HOOK_FAKE_RECORD=rec, **{NO_SUMMARY: "1"}))     # not on the allow-list
+    assert NO_SUMMARY not in json.loads(rec.read_text())["env"]
+
+
+def test_with_the_flag_on_the_cli_is_told_to_skip_its_summary(tmp_path):
+    asked = []
+    def flag(name):
+        asked.append(name)
+        return True
+    assert recorded_env(tmp_path, flag=flag)[NO_SUMMARY] == "0"
+    assert set(asked) == {"g1.cli_no_summary"}
+    usage = run(make(tmp_path, flag=lambda name: True))[-1].data["usage"]
+    assert usage["no_summary"] is True
+    assert run(make(tmp_path, flag=lambda name: False))[-1].data["usage"]["no_summary"] is False
+
+
+def test_a_flag_that_cant_be_read_counts_as_off(tmp_path):
+    def broken(name):
+        raise RuntimeError("no such table: settings_kv")
+    assert NO_SUMMARY not in recorded_env(tmp_path, flag=broken)
+
+
+def test_the_flag_changes_the_tail_the_cli_leaves_behind(tmp_path):
+    slow = run(make(tmp_path, flag=lambda name: False, KAIRO_HOOK_FAKE_TAIL_S="0.8"))[-1].data["usage"]
+    fast = run(make(tmp_path, flag=lambda name: True, KAIRO_HOOK_FAKE_TAIL_S="0.8"))[-1].data["usage"]
+    assert slow["tail_ms"] >= 700 and "summary_ms" in slow
+    assert fast["tail_ms"] < 500 and "summary_ms" not in fast
+
+
+@pytest.fixture
+def owner_flag(migrated):
+    """The flag as the app reads it (app/flags.py in the database) and the owner's switch."""
+    from sqlmodel import Session
+    from app import flags
+    from app.db import make_engine
+    engine = make_engine(migrated.db_url)
+
+    def read(name):
+        with Session(engine) as s:
+            return flags.on(s, name)
+
+    def switch(value):
+        with Session(engine) as s:
+            flags.set_flag(s, "g1.cli_no_summary", value)
+    return read, switch
+
+
+def test_the_owner_flips_the_flag_and_the_next_process_follows(tmp_path, owner_flag):
+    read, switch = owner_flag
+    brain = make(tmp_path, flag=read, KAIRO_HOOK_FAKE_TAIL_S="0.8")
+    assert run(brain)[-1].data["usage"]["tail_ms"] >= 700
+    switch(True)
+    assert run(brain)[-1].data["usage"]["tail_ms"] < 500
+    switch(None)                                    # back to the default: off
+    assert run(brain)[-1].data["usage"]["tail_ms"] >= 700
+
+
+def test_a_warm_process_started_before_the_flip_is_replaced(tmp_path, owner_flag):
+    read, switch = owner_flag
+    brain = make(tmp_path, flag=read, KAIRO_HOOK_FAKE_TAIL_S="0.8")
+    assert brain.warm_up(key="conv", session_id="abc", system="s", tools=[]) is True
+    try:
+        old = brain._warm
+        assert brain.warm_ready("conv", "abc") and brain.warm_up(key="conv", session_id="abc", system="s", tools=[]) is False
+        switch(True)
+        assert not brain.warm_ready("conv", "abc")                                  # the old environment no longer fits
+        assert brain.warm_up(key="conv", session_id="abc", system="s", tools=[]) is True      # same key: replaced, not kept
+        assert brain._warm is not old and brain.warm_ready("conv", "abc")
+        usage = list(brain.run("hi", session_id="abc", system="s", tools=[], warm="conv"))[-1].data["usage"]
+        assert usage["warm"] is True and usage["no_summary"] is True and usage["tail_ms"] < 500
+    finally:
+        brain.close_warm()
+
+
+def test_a_turn_never_runs_on_a_warm_process_with_the_old_setting(tmp_path, owner_flag):
+    """No warm_up after the flip: the turn runs on a fresh process instead of waiting 2 s for a stale one."""
+    read, switch = owner_flag
+    brain = make(tmp_path, flag=read, KAIRO_HOOK_FAKE_TAIL_S="0.8")
+    brain.warm_up(key="conv", session_id="abc", system="s", tools=[])
+    try:
+        switch(True)
+        usage = list(brain.run("hi", session_id="abc", system="s", tools=[], warm="conv"))[-1].data["usage"]
+        assert usage["warm"] is False and usage["no_summary"] is True and usage["tail_ms"] < 500
+        assert brain._warm is None                  # the stale one is gone (a cold turn on its conversation retires it)
+    finally:
+        brain.close_warm()
+
+
+def test_the_app_reads_the_owners_switch_for_the_conversation_process(migrated, tmp_path, monkeypatch):
+    """GET/PUT /api/flags -> the next Claude process of the owner's conversation (both values)."""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    rec = tmp_path / "rec.json"
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_RECORD", str(rec))
+
+    def converse(ws, text, thread_id=None):
+        ws.send_json({"type": "message", "text": text, "thread_id": thread_id})
+        while (frame := ws.receive_json())["type"] not in ("done", "error"):
+            pass
+        return frame
+
+    with TestClient(create_app(migrated)) as client, client.websocket_connect("/ws/chat") as ws:
+        flag = next(f for f in client.get("/api/flags").json() if f["name"] == "g1.cli_no_summary")
+        assert flag["on"] is False and flag["default"] is False
+        assert converse(ws, "one")["type"] == "done"
+        before = json.loads(rec.read_text())
+        assert NO_SUMMARY not in before["env"]                          # off: the CLI runs as before
+        client.put("/api/flags/g1.cli_no_summary", json={"on": True})
+        assert converse(ws, "two")["type"] == "done"
+        after = json.loads(rec.read_text())
+        assert after["env"][NO_SUMMARY] == "0" and after["pid"] != before["pid"]      # a new process, same conversation
+        client.put("/api/flags/g1.cli_no_summary", json={"on": None})
+        assert converse(ws, "three")["type"] == "done"
+        assert NO_SUMMARY not in json.loads(rec.read_text())["env"]
+        client.app.state.runner.brain.close_warm()

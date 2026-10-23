@@ -54,7 +54,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .base import BrainEvent, BrainStatus, EventKind
 
@@ -94,6 +94,14 @@ ENV_ALLOWLIST = (
 # Always set for the CLI: Kairo's installer decides the CLI version.
 FIXED_ENV = {"DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1"}
 ENV_PREFIX_ALLOWLIST = ("KAIRO_HOOK_",)  # settings the gate hook needs
+
+# Voice G1 (owner's decision pending, flag g1.cli_no_summary, off by default): after every answer the CLI writes
+# a summary of the turn (system/post_turn_summary) and sends the result only then: 1.99 s p50, 2.69 s p95
+# (measured with 2.1.296, n = 32). With this variable at 0 the tail is 0.01 s p50. It is undocumented
+# (missing from the CLI's environment variable page, the summary code is marked internal), so it is only set when
+# the owner switches the flag on, and the tail is watched at run time (tail_notes): a CLI update may drop it.
+NO_SUMMARY_FLAG = "g1.cli_no_summary"
+NO_SUMMARY_ENV = {"CLAUDE_CODE_CLASSIFIER_SUMMARY": "0"}
 
 # A warm process (fix plan 30) is closed after this long without a turn, and is not used for
 # a turn when it started longer ago than WARM_MAX_AGE_S (its system prompt, e.g. "Right now", is stale).
@@ -135,13 +143,16 @@ class ClaudeCLIBrain:
         model: str | None = None,
         env: dict[str, str] | None = None,
         extra_env: dict[str, str] | None = None,
+        flag: Callable[[str], bool] | None = None,
     ) -> None:
+        """flag(name): the owner's switches (app/flags.py); read whenever a process is started, not per event."""
         self.claude_bin = claude_bin
         self.workspace_dir = Path(workspace_dir)
         self.mcp_config = mcp_config
         self.timeout_s = timeout_s
         self.model = model
         self._env = build_env(env)
+        self._flag = flag
         # Settings the gate hook needs (KAIRO_HOOK_*), set by the backend.
         self._env.update(extra_env or {})
         self._status = BrainStatus.ok
@@ -217,26 +228,28 @@ class ClaudeCLIBrain:
         """Start the CLI for the next turn now, so that turn doesn't wait for it to start (a call).
         It waits on stdin; nothing reaches the model until run(warm=key) sends the turn. Returns
         False when a matching warm process is already there."""
+        env, no_summary = self._spawn_env(origin)
         with self._warm_lock:
             w = self._warm
-            if w is not None and (w.busy or w.usable(key, session_id)):
+            if w is not None and (w.busy or (w.usable(key, session_id) and w.no_summary == no_summary)):
                 return False               # never cut off a turn that is running
-            self._close_warm_locked()
+            self._close_warm_locked()      # (also one started under the other g1.cli_no_summary setting)
             cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=True, model=model,
                                      prompt_file="system-prompt-warm.md")
             self.workspace_dir.mkdir(parents=True, exist_ok=True)
             try:
-                proc = subprocess.Popen(cmd, cwd=self.workspace_dir, env=self.hook_env(origin), stdin=subprocess.PIPE,
+                proc = subprocess.Popen(cmd, cwd=self.workspace_dir, env=env, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
             except OSError:
                 return False
             self._warm = _Warm(proc, key, session_id, on_idle=self._close_if_idle, model=model or self.model,
-                               idle_s=idle_s or WARM_IDLE_S, max_age_s=max_age_s or WARM_MAX_AGE_S)
+                               idle_s=idle_s or WARM_IDLE_S, max_age_s=max_age_s or WARM_MAX_AGE_S, no_summary=no_summary)
             return True
 
     def warm_ready(self, key: Any, session_id: str | None) -> bool:
+        wants = self._wants_no_summary()
         with self._warm_lock:
-            return self._warm is not None and self._warm.usable(key, session_id)
+            return self._warm is not None and self._warm.usable(key, session_id) and self._warm.no_summary == wants
 
     def close_warm(self) -> None:
         with self._warm_lock:
@@ -253,13 +266,14 @@ class ClaudeCLIBrain:
                 self._close_warm_locked()
 
     def _take_warm(self, key: Any, session_id: str | None) -> "_Warm | None":
+        wants = self._wants_no_summary()
         with self._warm_lock:
             w = self._warm
             if w is not None and w.proc.poll() is not None:
                 self._close_warm_locked()      # died while waiting
                 return None
-            if w is None or not w.usable(key, session_id):
-                return None
+            if w is None or not w.usable(key, session_id) or w.no_summary != wants:
+                return None                    # (a process started before the owner flipped g1.cli_no_summary: not used)
             w.busy = True
             return w
 
@@ -274,6 +288,23 @@ class ClaudeCLIBrain:
     def hook_env(self, origin: str) -> dict[str, str]:
         """The environment the CLI (and so the PreToolUse hook it starts) runs with."""
         return {**self._env, "KAIRO_HOOK_ORIGIN": origin}
+
+    def _wants_no_summary(self) -> bool:
+        """Flag g1.cli_no_summary. A flag that can't be read (database not migrated yet) is off."""
+        if self._flag is None:
+            return False
+        try:
+            return bool(self._flag(NO_SUMMARY_FLAG))
+        except Exception:
+            return False
+
+    def _spawn_env(self, origin: str) -> tuple[dict[str, str], bool]:
+        """The environment for a new CLI process, and whether it turns the end-of-turn summary off."""
+        env = self.hook_env(origin)
+        no_summary = self._wants_no_summary()
+        if no_summary:
+            env.update(NO_SUMMARY_ENV)
+        return env, no_summary
 
     def tools_status(self) -> str:
         """Did the CLI's last run connect Kairo's MCP server? (system/init mcp_servers)"""
@@ -340,9 +371,10 @@ class ClaudeCLIBrain:
         cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images), model=model)
         if images:
             prompt = _user_message(prompt, images)
-        run_env = self.hook_env(origin)
+        run_env, no_summary = self._spawn_env(origin)
         self._start_turn()
         self._timing["warm"] = False
+        self._timing["no_summary"] = no_summary
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.Popen(
@@ -414,6 +446,7 @@ class ClaudeCLIBrain:
         model: switched first when the process runs another one (control request set_model)."""
         self._start_turn()
         self._timing["warm"] = True
+        self._timing["no_summary"] = w.no_summary
         proc = w.proc
         if model and w.model != model:
             if not w.control({"subtype": "set_model", "model": model}):
@@ -559,9 +592,10 @@ class _Warm:
     process for chat and calls lives long (idle_s, max_age_s) and runs the model each turn asks for."""
 
     def __init__(self, proc: subprocess.Popen, key: Any, session_id: str | None, *, on_idle, model: str | None = None,
-                 idle_s: float = WARM_IDLE_S, max_age_s: float = WARM_MAX_AGE_S) -> None:
+                 idle_s: float = WARM_IDLE_S, max_age_s: float = WARM_MAX_AGE_S, no_summary: bool = False) -> None:
         self.proc, self.key, self.session_id = proc, key, session_id
         self.model = model
+        self.no_summary = no_summary           # started with NO_SUMMARY_ENV (the environment is fixed at start)
         self.idle_s, self.max_age_s = idle_s, max_age_s
         self.started = time.monotonic()
         self.busy = False

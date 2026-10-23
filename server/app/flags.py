@@ -17,6 +17,10 @@ PREFIX = "flag:"
 # name -> (default, what it changes, in the owner's words)
 FLAGS: dict[str, tuple[bool, str]] = {
     # -- G1 Claude CLI
+    "g1.cli_no_summary": (False, "Claude answers about 2 seconds sooner: it stops writing a summary after each answer, and "
+                                 "the next message no longer waits for it. This uses an undocumented Claude Code setting, "
+                                 "so it stays off until you decide; Voice speed warns if a Claude update makes it stop "
+                                 "working."),
 
     # -- G2 Whisper
 
