@@ -1285,7 +1285,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if vm["state"] != "ready":
             llm.update(ok=False, reason=vm.get("error") or f"the voice model is {vm['state']}")
         comps["voice_model"] = {**llm, "model": vm.get("model"), "state": vm["state"],
-                                "loaded": vm["state"] == "ready"}
+                                "loaded": vm["state"] == "ready",
+                                "vram": await asyncio.to_thread(gpu_mod.llama_vram, app.state.voice_llm.log_dir / "voice-llm.log")}
         emb = _embeddings_device()
         if emb is not None:
             comps["embeddings"] = emb
@@ -1298,6 +1299,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 mine[server.proc.pid] = "voice_model"
             for p_ in card["processes"]:
                 p_["kairo"] = mine.get(p_["pid"])
+            if _flag_on("g8.sysmem_readback"):    # G8: the driver's sysmem fallback policy as this account sees it (P17)
+                card["sysmem"] = await asyncio.to_thread(gpu_mod.sysmem_policy)
         why = _rtc_ready()
         with session_for(engine) as s_:
             last = s_.exec(select(VoiceTurn).where(VoiceTurn.path.in_(("call", "chat_voice")))
@@ -1309,7 +1312,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except ValueError:
                 last_line = "old"
         on_gpu = all(c.get("ok") for k, c in comps.items() if k != "piper" and (k != "speaker" or c.get("loaded")))
-        return {"components": comps, "gpu": card, "all_on_gpu": on_gpu,
+        return {"components": comps, "gpu": card, "all_on_gpu": on_gpu, "boot": list(app.state.boot_trail),
                 "line": {"webrtc_ready": why is None, "reason": why, "last_turn": last_line,
                          "last_turn_at": last.ts.isoformat() if last is not None else None}}
 

@@ -311,7 +311,10 @@ def _llama(ctx: Ctx) -> list[Check]:
                  warn("llama.flags", "context and flags", "; ".join(unsure), n_ctx, "tokens") if unsure else
                  ok("llama.flags", "context and flags", f"context {n_ctx} tokens, 1 slot, chat template on (-c, -np 1, --jinja)", n_ctx, "tokens"))
     dev = gpu.llama_device(ctx.data_dir / "logs" / "voice-llm.log")
-    layers = (ok("llama.device", "on the GPU", f"{dev['layers']} layers on the GPU" + (f" ({dev['gpu']})" if dev.get("gpu") else ""))
+    held = gpu.llama_vram(ctx.data_dir / "logs" / "voice-llm.log")
+    took = (f"; it holds {mb(held['total'])} of graphics memory (model {mb(held['model'])}, context {mb(held['kv'] + held['rs'])}, "
+            f"work space {mb(held['compute'])})" if held["total"] else "")
+    layers = (ok("llama.device", "on the GPU", f"{dev['layers']} layers on the GPU" + (f" ({dev['gpu']})" if dev.get("gpu") else "") + took)
               if dev["ok"] else bad("llama.device", "on the GPU", str(dev["reason"])))
     return [first, running, flags, layers]
 
@@ -425,7 +428,33 @@ def _system(ctx: Ctx) -> list[Check]:
     offline = (warn("system.hf_offline", "HF_HUB_OFFLINE", "can't see Kairo's environment: Kairo isn't answering") if ctx.live is None else
                ok("system.hf_offline", "HF_HUB_OFFLINE", "HF_HUB_OFFLINE is set: loading a model never waits for Hugging Face") if value in ("1", "true", "yes", "on") else
                warn("system.hf_offline", "HF_HUB_OFFLINE", "HF_HUB_OFFLINE isn't set for Kairo's voice: a model load can wait for Hugging Face when the network is down"))
-    return [vram, memory, offline]
+    return [vram, memory, offline, _sysmem(card, vram)]
+
+
+def _sysmem(card: dict | None, vram: Check) -> Check:
+    """NVIDIA's CUDA sysmem fallback policy (voice recipe 9). At 1 a full graphics card is an out-of-memory error; otherwise the
+    driver may quietly put CUDA memory into shared memory and the voice gets 2 to 28 times slower with no error anywhere. Setting it
+    is the owner's choice (the installer does it only with -CudaSysmemPolicy), so not set is a warning only while the card is nearly full."""
+    name = "CUDA sysmem fallback"
+    answers = bool(card) and card.get("used_mb") is not None and bool(card.get("total_mb"))
+    served = bool(card and card.get("sysmem"))
+    pol = card["sysmem"] if served else gpu.sysmem_policy()
+    seen = "read by Kairo's server" if served else "read by this command"
+    if not pol.get("available"):
+        if sys.platform != "win32":
+            return ok("system.sysmem", name, "not applicable: it is NVIDIA's Windows driver setting, and this PC isn't Windows")
+        if not answers:
+            return ok("system.sysmem", name, "nothing to judge: no NVIDIA graphics card answers on this PC")
+        return warn("system.sysmem", name, f"can't read the driver's setting ({seen}): {pol.get('why') or 'no reason given'}")
+    value = pol.get("value")
+    if pol.get("off"):
+        return ok("system.sysmem", name, f"off (policy 1, {seen}): a full graphics card is an out-of-memory error, never a silent slowdown", value)
+    now = f"{pol.get('label') or 'not set'} ({seen})"
+    if vram.status in (WARN, FAIL):
+        return warn("system.sysmem", name, f"{now}, and the graphics memory is nearly full: the driver may spill into shared memory, a voice "
+                    "2 to 28 times slower that nothing reports. Your choice: run Install Kairo with -CudaSysmemPolicy (an administrator window)", value)
+    return ok("system.sysmem", name, f"{now}: the driver may spill into shared memory when the card is full. Your choice to change "
+              "(Install Kairo -CudaSysmemPolicy)", value)
 
 
 def firewall_rule() -> dict | None:

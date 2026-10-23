@@ -30,7 +30,7 @@ import sys
 
 SETTING_ID = 0x10ECECC9                     # "CUDA - Sysmem Fallback Policy"
 VALUES = {0: "driver default", 1: "prefer NO sysmem fallback", 2: "prefer sysmem fallback"}
-UNSET = "driver default (not set; the driver may spill into shared memory)"
+UNSET = "driver default (not set)"
 
 # nvapi_QueryInterface ids (nvapi_interface.h)
 IDS = {

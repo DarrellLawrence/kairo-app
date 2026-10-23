@@ -38,6 +38,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
                               "instead of all at once, and the free graphics memory is read in between and logged. Before, the memory "
                               "model checked the card before the voice model had taken its share and could pick the GPU when it did not "
                               "fit. Takes effect the next time Kairo starts."),
+    "g8.sysmem_readback": (False, "Kairo's voice report also shows NVIDIA's driver setting 'CUDA sysmem fallback' as Kairo's own account sees it "
+                                  "(1 = a full graphics card is an error, anything else = the driver may quietly spill into slow shared "
+                                  "memory). Off until the read has been proven on the PC: `kairo diag` reads it itself either way."),
 
     # -- G9 speech text
 
