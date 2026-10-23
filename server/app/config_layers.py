@@ -50,7 +50,10 @@ LIMITS = ("approvals_open_max", "outbound_per_day_max")
 PROFILE = "profile.yaml"
 PROFILE_PINNED = ".profile-pinned-v1"
 NO_HISTORY = {PROFILE}         # personal values: no fingerprints in the repo, never dropped as "a default"
-NOT_CONFIG = {HISTORY, MARKER, README, PROFILE_PINNED}
+# personal-terms.txt: the privacy scanner's list of the owner's names and numbers lives in this folder on the PC
+# (data\config\personal-terms.txt). It is not config: it must never be copied into config-effective.
+PERSONAL_TERMS = "personal-terms.txt"
+NOT_CONFIG = {HISTORY, MARKER, README, PROFILE_PINNED, PERSONAL_TERMS}
 BASE_SUFFIX = ".base"          # personality.md.base: digest of the default the owner's copy is based on
 
 README_TEXT = """\

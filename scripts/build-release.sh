@@ -78,5 +78,12 @@ PY
 rm -rf "$stage"
 # Nothing the app needs at run time may be missing (2026-10-14: no release ever had mcp_kairo/hooks).
 "$PY" scripts/check_release.py "$zip"
+# Owner's master prompt 0.6: no personal term, secret, profile folder, data folder or .env may ship. The terms come
+# from the owner's list outside the repo when this machine has one (CI scans again with them from its secret).
+if ! "$PY" scripts/privacy_scan.py --zip "$zip"; then
+  rm -f "$zip" "$zip.sha256"
+  echo "The setup zip failed the privacy scan and was deleted (see above)." >&2
+  exit 1
+fi
 echo "$version" > "$out/VERSION"
 echo "==> $zip"

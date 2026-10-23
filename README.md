@@ -6,7 +6,8 @@ Single-user personal assistant. Spec: [docs/KICKOFF.md](docs/KICKOFF.md) (source
 - `web/` React + Vite PWA (six tabs; Chat works, the rest arrive with later milestones)
 - `config/` who the owner is (`profile.yaml`), permissions, schedule, personality
 - `installer/` Windows installer, updater, rollback, uninstaller (kairo-home)
-- `scripts/build-release.sh` builds the setup zip
+- `scripts/build-release.sh` builds the setup zip (and scans it for personal data and secrets)
+- `scripts/privacy_scan.py` and `scripts/hooks/` keep personal data and secrets out of the repo and the release
 
 ## Dev (laptop, inside WSL)
 
@@ -54,6 +55,22 @@ cd server && .venv/bin/python -m pytest                                   # fast
 KAIRO_REAL_CLI=1 .venv/bin/python -m pytest tests/test_realcli.py -o addopts="" -v   # real Claude CLI (a few tiny calls)
 ```
 Run the real-CLI tests before a release that touches the hook, the workspace config, the brain adapter or prompts.
+
+## Keeping personal data and secrets out
+
+The code may become public, so nothing personal may ever be committed or shipped. `scripts/privacy_scan.py` checks
+the lines a commit adds, a directory, the whole git history and the release zip for the owner's personal terms
+(a list that lives outside the repo), for secrets, and for paths that must never be committed (`private/`, `data/`,
+`devdata/`, `*.local.*`, `.env`, `*.sqlite`). Once per clone, turn on the git hooks:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+The hooks above cover branches that contain `scripts/hooks`. To protect every branch and worktree of the clone (also old
+branches), run `python scripts/privacy_scan.py --install-hooks` as well.
+
+Details (the terms list, CI, gitleaks) are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 

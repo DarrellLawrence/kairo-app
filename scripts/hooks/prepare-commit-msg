@@ -1,0 +1,10 @@
+#!/bin/sh
+# Kairo prepare-commit-msg: when an editor will be opened, keeps a copy of the message file as git hands it over, so
+# that commit-msg can tell the lines git wrote (its comment block, the diff of -v) from the lines that were typed.
+# git sets GIT_EDITOR=: for the hooks when no editor will be opened (-m, -F, git merge -m ...). Never blocks a commit.
+gd=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+rm -f "$gd/kairo-msg-prepared" "$gd/kairo-msg-source" 2>/dev/null
+if [ "${GIT_EDITOR-}" != ":" ]; then
+  cp "$1" "$gd/kairo-msg-prepared" 2>/dev/null
+fi
+exit 0

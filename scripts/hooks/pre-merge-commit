@@ -1,0 +1,4 @@
+#!/bin/sh
+# Kairo pre-merge-commit: git does not run pre-commit for the commit that ends a merge, this hook does the same scan.
+here=$(cd "$(dirname "$0")" && pwd) || exit 1
+exec "$here/pre-commit" "$@"

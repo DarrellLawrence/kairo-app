@@ -1,0 +1,33 @@
+#!/bin/sh
+# Kairo pre-commit: stops personal data and secrets before they are committed.
+# Turn it on once per clone:   git config core.hooksPath scripts/hooks
+#   (that covers branches that contain scripts/hooks; for every branch and worktree use
+#    python scripts/privacy_scan.py --install-hooks)
+# It runs scripts/privacy_scan.py --staged, and gitleaks too if gitleaks is installed.
+# Skipping it (git commit --no-verify) is possible, but CI scans the whole history again.
+# Git for Windows runs this file through its own sh, so no .cmd or .ps1 is needed.
+
+here=$(cd "$(dirname "$0")" && pwd) || exit 1
+. "$here/_common.sh" || exit 1
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root" || exit 1
+kairo_find_python pre-commit || exit 1
+kairo_find_scanner pre-commit "$root" "$here" || exit 1
+
+"$py" "$scan" --staged || {
+  echo "pre-commit: the privacy scan found something (see above). Nothing was committed." >&2
+  exit 1
+}
+
+if command -v gitleaks >/dev/null 2>&1; then
+  depth=
+  if gitleaks git --help 2>&1 | grep -q 'max-archive-depth'; then depth="--max-archive-depth 3"; fi
+  # --verbose names file, line and rule (the output is --redact'ed); this is your own terminal, not a CI log.
+  if gitleaks git --help >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    gitleaks git --staged --pre-commit --redact --verbose --no-banner -l warn $depth || exit 1      # 8.19 and newer
+  else
+    gitleaks protect --staged --redact --verbose --no-banner -l warn || exit 1                      # older gitleaks
+  fi
+fi
+exit 0

@@ -11,3 +11,21 @@ node_modules/
 dist/
 # The owner's profile lives only in the vault on the PC (owner's decision 2026-10-19), never here.
 private/
+
+# Guard rails against personal data and secrets (owner's master prompt 0.6). scripts/privacy_scan.py fails on any of
+# these paths in a commit, the history or a release, even if someone adds one with -f.
+.env.*
+!.env.example
+data/
+*.local.*
+personal-terms*.txt
+*.sqlite*
+*.db
+*.db3
+secrets/
+vault/
+.private/
+*.env
+.envrc
+.env-*
+capture-token*

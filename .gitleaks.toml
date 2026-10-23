@@ -1,0 +1,35 @@
+# gitleaks for Kairo (CI runs a pinned release on the full history; the pre-commit hook runs it if installed).
+# Needs gitleaks 8.25 or newer ([[allowlists]]). Keep it narrow: every entry names its rule.
+title = "Kairo"
+
+[extend]
+useDefault = true
+
+# Words that only look like assignments (gitleaks' generic-api-key rule).
+[[allowlists]]
+description = "a docstring: 'the hidden state of the final EOS token, L2-normalised'"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''server/app/embed_worker\.py$''']
+regexes = ['''^L2-normalised\.?$''']
+
+[[allowlists]]
+description = "a test that checks backend secrets never reach the CLI (it sets fake ones)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''server/tests/test_brain_cli\.py$''']
+regexes = ['''^ANTHROPIC_API_KEY=$''']
+
+# The scanner's own tests build fake keys on purpose (from pieces, so they are not whole in the source).
+[[allowlists]]
+description = "fake values that test scripts/privacy_scan.py"
+targetRules = ["generic-api-key"]
+paths = ['''server/tests/test_privacy_scan\.py$''']
+
+# A VAPID (Web Push) private key as a raw base64url value (VAPID_PRIVATE=..., {"vapid": {"private": "..."}}): the default
+# rules know PEM keys and *_KEY names, not this shape. The window reaches past an 87-character public key listed first.
+[[rules]]
+id = "kairo-vapid-private-key"
+description = "A VAPID (Web Push) private key written as a raw base64url value"
+regex = '''(?i)vapid[\s\S]{0,300}?private["']?\s*[:=]\s*["']?[A-Za-z0-9_\-+/=]{40,}'''
+keywords = ["vapid"]
