@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, parseTs } from '../api.js'
 import { clientLog, device } from '../clientlog.js'
+import { applyFlags, changedCount } from '../flags.js'
+import ExperimentsPage from './Experiments.jsx'
 import { holdMic, playLastAgain, releaseMic, setReleaseWhileSpeaking, speak, unlockAudio } from '../voice.js'
 import { PASSAGE, SECONDS, recordVoice, sendVoice } from '../voiceprint.js'
 import {
@@ -1007,11 +1009,12 @@ function SystemPage() {
   const [askPause, setAskPause] = useState(false)
   const [speed, setSpeed] = useState([])
   const [conflicts, setConflicts] = useState(0)
+  const [switched, setSwitched] = useState(0)   // Experiments: switches the owner changed
 
   const load = useCallback(async () => {
-    const [h, s, g, k, l, c] = await Promise.allSettled([
+    const [h, s, g, k, l, c, f] = await Promise.allSettled([
       fetch('/health').then((r) => r.json()), api('/api/status'), api('/api/setup/google/status'), api('/api/kill-switch'),
-      api('/api/latency'), api('/api/vault/conflicts'),
+      api('/api/latency'), api('/api/vault/conflicts'), api('/api/flags'),
     ])
     setHealth(h.status === 'fulfilled' ? (h.value.detail ?? h.value) : { status: 'unreachable' })
     setStatus(s.status === 'fulfilled' ? s.value : {})
@@ -1019,6 +1022,7 @@ function SystemPage() {
     setPaused(k.status === 'fulfilled' ? k.value.paused : null)
     setSpeed(l.status === 'fulfilled' ? l.value.rows : [])
     setConflicts(c.status === 'fulfilled' ? c.value.conflicts.length : 0)
+    setSwitched(f.status === 'fulfilled' ? changedCount(applyFlags(f.value)) : 0)
   }, [])
   useEffect(() => { load() }, [load])
 
@@ -1090,6 +1094,9 @@ function SystemPage() {
               onClick={() => stack.push('Acceptance', () => <AcceptancePage />)} />
             <ListRow icon={<IconSpeaker />} title="Sound check" subtitle="Is Kairo's voice audible on this iPhone?" chevron
               onClick={() => stack.push('Sound check', () => <SoundCheckPage />)} />
+            <ListRow icon={<IconBolt />} title="Experiments" subtitle="Switches for changes that wait for your OK or the PC" chevron
+              value={switched > 0 ? <Badge tone="warn" pop={false}>{switched} changed</Badge> : undefined}
+              onClick={() => stack.push('Experiments', () => <ExperimentsPage />)} />
           </List>
         </>
       )}
