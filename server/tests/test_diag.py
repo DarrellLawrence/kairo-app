@@ -476,3 +476,40 @@ def test_the_page_opens_at_diag_voice_even_when_the_phone_reloads_that_address(m
         page = c.get("/diag/voice")
         assert page.status_code == 200 and "Kairo app shell" in page.text         # the app's route, not a 404
         assert c.get("/api/diag/voice").headers["content-type"].startswith("application/json")   # and the API is not shadowed by it
+
+
+def test_the_command_asks_a_real_server_process_the_way_the_pc_does(tmp_path):
+    """`kairo diag` = python -m app.diag --env-file kairo.env: it reads the port from the settings file, asks the server
+    that app.serve started (owner check on, as in production) and prints what that server says."""
+    import time
+    import urllib.request
+
+    from alembic import command
+
+    from tests.conftest import FAKE_CLAUDE, alembic_config
+    from tests.test_serve import free_port
+    data = tmp_path / "Kairo" / "data"
+    db_url = f"sqlite:///{(data / 'db' / 'kairo.sqlite').as_posix()}"
+    port = free_port()
+    env_file = tmp_path / "kairo.env"
+    env_file.write_text(f"KAIRO_DATA_DIR={data}\nKAIRO_DB_URL={db_url}\nKAIRO_CLAUDE_BIN={FAKE_CLAUDE}\nKAIRO_PORT={port}\n", encoding="utf-8")
+    command.upgrade(alembic_config(db_url), "head")
+    proc = subprocess.Popen([sys.executable, "-m", "app.serve", "--env-file", str(env_file)], cwd=SERVER_DIR,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(80):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+                break
+            except OSError:
+                time.sleep(0.25)
+        out = subprocess.run([sys.executable, "-m", "app.diag", "--env-file", str(env_file), "--json"], cwd=SERVER_DIR,
+                             capture_output=True, text=True, timeout=120)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+    report = json.loads(out.stdout)
+    by_id = {c["id"]: c for c in report["checks"]}
+    assert report["source"] == "server" and by_id["kairo.running"]["status"] == "PASS"
+    assert out.returncode == 1 and report["counts"]["fail"] > 0            # a bare data folder: nothing installed
+    assert str(tmp_path) not in out.stdout                                   # no folder of this machine in what is printed

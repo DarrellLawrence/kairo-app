@@ -70,7 +70,7 @@ SNAPSHOT_STALE_S = 15 * 60
 
 @dataclass
 class Check:
-    id: str                      # "whisper.gpu": stable, for scripts and the PWA
+    id: str                      # "whisper.device": stable, for scripts and the PWA
     group: str
     name: str
     status: str                  # PASS | WARN | FAIL
