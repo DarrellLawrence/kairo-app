@@ -1389,6 +1389,7 @@ function RealtimePage() {
           <select value={s.language || 'auto'} onChange={(e) => save({ language: e.target.value })}>
             <option value="auto">English and German</option>
             <option value="en">English only (a little faster)</option>
+            <option value="de">German only (a little faster)</option>
           </select>
         </label>
       </div>
