@@ -78,6 +78,39 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                "Takes effect on the next call."),
 
     # -- G5 hand-off
+    "g5.stream_verbatim": (False, "When Kairo has to ask Claude something on a call, you hear Claude's own sentences as they are "
+                                  "written, word for word, instead of the voice model saying them again in its own words "
+                                  "after Claude is done. A short answer starts about half a second sooner and a long one "
+                                  "(about 150 words) about one and a half seconds sooner (estimates from timelines measured "
+                                  "on a test machine, not this PC). Off until you decide: it replaces your choice of "
+                                  "2026-10-16 that the voice model says the answer. A hang-up request from Claude still "
+                                  "hangs up. Takes effect at the next call."),
+    "g5.second_piece": (True, "Kairo's voice cuts an answer into pieces so it can start before the answer is written. The first piece "
+                              "is cut after five words (or the first comma), as you asked. Until now the second piece was cut "
+                              "after five words as well, in the middle of a sentence, so every answer was cut twice there; "
+                              "now only once. On the old line, the holding line no longer jumps in front of words that "
+                              "were already written. Takes effect at the next call."),
+    "g5.flush_at_end": (True, "Kairo goes on as soon as Claude's text is finished, not when the Claude program has also finished "
+                              "writing its own summary of the turn (about 2 seconds later, measured). The voice model gets "
+                              "the answer then, and with the streaming switch the last words are spoken at once instead of "
+                              "waiting for the full stop. Takes effect at the next call."),
+    "g5.cap_first_piece": (True, "The 8 seconds Claude gets on a call count until the first words of the answer are spoken. An "
+                                 "answer that has begun is never cut off by them, however long it is. Only matters with the "
+                                 "streaming switch on: without it, the answer is spoken whole after Claude is done, so "
+                                 "the 8 seconds count until then, as before. Takes effect at the next call."),
+    "g5.filler_wording": (True, "The short line Kairo says while Claude works no longer claims to be doing something it may not be "
+                                "doing (\"Pulling that up\" for a note to save). English: \"Okay, one moment.\", \"Let me check "
+                                "that.\", \"One sec.\" German: \"Okay, einen Moment.\", \"Ich schau kurz nach.\", \"Sekunde.\" "
+                                "Takes effect at the next call."),
+    "g5.bringup_cancel": (True, "While Claude works, Kairo may raise one thing from its list after a short wait. With the streaming "
+                                "switch on, that is dropped as soon as Claude's first words are being spoken, so Kairo never "
+                                "breaks into the middle of an answer. Without the streaming switch it changes nothing: "
+                                "a raise that has not been said yet is already dropped when the answer arrives or you talk. "
+                                "Takes effect at the next call."),
+    "g5.warm_on_call_open": (True, "Opening the Call screen (or the voice button) also starts Claude's conversation program in the "
+                                   "background, if it is not already running, so the first question on the call does not wait about "
+                                   "a second for it to start. It only starts the program; nothing is sent to Claude. Takes effect "
+                                   "at once."),
 
     # -- G6 turn-taking
 
