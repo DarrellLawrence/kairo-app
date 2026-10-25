@@ -297,8 +297,13 @@ def _bench(ids, delays=None, deaf=(), miss_after_s=5.0):
 
 @pytest.fixture(scope="module")
 def mock_run():
+    """With the three turn-taking decisions switched off (they are on by default), so a long backchannel still cuts the
+    answer: the false-interrupt rate below is checked against a real cut."""
     _needs_pipecat()
-    return _bench(PLAN, deaf=(DEAF,))
+    off = voicertc.Turning(smart_turn_3s=False, ignore_windows=False, transcript_barge_in=False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(voicertc, "Turning", lambda: off)               # build_call() without the argument: this call's switches
+        return _bench(PLAN, deaf=(DEAF,))
 
 
 def test_a_mock_run_finds_the_delays_built_into_the_stand_ins(mock_run):
@@ -342,7 +347,7 @@ def test_false_interrupts_match_what_the_pipeline_really_did(mock_run):
 @pytest.fixture(scope="module")
 def words_start_run():
     """The same long backchannel against the owner's three turn-taking decisions switched on (g6.transcript_barge_in,
-    g6.ignore_windows, g6.smart_turn_3s: all off by default)."""
+    g6.ignore_windows, g6.smart_turn_3s: on by default, as the owner's spec asks)."""
     _needs_pipecat()
     on = voicertc.Turning(smart_turn_3s=True, ignore_windows=True, transcript_barge_in=True)
     with pytest.MonkeyPatch.context() as mp:
@@ -351,7 +356,7 @@ def words_start_run():
 
 
 def test_with_the_words_only_start_a_long_backchannel_does_not_cut_the_answer_and_the_bench_sees_it(words_start_run):
-    """A long backchannel is speech to the VAD (the default run above: the same clip cuts the answer) and is written
+    """A long backchannel is speech to the VAD (the run above, switches off: the same clip cuts the answer) and is written
     down, but it is not an interruption with g6.transcript_barge_in on: the answer goes on, and the bench reports no cut."""
     records, world, _, windows = words_start_run
     probe = next(r for r in records if r["clip"] == "bc_long")

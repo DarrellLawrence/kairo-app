@@ -1042,9 +1042,10 @@ def test_a_cough_over_kairo_neither_stops_it_nor_makes_it_answer_again(monkeypat
     assert r.stopped == [] and [n for _, n in r.asked] == [1] and "barge_in" not in r.kinds
 
 
-def test_by_default_any_sound_over_kairo_stops_it_the_old_way_and_the_phone_is_still_told():
-    """The switches are off until the owner turns them on (flags.py): a call with nothing changed stops at the VAD's start."""
-    r = _over_kairo("Mhm.", Turning())
+def test_with_the_switches_off_any_sound_over_kairo_stops_it_the_old_way_and_the_phone_is_still_told():
+    """The owner switched the three turn-taking decisions off (flags.py; they are on by default): the call stops at the
+    VAD's start, as before G6."""
+    r = _over_kairo("Mhm.", Turning(smart_turn_3s=False, ignore_windows=False, transcript_barge_in=False))
     assert r.stopped == [1], (r.stopped, r.kinds)                  # the VAD's start alone, as before
     assert r.kinds.count("barge_in") == 1                          # g7.listen_on_barge_in relies on the PC saying so either way
     assert r.kinds.count("speech") == 2                            # and every stretch of speech told the phone
