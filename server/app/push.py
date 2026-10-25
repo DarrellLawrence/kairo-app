@@ -33,6 +33,9 @@ PROACTIVE = {"loops", "coach", "location", "lerndoku"}      # share the daily pi
 TO_BRIEF = {"backup"}                                       # at night: the morning brief shows it instead
 DEDUPE = timedelta(hours=6)
 DEFAULT_MAX = 6
+URGENCIES = ("very-low", "low", "normal", "high")      # RFC 8030 section 5.3
+MAX_TTL_S = 7 * 24 * 3600                              # the push services cap it anyway
+MAX_TAG = 64
 
 
 def _b64url(data: bytes) -> str:
@@ -98,11 +101,18 @@ class Pusher:
             s.commit()
 
     def notify(self, title: str, body: str, url: str = "/", *, source: str = "kairo", ignore_quiet: bool = False,
-               wait: bool = False, now: datetime | None = None) -> str:
-        """Sent, held (quiet hours) or dropped (duplicate, budget, or into the brief). Returns which."""
+               wait: bool = False, now: datetime | None = None, ttl: int | None = None, urgency: str | None = None,
+               tag: str | None = None) -> str:
+        """Sent, held (quiet hours) or dropped (duplicate, budget, or into the brief). Returns which.
+
+        ttl, urgency, tag (G10, timers): how long the push service keeps the push for a phone it cannot reach
+        (pywebpush sends 0 = never), RFC 8030's Urgency ("high" wakes the phone), and a notification tag that is
+        its own: the phone replaces a notification with the same tag, so two timers need two tags. A tag is part
+        of what makes a push "the same push" for the 6 h dedupe. Without them the push is exactly as before."""
         now = (now or datetime.now(self.profile.tz)).astimezone(self.profile.tz)
         body = (body or "")[:1000]
-        key = hashlib.sha1(f"{source}|{title}|{body}".encode("utf-8")).hexdigest()
+        tag = (tag or "")[:MAX_TAG] or None
+        key = hashlib.sha1(f"{source}|{title}|{body}{'|' + tag if tag else ''}".encode("utf-8")).hexdigest()
         with self._lock, Session(self.engine) as s:
             status, why, after = "sent", "", None
             recent = s.exec(select(PushLog).where(PushLog.key == key).where(PushLog.status.in_(("sent", "held")))
@@ -122,7 +132,8 @@ class Pusher:
         if status != "sent":
             log.info("push %s (%s): %r", status, why, title)
             return status
-        worker = threading.Thread(target=self._send_all, args=(title, body, url), daemon=True)
+        worker = threading.Thread(target=self._send_all, args=(title, body, url),
+                                  kwargs={"ttl": ttl, "urgency": urgency, "tag": tag}, daemon=True)
         worker.start()
         if wait:
             worker.join(timeout=30)
@@ -172,8 +183,17 @@ class Pusher:
             worker.join(timeout=30)
         return len(rows)
 
-    def _send_all(self, title: str, body: str, url: str) -> None:
-        payload = json.dumps({"title": title, "body": body[:240], "url": url})
+    def _send_all(self, title: str, body: str, url: str, *, ttl: int | None = None, urgency: str | None = None,
+                  tag: str | None = None) -> None:
+        data = {"title": title, "body": body[:240], "url": url}
+        if tag:
+            data["tag"] = tag
+        payload = json.dumps(data)
+        extra: dict = {}                                       # only what was asked for: other pushes stay as they were
+        if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0:
+            extra["ttl"] = min(ttl, MAX_TTL_S)
+        if urgency in URGENCIES:
+            extra["headers"] = {"Urgency": urgency}
         claims = {"sub": f"mailto:{self.profile.gmail or 'kairo@localhost'}"}
         with Session(self.engine) as s:
             for sub in s.exec(select(PushSubscription)).all():
@@ -183,7 +203,7 @@ class Pusher:
                 info = {"endpoint": sub.endpoint, "keys": json.loads(sub.keys_json)}
                 try:
                     self._send(subscription_info=info, data=payload, vapid_private_key=str(self.pem),
-                               vapid_claims=dict(claims), timeout=10)
+                               vapid_claims=dict(claims), timeout=10, **extra)
                 except Exception as exc:  # pywebpush raises WebPushException with .response
                     status = getattr(getattr(exc, "response", None), "status_code", None)
                     if status in (404, 410):
