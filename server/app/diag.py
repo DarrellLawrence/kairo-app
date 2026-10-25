@@ -381,10 +381,27 @@ def _speaker(ctx: Ctx) -> list[Check]:
     enrolled = (ok("speaker.enrolled", "your voice is enrolled", "your voiceprint is on the PC (encrypted, never shown)") if taught else
                 warn("speaker.enrolled", "your voice is enrolled", "no voiceprint yet: teach Kairo your voice (More -> Settings -> Voice); until then the speaker check is off"))
     d = ctx.dev("speaker") or {}
+    gate = _label_gate(d.get("label_gate"))
     if d.get("on", taught):
-        return [first, *live_checks(ctx, "speaker", "speaker", gpu_required=True), enrolled]
+        return [first, *live_checks(ctx, "speaker", "speaker", gpu_required=True), enrolled, *gate]
     # the check is off (not taught, or switched off): nothing is meant to be loaded, so "enrolled" says it once
-    return [first, enrolled] + ([warn("speaker.loaded", "loaded", f"the check is off: {d.get('note') or 'switched off'}")] if taught else [])
+    return [first, enrolled] + ([warn("speaker.loaded", "loaded", f"the check is off: {d.get('note') or 'switched off'}")] if taught else []) + gate
+
+
+def _label_gate(row) -> list[Check]:
+    """G13: what a voice request that Kairo cannot confirm as the owner may do. Judged from what the running server says
+    (an older server, or none, says nothing and adds nothing). Unchecked requests (no voiceprint, or the check off) can
+    change things, as they always could: a WARN, with why."""
+    if not isinstance(row, dict):
+        return []
+    if not row.get("flag"):
+        return [warn("speaker.label_gate", "voice requests that change things",
+                     "g13.speaker_label_gate is off (More -> System -> Experiments): a voice that is not confirmed as yours can still change things")]
+    if row.get("checked"):
+        return [ok("speaker.label_gate", "voice requests that change things",
+                   "a voice request that Kairo cannot confirm is yours may look things up and answer, but changes nothing")]
+    return [warn("speaker.label_gate", "voice requests that change things",
+                 f"unchecked: the speaker check is off ({row.get('note') or 'switched off'}), so every voice request can change things, as before")]
 
 
 def _embeddings(ctx: Ctx) -> list[Check]:

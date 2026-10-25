@@ -490,12 +490,28 @@ class Speaker:
             return False, info["problem"]
         return True, None
 
+    def label_gate(self) -> dict:
+        """G13, for kairo diag: is the label gate (g13.speaker_label_gate) on, and does the check run? With no check
+        every voice request is unchecked and can change things, as before: that is the diag's WARN."""
+        from sqlmodel import Session
+
+        from . import flags
+        flag = flags.FLAGS["g13.speaker_label_gate"][0]
+        if self.engine is not None:
+            try:
+                with Session(self.engine) as s:
+                    flag = flags.on(s, "g13.speaker_label_gate")
+            except Exception:   # the report never fails over it
+                log.warning("speaker check: the label gate's switch could not be read", exc_info=True)
+        on, why = self.check_state()
+        return {"flag": flag, "checked": on, "note": why}
+
     def device(self) -> dict:
         """Voice speed's row for the speaker check (like Whisper's and Kokoro's)."""
         on, why = self.check_state()
         out = {"device": self.model.device, "model": MODEL_NAME.removesuffix(".onnx"), "loaded": self.model.loaded,
                "load_ms": self.model.load_ms, "warm_ms": self.model.warm_ms, "on": on, "note": why,
-               "checked": getattr(self.model, "checked", None)}
+               "checked": getattr(self.model, "checked", None), "label_gate": self.label_gate()}
         if not self.model.installed():
             out.update(ok=False, reason="model missing (run Update Kairo): the speaker check is off, calls still work")
         elif self.model.failed:
