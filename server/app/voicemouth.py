@@ -437,8 +437,9 @@ class _Pending:
 
 
 Ask = Callable[[str, list[str], str], Awaitable[tuple[str, bool]]]
-# ... and the same with a sink(kind, value) it tells while Claude works (G5): ("text", words), ("escalated", info),
-# ("end", (answer, hang up)) when Claude's text is complete, which is before the CLI has sent its result.
+# ... and the same with a sink(kind, value) it tells while Claude works (G5): ("text", words; a "\n" stands between the
+# words before a tool call and the message after it), ("escalated", info), ("end", (answer, hang up)) when Claude's text is
+# complete, which is before the CLI has sent its result.
 AskStream = Callable[[str, list[str], str, Callable[..., None]], Awaitable[tuple[str, bool]]]
 
 

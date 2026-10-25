@@ -131,6 +131,81 @@ def test_g5_a_tool_turns_answer_is_the_words_after_its_last_tool_call(migrated):
     assert error is None and text == "You have school at 8." and ended == ["You have school at 8."]
 
 
+def _tool_turn(first: str, tool_calls: int = 1, tail: str = "You have school at 8 and training at 18:00."):
+    """Claude writes `first`, calls a tool (`tool_calls` times in a row), then writes the answer: the CLI's messages carry
+    no whitespace between them."""
+    events = [BrainEvent(EventKind.session, session_id="S1")]
+    if first:
+        events.append(BrainEvent(EventKind.text, text=first))
+    events += [BrainEvent(EventKind.tool_use, data={"name": "calendar_list"}) for _ in range(tool_calls)]
+    events += [BrainEvent(EventKind.text, text=tail), BrainEvent(EventKind.message_end),
+               BrainEvent(EventKind.result, text=tail, session_id="S1")]
+    return events
+
+
+def _told(migrated, events):
+    seen = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        text, error, _sid = call_turn(c.app, on_text=seen.append)
+    assert error is None
+    return seen, text
+
+
+def test_g5_the_words_before_a_tool_call_and_the_answer_are_told_with_a_line_break_between(migrated):
+    """Two CLI messages are glued without a space ("calendar.You have"), and a sentence ends only at punctuation plus
+    whitespace: the preface and the answer would be one sentence for the voice."""
+    seen, text = _told(migrated, _tool_turn("Checking your calendar."))
+    assert seen == ["Checking your calendar.", "\n", "You have school at 8 and training at 18:00."]
+    assert text == "You have school at 8 and training at 18:00."           # (what the turn returns is untouched)
+
+
+def test_g5_no_line_break_when_nothing_was_written_before_the_tool_call_or_for_a_second_tool_call(migrated):
+    seen, _ = _told(migrated, _tool_turn(""))
+    assert seen == ["You have school at 8 and training at 18:00."]
+    seen, _ = _told(migrated, _tool_turn("Checking.", tool_calls=3))
+    assert seen == ["Checking.", "\n", "You have school at 8 and training at 18:00."]
+
+
+def test_g5_a_tool_turn_whose_first_message_is_thinking_out_loud_is_still_said_after_it(migrated):
+    """End to end with the real mouth: 'Let me check ...' is held and dropped as meta, and the answer after it is
+    Claude's own words, said as they come, with the voice model asked once (not a second round after the end)."""
+    from app.voicemouth import Mouth
+    from tests.test_voicemouth import Model, run, tool
+    from tests.test_voicemouth_stream import FlushSpeaker
+    events = _tool_turn("Let me check your calendar.")
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        m, sp = Model(tool("what's on tomorrow?")), FlushSpeaker()
+        mo = Mouth(m, ask=c.app.state.mouth_ask, ask_stream=c.app.state.mouth_ask_stream, context="## Right now\nThursday 14:00",
+                   items=[], name="Sam", stream_verbatim=True, early_end=True)
+        r = run(mo.turn("What's on tomorrow?", "en", sp))
+    assert len(m.calls) == 1 and r.streamed
+    assert sp.heard.strip() == "You have school at 8 and training at 18:00."
+
+
+def test_g5_a_plain_first_message_is_said_while_the_tool_works_not_glued_to_the_answer(migrated):
+    """'Checking your calendar.' is a sentence on its own: it goes out at the tool call, before the answer exists."""
+    from app.voicemouth import Mouth
+    from tests.test_voicemouth import Model, run, tool
+    from tests.test_voicemouth_stream import FlushSpeaker
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="Checking your calendar."),
+              BrainEvent(EventKind.tool_use, data={"name": "calendar_list"}), "TAIL",
+              BrainEvent(EventKind.text, text="You have school at 8 and training at 18:00."), BrainEvent(EventKind.message_end),
+              BrainEvent(EventKind.result, text="You have school at 8 and training at 18:00.", session_id="S1")]
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events, tail=1.0)
+        m, sp = Model(tool("what's on tomorrow?")), FlushSpeaker()
+        mo = Mouth(m, ask=c.app.state.mouth_ask, ask_stream=c.app.state.mouth_ask_stream, context="## Right now\nThursday 14:00",
+                   items=[], name="Sam", stream_verbatim=True, early_end=True)
+        started = time.monotonic()
+        r = run(mo.turn("What's on tomorrow?", "en", sp))
+    assert r.streamed and len(m.calls) == 1
+    assert sp.heard.split() == "Checking your calendar. You have school at 8 and training at 18:00.".split()
+    assert "calendar.You" not in sp.heard
+    assert sp.first("feed") - started < 0.8              # before the tool's second (the brain waits 1 s at the tool call)
+
+
 # ---------------------------------------------------------------- conversation_parts, once
 
 def test_g5_the_conversation_prompt_is_built_once_a_turn_not_twice(migrated, monkeypatch):

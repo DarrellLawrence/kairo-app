@@ -3623,13 +3623,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         owner's request (own), never on the wrapper's wording (owner's rule 2026-10-19), in the language of the
         owner's words on the call. (Claude's whole answer, the error or None, the brain session.) Acceptance
         test 43 runs it too.
-        G5, while Claude works: on_text(delta) for every piece of its words; on_escalate({"escalated": model, "why": ...})
-        when Haiku hands the turn to the stronger model (nothing of Haiku's was said); on_end(the final message's text)
-        when Claude's text is complete, before the CLI has finished its own summary and sent the result;
-        on_session(id) as soon as the Claude session is known."""
+        G5, while Claude works: on_text(delta) for every piece of its words (a "\n" between the words before a tool call
+        and the message after it: the CLI's messages carry no space of their own, and a sentence ends at punctuation
+        plus whitespace); on_escalate({"escalated": model, "why": ...}) when Haiku hands the turn to the stronger model
+        (nothing of Haiku's was said); on_end(the final message's text) when Claude's text is complete, before the CLI
+        has finished its own summary and sent the result; on_session(id) as soon as the Claude session is known."""
         said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
         parts: list[str] = []
         last_message: list[str] = []       # the words since the last tool call: the answer proper
+        told = False                       # on_text got words since the last message break
         final, error, new_sid = None, None, None
         async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=session_id, thread_id=thread_id,
                                       purpose=purpose, model=model, own=request if own is None else own,
@@ -3640,9 +3642,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             elif event.kind is EventKind.text:
                 parts.append(event.text)
                 last_message.append(event.text)
+                told = told or bool(event.text.strip())
                 _tell(on_text, event.text)
             elif event.kind is EventKind.tool_use:
                 last_message.clear()
+                if told:                   # the message before the call ends here, whatever its last character was
+                    told = False
+                    _tell(on_text, "\n")
             elif event.kind is EventKind.message_end:
                 _tell(on_end, "".join(last_message).strip())
             elif event.kind is EventKind.usage and (event.data or {}).get("escalated"):
