@@ -569,7 +569,7 @@ class Speaker:
         if self.engine is None:
             return
         row_ = [v.at, v.path, v.outcome, v.why, v.score, v.rms_db, v.owner_db, v.speech_s, v.ms, v.wait_ms,
-                self.model.device if v.score is not None else None]
+                self.model.device if v.score is not None else None, v.label]
         try:
             with Session(self.engine) as s:
                 row = s.get(SettingKV, STATS_KEY) or SettingKV(key=STATS_KEY)
@@ -590,7 +590,7 @@ class Speaker:
                 "model": self.device(), "record_s": 30, "min_speech_s": ENROLL_MIN_S, **self.summary(s)}
 
 
-COLUMNS = ("at", "path", "outcome", "why", "score", "rms_db", "owner_db", "speech_s", "ms", "wait_ms", "device")
+COLUMNS = ("at", "path", "outcome", "why", "score", "rms_db", "owner_db", "speech_s", "ms", "wait_ms", "device", "label")
 
 
 def _rows(value) -> list:
@@ -598,7 +598,10 @@ def _rows(value) -> list:
         data = json.loads(value) if value else []
     except ValueError:
         data = []
-    return [r for r in data if isinstance(r, list) and len(r) == len(COLUMNS)] if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    # (a record from before the label column has one field fewer: the label is unknown there)
+    return [r + [None] * (len(COLUMNS) - len(r)) for r in data if isinstance(r, list) and len(COLUMNS) - 1 <= len(r) <= len(COLUMNS)]
 
 
 def _pct(v: list, p: float):
@@ -615,10 +618,15 @@ def summarize(rows: list, now: dt.datetime, days: int = 7) -> dict:
         if r["outcome"] in counts:
             counts[r["outcome"]] += 1
     scored = [r for r in recent if r["score"] is not None]
+    answered = [r for r in recent if r["outcome"] == "answered"]
+    labels = {k: sum(1 for r in answered if r["label"] == k) for k in (OWNER, UNSURE, UNCHECKED)}
+    labels["slow"] = sum(1 for r in answered if r["why"] == "slow")           # (these are unsure too)
+    checked = labels[OWNER] + labels[UNSURE]
+    labels["unsure_pct"] = round(100 * labels[UNSURE] / checked, 1) if checked else None
     ignored = [{"at": r["at"], "reason": r["outcome"], "title": REASONS[r["outcome"]], "score": r["score"],
                 "level_db": r["rms_db"], "owner_db": r["owner_db"], "speech_s": r["speech_s"]}
                for r in reversed(recent) if r["outcome"] in REASONS][:20]
-    return {"days": days, "turns": len(recent), "counts": counts, "scored": len(scored),
+    return {"days": days, "turns": len(recent), "counts": counts, "labels": labels, "scored": len(scored),
             "ms": {"p50": _pct([r["ms"] for r in scored], .5), "p95": _pct([r["ms"] for r in scored], .95),
                    "last": scored[-1]["ms"] if scored else None},
             "wait_ms": {"p50": _pct([r["wait_ms"] for r in recent], .5), "p95": _pct([r["wait_ms"] for r in recent], .95)},

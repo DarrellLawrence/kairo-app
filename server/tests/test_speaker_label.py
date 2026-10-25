@@ -8,6 +8,8 @@ audio only (tests/test_speaker.py's made-up voices and its pitch model). Written
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import json
 import time
 
 import pytest
@@ -205,13 +207,50 @@ def test_a_turn_ignored_for_being_too_far_is_not_a_confirmed_owner(tmp_path):
     assert (far.answer, far.outcome) == (False, "too_quiet") and far.label == "unsure"
 
 
-def test_the_label_is_not_in_the_record_or_the_log(tmp_path, migrated, caplog):
-    """Voice speed keeps time, reason, score and level; the label rides on the verdict only."""
-    assert "label" not in sp.COLUMNS
+def test_the_label_is_never_in_the_log_line(tmp_path, migrated, caplog):
+    """The log keeps time, reason, score and level; the label word is not in it (the record keeps it, as a count)."""
     s = taught(tmp_path, make_engine(migrated.db_url))
     caplog.set_level("DEBUG")
     v = turn(s.gate(), (voice(2.0, OTHER_HZ, seed=3), True))
     assert v.label == "stranger" and "stranger" not in v.log_line()
+
+
+def test_voice_speed_counts_the_labels_so_the_owner_can_read_how_often_they_are_asked_to_repeat(tmp_path, migrated):
+    """P19: after ~100 turns the owner reads how many answered turns were not confirmed as theirs (a short word, a check
+    that was too slow). Counts only: no words, no scores beyond what the record had."""
+    import json as _json
+    from sqlmodel import Session
+
+    from app.db import SettingKV
+    engine = make_engine(migrated.db_url)
+    s = taught(tmp_path, engine)
+    g = s.gate()
+    turn(g, (voice(2.0, OWNER_HZ, seed=2), True))                 # owner
+    turn(g, (voice(2.0, OWNER_HZ, seed=3), True))                 # owner
+    turn(g, (voice(0.6, NEAR_HZ, seed=5), True))                  # short and weak: unsure
+    turn(g, (voice(2.0, OTHER_HZ, seed=4), True))                 # someone else: ignored, not an answered turn
+    s.measure = lambda pcm, on: time.sleep(0.5)
+    old = sp.WAIT_MAX_S
+    sp.WAIT_MAX_S = 0.05
+    try:
+        turn(g, (voice(1.0), True))                               # too slow: answered, unsure
+    finally:
+        sp.WAIT_MAX_S = old
+    s.writer.submit(lambda: None).result()
+    with Session(engine) as db:
+        st = s.summary(db)
+        row = _json.loads(db.get(SettingKV, sp.STATS_KEY).value)[0]
+    assert sp.COLUMNS[-1] == "label" and len(row) == len(sp.COLUMNS) and row[-1] == "owner"
+    assert st["labels"] == {"owner": 2, "unsure": 2, "unchecked": 0, "slow": 1, "unsure_pct": 50.0}
+    assert st["counts"]["answered"] == 4 and st["counts"]["not_you"] == 1
+
+
+def test_a_record_from_before_the_label_column_still_reads():
+    old_row = ["2026-10-24T10:00:00+00:00", "call", "answered", "you", 0.8, -24.0, -21.0, 1.4, 6, 1, "cpu"]
+    rows = sp._rows(json.dumps([old_row]))
+    assert len(rows) == 1 and len(rows[0]) == len(sp.COLUMNS) and rows[0][-1] is None
+    st = sp.summarize(rows, dt.datetime(2026, 10, 25, tzinfo=dt.timezone.utc), 7)
+    assert st["counts"]["answered"] == 1 and st["labels"] == {"owner": 0, "unsure": 0, "unchecked": 0, "slow": 0, "unsure_pct": None}
 
 
 # ---------------------------------------------------------------- which label goes with which turn (WebRTC: gate.answer, then answer())

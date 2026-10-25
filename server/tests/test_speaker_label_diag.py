@@ -11,7 +11,7 @@ from app import flags
 from app import speaker as sp
 from app.db import make_engine
 from tests.test_diag import comp, pc, run, voice_parts, vl  # noqa: F401  (fixtures: C:\Kairo in miniature)
-from tests.test_speaker import PitchModel, taught
+from tests.test_speaker import PitchModel, app_client, taught  # noqa: F401  (app_client: a fixture)
 
 FLAG = "g13.speaker_label_gate"
 
@@ -96,3 +96,26 @@ def test_the_device_row_carries_the_gate_state(tmp_path, migrated):
 def test_the_device_row_never_carries_a_voiceprint(tmp_path, migrated):
     s = taught(tmp_path, make_engine(migrated.db_url))
     assert "vector" not in json.dumps(s.device())
+
+
+# ---------------------------------------------------------------- how often a request was not confirmed (P19: read after ~100 turns)
+
+def test_voice_speed_and_the_run_diagnosis_say_how_often_a_request_was_not_confirmed(app_client):
+    """The number the owner needs to decide whether the label gate suits their phone: answered turns by label, and how many
+    of the unsure ones were a check that was too slow. Counts only."""
+    s = app_client.app.state.speaker
+    for label, why, score in (("owner", "you", 0.7), ("owner", "you", 0.6), ("owner", "you", 0.5),
+                              ("unsure", "short: you", 0.2), ("unsure", "slow", None), ("unchecked", "off", None)):
+        s.record(sp.Verdict(True, "answered", why, score=score, rms_db=-24.0, speech_s=1.4, ms=6, wait_ms=1, label=label,
+                            at=s.now().isoformat(timespec="seconds")))
+    st = app_client.get("/api/voice/speaker").json()
+    assert st["labels"] == {"owner": 3, "unsure": 2, "unchecked": 1, "slow": 1, "unsure_pct": 40.0}
+    text = app_client.post("/api/diagnosis").json()["text"]
+    assert "owner 3, not confirmed 2 (40.0 %, 1 too slow), unchecked 1" in text
+
+
+def test_a_diagnosis_with_no_checked_turns_says_nothing_about_percent(app_client):
+    s = app_client.app.state.speaker
+    s.record(sp.Verdict(True, "answered", "off", label="unchecked", at=s.now().isoformat(timespec="seconds")))
+    text = app_client.post("/api/diagnosis").json()["text"]
+    assert "owner 0, not confirmed 0, unchecked 1" in text and "%" not in text.split("owner 0, not confirmed 0, unchecked 1")[1][:20]
