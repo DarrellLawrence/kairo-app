@@ -51,11 +51,31 @@ TRAILING_SILENCE_S = 0.2      # Whisper gets this much silence after the words (
 # After a tap the VAD hears nothing until that turn is taken (a loud room would start a new stretch of speech,
 # which holds the turn open, before Whisper is through); never longer than this.
 TAP_HOLD_S = 3.0
+TURN_STOP_TIMEOUT_OLD_S = 5.0    # Pipecat's own watchdog for a turn nothing ended; kept as it was while g6.smart_turn_3s is off
 OUT_RATE = 24000              # Kokoro's rate; Piper (22.05 kHz) is resampled to it
 OPENERS = {
     "en": ("Sure,", "Sure.", "Okay,", "Okay.", "Yeah,", "Yeah.", "Got it.", "Hey!", "Hm,", "Right,", "Nice.", "Done."),
     "de": ("Klar,", "Klar.", "Okay,", "Okay.", "Ja,", "Ja.", "Alles klar.", "Hey!", "Hm,", "Gut.", "Erledigt."),
 }
+
+
+# ---------------------------------------------------------------- the owner's turn-taking switches (group G6)
+
+# Turning attribute -> flag name (app/flags.py). Read once as a call starts (main.py), never per audio frame.
+TURN_FLAGS = {
+    "empty_turn_fix": "g6.empty_turn_fix",
+}
+
+
+@dataclass(frozen=True)
+class Turning:
+    """Which turn-taking changes this call uses. The defaults are the flags' defaults (a test pins them together),
+    so a call built without the argument (tests, the bench) is the call the owner gets with nothing changed."""
+    empty_turn_fix: bool = True          # a sound with no words doesn't make Kairo answer the last question again
+
+    @classmethod
+    def read(cls, on: Callable[[str], bool]) -> "Turning":
+        return cls(**{attr: bool(on(name)) for attr, name in TURN_FLAGS.items()})
 
 
 def available() -> bool:
@@ -388,7 +408,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                openers: OpenerCache | None = None, smart_turn_model: str | None = None,
                speculate: Callable[[str, str | None], Any] | None = None, discard: Callable[[], Any] | None = None,
                greeting: str | None = None, warning: str | None = None, gate: Callable[[], Any] | None = None,
-               norm: Callable[[str, str | None], tuple[str, str | None]] | None = None):
+               norm: Callable[[str, str | None], tuple[str, str | None]] | None = None, turning: Turning | None = None):
     """The pipeline for one call on an initialized SmallWebRTCConnection.
 
     voice: transcribe_pcm(pcm16k, language) -> Transcript; speak(text, language) -> (wav, lang).
@@ -404,6 +424,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     gate: async () -> bool, asked when a turn is finished: False = not the owner (speaker.py), the turn is
       ignored (no answer, nothing started early kept) and the call keeps listening.
     norm: (text, language) -> (what the voice says, language) (speaknorm.for_call, g9.speaknorm); None: as written.
+    turning: the g6.* switches as the call starts (Turning.read); None: the flags' defaults.
     """
     from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -434,6 +455,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
 
     from .voicelink import heard, wav_pcm
 
+    turning = turning or Turning()
     state = _State(answer=answer, interrupt=interrupt or (lambda n: None), events=events or conn.send_app_message,
                    language_mode=language_mode, speculate=speculate, discard=discard, gate=gate)
     cache = openers or OpenerCache(lambda text, lang: wav_pcm(voice.speak(text, lang)[0]))
@@ -573,7 +595,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
         async def process_frame(self, frame: Frame, direction: FrameDirection):
             await super().process_frame(frame, direction)
             if isinstance(frame, LLMContextFrame):
-                text = _last_user_text(frame.context)
+                text = _last_user_text(frame.context, strict=turning.empty_turn_fix)
                 state.heard = ""
                 if text and state.gate is not None and not await state.gate():   # not the owner (speaker.py)
                     text = ""
@@ -671,8 +693,12 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                                                             audio_out_10ms_chunks=2))
     stop = TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3(
         smart_turn_model_path=smart_turn_model, params=SmartTurnParams(stop_secs=TURN_MAX_SILENCE_S)))
+    # g6.empty_turn_fix: a turn that ends with no words (a cough over Kairo) is dropped. Pipecat's own recovery would add
+    # a note to the conversation and run the model, and the last owner message, the one already answered, was answered again.
+    quiet_empty = {"empty_user_turn": None} if turning.empty_turn_fix else {}
     pair = LLMContextAggregatorPair(LLMContext(), user_params=LLMUserAggregatorParams(
-        user_turn_strategies=UserTurnStrategies(stop=[TapStop(), stop])))
+        user_turn_strategies=UserTurnStrategies(stop=[TapStop(), stop]), user_turn_stop_timeout=TURN_STOP_TIMEOUT_OLD_S,
+        **quiet_empty))
     pipeline = Pipeline([transport.input(), VADProcessor(vad_analyzer=OwnerVAD(params=VADParams(stop_secs=VAD_STOP_S))),
                          Watch(), WhisperSTT(), pair.user(), EndOfTurn(), Answer(), KairoTTS(), transport.output(),
                          Spoken(), pair.assistant()])
@@ -717,10 +743,14 @@ def _quiet(task: asyncio.Task) -> None:
         log.warning("rtc: answer: %s: %s", type(task.exception()).__name__, task.exception())
 
 
-def _last_user_text(context) -> str:
+def _last_user_text(context, strict: bool = False) -> str:
+    """What the owner just said. strict (g6.empty_turn_fix): only when the conversation ends with the owner's message;
+    a note Pipecat added after an answered turn is not a new question. Not strict: the last owner message, wherever."""
     for m in reversed(getattr(context, "messages", None) or getattr(context, "get_messages", lambda: [])()):
         role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
         if role != "user":
+            if strict:
+                return ""
             continue
         content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
         if isinstance(content, list):

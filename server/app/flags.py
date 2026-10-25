@@ -80,6 +80,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G5 hand-off
 
     # -- G6 turn-taking
+    "g6.empty_turn_fix": (True, "A sound over Kairo that Whisper can't turn into words (a cough, a chair) no longer makes it answer "
+                                "your last question a second time. Measured in the research: it did, every time. Takes effect "
+                                "at the next call."),
 
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "

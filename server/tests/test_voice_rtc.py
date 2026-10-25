@@ -216,7 +216,7 @@ def _phone_track(times: list[float], speech=None):
 
 async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_after, timeout=25.0, interrupt=None,
                 voice=None, openers=None, greeting=None, first_message=None, warning=None, speech=None, later=(),
-                gate=None):
+                gate=None, turning=None):
     """A fake phone calls Kairo over WebRTC on this machine. Returns what the phone saw.
     later: (seconds after the mic started, message[, event]) sent on the data channel then, once the PC sent
     that event (the phone taps "done" only after the PC said it hears speech); phone.sent: when."""
@@ -276,8 +276,9 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
 
     await pc.setLocalDescription(await pc.createOffer())
     conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
+    extra = {} if turning is None else {"turning": turning}      # the g6.* switches (default: as the flags' defaults)
     call = voicertc.build_call(conn, voice=voice, answer=answer, interrupt=interrupt, openers=openers, greeting=greeting,
-                               warning=warning, gate=gate)
+                               warning=warning, gate=gate, **extra)
     run = asyncio.get_running_loop().create_task(call.run())
     ans = conn.get_answer()
     await pc.setRemoteDescription(RTCSessionDescription(sdp=ans["sdp"], type=ans["type"]))
