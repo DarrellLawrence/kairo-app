@@ -194,11 +194,14 @@ class Speaker:
     """Speaks an answer sentence by sentence: audio for the next sentence is made while the
     phone plays the one before. stop() ends it at once (talked over, hung up)."""
 
-    def __init__(self, voice, send_json, send_bytes, language: str | None, turn: int = 0, norm=None) -> None:
+    def __init__(self, voice, send_json, send_bytes, language: str | None, turn: int = 0, norm=None,
+                 second_piece: bool = True) -> None:
         self.voice, self.send_json, self.send_bytes, self.turn = voice, send_json, send_bytes, turn
         self.language = language if language in ("en", "de") else None
         self.norm = norm                    # g9.speaknorm: (text, language) -> (what the voice says, language), or None
+        self.second_piece = second_piece    # g5.second_piece: a line of Kairo's own does not jump words already written
         self.split = Sentences(norm is not None)
+        self.cut_before = False             # a flush() has started the first-piece rule over: words were cut before it
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.sent = 0
         self.first_audio_ms: int | None = None
@@ -215,7 +218,20 @@ class Speaker:
     def say(self, text: str) -> None:
         text = speakable(text)
         if text:
+            if self.second_piece:
+                self.flush()                # the words before this line are said before it; the words after start fresh
             self.queue.put_nowait(text)
+
+    def flush(self) -> None:
+        """The end of what is being written (Claude's text is finished): the words still being collected go to the voice
+        now, not when the speaker closes. The speaker stays open; words after this start a fresh first piece."""
+        if self.closed:
+            return
+        rest = self.split.flush()
+        if rest:
+            self.queue.put_nowait(rest)
+        self.cut_before = self.cut_before or self.split.count > 0     # (finish() must still know words were spoken)
+        self.split = Sentences(self.norm is not None)
 
     def finish(self, final_text: str | None = None) -> None:
         """The answer is complete. final_text: the whole answer, when nothing came in pieces."""
@@ -225,7 +241,7 @@ class Speaker:
         rest = self.split.flush()
         if rest:
             self.queue.put_nowait(rest)
-        elif final_text and self.split.count == 0 and self.sent == 0 and self.queue.empty():
+        elif final_text and self.split.count == 0 and not self.cut_before and self.sent == 0 and self.queue.empty():
             self.say(final_text)
         self.queue.put_nowait(None)
 
