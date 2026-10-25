@@ -125,6 +125,10 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                            "effect at the next call."),
 
     # -- G10 fast paths
+    "g10.fast_paths": (True, "Kairo answers 'What time is it?', 'What's the date?' and 'What day is it?' (and the German ones) "
+                             "itself, by a rule on the PC, the moment you finish: the voice model is not asked at all. Only when "
+                             "the whole sentence is that question: 'what time is my train' or 'what time is it in Tokyo' still go "
+                             "to the voice model. Off: those questions go to the voice model as before. Takes effect at the next call."),
 
     # -- G11 router
     "g11.router": (False, "Kairo writes down, for every call to the model, which route it took and why (More -> Usage, "
