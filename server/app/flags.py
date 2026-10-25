@@ -83,6 +83,11 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g6.empty_turn_fix": (True, "A sound over Kairo that Whisper can't turn into words (a cough, a chair) no longer makes it answer "
                                 "your last question a second time. Measured in the research: it did, every time. Takes effect "
                                 "at the next call."),
+    "g6.tap_lag_fix": (True, "Tapping 'I'm done' works when the PC is busy. Before, if the PC was slow, the tap could arrive before the "
+                             "words you had said had reached the part that ends the turn, be thrown away as 'nothing was said', and "
+                             "the answer came about 7 seconds late (measured: 1 tap in 4 with the PC at load 7 on 4 cores). Now the "
+                             "tap waits for them, and the speech ends where you tapped, not where the PC had got to: the last words "
+                             "before the tap are no longer lost. Takes effect at the next call."),
 
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "

@@ -64,6 +64,7 @@ OPENERS = {
 # Turning attribute -> flag name (app/flags.py). Read once as a call starts (main.py), never per audio frame.
 TURN_FLAGS = {
     "empty_turn_fix": "g6.empty_turn_fix",
+    "tap_lag_fix": "g6.tap_lag_fix",
 }
 
 
@@ -72,6 +73,7 @@ class Turning:
     """Which turn-taking changes this call uses. The defaults are the flags' defaults (a test pins them together),
     so a call built without the argument (tests, the bench) is the call the owner gets with nothing changed."""
     empty_turn_fix: bool = True          # a sound with no words doesn't make Kairo answer the last question again
+    tap_lag_fix: bool = True             # a tap on "done" survives a busy PC (the words, or the audio, still on their way)
 
     @classmethod
     def read(cls, on: Callable[[str], bool]) -> "Turning":
@@ -371,12 +373,15 @@ class _State:
         self.pending = 0                        # pieces of speech Whisper is still writing down
         self.tap: str | None = None             # "waiting": tapped, the turn ends once Whisper is through; "ended"
         self.tap_at = 0.0
+        self.audio_in = 0                       # audio frames that have reached the pipeline (g6.tap_lag_fix: where a tap falls)
+        self.tap_upto = 0                       # ... and how many of them were there when the owner tapped
 
     def tap_now(self) -> bool:
         """The owner tapped "done". False when nothing was heard since the last turn (nothing to end)."""
         if self.tapping() is not None or not (self.vad_on or self.pending or self.heard):
             return False
         self.tap, self.tap_at = "waiting", time.monotonic()
+        self.tap_upto = self.audio_in
         return True
 
     def tapping(self) -> str | None:
@@ -431,9 +436,9 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     from pipecat.audio.vad.silero import SileroVADAnalyzer
     from pipecat.audio.vad.vad_analyzer import VADParams, VADState
     from pipecat.frames.frames import (
-        AggregatedTextFrame, BotStoppedSpeakingFrame, ControlFrame, Frame, InterruptionFrame, LLMContextFrame,
-        LLMFullResponseEndFrame, LLMFullResponseStartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame,
-        UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
+        AggregatedTextFrame, BotStoppedSpeakingFrame, ControlFrame, Frame, InputAudioRawFrame, InterruptionFrame,
+        LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, TranscriptionFrame, TTSAudioRawFrame,
+        TTSSpeakFrame, UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
     )
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.runner import PipelineRunner
@@ -472,14 +477,18 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
 
     class OwnerVAD(SileroVADAnalyzer):
         """Silero, deaf while a tap is in progress: the speech it was hearing ends at once, and a loud room
-        can't start a new stretch (which would hold the tapped turn open) before the turn is taken."""
+        can't start a new stretch (which would hold the tapped turn open) before the turn is taken.
+        g6.tap_lag_fix: "at once" means at the audio the owner had spoken when they tapped, not at the audio the VAD
+        had got to: on a busy PC it is behind, and the last words before the tap would be lost."""
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self._deaf = False
+            self._seen = 0                          # audio frames analysed so far
 
         async def analyze_audio(self, buffer: bytes) -> VADState:
-            if state.tapping() is not None:
+            self._seen += 1
+            if state.tapping() is not None and not (turning.tap_lag_fix and self._seen <= state.tap_upto):
                 if not self._deaf:
                     self._deaf = True
                     self.set_params(self.params)           # quiet now; it starts afresh afterwards
@@ -511,11 +520,22 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                 if self._text:
                     state.tap, state.turn.tapped = "ended", state.tap_at
                     await self.trigger_user_turn_stopped()
+                elif turning.tap_lag_fix and state.heard and isinstance(frame, Tapped):
+                    pass       # Whisper has written words down but their frame is still on its way (the tap got ahead of it)
                 else:
                     state.tap = None                       # nothing was said: nothing to end
             if isinstance(frame, (TranscriptionFrame, Transcribed)):
                 return ProcessFrameResult.STOP
             return ProcessFrameResult.CONTINUE
+
+    class Count(FrameProcessor):
+        """Counts the audio that reaches the pipeline, so a tap knows how much of it the owner had spoken."""
+
+        async def process_frame(self, frame: Frame, direction: FrameDirection):
+            await super().process_frame(frame, direction)
+            if isinstance(frame, InputAudioRawFrame):
+                state.audio_in += 1
+            await self.push_frame(frame, direction)
 
     class Watch(FrameProcessor):
         """The end of speech the VAD saw starts a turn's clock; the phone hears when speech starts (a turn
@@ -699,7 +719,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     pair = LLMContextAggregatorPair(LLMContext(), user_params=LLMUserAggregatorParams(
         user_turn_strategies=UserTurnStrategies(stop=[TapStop(), stop]), user_turn_stop_timeout=TURN_STOP_TIMEOUT_OLD_S,
         **quiet_empty))
-    pipeline = Pipeline([transport.input(), VADProcessor(vad_analyzer=OwnerVAD(params=VADParams(stop_secs=VAD_STOP_S))),
+    pipeline = Pipeline([transport.input(), *([Count()] if turning.tap_lag_fix else []),
+                         VADProcessor(vad_analyzer=OwnerVAD(params=VADParams(stop_secs=VAD_STOP_S))),
                          Watch(), WhisperSTT(), pair.user(), EndOfTurn(), Answer(), KairoTTS(), transport.output(),
                          Spoken(), pair.assistant()])
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True, audio_out_sample_rate=OUT_RATE))
