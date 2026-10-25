@@ -215,32 +215,6 @@ def test_the_shipped_voicellm_json_has_no_turn_pin_so_the_tools_folder_and_its_d
         assert voicellm.smart_turn_for_calls(s, site) is None                  # switch on: nothing pinned, pipecat's copy
 
 
-def test_the_app_hands_a_call_the_model_the_switch_says(local, monkeypatch, tmp_path):
-    """/api/rtc/offer reads the switch at the start of each call and gives build_call the file (or None: pipecat's copy)."""
-    pytest.importorskip("pipecat")
-    pytest.importorskip("aiortc")
-    import asyncio
-    from app import voicertc
-    from tests import test_voice_rtc as rtc
-    pinned = tmp_path / "smart-turn-v3.2-cpu.onnx"
-    monkeypatch.setattr(voicellm, "smart_turn_pinned_path", lambda site: pinned)
-    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
-    local.app.state.voice = rtc.ToneVoice(local.voice)
-    seen = []
-    original = voicertc.build_call
-
-    def spy(*a, **k):
-        seen.append(k.get("smart_turn_model"))
-        return original(*a, **{**k, "smart_turn_model": None})        # the stand-in file is not a model: load pipecat's own
-    monkeypatch.setattr(voicertc, "build_call", spy)
-    asyncio.run(rtc._app_call(local, seconds=2))
-    assert local.put("/api/flags/g3.smart_turn_pin", json={"on": True}).status_code == 200
-    asyncio.run(rtc._app_call(local, seconds=2))
-    assert local.put("/api/flags/g3.smart_turn_pin", json={"on": False}).status_code == 200
-    asyncio.run(rtc._app_call(local, seconds=2))
-    assert seen == [None, str(pinned), None]
-
-
 # ---------------------------------------------------------------- the lab counts spoken call markup (the gate: 0 of N)
 
 def test_spoken_markup_is_told_from_ordinary_words():

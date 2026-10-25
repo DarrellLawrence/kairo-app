@@ -963,3 +963,26 @@ def test_the_patch_takes_60_ms_off_every_turn_and_160_ms_after_a_loss(uplink_run
     print(f"\nsaved per turn: {saved_clean:.1f} ms; after one lost packet: {saved_after_loss:.1f} ms")
     assert 25 < saved_clean < 95                                   # 3 packets of 20 ms
     assert 90 < saved_after_loss < 240                            # 8 packets of 20 ms
+
+
+def test_the_app_hands_a_call_the_model_the_switch_says(local, monkeypatch, tmp_path):
+    """G3 (g3.smart_turn_pin; here so both voice CI jobs run it): /api/rtc/offer reads the switch at the start of each call and gives build_call the file (or None: pipecat's copy)."""
+    _needs_pipecat()
+    from app import voicellm
+    pinned = tmp_path / "smart-turn-v3.2-cpu.onnx"
+    monkeypatch.setattr(voicellm, "smart_turn_pinned_path", lambda site: pinned)
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    local.app.state.voice = ToneVoice(local.voice)
+    seen = []
+    original = voicertc.build_call
+
+    def spy(*a, **k):
+        seen.append(k.get("smart_turn_model"))
+        return original(*a, **{**k, "smart_turn_model": None})        # the stand-in file is not a model: load pipecat's own
+    monkeypatch.setattr(voicertc, "build_call", spy)
+    asyncio.run(_app_call(local, seconds=2))
+    assert local.put("/api/flags/g3.smart_turn_pin", json={"on": True}).status_code == 200
+    asyncio.run(_app_call(local, seconds=2))
+    assert local.put("/api/flags/g3.smart_turn_pin", json={"on": False}).status_code == 200
+    asyncio.run(_app_call(local, seconds=2))
+    assert seen == [None, str(pinned), None]
