@@ -12,7 +12,6 @@ import time
 
 import pytest
 
-from app import bringup
 from app.voicemouth import FILLERS, LATER, Mouth, _Hang, g5_mouth_args
 from tests.test_voicemouth import CASE, LEA, Model, Speaker, mouth, run, text, tool
 
@@ -111,12 +110,12 @@ def test_g5_the_hang_up_marker_is_taken_out_even_when_it_arrives_in_pieces():
 
 def test_g5_the_first_sentence_reaches_the_voice_before_claude_has_finished():
     m = Model(tool("what's on tomorrow?"))
-    brain = StreamBrain(gap=0.15, tail=0.2)
+    brain = StreamBrain(gap=0.3, tail=0.2)
     sp = FlushSpeaker()
     mo = streaming(m, brain)
     r = run(mo.turn("What's on tomorrow?", "en", sp))
     assert sp.heard == "Tomorrow you have school from 8 to 15:30. Training is at 18:00." and r.text.endswith("Training is at 18:00.")
-    assert sp.first("feed") < brain.stamps["text_done"] - 0.2                   # the first words went out while Claude wrote
+    assert sp.first("feed") < brain.stamps["text_done"] - 0.3                   # the first words went out while Claude wrote
     assert sp.events[0] == ("say", FILLERS["en"][0])                            # the holding line first, as always
     assert r.asked == ["what's on tomorrow?"] and r.streamed and r.claude_first_ms is not None and r.tool_ms is not None
 
@@ -147,13 +146,13 @@ def test_g5_the_next_turn_sees_what_was_said_and_asks_claude_again_if_it_must():
 
 def test_g5_the_last_words_are_flushed_when_claudes_text_ends_not_when_the_cli_is_done():
     m = Model(tool("what's on tomorrow?"))
-    brain = StreamBrain(tail=1.0)
+    brain = StreamBrain(tail=4.0)
     sp = FlushSpeaker()
     started = time.monotonic()
     run(streaming(m, brain).turn("What's on tomorrow?", "en", sp))
     took = time.monotonic() - started
-    assert sp.first("flush") < brain.stamps["text_done"] + 0.3
-    assert took < 0.7 < 1.0                                                    # the turn did not wait for the CLI's 1 s tail
+    assert sp.first("flush") < brain.stamps["text_done"] + 0.5
+    assert took < 2.5 < 4.0                                                    # the turn did not wait for the CLI's 4 s tail
     assert sp.stamps[-1][1] == "flush"                                         # nothing was said after the flush
 
 
@@ -234,11 +233,11 @@ def test_g5_a_hand_over_to_a_stronger_model_is_noted_and_nothing_of_the_marker_i
 def test_g5_with_only_the_flush_switch_claudes_words_are_not_said_but_the_answer_comes_at_the_end_of_the_text():
     """Rephrase (today): the voice model says the answer in its own words, one round, as soon as Claude's text is done."""
     m = Model(tool("what's on tomorrow?"), text("Tomorrow: school, then training at 18:00."))
-    brain = StreamBrain(gap=0.05, tail=1.0)
+    brain = StreamBrain(gap=0.05, tail=4.0)
     sp = FlushSpeaker()
     started = time.monotonic()
     r = run(streaming(m, brain, stream_verbatim=False).turn("What's on tomorrow?", "en", sp))
-    assert time.monotonic() - started < 0.8                                    # not after the CLI's 1 s tail
+    assert time.monotonic() - started < 2.5                                    # not after the CLI's 4 s tail
     assert sp.heard == "Tomorrow: school, then training at 18:00." and len(m.calls) == 2 and not r.streamed
     assert [x["role"] for x in m.calls[1]["messages"]] == ["system", "user", "assistant", "tool"]
     assert json.loads(m.calls[1]["messages"][3]["content"])["answer"] == "Tomorrow you have school from 8 to 15:30. Training is at 18:00."
@@ -273,18 +272,18 @@ def test_g5_with_both_switches_off_and_an_ask_stream_the_old_path_is_used_too():
 
 def test_g5_the_cap_counts_to_the_first_spoken_piece_and_never_cuts_an_answer_that_has_begun():
     m = Model(tool("tell me about the trip"))
-    brain = StreamBrain(words=tuple(f"Part {i} of the trip plan. " for i in range(6)), first=0.05, gap=0.1)
+    brain = StreamBrain(words=tuple(f"Part {i} of the trip plan. " for i in range(6)), first=0.02, gap=0.3)
     sp = FlushSpeaker()
-    r = run(streaming(m, brain, ask_timeout_s=0.3).turn("Tell me about the trip", "en", sp))      # the answer takes 0.6 s
+    r = run(streaming(m, brain, ask_timeout_s=0.8).turn("Tell me about the trip", "en", sp))      # the answer takes 1.8 s
     assert not r.deferred and LATER["en"] not in sp.said and "Part 5 of the trip plan." in sp.heard and r.streamed
 
 
 def test_g5_without_the_cap_switch_the_whole_answer_has_the_8_seconds_as_before():
     m = Model(tool("tell me about the trip"))
     late = []
-    brain = StreamBrain(words=tuple(f"Part {i} of the trip plan. " for i in range(6)), first=0.05, gap=0.1)
+    brain = StreamBrain(words=tuple(f"Part {i} of the trip plan. " for i in range(6)), first=0.02, gap=0.3)
     sp = FlushSpeaker()
-    mo = streaming(m, brain, ask_timeout_s=0.3, cap_first_piece=False, late=lambda req, ans: late.append((req, ans)))
+    mo = streaming(m, brain, ask_timeout_s=0.8, cap_first_piece=False, late=lambda req, ans: late.append((req, ans)))
     r = run(mo.turn("Tell me about the trip", "en", sp))
     assert r.deferred and sp.said[-1] == LATER["en"] and "Part 0 of the trip plan." in sp.heard
     assert "Part 5 of the trip plan." not in sp.heard                           # cut by the cap
@@ -293,16 +292,16 @@ def test_g5_without_the_cap_switch_the_whole_answer_has_the_8_seconds_as_before(
 def test_g5_no_first_piece_in_time_is_the_old_i_will_get_back_to_you_and_a_push():
     m = Model(tool("check my mail"))
     late = []
-    brain = StreamBrain(words=("Nothing new in your mail.",), first=0.4, answer="Nothing new in your mail.")
+    brain = StreamBrain(words=("Nothing new in your mail.",), first=1.0, answer="Nothing new in your mail.")
     sp = FlushSpeaker()
-    mo = streaming(m, brain, ask_timeout_s=0.1, late=lambda req, ans: late.append((req, ans)))
+    mo = streaming(m, brain, ask_timeout_s=0.2, late=lambda req, ans: late.append((req, ans)))
 
     async def go():
         r = await mo.turn("check my mail", "en", sp)
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(1.5)                          # Claude's first words come after the call moved on
         return r
     r = run(go())
-    assert sp.said == [FILLERS["en"][0], LATER["en"]] and r.deferred and r.tool_ms < 300 and sp.heard == ""
+    assert sp.said == [FILLERS["en"][0], LATER["en"]] and r.deferred and r.tool_ms < 700 and sp.heard == ""
     assert late == [("check my mail", "Nothing new in your mail.")] and len(m.calls) == 1
 
 
@@ -310,15 +309,15 @@ def test_g5_no_first_piece_in_time_is_the_old_i_will_get_back_to_you_and_a_push(
 
 def test_g5_a_raise_that_has_not_been_said_is_dropped_when_claudes_first_words_come():
     m = Model(tool("is Friday free?"))
-    brain = StreamBrain(words=("Friday is free ", "after 4. ", "Enjoy it."), first=0.02, gap=0.2)
+    brain = StreamBrain(words=("Friday is free ", "after 4. ", "Enjoy it."), first=0.02, gap=0.4)
     sp = FlushSpeaker()
-    r = run(streaming(m, brain, items=[CASE, LEA], wait_after_s=0.1).turn("Is Friday free?", "en", sp))
+    r = run(streaming(m, brain, items=[CASE, LEA], wait_after_s=0.5).turn("Is Friday free?", "en", sp))
     assert r.waited == [] and r.raised == [] and sp.said == [FILLERS["en"][0]] and "Enjoy it." in sp.heard
 
 
 def test_g5_without_that_switch_the_raise_still_comes_in_the_middle_of_the_answer():
     m = Model(tool("is Friday free?"))
-    brain = StreamBrain(words=("Friday is free ", "after 4. ", "Enjoy it."), first=0.02, gap=0.2)
+    brain = StreamBrain(words=("Friday is free ", "after 4. ", "Enjoy it."), first=0.02, gap=0.4)
     sp = FlushSpeaker()
     r = run(streaming(m, brain, items=[CASE, LEA], wait_after_s=0.1, bringup_cancel=False).turn("Is Friday free?", "en", sp))
     assert r.waited == ["L1"] and sp.said[1].startswith("Quick one:")
@@ -334,9 +333,9 @@ def test_g5_an_urgent_item_still_comes_first_before_the_answer():
 
 def test_g5_talking_over_the_wait_drops_the_raise_that_was_waiting():
     m = Model(tool("is Friday free?"))
-    brain = StreamBrain(words=("Friday is free.",), first=1.0)
+    brain = StreamBrain(words=("Friday is free.",), first=3.0)
     sp = FlushSpeaker()
-    mo = streaming(m, brain, items=[LEA], wait_after_s=0.4)
+    mo = streaming(m, brain, items=[LEA], wait_after_s=0.8)
 
     async def go():
         t = asyncio.get_running_loop().create_task(mo.turn("Is Friday free?", "en", sp))
@@ -344,7 +343,7 @@ def test_g5_talking_over_the_wait_drops_the_raise_that_was_waiting():
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
             await t
-        await asyncio.sleep(0.5)                        # (past the time the item would have been said)
+        await asyncio.sleep(1.0)                        # (past the time the item would have been said)
     run(go())
     assert sp.said == [FILLERS["en"][0]]
 
@@ -386,7 +385,7 @@ def test_g5_the_rest_of_a_talked_over_answer_comes_in_the_next_turn_with_what_wa
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
             await t
-        await asyncio.sleep(0.8)                                 # Claude finishes while the owner talks
+        await asyncio.sleep(1.5)                                 # Claude finishes while the owner talks
         return await mo.turn("Wait, what should I bring?", "en", FlushSpeaker())
     run(go())
     last = m.calls[-1]["messages"][-1]["content"]

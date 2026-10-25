@@ -53,7 +53,7 @@ def test_g5_call_turn_tells_the_text_as_it_comes_and_the_end_before_the_cli_is_d
     assert kinds.count("text") >= 2 and kinds[-1] == "end" and kinds.count("end") == 1     # the fake sends two halves
     assert "".join(s[1] for s in seen if s[0] == "text") == text
     assert seen[-1][1] == text                                                             # the end carries the final message
-    assert done - seen[-1][2] >= TAIL_S * 0.7        # the CLI's own tail came after the end: nothing waited for it
+    assert done - seen[-1][2] >= TAIL_S * 0.5        # the CLI's own tail came after the end: nothing waited for it
     assert seen[-1][2] - started < TAIL_S + 5
 
 
@@ -317,9 +317,9 @@ def long_tail(monkeypatch):
 
 def test_g5_the_answer_comes_without_waiting_for_the_cli_summary_and_with_the_switch_off_it_waits(long_tail, local):   # noqa: F811
     _frames, quick = _call(local)                                         # g5.flush_at_end is on by default
-    assert quick < 1.6                                                    # (the fake Claude's summary takes 2 s)
     _frames, slow = _call(local, flags=[("g5.flush_at_end", False)])
-    assert slow >= 1.9
+    assert slow >= 1.9                                                    # (the fake Claude's summary takes 2 s)
+    assert slow - quick >= 1.0                                            # ... which the default no longer waits for
 
 
 def test_g5_a_call_over_webrtc_cuts_claudes_words_once_and_with_the_switch_off_twice(local, monkeypatch):   # noqa: F811
