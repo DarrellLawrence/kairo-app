@@ -94,6 +94,11 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                "of 100 finished sentences unfinished, and those answers come 2.5 seconds later, so the average turn is "
                                "0.1 second slower and about 1 call in 3 has at least one such wait in 10 turns. Your own rate is "
                                "measured on the PC (P9). Off: 0.5 seconds, as before. Takes effect at the next call."),
+    "g6.ignore_windows": (True, "A sound on your side is not heard as you starting to talk during the first 0.4 seconds of Kairo's voice "
+                                "(its own voice is loudest in the microphone then) nor during 1 second after the phone's audio "
+                                "stalled or the call connected (a burst of noise). If you really go on talking past that moment "
+                                "you are heard from your first word. Off: any sound counts at once, as before. Takes effect at the "
+                                "next call."),
 
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "

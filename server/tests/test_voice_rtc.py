@@ -224,7 +224,7 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
     from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
     voicertc.tailnet_only(allow_loopback=True)      # the fake phone is in this process: it offers 127.0.0.1 too
     voice = voice or FakeVoice()
-    phone = SimpleNamespace(events=[], audio_after=[], mic=None, loud=[], sent=[])
+    phone = SimpleNamespace(events=[], audio_after=[], mic=None, loud=[], sent=[], event_at=[])
     pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))   # like the phone: no STUN/TURN (aiortc's default asks Google)
     mic = _phone_track(list(times), speech)
     phone.mic = mic
@@ -235,6 +235,7 @@ async def _call(answer, *, times=(0.5,), wait_for=lambda phone: phone.audio_afte
     def on_message(msg):
         try:
             phone.events.append(json.loads(msg))
+            phone.event_at.append(time.monotonic())
         except ValueError:
             pass
 

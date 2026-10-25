@@ -46,9 +46,11 @@ class ScriptedVoice(FakeVoice):
     def __init__(self, *texts: str):
         super().__init__()
         self.script = list(texts)
+        self.lengths_s: list[float] = []
 
     def transcribe_pcm(self, pcm: bytes, language=None):
         self.heard += 1
+        self.lengths_s.append(len(pcm) / 32000)
         text = self.script.pop(0) if self.script else ""
         return SimpleNamespace(text=text, language="en" if text else None, seconds=len(pcm) / 32000)
 
@@ -324,3 +326,98 @@ def test_a_turn_with_no_words_ends_at_the_watchdog_and_the_switch_picks_which():
         assert hits, [line for _, line in seen.rows]
         ends[on] = hits[0] - phone.mic.ends[0]
     assert ends[False] - ends[True] > 1.0, ends                           # the switch decides how long the watchdog waits
+
+
+# ---------------------------------------------------------------- ignore windows (g6.ignore_windows)
+
+def test_a_window_holds_new_speech_for_the_first_moments_of_kairos_voice_and_after_a_gap_in_the_audio():
+    s = voicertc._State(answer=None, interrupt=lambda n: None, events=lambda m: None, language_mode="auto")
+    assert s.holding(100.0) is False                              # nothing going on: speech is heard at once
+    s.bot_speaking, s.bot_started = True, 100.0
+    assert s.holding(100.0) and s.holding(100.0 + voicertc.BARGE_GRACE_S - 0.01)      # Kairo's first moments: its start in the mic
+    assert not s.holding(100.0 + voicertc.BARGE_GRACE_S + 0.01)
+    s.bot_speaking = False
+    assert not s.holding(100.1)                                   # Kairo is quiet: no window
+    s.note_audio(200.0)                                           # audio arriving every 20 ms: nothing
+    s.note_audio(200.02)
+    assert s.holding(200.03) is False
+    s.note_audio(200.02 + voicertc.AUDIO_GAP_S + 0.1)             # the audio stalled (a reconnect, a glitch) and came back
+    t = 200.02 + voicertc.AUDIO_GAP_S + 0.1
+    assert s.holding(t + 0.01) and s.holding(t + voicertc.RECONNECT_HOLD_S - 0.01)
+    assert not s.holding(t + voicertc.RECONNECT_HOLD_S + 0.01)
+
+
+def _burst_over_kairo(turning: Turning, *, burst_after_s: float, burst_s: float, grace_s: float):
+    """The owner asks something, Kairo starts a long answer, and the owner makes a sound (the first burst_s seconds of the
+    same sentence) burst_after_s after the question ended. Whisper writes the sound down as 'Stop'."""
+    _needs_pipecat()
+    asked, stopped = [], []
+    voice = ScriptedVoice("Remind me to call the dentist tomorrow morning.", "Stop")
+    voice.tone = _tone(1.5)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(voicertc, "BARGE_GRACE_S", grace_s)
+        phone = asyncio.run(_call(_long_answer(asked), voice=voice, interrupt=stopped.append, turning=turning,
+                                  speech=_speech_then(gap_s=burst_after_s, clip_s=burst_s), wait_for=_after(8.0), timeout=14))
+    return SimpleNamespace(phone=phone, voice=voice, asked=asked, stopped=stopped,
+                           speech_events=[e for e in phone.events if e.get("type") == "speech"])
+
+
+def test_a_sound_in_the_first_moments_of_kairos_voice_is_not_heard_with_the_window_on():
+    """The start of Kairo's own voice is when its echo is loudest and the owner's speech overlaps it by accident: a new
+    stretch of speech inside the window is not reported (the window is shortened to 3 s here so the test can hit it)."""
+    on = _burst_over_kairo(Turning(ignore_windows=True), burst_after_s=1.0, burst_s=0.6, grace_s=3.0)
+    off = _burst_over_kairo(Turning(ignore_windows=False), burst_after_s=1.0, burst_s=0.6, grace_s=3.0)
+    assert on.voice.heard == 1 and on.stopped == [] and len(on.speech_events) == 1, (on.voice.heard, on.stopped, on.phone.events)
+    assert off.voice.heard == 2 and off.stopped == [1], (off.voice.heard, off.stopped)        # the old way: heard, and it cut Kairo off
+
+
+def test_speech_that_goes_on_past_the_window_is_heard_from_its_start():
+    """Not a sound but the owner taking over: it starts inside the window and goes on, so it is reported when the window
+    closes, and Whisper still gets the words from the start (the speech-to-text keeps the last second before it)."""
+    on = _burst_over_kairo(Turning(ignore_windows=True), burst_after_s=0.4, burst_s=2.5, grace_s=1.5)
+    assert on.voice.heard == 2, (on.voice.heard, on.phone.events)
+    assert on.stopped == [1]                                      # and it did cut the long answer off
+    assert on.voice.lengths_s[1] >= 1.8, on.voice.lengths_s       # the whole sentence, not just what came after the window
+
+
+def test_speech_already_going_on_is_never_cut_by_a_window():
+    """The owner is mid-sentence (the loud room, no pause) when Kairo says a line: the window must not end their speech."""
+    from tests.test_voice_rtc import _loud_is_speech, _steady
+    _needs_pipecat()
+    voice = RecordingVoice()
+    asked = []
+
+    async def answer(text, language, number, speaker):
+        asked.append(time.monotonic())
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+    with pytest.MonkeyPatch.context() as mp:
+        _loud_is_speech(mp)
+        mp.setattr(voicertc, "BARGE_GRACE_S", 100.0)               # the window stays open for the whole test
+        phone = asyncio.run(_call(answer, voice=voice, speech=_steady(5.0), turning=Turning(ignore_windows=True),
+                                  later=((2.0, {"type": "say", "text": "One moment."}),), wait_for=lambda p: bool(asked),
+                                  timeout=14))
+    assert asked and voice.lengths[0] >= 4.0, (voice.lengths, phone.events)      # one decode of the whole 5 s
+
+
+def test_the_first_second_after_the_call_connects_is_a_window_too():
+    """Connecting (or reconnecting) the phone's audio starts with a burst of noise: RECONNECT_HOLD_S after the client
+    connected, new speech is not reported (shortened to 2.0 s here); speech that goes on is heard."""
+    _needs_pipecat()
+    first = {}
+    for on in (True, False):
+        voice = RecordingVoice()
+        asked = []
+
+        async def answer(text, language, number, speaker, asked=asked):
+            asked.append(time.monotonic())
+            speaker.finish("Okay.")
+            return {"route": "talk"}
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(voicertc, "RECONNECT_HOLD_S", 2.0)
+            phone = asyncio.run(_call(answer, voice=voice, times=(0.2,), turning=Turning(ignore_windows=on),
+                                      wait_for=lambda p: bool(asked), timeout=14))
+        i = next(k for k, e in enumerate(phone.events) if e.get("type") == "speech")
+        first[on] = phone.event_at[i] - phone.mic.t0
+        assert asked
+    assert first[True] > first[False] + 0.8, first                # held until the window closed

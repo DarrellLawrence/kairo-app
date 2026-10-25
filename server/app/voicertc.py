@@ -58,6 +58,12 @@ TRAILING_SILENCE_S = 0.2      # Whisper gets this much silence after the words (
 # which holds the turn open, before Whisper is through); never longer than this.
 TAP_HOLD_S = 3.0
 TURN_STOP_TIMEOUT_OLD_S = 5.0    # Pipecat's own default, what a call had before g6.smart_turn_3s
+# g6.ignore_windows: new speech (a quiet -> speaking change) is not reported to the call during these moments. Speech
+# already being reported is never cut; speech that goes on past the window is reported when it closes (the speech to
+# text keeps the last second before it, so no word is lost).
+BARGE_GRACE_S = 0.4              # the first moments of Kairo's own voice: its start in the microphone, an overlap by accident
+RECONNECT_HOLD_S = 1.0           # after the call connected, or after the audio stalled: the noise that comes with it
+AUDIO_GAP_S = 0.5                # no audio for this long counts as a stall
 OUT_RATE = 24000              # Kokoro's rate; Piper (22.05 kHz) is resampled to it
 OPENERS = {
     "en": ("Sure,", "Sure.", "Okay,", "Okay.", "Yeah,", "Yeah.", "Got it.", "Hey!", "Hm,", "Right,", "Nice.", "Done."),
@@ -72,6 +78,7 @@ TURN_FLAGS = {
     "empty_turn_fix": "g6.empty_turn_fix",
     "tap_lag_fix": "g6.tap_lag_fix",
     "smart_turn_3s": "g6.smart_turn_3s",
+    "ignore_windows": "g6.ignore_windows",
 }
 
 
@@ -82,6 +89,7 @@ class Turning:
     empty_turn_fix: bool = True          # a sound with no words doesn't make Kairo answer the last question again
     tap_lag_fix: bool = True             # a tap on "done" survives a busy PC (the words, or the audio, still on their way)
     smart_turn_3s: bool = True           # a trailing-off thought is given 3.0 s before Kairo answers (was 0.5 s)
+    ignore_windows: bool = True          # new speech is not heard in the first moments of Kairo's voice or after an audio gap
 
     @classmethod
     def read(cls, on: Callable[[str], bool]) -> "Turning":
@@ -382,6 +390,10 @@ class _State:
         self.pending = 0                        # pieces of speech Whisper is still writing down
         self.tap: str | None = None             # "waiting": tapped, the turn ends once Whisper is through; "ended"
         self.tap_at = 0.0
+        self.bot_speaking = False               # Kairo's voice is being played (the transport said so)
+        self.bot_started = 0.0                  # ... since then (monotonic)
+        self.hold_until = 0.0                   # g6.ignore_windows: no new speech is reported before then (a reconnect, an audio gap)
+        self.last_audio: float | None = None    # when the last audio frame reached the VAD
         self.watchdog = False                   # Pipecat's watchdog ended the turn that is ending
         self.verdict: dict | None = None        # Smart Turn's last answer for this turn (complete, probability, ms)
         self.audio_in = 0                       # audio frames that have reached the pipeline (g6.tap_lag_fix: where a tap falls)
@@ -401,6 +413,17 @@ class _State:
             log.warning("rtc: a tapped turn wasn't taken within %.0f s: the call listens as before", TAP_HOLD_S)
             self.tap, self.pending = None, 0
         return self.tap
+
+    def holding(self, now: float) -> bool:
+        """A window is open: a new stretch of speech is not reported (g6.ignore_windows)."""
+        return now < self.hold_until or (self.bot_speaking and now - self.bot_started < BARGE_GRACE_S)
+
+    def note_audio(self, now: float) -> None:
+        """An audio frame reached the VAD at `now`. After a stall (AUDIO_GAP_S without audio) the noise that comes with
+        the audio coming back is held for RECONNECT_HOLD_S."""
+        if self.last_audio is not None and now - self.last_audio > AUDIO_GAP_S:
+            self.hold_until = now + RECONNECT_HOLD_S
+        self.last_audio = now
 
     def send(self, msg: dict) -> None:
         try:
@@ -447,9 +470,10 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     from pipecat.audio.vad.silero import SileroVADAnalyzer
     from pipecat.audio.vad.vad_analyzer import VADParams, VADState
     from pipecat.frames.frames import (
-        AggregatedTextFrame, BotStoppedSpeakingFrame, ControlFrame, Frame, InputAudioRawFrame, InterruptionFrame,
-        LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, MetricsFrame, TranscriptionFrame,
-        TTSAudioRawFrame, TTSSpeakFrame, UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
+        AggregatedTextFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame, ControlFrame, Frame, InputAudioRawFrame,
+        InterruptionFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, MetricsFrame,
+        TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame, UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame,
+        VADUserStoppedSpeakingFrame,
     )
     from pipecat.metrics.metrics import TurnMetricsData
     from pipecat.pipeline.pipeline import Pipeline
@@ -497,16 +521,27 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             super().__init__(**kwargs)
             self._deaf = False
             self._seen = 0                          # audio frames analysed so far
+            self._told_quiet = True                 # the call was last told 'quiet' (g6.ignore_windows)
 
         async def analyze_audio(self, buffer: bytes) -> VADState:
             self._seen += 1
             if state.tapping() is not None and not (turning.tap_lag_fix and self._seen <= state.tap_upto):
                 if not self._deaf:
                     self._deaf = True
+                    self._told_quiet = True
                     self.set_params(self.params)           # quiet now; it starts afresh afterwards
                 return VADState.QUIET
             self._deaf = False
-            return await super().analyze_audio(buffer)
+            if not turning.ignore_windows:
+                return await super().analyze_audio(buffer)
+            now = time.monotonic()
+            state.note_audio(now)
+            got = await super().analyze_audio(buffer)
+            if got == VADState.SPEAKING and self._told_quiet and state.holding(now):
+                return VADState.QUIET                  # a new stretch of speech inside a window: not reported (yet)
+            if got in (VADState.SPEAKING, VADState.QUIET):
+                self._told_quiet = got == VADState.QUIET
+            return got
 
     class TapStop(BaseUserTurnStopStrategy):
         """A tap ends the turn as soon as Whisper has written down all that was said, without waiting for a
@@ -732,11 +767,15 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                 yield TTSAudioRawFrame(pcm[i:i + step], self.sample_rate, 1, context_id=context_id)
 
     class Spoken(FrameProcessor):
-        """Kairo's voice went quiet at the phone's end of the pipe: the phone may show the answer as over."""
+        """Whether Kairo's voice is being played (the windows and the barge-in rule need it), and when it went quiet at
+        the phone's end of the pipe: the phone may show the answer as over."""
 
         async def process_frame(self, frame: Frame, direction: FrameDirection):
             await super().process_frame(frame, direction)
-            if isinstance(frame, BotStoppedSpeakingFrame):
+            if isinstance(frame, BotStartedSpeakingFrame):
+                state.bot_speaking, state.bot_started = True, time.monotonic()
+            elif isinstance(frame, BotStoppedSpeakingFrame):
+                state.bot_speaking = False
                 state.send({"type": "spoken", "turn": state.number})
             await self.push_frame(frame, direction)
 
@@ -762,6 +801,10 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                          Watch(), WhisperSTT(), pair.user(), EndOfTurn(), Answer(), KairoTTS(), transport.output(),
                          Spoken(), pair.assistant()])
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True, audio_out_sample_rate=OUT_RATE))
+
+    @transport.event_handler("on_client_connected")
+    async def _connected(_transport, _client):
+        state.hold_until = time.monotonic() + RECONNECT_HOLD_S      # the first moments of a connection are noisy
 
     @transport.event_handler("on_client_disconnected")
     async def _hung_up(_transport, _client):
