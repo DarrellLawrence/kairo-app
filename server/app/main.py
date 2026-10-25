@@ -240,10 +240,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                                       reason=reason):
                 yield event
             return
-        if thread_id is not None and session_id is not None and conversation_hash() != (
-                await asyncio.to_thread(conversation_parts, thread_id, False, before_id))[1]:
-            session_id = None              # the lasting part of the prompt changed: a fresh session gets it
         static, stable = await asyncio.to_thread(conversation_parts, thread_id, session_id is None, before_id)
+        if thread_id is not None and session_id is not None and conversation_hash() != stable:
+            session_id = None              # the lasting part of the prompt changed: a fresh session gets it
+            static = (await asyncio.to_thread(conversation_parts, thread_id, True, before_id))[0]   # (with the recent messages)
         warm = None
         if thread_id is not None:          # the owner's conversation; acceptance turns run on their own
             warm = conversation_key(thread_id, stable)
@@ -263,7 +263,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if out:
                     yield BrainEvent(EventKind.text, text=out)
                 continue
-            if event.kind is EventKind.result:
+            if event.kind is EventKind.message_end:      # the answer's text is complete (the result follows, up to seconds later)
+                if filt.escalated():
+                    continue                             # Haiku handing over: that message is no answer, Sonnet's end comes
+                rest = filt.flush()
+                if rest:
+                    yield BrainEvent(EventKind.text, text=rest)
+            elif event.kind is EventKind.result:
                 if filt.escalated():
                     handed_over_sid = event.session_id or session_id
                     break
@@ -3552,14 +3558,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return f"I couldn't get that done: {clip_text(error.text, 160)}", False
         return realtime.spoken_answer(text)   # plain speech, on every voice line
 
+    def _tell(callback, *args) -> None:
+        """A hand-off callback (the voice model's side): a bug in it never costs the turn."""
+        if callback is not None:
+            try:
+                callback(*args)
+            except Exception:
+                log.exception("voice: a hand-off callback")
+
     async def _call_turn(request: str, lines: list[str], *, session_id, thread_id, purpose: str,
-                         model: str | None = None, own: str | None = None):
+                         model: str | None = None, own: str | None = None, on_text=None, on_escalate=None, on_end=None):
         """ask_kairo's turn for Claude, as on any call: the call's wrapper (realtime.brain_prompt), routed on the
         owner's request (own), never on the wrapper's wording (owner's rule 2026-10-19), in the language of the
         owner's words on the call. (Claude's whole answer, the error or None, the brain session.) Acceptance
-        test 43 runs it too."""
+        test 43 runs it too.
+        G5, while Claude works: on_text(delta) for every piece of its words; on_escalate({"escalated": model, "why": ...})
+        when Haiku hands the turn to the stronger model (nothing of Haiku's was said); on_end(the final message's text)
+        when Claude's text is complete, before the CLI has finished its own summary and sent the result."""
         said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
         parts: list[str] = []
+        last_message: list[str] = []       # the words since the last tool call: the answer proper
         final, error, new_sid = None, None, None
         async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=session_id, thread_id=thread_id,
                                       purpose=purpose, model=model, own=request if own is None else own,
@@ -3568,11 +3586,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 new_sid = event.session_id
             elif event.kind is EventKind.text:
                 parts.append(event.text)
+                last_message.append(event.text)
+                _tell(on_text, event.text)
+            elif event.kind is EventKind.tool_use:
+                last_message.clear()
+            elif event.kind is EventKind.message_end:
+                _tell(on_end, "".join(last_message).strip())
+            elif event.kind is EventKind.usage and (event.data or {}).get("escalated"):
+                _tell(on_escalate, dict(event.data))
             elif event.kind is EventKind.result:
                 final, new_sid = event.text or "".join(parts), event.session_id or new_sid
             elif event.kind is EventKind.error:
                 error, new_sid = event, event.session_id or new_sid
         return (final or "".join(parts)).strip(), error, new_sid
+    app.state.call_turn = _call_turn      # (tests listen here)
 
     @app.get("/api/voice/realtime")
     def realtime_get():
