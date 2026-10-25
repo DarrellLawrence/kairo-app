@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app import prefs, voicestats
-from app.db import Timer, make_engine
+from app.db import PushLog, Timer, make_engine
 from app.main import create_app
 from tests.fakes.fake_google import FakeGoogle, connect
 from tests.test_voice_local import local, requests_seen  # noqa: F401  (fixtures: the app with the fake voice model)
@@ -55,7 +55,19 @@ def test_a_german_question_gets_a_german_answer(local):
     assert local.voice.spoken[0][0] == done["text"]
 
 
+PHONE = {"endpoint": "https://web.push.apple.com/abc", "keys": {"p256dh": "BPk", "auth": "au"}}
+
+
+def test_without_a_phone_subscribed_the_call_says_it_cannot_set_a_timer_and_sets_none(local):
+    done = done_of(ask(local, "Set a timer for ten minutes"))
+    assert done["text"].startswith("I can't set a timer: no phone is set up for notifications yet.")
+    assert local.app.state.timers.active() == [] and not any("Set a timer" in t for t in user_texts(local))   # a rule said it
+    assert local.post("/api/push/subscribe", json=PHONE).status_code == 200
+    assert done_of(ask(local, "Set a timer for ten minutes", turn=2))["text"] == "Okay, 10 minutes."
+
+
 def test_a_timer_is_set_on_a_call_and_is_a_row_the_runner_will_ring(local):
+    assert local.post("/api/push/subscribe", json=PHONE).status_code == 200
     done = done_of(ask(local, "Set a timer for ten minutes"))
     assert done["text"] == "Okay, 10 minutes."
     with Session(make_engine(local.settings.db_url)) as s:
@@ -140,6 +152,43 @@ def test_the_timers_runner_starts_with_the_app_and_rings_through_the_real_pusher
         while not sent and time.monotonic() < deadline:
             time.sleep(0.1)
     assert sent and sent[0]["ttl"] == 600 and sent[0]["headers"] == {"Urgency": "high"} and "tea" in sent[0]["data"]
+    with Session(make_engine(migrated.db_url)) as s:
+        [row] = s.exec(select(Timer)).all()
+        assert (row.status, [p.status for p in s.exec(select(PushLog)).all()]) == ("fired", ["sent"])
+
+
+def test_a_push_service_that_is_down_leaves_the_timer_waiting_and_the_log_says_failed(migrated, monkeypatch):
+    """Through the lifespan, the real Timers and the real Pusher: the sender fails, the timer is not marked rung, the next try
+    (the sender works again) rings it with the same tag."""
+    monkeypatch.setenv("KAIRO_SCHEDULER", "1")
+    monkeypatch.setattr("app.main.acceptance_after_release", lambda app: _never())
+    monkeypatch.setattr("app.timers.RETRY_S", 0.2)
+    app = create_app(migrated)
+    sent, fail = [], [True]
+
+    def sender(**kw):
+        if fail[0]:
+            raise TimeoutError("push service timed out")
+        sent.append(kw)
+
+    app.state.pusher._send = sender
+    app.state.jobs.start = lambda: None
+    with TestClient(app) as c:
+        c.post("/api/push/subscribe", json=PHONE)
+        app.state.timers.add(1, label="tea")
+        deadline = time.monotonic() + 20
+        with Session(make_engine(migrated.db_url)) as s:
+            while time.monotonic() < deadline and not s.exec(select(PushLog).where(PushLog.status == "failed")).all():
+                s.expire_all()
+                time.sleep(0.1)
+        fail[0] = False
+        while not sent and time.monotonic() < deadline:
+            time.sleep(0.1)
+    with Session(make_engine(migrated.db_url)) as s:
+        [row] = s.exec(select(Timer)).all()
+        statuses = [p.status for p in s.exec(select(PushLog).order_by(PushLog.id)).all()]
+    assert sent and "tea" in sent[0]["data"] and row.status == "fired"
+    assert statuses[0] == "failed" and statuses[-1] == "sent"
 
 
 async def _never():

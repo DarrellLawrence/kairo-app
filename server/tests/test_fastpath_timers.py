@@ -4,13 +4,14 @@ an injected clock. A timer is an internal action that only touches the owner: no
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 from sqlmodel import Session, select
 
 from app import fastpath, flags
 from app import timers as timers_mod
-from app.db import Timer
+from app.db import PushSubscription, Timer
 from app.timers import Timers
 from tests.test_pa import TZ
 from tests.test_timers import Bell, Clock, db_template, engine  # noqa: F401  (fixtures: one migrated database per file)
@@ -71,6 +72,23 @@ def test_a_length_that_cannot_be_set_is_told_not_guessed(rig):
     assert rig.say("set a timer for 5 minutes") == f"There are already {timers_mod.MAX_ACTIVE} timers running."
     assert rig.say("stell einen Timer auf 5 Minuten") == f"Es laufen schon {timers_mod.MAX_ACTIVE} Timer."
     assert len(rig.rows()) == timers_mod.MAX_ACTIVE
+
+
+def test_without_a_phone_to_ring_no_timer_is_promised(rig):
+    """The review found: with no device subscribed to notifications Kairo said "Okay, 1 second." and then rang nobody."""
+    with Session(rig.engine) as s:
+        for sub in s.exec(select(PushSubscription)).all():
+            s.delete(sub)
+        s.commit()
+    assert rig.say("set a timer for ten minutes") == ("I can't set a timer: no phone is set up for notifications yet. "
+                                                      "Turn them on in the Kairo app, then ask me again.")
+    assert rig.say("Erinner mich in 20 Minuten an die Wäsche") == ("Ich kann keinen Timer stellen: auf keinem Gerät sind Mitteilungen "
+                                                                     "eingerichtet. Schalte sie zuerst in der Kairo-App ein.")
+    assert rig.rows() == []
+    with Session(rig.engine) as s:
+        s.add(PushSubscription(endpoint="https://web.push.apple.com/9", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
+        s.commit()
+    assert rig.say("set a timer for ten minutes") == "Okay, 10 minutes." and len(rig.rows()) == 1
 
 
 def test_how_long_is_left(rig):

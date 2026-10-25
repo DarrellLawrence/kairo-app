@@ -19,6 +19,12 @@ When a timer is up, a push goes to the owner's devices through the one notificat
 This is an internal action that only touches the owner (v7): no approval card, no gate action, no tool for the model.
 A timer that ran out while Kairo was not running still rings after the restart (told that it was late); one that
 is over STALE_S late is marked missed and not told, since it would only be noise by now.
+
+A timer is only "fired" when a device's push service took the push (notify's report). If none did (a timeout, a
+push service that said no, no device subscribed) the timer stays waiting with the reason in its note, is tried
+again a little later each time (the push is marked "failed" in push_log, so the retry is allowed) and is missed, with
+the reason, once it is STALE_S late. Setting a timer is refused in plain words when no device is subscribed at all
+(can_ring): Kairo does not promise a ring nobody would hear.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from typing import Callable
 
 from sqlmodel import select
 
-from .db import Timer, session_for
+from .db import PushSubscription, Timer, session_for
 
 log = logging.getLogger("kairo.timers")
 
@@ -44,7 +50,9 @@ STALE_S = 30 * 60       # later than this: missed, not told
 PUSH_TTL_S = 600        # the push service keeps an undelivered timer push for ten minutes
 KEEP_DAYS = 30          # a finished timer is forgotten after this
 PURGE_EVERY_H = 6
-RETRY_S = 5.0           # a timer that is due but could not be told is tried again after this
+RETRY_S = 5.0           # a timer that is due but could not be told is tried again after this, and later each time (half
+                        # as long as it is late, at most one chunk)
+TRYING = "push failed: "    # a waiting timer's note after a try that no device took
 UTC = dt.timezone.utc
 
 
@@ -104,7 +112,8 @@ def local_hhmm(t: dt.datetime, tz) -> str:
 
 
 def words(t: Timer, tz, late_s: float = 0.0) -> tuple[str, str]:
-    """(title, body) of the push: a fixed template and the owner's own words, in the language it was set in."""
+    """(title, body) of the push: a fixed template and the owner's own words, in the language it was set in. A timer whose
+    earlier tries failed (note starts with TRYING) says that, not that Kairo was not running."""
     de = t.lang == "de"
     set_at = local_hhmm(t.created_at, tz)
     ran_out = local_hhmm(t.fire_at, tz)
@@ -122,8 +131,13 @@ def words(t: Timer, tz, late_s: float = 0.0) -> tuple[str, str]:
         body += (f": {t.label}" if t.label else "")
         body += f" (gestellt um {set_at})." if de else f" (set {set_at})."
     if late_s >= LATE_NOTE_S:
-        body += (f" Er ist um {ran_out} abgelaufen, als Kairo nicht lief." if de
-                 else f" It ran out at {ran_out}, while Kairo was not running.")
+        retried = (t.note or "").startswith(TRYING)
+        if retried:
+            body += (f" Er ist um {ran_out} abgelaufen; die ersten Versuche, dich zu erreichen, sind nicht durchgekommen." if de
+                     else f" It ran out at {ran_out}; the first tries to tell you did not get through.")
+        else:
+            body += (f" Er ist um {ran_out} abgelaufen, als Kairo nicht lief." if de
+                     else f" It ran out at {ran_out}, while Kairo was not running.")
     return title, body
 
 
@@ -157,6 +171,11 @@ class Timers:
         self._poke()
         return row
 
+    def can_ring(self) -> bool:
+        """At least one device is subscribed to notifications: a timer set now has someone to ring."""
+        with session_for(self.engine) as s:
+            return s.exec(select(PushSubscription.id).limit(1)).first() is not None
+
     def active(self) -> list[Timer]:
         with session_for(self.engine) as s:
             return list(s.exec(select(Timer).where(Timer.status == "active").order_by(Timer.fire_at, Timer.id)).all())
@@ -180,28 +199,47 @@ class Timers:
     # ------------------------------------------------ ringing
 
     def fire_due(self, now: dt.datetime | None = None) -> int:
-        """Rings (or, when far too late, marks missed) everything whose time has come. Returns how many rang."""
+        """Rings (or, when far too late, marks missed) everything whose time has come. Returns how many rang. A timer no
+        device could be told about stays waiting (note: why) and is tried again at the next tick."""
         now = _utc(now or self.now())
         rang = 0
+        can_ring = self.can_ring()
         with session_for(self.engine) as s:
             due = s.exec(select(Timer).where(Timer.status == "active").where(Timer.fire_at <= now)
                          .order_by(Timer.fire_at, Timer.id)).all()
             for t in due:
                 late = (now - _utc(t.fire_at)).total_seconds()
                 if late > STALE_S:
+                    reason = (t.note or "")[len(TRYING):].strip() if (t.note or "").startswith(TRYING) else "Kairo was not running"
                     t.status, t.done_at = "missed", now
-                    t.note = f"{int(late // 60)} min late (Kairo was not running): not told"
-                    log.info("timer %s: %s", t.id, t.note)
+                    t.note = f"{int(late // 60)} min late ({reason}): not told"
+                    log.warning("timer %s: %s", t.id, t.note)
                 else:
-                    title, body = words(t, self.tz, late)
-                    try:
-                        self.notify(title, body, "/", source="timer", ignore_quiet=True, ttl=PUSH_TTL_S, urgency="high",
-                                    tag=f"timer-{t.id}")
-                    except Exception:   # tried again at the next tick; never lose the runner over it
-                        log.exception("timer %s: the push failed", t.id)
+                    failure, report = None, {}
+                    if not can_ring:
+                        failure = "no device is subscribed to notifications"     # nothing to try: not a push into the void
+                    else:
+                        title, body = words(t, self.tz, late)
+                        try:
+                            self.notify(title, body, "/", source="timer", ignore_quiet=True, ttl=PUSH_TTL_S, urgency="high",
+                                        tag=f"timer-{t.id}", report=report)
+                        except Exception as exc:   # tried again at the next tick; never lose the runner over it
+                            log.exception("timer %s: the push failed", t.id)
+                            failure = f"{type(exc).__name__}: {exc}"[:200]
+                        else:
+                            if report.get("delivered") == 0:                         # asked, answered, and nobody took it
+                                failure = report.get("error") or "no device took the push"
+                    if failure is not None:
+                        t.note = TRYING + failure
+                        log.warning("timer %s: %s", t.id, t.note)
+                        s.add(t)
+                        s.commit()
                         continue
                     t.status, t.done_at = "fired", now
-                    t.note = f"rang {int(late)} s late" if late >= LATE_NOTE_S else None
+                    note = f"rang {int(late)} s late" if late >= LATE_NOTE_S else None
+                    if report.get("delivered") is not None and report.get("tried", 0) > report["delivered"]:
+                        note = "; ".join(x for x in (note, f"delivered to {report['delivered']} of {report['tried']} devices") if x)
+                    t.note = note
                     rang += 1
                 s.add(t)
                 s.commit()
@@ -233,8 +271,8 @@ class Timers:
         if nxt is None:
             return self.chunk_s
         gap = (nxt - _utc(self.now())).total_seconds()
-        if gap <= 0:                      # due but not rung (the push failed): not in a tight loop
-            return min(RETRY_S, self.chunk_s)
+        if gap <= 0:                      # due but not rung (the push failed): not in a tight loop, later each time
+            return min(max(RETRY_S, -gap / 2), self.chunk_s)
         return min(gap + 0.005, self.chunk_s)
 
     async def run(self) -> None:

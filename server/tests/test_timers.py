@@ -41,12 +41,15 @@ class Bell:
     def __init__(self):
         self.calls = []
         self.fail = 0
+        self.outcome = {"tried": 1, "delivered": 1, "error": None}      # what the push boss reports (push.Pusher.notify report=)
 
     def __call__(self, title, body, url="/", **kw):
         if self.fail:
             self.fail -= 1
             raise RuntimeError("push service down")
         self.calls.append({"title": title, "body": body, "url": url, **kw})
+        if kw.get("report") is not None:
+            kw["report"].update(self.outcome)
         return "sent"
 
 
@@ -61,7 +64,11 @@ def db_template(tmp_path_factory):
 @pytest.fixture
 def engine(db_template, tmp_path):
     shutil.copy(db_template, tmp_path / "k.sqlite")
-    return make_engine(f"sqlite:///{(tmp_path / 'k.sqlite').as_posix()}")
+    eng = make_engine(f"sqlite:///{(tmp_path / 'k.sqlite').as_posix()}")
+    with Session(eng) as s:                    # the owner's phone has notifications on: a timer can ring
+        s.add(PushSubscription(endpoint="https://web.push.apple.com/1", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
+        s.commit()
+    return eng
 
 
 @pytest.fixture
@@ -170,9 +177,6 @@ def test_a_timer_a_minute_late_rings_as_usual_one_far_too_late_is_missed_without
 
 def test_quiet_hours_do_not_hold_a_timer_back(engine, tmp_path):
     """Through the real notification boss at 23:30, inside the profile's quiet hours (23:00-06:00)."""
-    with Session(engine) as s:
-        s.add(PushSubscription(endpoint="https://web.push.apple.com/1", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
-        s.commit()
     sent = []
     pusher = Pusher(engine=engine, secrets_dir=tmp_path / "secrets", profile=PROFILE, sender=lambda **kw: sent.append(kw))
     clock = Clock(NIGHT)
@@ -201,6 +205,93 @@ def test_a_failed_push_is_tried_again_and_does_not_end_the_runner(rig):
     assert rig.fire_due() == 0 and rows(rig)[0].status == "active"                # still waiting to be told
     assert rig._tick() == timers_mod.RETRY_S                                       # due, but not in a tight loop
     assert rig.fire_due() == 1 and rows(rig)[0].status == "fired" and t.id == rows(rig)[0].id
+
+
+# ---------------------------------------------------------------- did it reach the phone? (found by the review of G10)
+
+def test_a_timer_is_only_told_as_rung_when_a_device_took_the_push(rig):
+    rig.bell.outcome = {"tried": 1, "delivered": 0, "error": "TimeoutError: push service timed out"}
+    t = rig.add(60, label="tea")
+    rig.clock.advance(minutes=1)
+    assert rig.fire_due() == 0
+    [row] = rows(rig)
+    assert row.id == t.id and row.status == "active" and row.done_at is None and row.note.startswith(timers_mod.TRYING)
+    assert "timed out" in row.note
+    rig.clock.advance(seconds=10)
+    rig.bell.outcome = {"tried": 1, "delivered": 1, "error": None}                   # the push service answers again
+    assert rig.fire_due() == 1
+    [row] = rows(rig)
+    assert row.status == "fired" and row.note is None and len(rig.bell.calls) == 2   # the same tag both times: one notification
+    assert {c["tag"] for c in rig.bell.calls} == {f"timer-{t.id}"}
+
+
+def test_a_timer_that_is_told_late_after_failed_tries_says_so_and_not_that_kairo_was_off(rig):
+    rig.bell.outcome = {"tried": 1, "delivered": 0, "error": "TimeoutError: push service timed out"}
+    rig.add(60)
+    rig.clock.advance(minutes=1)
+    rig.fire_due()
+    rig.clock.advance(minutes=4)
+    rig.bell.outcome = {"tried": 1, "delivered": 1, "error": None}
+    assert rig.fire_due() == 1
+    body = rig.bell.calls[-1]["body"]
+    assert body.endswith("It ran out at 10:01; the first tries to tell you did not get through.") and "Kairo was not running" not in body
+    assert rows(rig)[0].note == "rang 240 s late"
+
+
+def test_a_timer_nobody_could_be_told_about_is_missed_with_the_reason(rig):
+    rig.bell.outcome = {"tried": 2, "delivered": 0, "error": "410: gone"}
+    rig.add(60)
+    rig.clock.advance(minutes=1)
+    rig.fire_due()
+    rig.clock.advance(seconds=STALE_S + 60)
+    assert rig.fire_due() == 0
+    [row] = rows(rig)
+    assert row.status == "missed" and "not told" in row.note and "410: gone" in row.note and "not running" not in row.note
+    assert len(rig.bell.calls) == 1                                                  # no push after it is far too late
+
+
+def test_one_device_taking_the_push_is_enough_and_the_note_says_how_many(rig):
+    rig.bell.outcome = {"tried": 2, "delivered": 1, "error": "TimeoutError: x"}
+    rig.add(60)
+    rig.clock.advance(minutes=1)
+    assert rig.fire_due() == 1
+    assert rows(rig)[0].status == "fired" and rows(rig)[0].note == "delivered to 1 of 2 devices"
+
+
+def test_a_push_that_raises_is_kept_waiting_with_the_reason(rig):
+    rig.add(60)
+    rig.clock.advance(minutes=1)
+    rig.bell.fail = 1
+    assert rig.fire_due() == 0
+    assert rows(rig)[0].status == "active" and "push service down" in rows(rig)[0].note
+
+
+def test_without_any_device_nothing_is_sent_and_the_timer_waits_for_one(rig):
+    with Session(rig.engine) as s:
+        for sub in s.exec(select(PushSubscription)).all():
+            s.delete(sub)
+        s.commit()
+    assert rig.can_ring() is False
+    rig.add(60)
+    rig.clock.advance(minutes=1)
+    assert rig.fire_due() == 0 and rig.bell.calls == []                              # not a push into the void, not a log row
+    assert rows(rig)[0].status == "active" and "no device" in rows(rig)[0].note
+    with Session(rig.engine) as s:
+        s.add(PushSubscription(endpoint="https://web.push.apple.com/2", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
+        s.commit()
+    assert rig.can_ring() is True and rig.fire_due() == 1                            # the owner turned notifications on: it rings
+
+
+def test_a_timer_that_cannot_be_told_is_tried_again_a_little_later_each_time(rig):
+    rig.bell.outcome = {"tried": 1, "delivered": 0, "error": "x"}
+    rig.add(60)
+    rig.clock.advance(minutes=1)
+    rig.fire_due()
+    assert rig._tick() == timers_mod.RETRY_S                                         # just due: soon
+    rig.clock.advance(seconds=40)
+    assert rig._tick() == 20                                                         # 40 s late: half of that
+    rig.clock.advance(minutes=10)
+    assert rig._tick() == rig.chunk_s                                                # never longer than a chunk
 
 
 def test_what_cannot_be_set_is_refused(rig):

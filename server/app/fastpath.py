@@ -415,6 +415,8 @@ class FastPaths:
             if not execute:
                 return Answer("", lang, m.kind)
             reminder = bool(d.get("reminder"))
+            if not t.can_ring():                                  # nobody would hear it: say so, set nothing
+                return Answer(_TT[lang]["no_phone"], lang, "timer_error")
             try:
                 t.add(d["seconds"], label=d.get("label"), kind="reminder" if reminder else "timer", lang=lang)
             except TimerError as exc:
@@ -474,14 +476,16 @@ class FastPaths:
 
 _TT = {
     "en": {"none": "I don't have a timer running.", "range": "A timer can be from a second to a day.",
-           "many": "There are already {n} timers running.", "set": "Okay, {dur}", "remind": "Okay, I'll remind you in {dur}",
+           "many": "There are already {n} timers running.",
+           "no_phone": "I can't set a timer: no phone is set up for notifications yet. Turn them on in the Kairo app, then ask me again.", "set": "Okay, {dur}", "remind": "Okay, I'll remind you in {dur}",
            "left": "About {left} left.", "left_named": "{name}: about {left} left.", "unnamed": "The timer for {dur}",
            "you_have": "You have {n} timers.", "more": " And {k} more.",
            "which": "Say cancel all timers, or tell me which one by its name or length.",
            "cancelled": "Okay, timer cancelled.", "cancelled_all": "Okay, all {n} timers cancelled.",
            "no_name": "I don't have a timer called {q}.", "no_len": "I don't have a timer for {dur}."},
     "de": {"none": "Ich habe keinen Timer laufen.", "range": "Ein Timer geht von einer Sekunde bis zu einem Tag.",
-           "many": "Es laufen schon {n} Timer.", "set": "Okay, {dur}", "remind": "Okay, ich erinnere dich in {dur}",
+           "many": "Es laufen schon {n} Timer.",
+           "no_phone": "Ich kann keinen Timer stellen: auf keinem Gerät sind Mitteilungen eingerichtet. Schalte sie zuerst in der Kairo-App ein.", "set": "Okay, {dur}", "remind": "Okay, ich erinnere dich in {dur}",
            "left": "Noch etwa {left}.", "left_named": "{name}: noch etwa {left}.", "unnamed": "Der Timer für {dur}",
            "you_have": "Du hast {n} Timer.", "more": " Und {k} weitere.",
            "which": "Sag alle Timer abbrechen, oder welchen, mit Namen oder Länge.",
