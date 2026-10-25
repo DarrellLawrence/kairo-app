@@ -6,15 +6,18 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import shutil
 import time
 
 import pytest
+from alembic import command
 from sqlmodel import Session, select
 
 from app import timers as timers_mod
 from app.db import PushSubscription, Timer, make_engine
 from app.push import Pusher
 from app.timers import STALE_S, Timers, TimerError, clean_label, say_duration, say_left, words
+from tests.conftest import alembic_config
 from tests.test_pa import PROFILE, TZ
 
 T0 = dt.datetime(2026, 10, 14, 10, 0, tzinfo=TZ)              # a Wednesday, 10:00 in the owner's zone
@@ -47,9 +50,22 @@ class Bell:
         return "sent"
 
 
+@pytest.fixture(scope="module")
+def db_template(tmp_path_factory):
+    """One migrated database per file, copied for each test (a migration takes about a second)."""
+    folder = tmp_path_factory.mktemp("timers-db")
+    command.upgrade(alembic_config(f"sqlite:///{(folder / 'k.sqlite').as_posix()}"), "head")
+    return folder / "k.sqlite"
+
+
 @pytest.fixture
-def rig(migrated):
-    engine = make_engine(migrated.db_url)
+def engine(db_template, tmp_path):
+    shutil.copy(db_template, tmp_path / "k.sqlite")
+    return make_engine(f"sqlite:///{(tmp_path / 'k.sqlite').as_posix()}")
+
+
+@pytest.fixture
+def rig(engine):
     clock, bell = Clock(), Bell()
     t = Timers(engine, bell, tz=TZ, now=clock)
     t.clock, t.bell, t.engine = clock, bell, engine
@@ -152,14 +168,13 @@ def test_a_timer_a_minute_late_rings_as_usual_one_far_too_late_is_missed_without
     assert second.id == ancient.id and second.status == "missed" and "not told" in second.note
 
 
-def test_quiet_hours_do_not_hold_a_timer_back(migrated):
+def test_quiet_hours_do_not_hold_a_timer_back(engine, tmp_path):
     """Through the real notification boss at 23:30, inside the profile's quiet hours (23:00-06:00)."""
-    engine = make_engine(migrated.db_url)
     with Session(engine) as s:
         s.add(PushSubscription(endpoint="https://web.push.apple.com/1", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
         s.commit()
     sent = []
-    pusher = Pusher(engine=engine, secrets_dir=migrated.data_dir / "secrets", profile=PROFILE, sender=lambda **kw: sent.append(kw))
+    pusher = Pusher(engine=engine, secrets_dir=tmp_path / "secrets", profile=PROFILE, sender=lambda **kw: sent.append(kw))
     clock = Clock(NIGHT)
     t = Timers(engine, lambda *a, **k: pusher.notify(*a, wait=True, now=clock(), **k), tz=TZ, now=clock)
     t.add(300, label="bread")
@@ -215,8 +230,7 @@ def test_the_sleep_is_until_the_next_timer_and_never_longer_than_a_chunk(rig):
 
 # ---------------------------------------------------------------- the real loop (generous margins)
 
-def test_the_runner_rings_a_short_timer_and_wakes_for_one_added_while_it_sleeps(migrated):
-    engine = make_engine(migrated.db_url)
+def test_the_runner_rings_a_short_timer_and_wakes_for_one_added_while_it_sleeps(engine):
     bell = Bell()
     t = Timers(engine, bell, tz=TZ, chunk_s=30.0)                                  # the real clock; it would sleep 30 s
 

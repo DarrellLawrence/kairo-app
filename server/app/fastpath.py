@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import timerphrase
+from .timers import MAX_ACTIVE, TimerError, clean_label, say_duration, say_left
 
 log = logging.getLogger("kairo.fastpath")
 
@@ -193,7 +194,11 @@ class CallRules:
         self.fp, self.time_date, self.agenda, self.timers = fp, time_date, agenda, timers
 
     def _on(self, kind: str) -> bool:
-        return self.time_date if kind in ("time", "date", "weekday") else False
+        if kind in ("time", "date", "weekday"):
+            return self.time_date
+        if kind.startswith("timer_"):
+            return self.timers
+        return False
 
     def resolve(self, text: str, *, language: str | None = None, mode: str = "auto", execute: bool = True) -> Answer | None:
         """The answer a rule gives to `text`, or None (the voice model answers). language: what the speech-to-text said the
@@ -220,8 +225,8 @@ class CallRules:
 class FastPaths:
     """tz: the owner's zone; now: the clock (an aware datetime), injected in tests."""
 
-    def __init__(self, *, tz, now: Callable[[], dt.datetime] | None = None, engine=None):
-        self.tz, self.engine = tz, engine
+    def __init__(self, *, tz, now: Callable[[], dt.datetime] | None = None, engine=None, timers=None):
+        self.tz, self.engine, self.timers = tz, engine, timers
         self._now = now or (lambda: dt.datetime.now(dt.timezone.utc))
 
     def now(self) -> dt.datetime:
@@ -236,7 +241,7 @@ class FastPaths:
         from .db import session_for
         try:
             with session_for(self.engine) as s:
-                return self.rules(time_date=flags.on(s, "g10.fast_paths"))
+                return self.rules(time_date=flags.on(s, "g10.fast_paths"), timers=flags.on(s, "g10.timers"))
         except Exception:   # no database to read: no rules, the voice model answers as before
             log.exception("fast paths: reading the switches")
             return self.rules(time_date=False)
@@ -250,6 +255,113 @@ class FastPaths:
         elif m.kind == "weekday":
             wd = WEEKDAYS[m.lang][now.weekday()]
             text = f"It's {wd}." if m.lang == "en" else f"Heute ist {wd}."
+        elif m.kind.startswith("timer_"):
+            return self._timer(m, execute)
         else:
             return None
         return Answer(text, m.lang, m.kind)
+
+    # ------------------------------------------------ timers (timerphrase reads the words, timers.py rings them)
+
+    def _timer(self, m: Match, execute: bool) -> Answer | None:
+        t, lang, d = self.timers, m.lang, m.data
+        if t is None:                                           # nothing to keep a timer with: never promise one
+            return None
+        if m.kind == "timer_set":
+            if not execute:
+                return Answer("", lang, m.kind)
+            reminder = bool(d.get("reminder"))
+            try:
+                t.add(d["seconds"], label=d.get("label"), kind="reminder" if reminder else "timer", lang=lang)
+            except TimerError as exc:
+                return Answer(_TT[lang]["many" if exc.kind == "many" else "range"].format(n=MAX_ACTIVE), lang, "timer_error")
+            dur = say_duration(d["seconds"], lang)
+            label = clean_label(d.get("label"))
+            head = _TT[lang]["remind" if reminder else "set"].format(dur=dur)
+            return Answer(f"{head}: {label}." if label else f"{head}.", lang, m.kind)
+        rows = t.active()
+        if m.kind == "timer_list" or (m.kind == "timer_left" and not (d.get("all") or d.get("q") or d.get("seconds"))):
+            return Answer(self._listing(rows, lang) if rows else _TT[lang]["none"], lang, m.kind)
+        if not rows:
+            return Answer(_TT[lang]["none"], lang, m.kind)
+        picked = _pick(rows, d)
+        if m.kind == "timer_left":
+            if not picked:
+                return Answer(self._nothing_like(d, lang), lang, m.kind)
+            return Answer(self._listing(picked, lang), lang, m.kind)
+        # cancel
+        if d.get("all"):
+            target = rows
+        elif d.get("q") or d.get("seconds"):
+            if not picked:
+                return Answer(self._nothing_like(d, lang), lang, m.kind)
+            target = picked
+        else:
+            target = rows
+        if len(target) > 1 and not d.get("all"):               # which one? not guessed, nothing is cancelled
+            return Answer(self._listing(target, lang) + " " + _TT[lang]["which"], lang, m.kind)
+        if execute:
+            t.cancel([x.id for x in target])
+        word = "cancelled_all" if len(target) > 1 else "cancelled"
+        return Answer(_TT[lang][word].format(n=len(target)), lang, m.kind)
+
+    def _name(self, row, lang: str) -> str:
+        if row.label:
+            return row.label[0].upper() + row.label[1:]
+        return _TT[lang]["unnamed"].format(dur=say_duration(row.seconds, lang))
+
+    def _listing(self, rows: list, lang: str) -> str:
+        """One timer: how long is left (with its name if it has one). Several: all of them, the first three."""
+        if len(rows) == 1:
+            left = say_left(self.timers.left(rows[0]), lang)
+            if rows[0].label:
+                return _TT[lang]["left_named"].format(name=self._name(rows[0], lang), left=left)
+            return _TT[lang]["left"].format(left=left)
+        parts = [_TT[lang]["left_named"].format(name=self._name(r, lang), left=say_left(self.timers.left(r), lang)) for r in rows[:3]]
+        more = _TT[lang]["more"].format(k=len(rows) - 3) if len(rows) > 3 else ""
+        return _TT[lang]["you_have"].format(n=len(rows)) + " " + " ".join(parts) + more
+
+    @staticmethod
+    def _nothing_like(d: dict, lang: str) -> str:
+        if d.get("seconds"):
+            return _TT[lang]["no_len"].format(dur=say_duration(d["seconds"], lang))
+        return _TT[lang]["no_name"].format(q=d.get("q", ""))
+
+
+_TT = {
+    "en": {"none": "I don't have a timer running.", "range": "A timer can be from a second to a day.",
+           "many": "There are already {n} timers running.", "set": "Okay, {dur}", "remind": "Okay, I'll remind you in {dur}",
+           "left": "About {left} left.", "left_named": "{name}: about {left} left.", "unnamed": "The timer for {dur}",
+           "you_have": "You have {n} timers.", "more": " And {k} more.",
+           "which": "Say cancel all timers, or tell me which one by its name or length.",
+           "cancelled": "Okay, timer cancelled.", "cancelled_all": "Okay, all {n} timers cancelled.",
+           "no_name": "I don't have a timer called {q}.", "no_len": "I don't have a timer for {dur}."},
+    "de": {"none": "Ich habe keinen Timer laufen.", "range": "Ein Timer geht von einer Sekunde bis zu einem Tag.",
+           "many": "Es laufen schon {n} Timer.", "set": "Okay, {dur}", "remind": "Okay, ich erinnere dich in {dur}",
+           "left": "Noch etwa {left}.", "left_named": "{name}: noch etwa {left}.", "unnamed": "Der Timer für {dur}",
+           "you_have": "Du hast {n} Timer.", "more": " Und {k} weitere.",
+           "which": "Sag alle Timer abbrechen, oder welchen, mit Namen oder Länge.",
+           "cancelled": "Okay, Timer abgebrochen.", "cancelled_all": "Okay, alle {n} Timer abgebrochen.",
+           "no_name": "Ich habe keinen Timer namens {q}.", "no_len": "Ich habe keinen Timer für {dur}."},
+}
+
+
+def _words_of(text: str) -> list[str]:
+    return re.sub(r"[\W_]+", " ", (text or "").lower()).split()
+
+
+def _alike(a: str, b: str) -> bool:
+    """The same word, or one the plural/ending of the other (nudel / nudeln, egg / eggs), from three letters on."""
+    return a == b or (min(len(a), len(b)) >= 3 and (a.startswith(b) or b.startswith(a)))
+
+
+def _pick(rows: list, d: dict) -> list:
+    """Which of the running timers a cancel or a question means: all, by its length, by its name, else all of them."""
+    if d.get("all"):
+        return rows
+    if d.get("seconds"):
+        return [r for r in rows if r.seconds == d["seconds"]]
+    if d.get("q"):
+        want = _words_of(d["q"])
+        return [r for r in rows if want and all(any(_alike(w, x) for x in _words_of(r.label)) for w in want)]
+    return rows

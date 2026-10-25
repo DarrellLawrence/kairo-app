@@ -47,7 +47,11 @@ UTC = dt.timezone.utc
 
 
 class TimerError(ValueError):
-    """What the owner asked for cannot be set (the reason is a short sentence)."""
+    """What the owner asked for cannot be set. kind: "range" (a second to a day) or "many" (too many at once)."""
+
+    def __init__(self, message: str, kind: str = "range"):
+        super().__init__(message)
+        self.kind = kind
 
 
 def _utc(t: dt.datetime) -> dt.datetime:
@@ -137,11 +141,11 @@ class Timers:
 
     def add(self, seconds: int, *, label: str | None = None, kind: str = "timer", lang: str = "en") -> Timer:
         if not isinstance(seconds, int) or isinstance(seconds, bool) or not MIN_S <= seconds <= MAX_S:
-            raise TimerError("a timer can be from a second to a day")
+            raise TimerError("a timer can be from a second to a day", "range")
         now = _utc(self.now())
         with session_for(self.engine) as s:
             if len(s.exec(select(Timer.id).where(Timer.status == "active")).all()) >= MAX_ACTIVE:
-                raise TimerError(f"there are already {MAX_ACTIVE} timers")
+                raise TimerError(f"there are already {MAX_ACTIVE} timers", "many")
             row = Timer(created_at=now, fire_at=now + dt.timedelta(seconds=seconds), seconds=seconds,
                         label=clean_label(label), kind="reminder" if kind == "reminder" else "timer",
                         lang="de" if lang == "de" else "en")
