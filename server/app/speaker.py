@@ -221,12 +221,15 @@ def speaker_verdict(score: float | None, speech_s: float, mode: str) -> tuple[bo
     return (score >= THRESHOLD[mode]), ("you" if score >= THRESHOLD[mode] else "not_you")
 
 
-def label_for(*, on: bool, ok: bool, score: float | None, mode: str) -> str:
+def label_for(*, on: bool, ok: bool, score: float | None, mode: str, broken: bool = False) -> str:
     """G13: the label of a turn (speaker_label.py). on: the check runs (a voiceprint, the model, not switched off).
     ok: the turn passed the check (speaker_verdict). Only a score at or over the threshold is the owner; a short
-    turn that passed with a weaker score, or any turn the check could not score, is unsure."""
+    turn that passed with a weaker score, or any turn the check could not score, is unsure.
+    Not on: unchecked when that is the owner's choice (the setting is off, or no voiceprint was ever taught); unsure
+    when it is not (broken: a voiceprint is taught and the setting is not off, but the check cannot run), so the
+    protection does not switch itself off exactly when the check breaks."""
     if not on:
-        return UNCHECKED
+        return UNSURE if broken else UNCHECKED
     if score is None:
         return UNSURE
     if not ok:
@@ -490,6 +493,18 @@ class Speaker:
             return False, info["problem"]
         return True, None
 
+    def check_status(self) -> tuple[str, str | None]:
+        """G13: ("on" | "off" | "broken", why not). off is the owner's choice (the setting is off, or no voiceprint was
+        taught): voice requests are unchecked, as before. broken: a voiceprint is there and the setting is not off, but
+        the check cannot run (the model failed or is missing, the voice packages are gone, the voiceprint is unreadable
+        or from another model): voice requests are unsure, so they change nothing, and `kairo diag` says why."""
+        on, why = self.check_state()
+        if on:
+            return "on", None
+        if self.mode() == "off" or self.enrolled() is None:
+            return "off", why
+        return "broken", why
+
     def label_gate(self) -> dict:
         """G13, for kairo diag: is the label gate (g13.speaker_label_gate) on, and does the check run? With no check
         every voice request is unchecked and can change things, as before: that is the diag's WARN."""
@@ -503,8 +518,8 @@ class Speaker:
                     flag = flags.on(s, "g13.speaker_label_gate")
             except Exception:   # the report never fails over it
                 log.warning("speaker check: the label gate's switch could not be read", exc_info=True)
-        on, why = self.check_state()
-        return {"flag": flag, "checked": on, "note": why}
+        state, why = self.check_status()
+        return {"flag": flag, "checked": state == "on", "state": state, "note": why}
 
     def device(self) -> dict:
         """Voice speed's row for the speaker check (like Whisper's and Kokoro's)."""
@@ -692,7 +707,8 @@ class CallGate:
         return self._done(v)
 
     def judge(self, measured: list[Measured]) -> Verdict:
-        on, why_off = self.speaker.check_state()
+        state, why_off = self.speaker.check_status()
+        on = state == "on"
         mode = self.speaker.mode() if on else "off"
         frames = sum(m.level.frames for m in measured)
         speech = round(sum(m.level.speech_s for m in measured), 2)
@@ -715,7 +731,7 @@ class CallGate:
             ok, why = True, why_off or "off"
         base = dict(score=score, rms_db=rms, peak_db=peak, owner_db=owner_db, speech_s=speech,
                     ms=sum(m.ms for m in measured), path=self.path)
-        label = label_for(on=on, ok=ok, score=score, mode=mode)
+        label = label_for(on=on, ok=ok, score=score, mode=mode, broken=state == "broken")
         if not ok:
             return Verdict(False, "not_you", why, label=label, **base)
         surely_you = score is not None and score >= THRESHOLD.get(mode, 2.0)
@@ -730,10 +746,11 @@ class CallGate:
         return Verdict(True, "answered", why, label=label, **base)
 
     def _unsure_if_on(self) -> str:
-        """The label of a turn the check had no verdict for (too slow, crashed): unsure when the check is on, since then
-        Kairo could not say it was the owner; unchecked when it is off. A check that cannot even tell is unsure."""
+        """The label of a turn the check had no verdict for (too slow, crashed): unsure unless the owner has the check
+        off (or never taught a voice), since otherwise Kairo could not say it was the owner. A check that cannot even
+        tell is unsure."""
         try:
-            return UNSURE if self.speaker.check_state()[0] else UNCHECKED
+            return UNCHECKED if self.speaker.check_status()[0] == "off" else UNSURE
         except Exception:
             return UNSURE
 

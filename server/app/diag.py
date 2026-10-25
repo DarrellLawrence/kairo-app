@@ -391,7 +391,8 @@ def _speaker(ctx: Ctx) -> list[Check]:
 def _label_gate(row) -> list[Check]:
     """G13: what a voice request that Kairo cannot confirm as the owner may do. Judged from what the running server says
     (an older server, or none, says nothing and adds nothing). Unchecked requests (no voiceprint, or the check off) can
-    change things, as they always could: a WARN, with why."""
+    change things, as they always could: a WARN, with why. A taught voice whose check cannot run is the opposite: nothing by
+    voice changes anything, which is a FAIL."""
     if not isinstance(row, dict):
         return []
     if not row.get("flag"):
@@ -400,6 +401,11 @@ def _label_gate(row) -> list[Check]:
     if row.get("checked"):
         return [ok("speaker.label_gate", "voice requests that change things",
                    "a voice request that Kairo cannot confirm is yours may look things up and answer, but changes nothing")]
+    if row.get("state") == "broken":      # a voiceprint is taught and the setting is not off, but the check cannot run
+        return [bad("speaker.label_gate", "voice requests that change things",
+                    f"your voice is taught but the check cannot run ({row.get('note') or 'unknown'}): no voice request can be confirmed as yours, "
+                    "so they are answered but change nothing until it is fixed (run Update Kairo, or teach your voice again), "
+                    "or the speaker check is set to off (More -> Settings -> Voice)")]
     return [warn("speaker.label_gate", "voice requests that change things",
                  f"unchecked: the speaker check is off ({row.get('note') or 'switched off'}), so every voice request can change things, as before")]
 

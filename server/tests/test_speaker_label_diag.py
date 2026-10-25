@@ -17,7 +17,8 @@ FLAG = "g13.speaker_label_gate"
 
 
 def gate_row(**kw):
-    return {"flag": True, "checked": True, "note": None, **kw}
+    state = "on" if kw.get("checked", True) else kw.pop("state", "off")
+    return {"flag": True, "checked": True, "state": state, "note": None, **kw}
 
 
 def speaker(**kw):
@@ -44,6 +45,16 @@ def test_the_check_switched_off_is_a_warn_too(pc, vl):
     assert by_id["speaker.label_gate"]["status"] == "WARN" and "set to off" in by_id["speaker.label_gate"]["detail"]
 
 
+def test_a_taught_voice_whose_check_cannot_run_is_a_fail_that_says_what_happens(pc, vl):
+    """Review finding: voiceprint taught, setting not off, but the check cannot run. Every voice request is then
+    unsure: nothing it asks changes anything. That is the owner's problem to fix, so diag says it plainly."""
+    _, by_id = run(pc, live=voice_parts(speaker={**comp("cuda"), "on": False, "label_gate": gate_row(
+        checked=False, state="broken", note="the model failed: ORT self-check failed")}))
+    c = by_id["speaker.label_gate"]
+    assert c["status"] == "FAIL" and "the model failed: ORT self-check failed" in c["detail"]
+    assert "confirmed as yours" in c["detail"] and "change nothing" in c["detail"] and "off" in c["detail"]
+
+
 def test_the_flag_off_is_a_warn_whatever_the_check_does(pc, vl):
     _, by_id = run(pc, live=voice_parts(speaker=speaker(flag=False)))
     c = by_id["speaker.label_gate"]
@@ -68,9 +79,13 @@ def test_the_device_row_carries_the_gate_state(tmp_path, migrated):
     engine = make_engine(migrated.db_url)
     s = sp.Speaker(PitchModel(), tmp_path / "voiceprint.bin", engine)          # not taught
     row = s.device()["label_gate"]
-    assert row == {"flag": True, "checked": False, "note": "until you teach Kairo your voice (Settings → Voice)"}
+    assert row == {"flag": True, "checked": False, "state": "off", "note": "until you teach Kairo your voice (Settings → Voice)"}
     s2 = taught(tmp_path / "t", engine)
-    assert s2.device()["label_gate"] == {"flag": True, "checked": True, "note": None}
+    assert s2.device()["label_gate"] == {"flag": True, "checked": True, "state": "on", "note": None}
+    s2.model.failed = "ORT self-check failed"
+    assert s2.device()["label_gate"] == {"flag": True, "checked": False, "state": "broken",
+                                         "note": "the model failed: ORT self-check failed"}
+    s2.model.failed = None
     with Session(engine) as db:
         flags.set_flag(db, FLAG, False)
     assert s2.device()["label_gate"]["flag"] is False

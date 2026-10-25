@@ -3,10 +3,11 @@ passed to the PreToolUse hook").
 
 owner      the speaker check heard the owner's voice (score at or over the threshold)
 unsure     the check is on but could not say: a short turn with a weak score, too little audio, a check that was
-           too slow or crashed
+           too slow or crashed; and a taught voice whose check cannot run (the model failed or is missing, the
+           voiceprint is unreadable): it must not switch itself off when it breaks
 stranger   the check heard someone else (such a turn is not answered at all; the label is kept for the record)
-unchecked  the check is off or Kairo has no voiceprint yet (and the voice button, which is the owner's own press):
-           today's behaviour, and `kairo diag` warns
+unchecked  the owner has the check off, or Kairo has no voiceprint yet (and the voice button, which is the owner's own
+           press): today's behaviour, and `kairo diag` warns
 
 The label comes from the backend, never from anything the model sends. Unless it is owner or unchecked, nothing that
 changes anything runs on that turn (gate.py).

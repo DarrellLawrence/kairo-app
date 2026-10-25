@@ -77,18 +77,76 @@ def test_the_check_off_is_unchecked(tmp_path, migrated):
     assert v.answer and v.label == "unchecked"
 
 
-def test_a_missing_model_or_voice_packages_is_unchecked(tmp_path, monkeypatch):
+def test_label_for_a_check_that_should_run_but_cannot_is_unsure():
+    """broken: a voiceprint is taught and the setting is not off, but the check cannot run. That is not the owner's
+    choice, so it is never unchecked: it fails closed, like the rest of the gate."""
+    assert sp.label_for(on=False, ok=True, score=None, mode="off", broken=True) == "unsure"
+    assert sp.label_for(on=False, ok=True, score=None, mode="off", broken=False) == "unchecked"
+    assert sp.label_for(on=True, ok=True, score=0.9, mode="normal", broken=True) == "owner"      # (broken only matters when off)
+
+
+BREAKAGES = {
+    "model failed its load self-check": lambda s, m: setattr(s.model, "failed", "ORT self-check failed"),
+    "model file missing after an update": lambda s, m: setattr(s.model, "installed", lambda: False),
+    "voice packages gone": lambda s, m: m.setattr(sp, "np", None),
+    "voiceprint made with another model": lambda s, m: m.setattr(sp, "MODEL_NAME", "another-model.onnx"),
+    "voiceprint unreadable": lambda s, m: m.setattr("app.secretbox.load", lambda path: (_ for _ in ()).throw(OSError("denied"))),
+}
+
+
+@pytest.mark.parametrize("what", list(BREAKAGES))
+def test_a_taught_voice_whose_check_cannot_run_is_unsure_not_unchecked(tmp_path, monkeypatch, what):
+    """Review finding: the protection must not turn itself off exactly when the check breaks. The turn is still answered
+    (a broken check never costs the call, as before) but it changes nothing."""
     s = taught(tmp_path)
-    s.model.failed = "the model could not start"
-    assert turn(s.gate(), (voice(2.0, OTHER_HZ, seed=3), True)).label == "unchecked"       # the check is off: said in Voice speed
-    s.model.failed = None
+    assert s.check_state()[0] is True
+    BREAKAGES[what](s, monkeypatch)
+    s._print = None                                       # (the voiceprint is read again)
+    on, why = s.check_state()
+    assert on is False and why, what
+    assert s.check_status() == ("broken", why)
+    v = turn(s.gate(), (voice(2.0, OTHER_HZ, seed=3), True))
+    assert v.answer and v.label == "unsure", what
+    short = turn(s.gate(), (voice(0.2, OWNER_HZ, seed=4), True))
+    assert short.answer and short.label == "unsure", what
+
+
+@pytest.mark.parametrize("what", list(BREAKAGES))
+def test_the_same_breakage_with_the_check_switched_off_is_unchecked(tmp_path, monkeypatch, migrated, what):
+    """The owner chose off: that stays unchecked (and diag warns)."""
+    s = taught(tmp_path, make_engine(migrated.db_url))
+    s.set_mode("off")
+    BREAKAGES[what](s, monkeypatch)
+    s._print = None
+    assert s.check_status()[0] == "off"
+    v = turn(s.gate(), (voice(2.0, OTHER_HZ, seed=3), True))
+    assert v.answer and v.label == "unchecked", what
+
+
+def test_nothing_taught_is_unchecked_whatever_else_is_broken(tmp_path, monkeypatch):
+    """No voiceprint: the owner has not turned the check on yet. Unchecked, as before, with the model missing too."""
+    s = sp.Speaker(PitchModel(), tmp_path / "voiceprint.bin")
     s.model.installed = lambda: False
+    monkeypatch.setattr(sp, "np", None)
+    assert s.check_status()[0] == "off"
     assert turn(s.gate(), (voice(2.0, OTHER_HZ, seed=4), True)).label == "unchecked"
-    s.model.installed = lambda: True
-    monkeypatch.setattr(sp, "np", None)                                                      # the voice packages are gone
-    assert s.check_state() == (False, "the voice packages are not installed")                # so measure() has nothing: unchecked
-    v = sp.Verdict(True, "answered", "x")
-    assert sp.label_for(on=s.check_state()[0], ok=v.answer, score=None, mode="normal") == "unchecked"
+
+
+def test_a_broken_check_with_a_different_voice_is_stopped_by_the_gate(tmp_path):
+    """The reviewer's probe, end to end: voiceprint taught, the model failed, a different voice is answered as before
+    but the gate (the one the hook runs) refuses everything that changes anything."""
+    from app.gate import GateContext, load_gate
+    from app.settings import REPO_ROOT
+    s = taught(tmp_path)
+    s.model.failed = "ORT self-check failed"
+    v = turn(s.gate(), (voice(2.0, OTHER_HZ, seed=3), True))
+    assert v.answer and v.label == "unsure"
+    gate = load_gate(REPO_ROOT / "config")
+    ctx = GateContext(False, "owner_chat", 0, 0, voice=v.label)
+    assert gate.decide("mcp__kairo__tasks_create", {"title": "x"}, ctx).verdict == "deny"
+    proposal = {"action": "gmail.send", "args": {"to": ["x@example.com"], "subject": "s", "body": "b"}, "reason": "r"}
+    assert gate.decide("mcp__kairo__propose_action", proposal, ctx).verdict == "deny"
+    assert gate.decide("mcp__kairo__tasks_list", {}, ctx).verdict == "allow"          # reading stays
 
 
 def test_a_broken_or_slow_check_with_the_check_on_is_unsure(tmp_path, monkeypatch):
@@ -105,6 +163,19 @@ def test_a_broken_or_slow_check_with_the_check_on_is_unsure(tmp_path, monkeypatc
     s.measure = lambda pcm, on: time.sleep(0.5)
     late = turn(s.gate(), (voice(1.0), True))
     assert late.answer and late.why == "slow" and late.label == "unsure"
+
+
+def test_a_slow_check_that_is_broken_is_unsure_and_one_that_is_off_is_unchecked(tmp_path, monkeypatch, migrated):
+    monkeypatch.setattr(sp, "WAIT_MAX_S", 0.05)
+    s = taught(tmp_path)
+    s.model.failed = "the model could not start"
+    s.measure = lambda pcm, on: time.sleep(0.5)
+    late = turn(s.gate(), (voice(1.0), True))
+    assert late.answer and late.why == "slow" and late.label == "unsure"
+    s2 = taught(tmp_path / "b", make_engine(migrated.db_url))
+    s2.set_mode("off")
+    s2.measure = lambda pcm, on: time.sleep(0.5)
+    assert turn(s2.gate(), (voice(1.0), True)).label == "unchecked"
 
 
 def test_a_slow_check_with_the_check_off_is_unchecked(tmp_path, monkeypatch):
