@@ -2,7 +2,7 @@
 // tested here is when a turn starts (your last sound) and what it marks from the PC's events.
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { applyFlags, resetFlags } from '../src/flags.js'
+import { applyFlags, flagOn, resetFlags } from '../src/flags.js'
 import { makeRtcMeter, readStats } from '../src/rtclink.js'
 import { FakePeer, flushLogs, installPhone, logged } from './phone-fakes.js'
 
@@ -309,7 +309,8 @@ test('g7.no_aec_warning off: no warning even when echo cancelling is off', async
 })
 
 // ---------------------------------------------------------------- g7.listen_on_barge_in: the screen follows the PC, not the mic
-// Off by default until the PC sends {"type":"barge_in"} (turn-taking build): today it sends only `speech` and `spoken`.
+// Off by default. The PC sends {"type":"barge_in"} now (the turn-taking build, g6): whenever it cuts Kairo off. The owner
+// switches this on after the iPhone echo check (P12) and a few calls with the g6 switches.
 
 /* The switch turned on (its default is off). */
 const followPc = () => applyFlags([flag('g7.listen_on_barge_in', true, false)])
@@ -329,9 +330,10 @@ async function speakingThenNoise(fn) {
   })
 }
 
-/* The PC of today: the whole answer is written at once (text is far faster than speech), then you talk over it; the PC
-   stops its voice and sends `speech` (its VAD), later `spoken`, never `barge_in`. What the call screen and the turn log say. */
-async function talkedOverToday() {
+/* A PC that never sends barge_in (one from before the turn-taking build): the whole answer is written at once (text is far
+   faster than speech), then you talk over it; the PC stops its voice and sends `speech` (its VAD), later `spoken`. What the
+   call screen and the turn log say. */
+async function talkedOverToOldPc() {
   const states = []
   let turns
   await withLine({ state: (s) => states.push(s) }, {}, async ({ dc, rec }) => {
@@ -350,21 +352,12 @@ async function talkedOverToday() {
   return { states, turns }
 }
 
-test('g7.listen_on_barge_in is off by default: talking over an answer that is already written flips the screen and is counted as talked over', async () => {
-  const { states, turns } = await talkedOverToday()
-  assert.equal(states.at(-1), 'listening')            // the screen leaves "Speaking" as soon as you talk
-  assert.deepEqual(turns, [['interrupted', 'talked over']])   // and Voice speed counts the barge-in
-})
-
-test('g7.listen_on_barge_in off (the default): the old way, any loud sound on the phone flips the screen, and barge_in is not listened to', async () => {
-  await speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'listening'))
-  const states = []
-  await withLine({ state: (s) => states.push(s) }, {}, ({ dc }) => {
-    dc.pc({ type: 'transcript', text: 'What is on today?', turn: 1, server: {} })
-    dc.pc({ type: 'say', text: 'x', turn: 1 })
-    dc.pc({ type: 'barge_in' })
-    assert.equal(states.at(-1), 'speaking')
-  })
+test('g7.listen_on_barge_in is off by default, on the phone before the PC has answered and after', () => {
+  assert.equal(flagOn('g7.listen_on_barge_in'), false)
+  applyFlags([])
+  assert.equal(flagOn('g7.listen_on_barge_in'), false)
+  followPc()
+  assert.equal(flagOn('g7.listen_on_barge_in'), true)
 })
 
 test('g7.listen_on_barge_in on: a loud sound on the mic does not flip the screen while Kairo goes on talking', () => {
@@ -390,9 +383,30 @@ test('g7.listen_on_barge_in on: an answer the PC reports as interrupted also end
   })
 })
 
-test('g7.listen_on_barge_in on: with a PC that sends no barge_in the screen stays on "Speaking" until the PC says its voice stopped (why it is off for now)', async () => {
+test('g7.listen_on_barge_in on: a barge_in after an answer that is already written ends the turn as talked over', async () => {
   followPc()
-  const { states, turns } = await talkedOverToday()
+  const states = []
+  let turns
+  await withLine({ state: (s) => states.push(s) }, {}, async ({ dc, rec }) => {
+    dc.pc({ type: 'transcript', text: 'Tell me a long story', turn: 1, server: {} })
+    dc.pc({ type: 'say', text: 'Once upon a time.', turn: 1 })
+    dc.pc({ type: 'timing', turn: 1, server: {} })
+    dc.pc({ type: 'done', text: 'Once upon a time. And then.', interrupted: false, model: 'm', server: {} })
+    rec.micLevel = 0.001
+    await wait(450)
+    rec.micLevel = 0.1                                // a cough: the mic is loud, the PC does not cut Kairo off
+    await wait(350)
+    assert.equal(states.at(-1), 'speaking')
+    dc.pc({ type: 'barge_in' })                       // you really talk over Kairo: the PC says so
+    assert.equal(states.at(-1), 'listening')
+    turns = rec.posted.filter(([u]) => u === '/api/voice/turns').map(([, b]) => [b.outcome, b.reason])
+  })
+  assert.deepEqual(turns, [['interrupted', 'talked over']])
+})
+
+test('g7.listen_on_barge_in on: with an old PC that sends no barge_in the screen stays on "Speaking" until the PC says its voice stopped', async () => {
+  followPc()
+  const { states, turns } = await talkedOverToOldPc()
   assert.equal(states.at(-1), 'speaking')
   assert.deepEqual(turns, [])                         // the turn is not finished yet either: it is "played" once `spoken` comes
 })
@@ -406,6 +420,20 @@ test('g7.listen_on_barge_in on: a normal end of an answer and a barge_in with no
     dc.pc({ type: 'transcript', text: 'Hi', turn: 1, server: {} })
     dc.pc({ type: 'done', text: 'Hello', interrupted: false, model: 'm', server: {} })
     assert.equal(states.at(-1), 'thinking')           // not 'listening' until its voice has played (the old rule)
+  })
+})
+
+test('g7.listen_on_barge_in off (the default): the old way, any loud sound on the phone flips the screen and is counted as talked over, and barge_in is not listened to', async () => {
+  await speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'listening'))
+  const { states, turns } = await talkedOverToOldPc()
+  assert.equal(states.at(-1), 'listening')            // the screen leaves "Speaking" as soon as you talk
+  assert.deepEqual(turns, [['interrupted', 'talked over']])   // and Voice speed counts the barge-in
+  const seen = []
+  await withLine({ state: (s) => seen.push(s) }, {}, ({ dc }) => {
+    dc.pc({ type: 'transcript', text: 'What is on today?', turn: 1, server: {} })
+    dc.pc({ type: 'say', text: 'x', turn: 1 })
+    dc.pc({ type: 'barge_in' })
+    assert.equal(seen.at(-1), 'speaking')
   })
 })
 

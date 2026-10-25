@@ -12,8 +12,9 @@ from app.db import make_engine
 from app.main import create_app
 
 # name -> default. On by default: plain fixes of problems measured in the research (docs/CHANGELOG.md says which).
-# listen_on_barge_in is off: its other half (the PC sending {"type":"barge_in"}) is the turn-taking build's; without it
-# the call screen would stay on "Speaking" while you talk over an answer that is already written. Turn it on at that merge.
+# listen_on_barge_in is off: its other half, the PC sending {"type":"barge_in"}, exists now (the turn-taking build, group G6,
+# which sends it whenever it cuts Kairo off), but the default is the owner's to switch on after the iPhone echo check (P12)
+# and a few calls with the g6 switches.
 G7 = {
     "g7.mic_constraints": True,
     "g7.call_audio_mode": True,

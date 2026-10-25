@@ -1402,6 +1402,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s_:              # the owner's switches, read once at the start of the call
             jitter_patch = feature_flags.on(s_, "g4.jitter_patch")
             g5 = g5_options(s_)                      # the hand-off switches (g5.*)
+            turning = voicertc.Turning.read(lambda name: feature_flags.on(s_, name))      # g6.*: how this call takes turns
         conn = await voicertc.connect(sdp, "offer", jitter_patch=jitter_patch)
 
         async def send(frame) -> None:
@@ -1466,7 +1467,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                    language_mode=language_mode if language_mode in ("en", "de") else "auto", openers=_openers(),
                                    smart_turn_model=turn_model, speculate=speculate, discard=discard, greeting=_greeting(),
                                    warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
-                                   gate=gate.answer if gate else None, norm=norm)
+                                   gate=gate.answer if gate else None, norm=norm, turning=turning)
         key = id(call)
         _rtc_calls[key] = call
 
