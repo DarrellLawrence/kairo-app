@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from sqlmodel import Session
 
 from app import flags
