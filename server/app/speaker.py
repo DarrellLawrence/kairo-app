@@ -44,6 +44,8 @@ try:
 except ImportError:                                     # the app runs without them: the checks are off
     np = None
 
+from .speaker_label import LABELS, OWNER, STRANGER, UNCHECKED, UNSURE, worst   # noqa: F401  (LABELS: tests and callers)
+
 log = logging.getLogger("kairo.speaker")
 
 MODEL_NAME = "wespeaker_en_voxceleb_CAM++.onnx"         # the pin (URL, sha256, size) is in voicellm.json
@@ -87,6 +89,7 @@ ENROLL_WINDOW_S, ENROLL_HOP_S = 3.0, 1.5          # the voiceprint: mean of 3 s 
 ENROLL_AGREE, ENROLL_MIN_KEPT = 0.45, 0.75
 MAX_ENROLL_BYTES = int(ENROLL_MAX_S * 1.5 * RATE * 2)   # 90 s of 16-bit audio (pauses included)
 VOICEPRINT = Path("voice") / "voiceprint.bin"     # in the data folder (encrypted: secretbox), never the repo
+MAX_WAITING_LABELS = 16              # G13: verdicts waiting for their answer to start; more than this and the oldest merge
 KEEP_TURNS = 500                     # Voice speed's list (time, reason, score; never the words)
 STATS_KEY = "voice.speaker.turns"
 MODE_KEY = "voice.speaker.mode"
@@ -216,6 +219,19 @@ def speaker_verdict(score: float | None, speech_s: float, mode: str) -> tuple[bo
     if speech_s < SHORT_S:
         return (score >= SHORT_REJECT[mode]), ("short: you" if score >= SHORT_REJECT[mode] else "not_you")
     return (score >= THRESHOLD[mode]), ("you" if score >= THRESHOLD[mode] else "not_you")
+
+
+def label_for(*, on: bool, ok: bool, score: float | None, mode: str) -> str:
+    """G13: the label of a turn (speaker_label.py). on: the check runs (a voiceprint, the model, not switched off).
+    ok: the turn passed the check (speaker_verdict). Only a score at or over the threshold is the owner; a short
+    turn that passed with a weaker score, or any turn the check could not score, is unsure."""
+    if not on:
+        return UNCHECKED
+    if score is None:
+        return UNSURE
+    if not ok:
+        return STRANGER
+    return OWNER if score >= THRESHOLD.get(mode, 2.0) else UNSURE
 
 
 def too_quiet(rms_db: float | None, peak_db: float | None, owner: list[tuple[float, float]]) -> bool:
@@ -602,6 +618,7 @@ class Verdict:
     wait_ms: int = 0                    # what the turn waited for it (the latency it added)
     path: str = "call"
     at: str = ""
+    label: str = UNCHECKED              # G13: owner | unsure | stranger | unchecked (kept off the record and the log)
 
     def log_line(self) -> str:
         """Score and reason only, never the words."""
@@ -626,6 +643,7 @@ class CallGate:
         self.owner: list[tuple[float, float]] = []    # (rms, peak) of this call's answered turns
         self.quiet_run = 0
         self._lock = threading.Lock()
+        self._answered: list[str] = []                # G13: labels of turns answer() let through, not yet taken by their answer
 
     def hear(self, pcm: bytes) -> _Piece:
         """Thread-safe (the speech-to-text thread calls it). The check starts at once, in its own thread."""
@@ -649,11 +667,11 @@ class CallGate:
             measured = await asyncio.wait_for(asyncio.gather(*(asyncio.wrap_future(p.future) for p in use)), WAIT_MAX_S)
             v = self.judge(list(measured))
         except asyncio.TimeoutError:
-            v = Verdict(True, "answered", "slow")
+            v = Verdict(True, "answered", "slow", label=self._unsure_if_on())
             log.warning("speaker check: not ready after %d ms, the turn is answered", int(WAIT_MAX_S * 1000))
         except Exception as exc:   # never costs the turn
             log.warning("speaker check: %s: %s (the turn is answered)", type(exc).__name__, exc)
-            v = Verdict(True, "answered", "error")
+            v = Verdict(True, "answered", "error", label=self._unsure_if_on())
         v.wait_ms = int((time.monotonic() - t0) * 1000)
         return self._done(v)
 
@@ -681,18 +699,27 @@ class CallGate:
             ok, why = True, why_off or "off"
         base = dict(score=score, rms_db=rms, peak_db=peak, owner_db=owner_db, speech_s=speech,
                     ms=sum(m.ms for m in measured), path=self.path)
+        label = label_for(on=on, ok=ok, score=score, mode=mode)
         if not ok:
-            return Verdict(False, "not_you", why, **base)
+            return Verdict(False, "not_you", why, label=label, **base)
         surely_you = score is not None and score >= THRESHOLD.get(mode, 2.0)
         if too_quiet(rms, peak, self.owner) and not surely_you:   # far away, and not known to be the owner
             self.quiet_run += 1
             if self.quiet_run >= QUIET_RESET_AFTER:
                 self.owner, self.quiet_run = [], 0           # the owner moved away: learn the level again
-            return Verdict(False, "too_quiet", "too quiet / far", **base)
+            return Verdict(False, "too_quiet", "too quiet / far", label=UNSURE, **base)   # ignored: nobody ran, but not a confirmed owner
         self.quiet_run = 0
         if rms is not None and peak is not None:
             self.owner = (self.owner + [(rms, peak)])[-QUIET_REF_TURNS:]
-        return Verdict(True, "answered", why, **base)
+        return Verdict(True, "answered", why, label=label, **base)
+
+    def _unsure_if_on(self) -> str:
+        """The label of a turn the check had no verdict for (too slow, crashed): unsure when the check is on, since then
+        Kairo could not say it was the owner; unchecked when it is off. A check that cannot even tell is unsure."""
+        try:
+            return UNSURE if self.speaker.check_state()[0] else UNCHECKED
+        except Exception:
+            return UNSURE
 
     def _done(self, v: Verdict) -> Verdict:
         v.path = self.path
@@ -711,8 +738,25 @@ class CallGate:
         return v
 
     async def answer(self) -> bool:
-        """voicertc's hook: True = answer this turn."""
-        return (await self.decide()).answer
+        """voicertc's hook: True = answer this turn. An answered turn's label waits for its answer (take_label)."""
+        v = await self.decide()
+        if v.answer:
+            self._queue_label(v.label)
+        return v.answer
+
+    def _queue_label(self, label: str) -> None:
+        with self._lock:
+            self._answered.append(label)
+            if len(self._answered) > MAX_WAITING_LABELS:     # never grows when answers are slow: the two oldest become their worst
+                self._answered[:2] = [worst(*self._answered[:2])]
+
+    def take_label(self) -> str:
+        """G13: the label for the turn that is about to be answered (the call's answer callback, first thing it does):
+        the least trusted of the verdicts answer() let through since the last take, so no order of events makes a turn
+        more trusted than its own verdict. Nothing waiting (a bug: an answer without a verdict) is unsure, never owner."""
+        with self._lock:
+            label, self._answered = worst(*self._answered), []
+        return label or UNSURE
 
 
 class Listening:
