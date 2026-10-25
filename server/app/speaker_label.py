@@ -14,6 +14,16 @@ changes anything runs on that turn (gate.py).
 
 from __future__ import annotations
 
+import contextvars
+import json
+import logging
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Iterator
+
+log = logging.getLogger("kairo.speaker_label")
+
 OWNER, UNSURE, STRANGER, UNCHECKED = "owner", "unsure", "stranger", "unchecked"
 LABELS = (OWNER, UNSURE, STRANGER, UNCHECKED)       # gate.VOICE_LABELS says the same; a test keeps them equal
 
@@ -29,16 +39,6 @@ def worst(*labels: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------- which label the turn being handled has
-
-import contextvars
-import json
-import logging
-import uuid
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Iterator
-
-log = logging.getLogger("kairo.speaker_label")
 
 KEY = "voice.turn"                      # the settings row the gate and the hook read (gate_context.VOICE_TURN_KEY)
 FLAG = "g13.speaker_label_gate"

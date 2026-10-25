@@ -161,7 +161,10 @@ class BrainRunner:
                     if self.voice_turns is not None:
                         # G13: who spoke, in the database, once this run holds the brain and before Claude starts (so a
                         # waiting turn never takes the label of the one running). Not written: Claude does not run.
-                        labelled = self.voice_turns.begin(voice, thread_id=thread_id, purpose=purpose)
+                        try:
+                            labelled = self.voice_turns.begin(voice, thread_id=thread_id, purpose=purpose)
+                        except Exception as exc:
+                            raise RuntimeError(f"could not record who was speaking ({exc}); nothing was run") from exc
                     kwargs = {"model": model} if model else {}
                     if warm is not None:
                         kwargs["warm"] = warm
@@ -172,10 +175,11 @@ class BrainRunner:
                     post(BrainEvent(EventKind.error, text=f"Brain error: {exc}"))
                 finally:
                     self.current_origin, self.current_thread_id = None, None
-                    try:
-                        self.voice_turns.end(labelled) if self.voice_turns is not None else None
-                    except Exception:   # the next run replaces a leftover; it only matters for the owner_chat tools after this
-                        log.exception("speaker label: the record of the turn could not be removed")
+                    if self.voice_turns is not None:
+                        try:
+                            self.voice_turns.end(labelled)
+                        except Exception:   # the next run replaces a leftover; it only matters for the owner_chat tools after this
+                            log.exception("speaker label: the record of the turn could not be removed")
                     post(None)
 
         threading.Thread(target=work, name="brain-run", daemon=True).start()
