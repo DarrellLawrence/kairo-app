@@ -45,6 +45,7 @@ from . import speaknorm, speech, voicelink
 from . import selftest as selftest_mod
 from . import semantic
 from . import speaker as speaker_mod
+from . import speaker_label
 from . import tool_sites
 from . import conflicts as conflicts_mod, health as health_mod, links as links_mod, status_files
 from . import approvals, backup, board, brief, capture, lerndoku, life, school, chat, killswitch, knowledge, latency, location, lookup, onboarding, reviews, triage, vault, voicenote, loops, pa as pa_mod
@@ -197,6 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                               quiet_s=float(os.environ.get("KAIRO_OWNER_QUIET_S", chat.OWNER_QUIET_S)))
     from . import models as model_table
     runner.on_usage = lambda purpose, usage, ok, reason=None: model_table.record(engine, purpose, usage, ok, reason=reason)
+    runner.voice_turns = speaker_label.VoiceTurns(engine)   # G13: who spoke, for the gate and the hook, before a voice turn reaches Claude
 
     def _people_names() -> list[str]:
         """The people list: a prompt that has one of these names is about a person (router scanner, G11)."""
@@ -823,10 +825,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if origin is None:
                 audit(s, actor="brain", action=name or "?", outcome="denied: no brain run in progress", args=arguments)
                 return {"text": "Not allowed: no Kairo run in progress.", "is_error": True}
-            decision = gate.decide(TOOL_PREFIX + name, arguments, read_context(engine, origin))
+            gate_ctx = read_context(engine, origin, model_turn=True)   # G13: includes the speaker label of a voice turn
+            decision = gate.decide(TOOL_PREFIX + name, arguments, gate_ctx)
             if not decision.allowed:
                 audit(s, actor="brain", action=decision.action or name or "?", tier=decision.tier, args=arguments,
-                      outcome=f"denied: {decision.reason}")
+                      outcome=f"denied: {decision.reason}" + (f" [voice turn: {gate_ctx.voice}]" if gate_ctx.voice else ""))
                 return {"text": f"Not allowed: {decision.reason}", "is_error": True}
             if decision.verdict == "allow":
                 text_out = tools.run(decision)
@@ -1272,7 +1275,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if line.speaker is not None:   # nobody to hear it; the answer itself goes on and is saved
                 line.speaker.stop()
             if line.mouth is not None and line.mouth.reports():
-                report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
+                with speaker_label.scope(getattr(line, "label", None)):   # G13: what they said on this call, as weak as its weakest turn
+                    report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
                 _turns.add(report)
                 report.add_done_callback(_turns.discard)
 
@@ -1417,12 +1421,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             interrupt()
 
         async def answer(text: str, language, number: int, speaker) -> dict:
+            # G13, first thing and before any await: the speaker check's label of THIS turn (the call's gate numbers
+            # its verdicts, take_label() hands the turn the least trusted one waiting). No gate: the voice button.
+            label = gate.take_label() if gate is not None else speaker_label.UNCHECKED
+            line.label = speaker_label.worst(getattr(line, "label", None), label)       # the call's weakest, for the reports after it
             line.current = number
             if line.speaker is not None and line.speaker is not speaker:
                 line.speaker.stop()
             line.speaker = speaker
             stt_ms = int((speaker.server or {}).get("stt_ms") or 0)
-            await _answer_turn(line, speaker, text, language, number, stt_ms, path, call_id)
+            with speaker_label.scope(label):
+                await _answer_turn(line, speaker, text, language, number, stt_ms, path, call_id)
             return {"route": getattr(line, "route", None)}
 
         with session_for(engine) as s_:
@@ -1487,7 +1496,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if line.speaker is not None:
                     line.speaker.stop()
                 if line.mouth is not None and line.mouth.reports():
-                    report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
+                    with speaker_label.scope(getattr(line, "label", None)):
+                        report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
                     _turns.add(report)
                     report.add_done_callback(_turns.discard)
         task = asyncio.get_running_loop().create_task(run())
@@ -1525,6 +1535,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         text = voicelink.heard(tr.text if tr else "")
         language = tr.language if tr else None
         latency.record(engine, "stt", stt_ms)
+        verdict = None
         if piece is not None:
             speaker_mod.CallGate.words(piece, bool(text))
             verdict = await gate.decide() if text else None
@@ -1534,15 +1545,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await line.send({"type": "transcript", "text": text, "language": language, "stt_ms": stt_ms, "turn": number})
         if not text:
             return
+        label = verdict.label if verdict is not None else speaker_label.UNCHECKED    # G13 (the voice button has no check)
         if number <= line.stopped:
             line.carry = f"{line.carry} {text}".strip()   # talked on before Kairo answered: one message
+            line.carry_label = speaker_label.worst(getattr(line, "carry_label", None), label)   # ... as weak as its weakest words
             return
         text, line.carry = f"{line.carry} {text}".strip(), ""
+        label = speaker_label.worst(label, getattr(line, "carry_label", None))
+        line.carry_label = None
+        line.label = speaker_label.worst(getattr(line, "label", None), label)
         speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm)
         if line.speaker is not None:
             line.speaker.stop()
         line.speaker = speaker
-        await _answer_turn(line, speaker, text, language, number, stt_ms, path, call_id)
+        with speaker_label.scope(label):
+            await _answer_turn(line, speaker, text, language, number, stt_ms, path, call_id)
 
     async def _answer_turn(line, speaker, text: str, language, number: int, stt_ms: int, path: str, call_id) -> None:
         """The owner's words on a call or the voice button, on either line (/ws/voice or WebRTC): the voice
@@ -3529,8 +3546,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.add(thread)
                 s.commit()
             sid, tid = thread.brain_session_id, thread.id
-        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
-                                                model=model, own=own)
+        # G13: the speaker label of the turn this comes from (set where the call answers it); a line with no speaker
+        # check (the realtime voice, a report after the call) is unchecked, as before
+        with speaker_label.scope(speaker_label.current() or speaker_label.UNCHECKED):
+            text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
+                                                    model=model, own=own)
         if new_sid:
             with session_for(engine) as s:
                 thread = s.get(ChatThread, tid)
