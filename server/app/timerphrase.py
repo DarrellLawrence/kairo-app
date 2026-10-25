@@ -249,15 +249,29 @@ _STOP_Q = {"my", "the", "that", "this", "a", "an", "mein", "meinen", "meinem", "
 MAX_NAME_WORDS = 4          # "cancel the pasta timer": a name is a few words, not a sentence
 
 
+_TIMER_WORD = re.compile(r"\b(?:timers?|erinner\w*|remind\w*|alarms?)\b")
+
+
+def _name(words: str | None) -> str:
+    return " ".join(w for w in (words or "").split() if w not in _STOP_Q)
+
+
 def _query(kind: str, m: re.Match, lang: str) -> tuple[str, dict] | None:
+    """The cancel or the question as a small record, or None when it is not ONE request naming ONE timer: "cancel the timer
+    and set a timer for 5 minutes" is two requests, "stop the pasta timer for 5 minutes" has two names (which one?), and the
+    voice model reads those whole."""
     if kind != "timer_cancel" and kind != "timer_left":
         return kind, {}
-    q = (m.groupdict().get("q2") or m.groupdict().get("q") or "").strip()
-    art, noun = m.groupdict().get("art") or "", m.group("noun")
+    g = m.groupdict()
+    q1, q2 = _name(g.get("q")), _name(g.get("q2"))
+    if _COMPOUND.search(m.string) or (q1 and q2) or _TIMER_WORD.search(f"{q1} {q2}"):
+        return None
+    q = (g.get("q2") or g.get("q") or "").strip()
+    art, noun = g.get("art") or "", m.group("noun")
     every = art in _PLURAL_ART or (noun == "timers") or q in ("all", "every", "alle", "alles") or q.startswith(("all ", "alle "))
     if q in ("all", "every", "alle", "alles") or q.startswith(("all ", "alle ")):
         q = ""
-    q = " ".join(w for w in q.split() if w not in _STOP_Q)
+    q = _name(q)
     if len(q.split()) > MAX_NAME_WORDS or _COMPOUND.search(q):
         return None
     if every and not q:

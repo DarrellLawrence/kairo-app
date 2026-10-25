@@ -159,6 +159,41 @@ def test_what_is_not_a_clear_timer_sentence_goes_on_to_the_voice_model(text):
     assert m is None or not m.kind.startswith("timer"), (text, m)
 
 
+TWO_REQUESTS = [
+    # (found by the review of G10) a cancel and a new timer in one breath: the voice model reads it whole; a rule must not cancel "the 5 minute timer"
+    "stop the timer and set a timer for 5 minutes", "cancel the timer and set a timer for 5 minutes",
+    "stop the timer then set a timer for 5 minutes", "cancel the timer and set another timer for 10 minutes",
+    "cancel my timer and start a new timer for 5 minutes", "delete the timer and make a timer for 10 minutes",
+    "stop the timer, set a timer for 5 minutes", "cancel the timer set a timer for 5 minutes",
+    "cancel the timer for pasta and set a timer for 5 minutes", "cancel timer and set timer for 5 minutes",
+    "stop all timers and set a timer for 5 minutes", "cancel the timer or set a timer for 5 minutes",
+    "lösche den Timer und stell einen Timer für 5 Minuten", "stoppe den Timer und stelle einen neuen Timer für 10 Minuten",
+    "lösche den Timer dann stell einen Timer für 5 Minuten", "lösche den Timer stell einen Timer für 5 Minuten",
+    "stopp den Timer namens Nudeln und stell einen Timer für 5 Minuten", "brich den Timer ab und stell einen Timer für 5 Minuten",
+    "lösche alle Timer und stell einen Timer für 5 Minuten",
+    # a question and a request in one breath
+    "how much time is left on the timer and set a timer for 5 minutes", "wie lange läuft der Timer noch und stell einen Timer für 5 Minuten",
+    # two names that disagree: "the 5 minute timer" or "the pasta timer"? not sure, so not answered
+    "stop the 5 minute timer for pasta", "stop the pasta timer for 5 minutes", "cancel the timer for a timer", "cancel the eggs timer for pasta",
+    "stopp den Nudel Timer für 5 Minuten", "lösche den 5 Minuten Timer für Nudeln",
+]
+
+
+@pytest.mark.parametrize("text", TWO_REQUESTS)
+def test_two_requests_or_two_names_in_one_sentence_are_not_read_as_one_cancel(text):
+    assert match(text) is None, text
+
+
+def test_a_cancel_still_names_a_timer_by_one_name_only():
+    for text, want in [("cancel the timer for pasta", {"q": "pasta"}), ("cancel the timer called pasta", {"q": "pasta"}),
+                       ("stop the pasta timer", {"q": "pasta"}), ("cancel the timer for 5 minutes", {"seconds": 300}),
+                       ("stop my timer for 5 minutes", {"seconds": 300}), ("cancel the 5 minute timer", {"seconds": 300}),
+                       ("lösche den Timer für Nudeln", {"q": "nudeln"}), ("stopp den Timer namens Nudeln", {"q": "nudeln"}),
+                       ("lösche den Timer für 5 Minuten", {"seconds": 300}), ("cancel all timers", {"all": True})]:
+        m = match(text)
+        assert m is not None and m.kind == "timer_cancel" and m.data == want, (text, m)
+
+
 def test_a_label_may_not_be_a_time_of_day_or_a_pile_of_words():
     assert match("set a timer for 10 minutes for the 2 o'clock meeting") is None
     assert match("remind me in 10 minutes to call Lea and then Marc and then Anna and then the school office") is None

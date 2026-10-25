@@ -145,6 +145,19 @@ def test_cancel_one_by_its_length_or_its_name_or_all(rig):
     assert {r.status for r in rig.rows()} == {"cancelled"}
 
 
+def test_a_cancel_and_a_new_timer_in_one_sentence_change_nothing_and_go_to_the_voice_model(rig):
+    """The review found: "stop the timer and set a timer for 5 minutes" cancelled the running timer (or said there was no 5 minute
+    timer) and set nothing. Two requests are not a rule's to answer: nothing is cancelled, nothing is set."""
+    rig.say("set a timer for 5 minutes")
+    rig.say("set a timer for 10 minutes")
+    for text in ("stop the timer and set a timer for 5 minutes", "cancel the timer and set a timer for 5 minutes",
+                 "cancel the timer and set another timer for 10 minutes", "lösche den Timer und stell einen Timer für 5 Minuten",
+                 "stop the 5 minute timer for pasta", "stop the pasta timer for 5 minutes"):
+        assert rig.say(text) is None, text
+        assert rig.rules.would_answer(text) is False, text
+    assert [(r.seconds, r.status) for r in rig.rows()] == [(300, "active"), (600, "active")]
+
+
 def test_two_timers_of_the_same_length_are_not_cancelled_blindly(rig):
     rig.say("set a timer for ten minutes")
     rig.say("set a timer for ten minutes")
