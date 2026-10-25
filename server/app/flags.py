@@ -139,9 +139,13 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g10.timers": (True, "On a call you can say 'Set a timer for ten minutes', 'Stell einen Timer auf zehn Minuten', 'Remind me in an "
                          "hour to call Lea', 'How much time is left on my timer?' or 'Cancel the timer'. Kairo keeps the timer itself "
                          "and sends a push to your phone when it is up, also at night (quiet hours do not hold it back), with a "
-                         "ten-minute time-to-live and high urgency so the phone is woken for it. A timer touches only you, so it "
-                         "needs no approval. Off: those sentences go to the voice model as before (it has no timer). A timer "
-                         "that is already set still rings. Takes effect at the next call."),
+                         "ten-minute time-to-live and high urgency so the phone is woken for it. No phone with notifications on: "
+                         "Kairo says so and sets nothing. If a push does not get through, it is tried again for up to half "
+                         "an hour and the failure shows in Run diagnosis. iOS plays no alarm sound for a web push, a Focus or "
+                         "Low Power mode can silence or delay it, and how fast and how reliably it reaches your iPhone is not "
+                         "measured yet (test P22): do not trust it with the oven until you have tried it. A timer touches only "
+                         "you, so it needs no approval. Off: those sentences go to the voice model as before (it has no timer). "
+                         "A timer that is already set still rings. Takes effect at the next call."),
 
     # -- G11 router
     "g11.router": (False, "Kairo writes down, for every call to the model, which route it took and why (More -> Usage, "
