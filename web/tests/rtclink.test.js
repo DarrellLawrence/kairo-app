@@ -309,10 +309,11 @@ test('g7.no_aec_warning off: no warning even when echo cancelling is off', async
 })
 
 // ---------------------------------------------------------------- g7.listen_on_barge_in: the screen follows the PC, not the mic
-// On by default now that the PC sends {"type":"barge_in"} (the turn-taking build, g6): whenever it cuts Kairo off.
+// Off by default. The PC sends {"type":"barge_in"} now (the turn-taking build, g6): whenever it cuts Kairo off. The owner
+// switches this on after the iPhone echo check (P12) and a few calls with the g6 switches.
 
-/* The switch turned off (its default is on): the old way, any loud sound on the phone. */
-const oldWay = () => applyFlags([flag('g7.listen_on_barge_in', false, true)])
+/* The switch turned on (its default is off). */
+const followPc = () => applyFlags([flag('g7.listen_on_barge_in', true, false)])
 
 /* A call in which Kairo is speaking turn 1, then a loud sound on the mic (a cough, a "mhm", a real interruption). */
 async function speakingThenNoise(fn) {
@@ -351,17 +352,21 @@ async function talkedOverToOldPc() {
   return { states, turns }
 }
 
-test('g7.listen_on_barge_in is on by default', () => {
-  assert.equal(flagOn('g7.listen_on_barge_in'), true)
-  applyFlags([])                                       // and while the PC has not answered yet: the phone's own default
+test('g7.listen_on_barge_in is off by default, on the phone before the PC has answered and after', () => {
+  assert.equal(flagOn('g7.listen_on_barge_in'), false)
+  applyFlags([])
+  assert.equal(flagOn('g7.listen_on_barge_in'), false)
+  followPc()
   assert.equal(flagOn('g7.listen_on_barge_in'), true)
 })
 
-test('g7.listen_on_barge_in on (the default): a loud sound on the mic does not flip the screen while Kairo goes on talking', () => {
+test('g7.listen_on_barge_in on: a loud sound on the mic does not flip the screen while Kairo goes on talking', () => {
+  followPc()
   return speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'speaking'))
 })
 
 test('g7.listen_on_barge_in on: the PC\'s barge_in event is what switches the screen to listening, and ends the turn as talked over', () => {
+  followPc()
   return speakingThenNoise(({ dc, states }) => {
     dc.pc({ type: 'barge_in' })
     assert.equal(states.at(-1), 'listening')
@@ -371,6 +376,7 @@ test('g7.listen_on_barge_in on: the PC\'s barge_in event is what switches the sc
 })
 
 test('g7.listen_on_barge_in on: an answer the PC reports as interrupted also ends "speaking"', () => {
+  followPc()
   return speakingThenNoise(({ dc, states }) => {
     dc.pc({ type: 'done', text: 'You have two', interrupted: true, model: 'm', server: {} })
     assert.equal(states.at(-1), 'listening')
@@ -378,6 +384,7 @@ test('g7.listen_on_barge_in on: an answer the PC reports as interrupted also end
 })
 
 test('g7.listen_on_barge_in on: a barge_in after an answer that is already written ends the turn as talked over', async () => {
+  followPc()
   const states = []
   let turns
   await withLine({ state: (s) => states.push(s) }, {}, async ({ dc, rec }) => {
@@ -398,12 +405,14 @@ test('g7.listen_on_barge_in on: a barge_in after an answer that is already writt
 })
 
 test('g7.listen_on_barge_in on: with an old PC that sends no barge_in the screen stays on "Speaking" until the PC says its voice stopped', async () => {
+  followPc()
   const { states, turns } = await talkedOverToOldPc()
   assert.equal(states.at(-1), 'speaking')
   assert.deepEqual(turns, [])                         // the turn is not finished yet either: it is "played" once `spoken` comes
 })
 
 test('g7.listen_on_barge_in on: a normal end of an answer and a barge_in with nothing speaking change nothing', async () => {
+  followPc()
   const states = []
   await withLine({ state: (s) => states.push(s) }, {}, ({ dc }) => {
     dc.pc({ type: 'barge_in' })                       // listening already: nothing to cut
@@ -414,8 +423,7 @@ test('g7.listen_on_barge_in on: a normal end of an answer and a barge_in with no
   })
 })
 
-test('g7.listen_on_barge_in off: the old way, any loud sound on the phone flips the screen and is counted as talked over, and barge_in is not listened to', async () => {
-  oldWay()
+test('g7.listen_on_barge_in off (the default): the old way, any loud sound on the phone flips the screen and is counted as talked over, and barge_in is not listened to', async () => {
   await speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'listening'))
   const { states, turns } = await talkedOverToOldPc()
   assert.equal(states.at(-1), 'listening')            // the screen leaves "Speaking" as soon as you talk

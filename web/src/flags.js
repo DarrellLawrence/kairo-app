@@ -13,7 +13,7 @@ export const DEFAULTS = {
   'g7.call_audio_mode': true,
   'g7.call_logs': true,
   'g7.no_aec_warning': true,
-  'g7.listen_on_barge_in': true,    // the PC sends {"type":"barge_in"} whenever it cuts Kairo off (g6, either way)
+  'g7.listen_on_barge_in': false,   // off until the owner switches it on (P12): the PC sends {"type":"barge_in"} whenever it cuts Kairo off (g6)
   'g7.sound_check_rtc': true,
 }
 
