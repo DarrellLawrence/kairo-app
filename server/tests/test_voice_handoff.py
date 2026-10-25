@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from app import chat, conversation, voicertc
+from app import chat, conversation, realtime, voicertc
 from app.db import SettingKV, make_engine
 from app.main import create_app
 from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model and Claude)
@@ -113,6 +113,77 @@ def test_g5_when_the_lasting_prompt_changed_the_session_starts_fresh_with_the_re
                                                            purpose="call", model="haiku"))
     assert error is None and text.startswith("echo:")
     assert len(built) == 2 and "Recent conversation" not in built[0][2] and "an earlier message" in built[1][2]
+
+
+# ---------------------------------------------------------------- ask_kairo with a sink
+
+def ask_stream(app, request="what is on today?", about="", **kw):
+    sunk = []
+    out = asyncio.run(app.state.mouth_ask_stream(request, [f"Owner: {request}"], about, lambda kind, value=None: sunk.append((kind, value)), **kw))
+    return out, sunk
+
+
+def test_g5_ask_stream_returns_what_ask_returns_and_tells_the_sink_while_claude_works(migrated, tail):
+    with TestClient(create_app(migrated)) as c:
+        started = time.monotonic()
+        (answer, hang), sunk = ask_stream(c.app)
+        took = time.monotonic() - started
+        plain, plain_hang = asyncio.run(c.app.state.mouth_ask("what is on today?", ["Owner: what is on today?"], ""))
+    kinds = [k for k, _ in sunk]
+    assert kinds.count("text") >= 2 and kinds.count("end") == 1 and kinds[-1] == "end"
+    assert (answer, hang) == (plain, plain_hang) and hang is False and answer.startswith("echo: (spoken, on a call) what is on today?")
+    end_answer, end_hang = sunk[-1][1]
+    assert (end_answer, end_hang) == realtime.spoken_answer("".join(v for k, v in sunk if k == "text"))   # what a call may say
+    assert took >= TAIL_S * 0.7                     # (the call itself ran to the result; the sink was told at the end of the text)
+
+
+def test_g5_ask_stream_gives_the_claude_session_back_to_the_conversation_like_ask_does(migrated):
+    with TestClient(create_app(migrated)) as c:
+        ask_stream(c.app)
+        with Session(make_engine(migrated.db_url)) as s:
+            first = chat.main_thread(s, brain_name="claude_cli").brain_session_id
+    assert first                                                              # the next turn goes on in the same Claude session
+
+
+def test_g5_ask_stream_says_why_when_kairo_is_updating_or_paused_and_asks_nothing(migrated):
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.maintenance_until = time.time() + 60
+        (answer, hang), sunk = ask_stream(c.app)
+        assert answer == "Kairo is installing an update. Try again in a minute." and hang is False and sunk == []
+        c.app.state.maintenance_until = 0.0
+        assert c.post("/api/kill-switch", json={"paused": True}).status_code == 200
+        (answer, _hang), sunk = ask_stream(c.app)
+        assert answer.startswith("Kairo is paused with the kill switch") and sunk == []
+
+
+def test_g5_ask_stream_hands_a_raised_item_over_as_the_owners_answer_not_as_the_request(migrated):
+    with TestClient(create_app(migrated)) as c:
+        (answer, _hang), _sunk = ask_stream(c.app, "yes, I called her", about="open loop L1")
+    assert "answer to Kairo's open loop" in answer and "Record it as you would in chat" in answer     # (plain speech: "your")
+    assert answer.startswith("echo: (spoken, on a call) yes, I called her [")
+
+
+# ---------------------------------------------------------------- the call screen warms Claude
+
+def test_g5_opening_the_call_screen_starts_claudes_conversation_program(migrated):
+    calls = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain.warm_up = lambda **kw: calls.append(kw) or True
+        assert c.get("/api/voice/realtime").status_code == 200
+        deadline = time.monotonic() + 10
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert calls and calls[0]["origin"] == "owner_chat"
+
+
+def test_g5_the_call_screen_starts_nothing_when_the_switch_is_off(migrated):
+    calls = []
+    with TestClient(create_app(migrated)) as c:
+        assert c.put("/api/flags/g5.warm_on_call_open", json={"on": False}).status_code == 200
+        c.app.state.runner.brain.warm_up = lambda **kw: calls.append(kw) or True
+        assert c.get("/api/voice/realtime").status_code == 200
+        time.sleep(1.0)
+    assert calls == []
 
 
 # ---------------------------------------------------------------- the switches reach a call

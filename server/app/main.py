@@ -1787,6 +1787,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request = (f"{request}\n[This is the owner's answer to Kairo's {about}. Record it as you would in chat: "
                        "close or update the loop, save the answer.]")
         return await _rt_ask(request, lines, own=own)
+    app.state.mouth_ask = _mouth_ask
+
+    async def _mouth_ask_stream(request: str, lines: list[str], about: str, sink) -> tuple[str, bool]:
+        """_mouth_ask that tells sink(kind, value) while Claude works (see _rt_ask_stream): G5."""
+        own = bringup.without_reports(request)
+        if about:
+            request = (f"{request}\n[This is the owner's answer to Kairo's {about}. Record it as you would in chat: "
+                       "close or update the loop, save the answer.]")
+        return await _rt_ask_stream(request, lines, sink, own=own)
+    app.state.mouth_ask_stream = _mouth_ask_stream
 
     def _refresh_items(mouth: "Mouth") -> None:
         """Something on the list got done during the call (a loop closed), or was just pushed to the phone
@@ -3495,8 +3505,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return todaycard.render({k: v for k, v in card.peek().items() if k in todaycard.REALTIME})
 
     def _rt_prefetch() -> None:
-        """Opening Call or the voice button reads ahead what's due, so the call starts with a fresh card."""
+        """Opening Call or the voice button reads ahead what's due, so the call starts with a fresh card, and starts
+        Claude's conversation program if it isn't running (g5.warm_on_call_open: a cold start costs about a second)."""
         app.state.today_card.warm()
+        if _flag_on("g5.warm_on_call_open"):
+            warm_conversation_soon()
 
     def _rt_said(role: str, text_: str) -> None:
         """A line of the live call, into the one conversation (the owner's words as said on a call)."""
@@ -3527,25 +3540,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await _rt_ask(request, lines, model="haiku")
     app.state.report_ask = _report_ask               # an owner turn for Claude, like ask_kairo (tests listen here)
 
-    async def _rt_ask(request: str, lines: list[str], *, own: str | None = None,
-                      model: str | None = None) -> tuple[str, bool]:
-        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call.
-        Owner's rule 2026-10-19: Haiku unless the request itself is a real judgment call (owner_turn routes on
-        the request, or own, never on brain_prompt's wording around it); the owner's words on the call give
-        the language."""
+    def _rt_start() -> tuple[tuple[str, bool] | None, str | None, int | None]:
+        """What ask_kairo needs before Claude runs: (the answer to give instead, when Kairo can't ask right now; the
+        conversation's Claude session; its thread)."""
         if time.time() < app.state.maintenance_until:
-            return "Kairo is installing an update. Try again in a minute.", False
+            return ("Kairo is installing an update. Try again in a minute.", False), None, None
         with session_for(engine) as s:
             if killswitch.is_paused(s):
-                return "Kairo is paused with the kill switch. Resume it under More.", False
+                return ("Kairo is paused with the kill switch. Resume it under More.", False), None, None
             thread = chat.main_thread(s, brain_name=runner.brain.name)
             if memory.take_fresh(s):
                 thread.brain_session_id = None
                 s.add(thread)
                 s.commit()
-            sid, tid = thread.brain_session_id, thread.id
-        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
-                                                model=model, own=own)
+            return None, thread.brain_session_id, thread.id
+
+    def _rt_finish(tid: int, text: str, error, new_sid: str | None) -> tuple[str, bool]:
+        """What ask_kairo gives back: the conversation keeps Claude's session; the answer as a call may say it."""
         if new_sid:
             with session_for(engine) as s:
                 thread = s.get(ChatThread, tid)
@@ -3557,6 +3568,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if error is not None:
             return f"I couldn't get that done: {clip_text(error.text, 160)}", False
         return realtime.spoken_answer(text)   # plain speech, on every voice line
+
+    async def _rt_ask(request: str, lines: list[str], *, own: str | None = None,
+                      model: str | None = None) -> tuple[str, bool]:
+        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call.
+        Owner's rule 2026-10-19: Haiku unless the request itself is a real judgment call (owner_turn routes on
+        the request, or own, never on brain_prompt's wording around it); the owner's words on the call give
+        the language."""
+        early, sid, tid = _rt_start()
+        if early is not None:
+            return early
+        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
+                                                model=model, own=own)
+        return _rt_finish(tid, text, error, new_sid)
+
+    async def _rt_ask_stream(request: str, lines: list[str], sink, *, own: str | None = None,
+                             model: str | None = None) -> tuple[str, bool]:
+        """_rt_ask that tells sink(kind, value) while Claude works (G5): ("text", words) as they are written,
+        ("escalated", {...}) when Haiku hands over, ("end", (answer, hang up)) when Claude's text is complete, which
+        is before the CLI has sent its result. Returns what _rt_ask returns, at the result."""
+        early, sid, tid = _rt_start()
+        if early is not None:
+            return early
+        text, error, new_sid = await _call_turn(
+            request, lines, session_id=sid, thread_id=tid, purpose="call", model=model, own=own,
+            on_text=lambda words: sink("text", words), on_escalate=lambda info: sink("escalated", info),
+            on_end=lambda full: sink("end", realtime.spoken_answer(full)))
+        return _rt_finish(tid, text, error, new_sid)
+    app.state.rt_ask_stream = _rt_ask_stream
 
     def _tell(callback, *args) -> None:
         """A hand-off callback (the voice model's side): a bug in it never costs the turn."""
