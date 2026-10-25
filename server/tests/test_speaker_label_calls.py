@@ -7,6 +7,7 @@ so those two tests live in test_speaker.py, which CI's voice jobs run) there. Wr
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -170,3 +171,106 @@ def test_the_words_of_an_earlier_unsure_turn_do_not_become_the_owners(local, lab
         fr = frames_until(ws, limit=600)
     done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
     assert "TOOL-BLOCKED" in done["text"] and labels[-1:] == ["unsure"]
+
+
+# ---------------------------------------------------------------- an answer to a raised item is not lost silently (review finding)
+
+def _raise_then_reply(c, first, reply_audio, *, third=None, push_log=None):
+    """The urgent item is raised in turn 1's wait; the reply is turn 2 (and, when given, turn 3 says it again).
+    Returns what report_ask was given, in order."""
+    from tests.test_voice_local import seed_urgent
+    real = c.app.state.report_ask
+    seen: list[tuple[str, str | None]] = []
+
+    async def ask(request, lines):
+        seen.append((request, sl.current()))
+        return await real(request, lines)
+    c.app.state.report_ask = ask
+    seed_urgent(c)
+    c.voice.text = "Remind me what's on my list"
+    with c.websocket_connect("/ws/voice") as ws:
+        utter(ws, pcm(first), turn=1)
+        frames_until(ws, limit=400)
+        c.voice.text = "Yes I signed it this morning"
+        utter(ws, pcm(reply_audio), turn=2)
+        frames_until(ws, limit=400)
+        if third is not None:
+            c.voice.text = "Yes I signed the school form this morning"
+            utter(ws, pcm(third), turn=3)
+            frames_until(ws, limit=400)
+        time.sleep(0.6)                                               # the live report runs beside the call
+    time.sleep(0.5)                                                   # ... and the one after the hang-up
+    return seen
+
+
+@pytest.fixture
+def pushes(local, monkeypatch):
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(local.app.state.pusher, "notify", lambda title, body, url="/", **k: sent.append((title, body)) or "sent")
+    return sent
+
+
+def test_a_confirmed_reply_to_a_raised_item_is_recorded_as_before(local, pushes):
+    teach(local)
+    seen = _raise_then_reply(local, voice(2.0, OWNER_HZ, seed=2), voice(2.0, OWNER_HZ, seed=3))
+    assert len(seen) == 1 and seen[0][1] == "owner"                    # recorded, under the owner's label
+    assert not [p for p in pushes if "confirm" in p[1]]
+
+
+def test_a_short_weak_reply_to_a_raised_item_is_not_recorded_and_the_owner_is_told(local, pushes):
+    """The reviewer's case: 0.6 s of 'yes' scores weakly. The report would be refused by the hook and, being silent,
+    never noticed. Now nothing is sent, and the owner gets a push saying to say it again or mark it in the app."""
+    teach(local)
+    seen = _raise_then_reply(local, voice(2.0, OWNER_HZ, seed=2), voice(0.6, NEAR_HZ, seed=5))
+    assert seen == []
+    told = [p for p in pushes if "couldn't confirm" in p[1]]
+    assert len(told) == 1 and "sign the school form" in told[0][1] and "app" in told[0][1]
+    assert "unsure" not in told[0][1] and "stranger" not in told[0][1]       # never which label
+
+
+def test_saying_it_again_clearly_records_it(local, pushes):
+    teach(local)
+    seen = _raise_then_reply(local, voice(2.0, OWNER_HZ, seed=2), voice(0.6, NEAR_HZ, seed=5), third=voice(2.0, OWNER_HZ, seed=4))
+    assert len(seen) == 1 and "Yes I signed the school form this morning" in seen[0][0] and seen[0][1] == "owner"
+    assert len([p for p in pushes if "couldn't confirm" in p[1]]) == 1
+
+
+def test_a_weak_turn_elsewhere_on_the_call_does_not_stop_a_confirmed_reply(local, pushes):
+    """The item is raised in a weak turn; the reply is confirmed: it is recorded (labels are per reply, not per call)."""
+    teach(local)
+    seen = _raise_then_reply(local, voice(0.6, NEAR_HZ, seed=5), voice(2.0, OWNER_HZ, seed=3))
+    assert len(seen) == 1 and seen[0][1] == "owner" and not pushes_about(pushes)
+
+
+def pushes_about(pushes):
+    return [p for p in pushes if "couldn't confirm" in p[1]]
+
+
+def test_with_the_switch_off_a_weak_reply_is_recorded_as_before(local, pushes):
+    teach(local)
+    set_flag(local, False)
+    seen = _raise_then_reply(local, voice(2.0, OWNER_HZ, seed=2), voice(0.6, NEAR_HZ, seed=5))
+    assert len(seen) == 1 and not pushes_about(pushes)
+
+
+def test_before_the_voice_is_taught_a_reply_is_recorded_as_before(local, pushes):
+    local.app.state.speaker.model = PitchModel()                      # no voiceprint: unchecked
+    seen = _raise_then_reply(local, voice(2.0, OWNER_HZ, seed=2), voice(0.6, NEAR_HZ, seed=5))
+    assert len(seen) == 1 and seen[0][1] == "unchecked" and not pushes_about(pushes)
+
+
+def test_after_the_hang_up_a_reply_keeps_its_own_label(local, pushes, monkeypatch):
+    """Replies not sent during the call go after it. Each goes under the label it was said with: a confirmed one is
+    recorded even if the call had weak turns; a weak one is not, and the owner is told."""
+    from app import voicemouth
+    real_init = voicemouth.Mouth.__init__
+
+    def no_live_report(self, *a, **k):
+        k["report"] = None                                            # collect everything for after the call
+        real_init(self, *a, **k)
+    monkeypatch.setattr(voicemouth.Mouth, "__init__", no_live_report)
+    teach(local)
+    owner = _raise_then_reply(local, voice(0.6, NEAR_HZ, seed=5), voice(2.0, OWNER_HZ, seed=3))
+    assert len(owner) == 1 and owner[0][1] == "owner" and not pushes_about(pushes)
+    weak = _raise_then_reply(local, voice(2.0, OWNER_HZ, seed=2), voice(0.6, NEAR_HZ, seed=5))
+    assert weak == [] and len(pushes_about(pushes)) == 1

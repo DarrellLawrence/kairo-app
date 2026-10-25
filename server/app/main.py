@@ -58,7 +58,7 @@ from .actions import LoopsAdd
 from .audit import audit
 from .jobkit import clip as clip_text
 from .executor import Executor
-from .gate import TOOL_PREFIX, load_gate
+from .gate import TOOL_PREFIX, VOICE_MAY_CHANGE, load_gate
 from .gate_context import read_context
 from .housekeeping import Housekeeping, run_forever
 from .google.client import GoogleAPI, GoogleError, GoogleNotConnected
@@ -1275,8 +1275,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if line.speaker is not None:   # nobody to hear it; the answer itself goes on and is saved
                 line.speaker.stop()
             if line.mouth is not None and line.mouth.reports():
-                with speaker_label.scope(getattr(line, "label", None)):   # G13: what they said on this call, as weak as its weakest turn
-                    report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
+                report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
                 _turns.add(report)
                 report.add_done_callback(_turns.discard)
 
@@ -1424,7 +1423,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # G13, first thing and before any await: the speaker check's label of THIS turn (the call's gate numbers
             # its verdicts, take_label() hands the turn the least trusted one waiting). No gate: the voice button.
             label = gate.take_label() if gate is not None else speaker_label.UNCHECKED
-            line.label = speaker_label.worst(getattr(line, "label", None), label)       # the call's weakest, for the reports after it
             line.current = number
             if line.speaker is not None and line.speaker is not speaker:
                 line.speaker.stop()
@@ -1496,8 +1494,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if line.speaker is not None:
                     line.speaker.stop()
                 if line.mouth is not None and line.mouth.reports():
-                    with speaker_label.scope(getattr(line, "label", None)):
-                        report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
+                    report = asyncio.get_running_loop().create_task(_report_answers(line.mouth))
                     _turns.add(report)
                     report.add_done_callback(_turns.discard)
         task = asyncio.get_running_loop().create_task(run())
@@ -1553,7 +1550,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         text, line.carry = f"{line.carry} {text}".strip(), ""
         label = speaker_label.worst(label, getattr(line, "carry_label", None))
         line.carry_label = None
-        line.label = speaker_label.worst(getattr(line, "label", None), label)
         speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm)
         if line.speaker is not None:
             line.speaker.stop()
@@ -1654,7 +1650,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
-                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
+                      greeting=_greeting(), delivered=_delivered, may_record=_may_record, on_held=_reply_held,
+                      **mouth_args(g3))
         line.mouth = mouth
         try:
             await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
@@ -1758,6 +1755,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _turns.add(task)
         task.add_done_callback(_turns.discard)
 
+    def _may_record(label: str | None) -> bool:
+        """G13: may what the owner said under this speaker label be recorded (a loop closed, an answer saved)? The gate's
+        own rule: no label, owner and unchecked yes; unsure, stranger and anything unknown no, unless g13.speaker_label_gate
+        is off (then it is what it was). The database says; if it cannot, no."""
+        if label is None or label in VOICE_MAY_CHANGE:
+            return True
+        from . import flags as flags_
+        with session_for(engine) as s_:
+            return not flags_.on(s_, speaker_label.FLAG)
+
+    def _reply_held(item) -> None:
+        """G13: the owner's answer to an item Kairo raised was not confirmed as theirs, so it was not recorded: say so
+        (a push: the call is not interrupted), never which label."""
+        text = clip_text(item.text, 90)
+        app.state.pusher.notify("Kairo", f"I couldn't confirm that was you, so I didn't record your answer about: {text}. "
+                                "Say it again clearly, or mark it in the app.", "/#today", source="voice")
+
     def _report_live(item, said: str, reply: str) -> None:
         """On the call: what the owner said to an item Kairo raised goes to Claude now (done, later, new info),
         so the next questions on this call get the new state. Their own words only. Never spoken."""
@@ -1776,8 +1790,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         turn). Their own words only."""
         await asyncio.gather(*list(_turns - {asyncio.current_task()}), return_exceptions=True)   # the call's answers first
         for item, said, reply in mouth.reports():
+            label = mouth.reply_label(item.id)        # G13: each reply goes under the label it was said with, not the call's weakest
+            if not _may_record(label):
+                mouth.hold(item)
+                continue
             try:
-                await app.state.report_ask(bringup.report_request(item, said, reply), [f"Owner: {reply}"])
+                with speaker_label.scope(label):
+                    await app.state.report_ask(bringup.report_request(item, said, reply), [f"Owner: {reply}"])
             except Exception:
                 log.exception("voice: reporting the owner's answer to %s", item.id)
 
