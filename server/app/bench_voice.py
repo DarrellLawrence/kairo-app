@@ -451,7 +451,7 @@ def config_info(devices: dict | None) -> dict:
     whisper, kokoro, piper, vm = (comps.get(k) or {} for k in ("whisper", "kokoro", "piper", "voice_model"))
     return {"vad_stop_s": VAD_STOP_S, "turn_analyzer": TURN_ANALYZER,
             "stt_model": str(whisper.get("model") or "unknown"),
-            "stt_compute_type": {"cuda": "float16", "cpu": "int8"}.get(whisper.get("device"), "unknown"),   # voice.Voice._make_stt
+            "stt_compute_type": whisper.get("compute_type") or {"cuda": "float16", "cpu": "int8"}.get(whisper.get("device"), "unknown"),   # voice.Voice._make_stt
             "llm_model": str(vm["model"]) if vm.get("loaded") and vm.get("model") else None,
             "tts_en": f"kokoro {kokoro.get('model') or KOKORO_MODEL} ({KOKORO_VOICE}, {kokoro.get('device') or 'not loaded'})",
             "tts_de": f"piper {piper.get('model') or PIPER_DE} ({piper.get('device') or 'cpu'})"}

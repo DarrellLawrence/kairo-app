@@ -421,7 +421,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                               transport=lambda: getattr(app.state, "google_transport", None))
     app.state.brief = brief.BriefMaker(engine=engine, google_read=google_read, vault_dir=settings.vault_dir, profile=profile)
     _voice_site = tool_sites.site("voice", settings.data_dir)
-    app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site)
+    app.state.voice = Voice(voice_models_dir(settings.data_dir, _voice_site), site_dir=_voice_site, engine=engine)
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
@@ -1155,9 +1155,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         line.interrupt = interrupt
         if _mouth_ok(None):                          # the call's conversation is set up while the owner starts talking
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
-        with session_for(engine) as s_:              # English only: Whisper skips finding the language
-            line.stt_language = "en" if realtime.load_settings(s_).get("language") == "en" else None
+        with session_for(engine) as s_:              # English only or German only: Whisper skips finding the language
+            line.stt_language = {"en": "en", "de": "de"}.get(realtime.load_settings(s_).get("language"))
             line.norm = speaknorm.for_call(s_)       # g9.speaknorm: read once, as the call starts
+            if hasattr(app.state.voice, "call_started"):
+                app.state.voice.call_started(s_)     # the call's switches (g2.*) are read once, Whisper is warmed
         line.smart, line.endpointed = app.state.smart_turn.available(), False
         if line.smart:
             await line.send({"type": "hello", "endpoint": "smart", "pause_ms": 200, "end_ms": 1500})
@@ -1412,6 +1414,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s_:
             language_mode = realtime.load_settings(s_).get("language", "auto")
             norm = speaknorm.for_call(s_)            # g9.speaknorm: read once, as the call starts
+            if hasattr(app.state.voice, "call_started"):
+                app.state.voice.call_started(s_)     # the call's switches (g2.*) are read once, Whisper is warmed
         if _mouth_ok(call_id):
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         _warm_openers()
@@ -1430,7 +1434,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gate = _speaker_gate(path, ignored)
         call = voicertc.build_call(conn, voice=speaker_mod.Listening(app.state.voice, gate) if gate else app.state.voice,
                                    answer=answer, interrupt=talked_over, events=None,
-                                   language_mode="en" if language_mode == "en" else "auto", openers=_openers(),
+                                   language_mode=language_mode if language_mode in ("en", "de") else "auto", openers=_openers(),
                                    speculate=speculate, discard=discard, greeting=_greeting(),
                                    warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
                                    gate=gate.answer if gate else None, norm=norm)

@@ -23,6 +23,22 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                  "working."),
 
     # -- G2 Whisper
+    "g2.temperature_zero": (True, "On calls, Whisper writes each sentence down once and never retries with random variation "
+                                  "when it is unsure: the same words every time, and no slow second pass. A piece that only "
+                                  "repeats itself (\"cut, cut, cut ...\") is dropped instead of retried, and counted in Voice speed."),
+    "g2.offline_models": (True, "Whisper only loads the model files the installer already downloaded and never goes online to look "
+                                "for them while Kairo runs. A missing model is reported, not fetched in the middle of a sentence."),
+    "g2.int8_float16": (False, "Whisper runs in a lighter number format on the graphics card (int8_float16): about 0.8 GB less "
+                               "graphics memory, speed the same. Wait for the PC test (speed and word errors on your voice) "
+                               "before you switch it on. Takes effect at the next call."),
+    "g2.warm_at_connect": (True, "When a call or the voice button connects, Whisper writes down one short test sentence in the "
+                                 "background (in the language of your last call), so your first real sentence does not meet a "
+                                 "cold graphics card. A sentence you say during that one test waits for it to finish. Not "
+                                 "done when Whisper runs on the CPU."),
+    "g2.single_encode_langid": (False, "Calls set to English and German: Whisper listens once, picks English or German from that same "
+                                       "pass and writes the words down. Today it listens twice (an estimated 0.2 to 1.4 s per "
+                                       "sentence). Wait for the PC test (P2) and a check on your own short sentences (P25) "
+                                       "before you switch it on."),
 
     # -- G3 mouth
 

@@ -528,3 +528,42 @@ def test_a_card_that_fills_up_after_the_weights_is_a_fail_in_kairo_diag(pc, vl):
         "llama_init_from_model: failed to allocate buffer for kv cache\n", encoding="utf-8")
     c = run(pc, live=voice_parts())[1]["llama.device"]
     assert c["status"] == "FAIL" and "cudaMalloc failed: out of memory" in c["detail"] and "33/33" in c["detail"]
+
+# ---------------------------------------------------------------- G2: how Whisper really runs (compute type, ctranslate2, language finding)
+
+def test_diag_names_the_compute_type_and_the_ctranslate2_version_whisper_really_runs_in(pc, speech_only):
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", ctranslate2="4.8.3",
+                                              language_detection="Whisper's own (two passes, 99 languages)")))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "PASS" and "float16" in c["detail"] and "ctranslate2 4.8.3" in c["detail"]
+    assert "two passes" in c["detail"]
+
+
+def test_a_lighter_compute_type_that_did_not_load_is_a_warning_with_the_reason(pc, speech_only):
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", ctranslate2="4.8.3",
+                                              compute_note="int8_float16 did not load (ValueError: no int8_float16 on cuda); float16 is used")))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "WARN" and "int8_float16 did not load" in c["detail"] and "float16" in c["detail"]
+
+
+def test_a_language_finding_that_broke_is_a_warning_with_the_reason(pc, speech_only):
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", language_detection="Whisper's own (two passes, 99 languages)",
+                                              language_detection_note="RuntimeError: faster-whisper's options changed")))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "WARN" and "options changed" in c["detail"]
+
+
+def test_an_older_server_without_the_compute_type_adds_no_check(pc, speech_only):
+    _, by_id = run(pc, live=live())
+    assert "whisper.compute" not in by_id
+
+
+def test_diag_says_how_many_repeating_pieces_whisper_dropped_and_stays_green(pc, speech_only):
+    # temperature 0 has no retry for a decode that only repeats itself: it is dropped, and the count is shown
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", loops_dropped=3)))
+    c = by_id["whisper.compute"]
+    assert c["status"] == "PASS" and "3 repeating pieces dropped" in c["detail"]
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", loops_dropped=1)))
+    assert "1 repeating piece dropped" in by_id["whisper.compute"]["detail"]
+    _, by_id = run(pc, live=live(whisper=comp(compute_type="float16", loops_dropped=0)))
+    assert "repeating" not in by_id["whisper.compute"]["detail"]
