@@ -656,12 +656,19 @@ def test_kairo_bench_uses_the_servers_settings_and_its_voice_packages(tmp_path, 
     site.mkdir()
     env = tmp_path / "kairo.env"
     env.write_text(f"KAIRO_VOICE_SITE={site}\nKAIRO_PORT=8123\n", encoding="utf-8")
+    from app.settings import get_settings
     monkeypatch.setattr(sys, "path", list(sys.path))
-    monkeypatch.delenv("KAIRO_VOICE_SITE", raising=False)
-    monkeypatch.delenv("KAIRO_PORT", raising=False)
-    bench_voice.prepare(env)
-    assert str(site) in sys.path
-    import os
-    assert os.environ["KAIRO_PORT"] == "8123"
-    bench_voice.prepare(None)                                   # no file: nothing changes, nothing breaks
-    assert bench_voice.parser().parse_args(["--env-file", str(env)]).env_file == env
+    for name in ("KAIRO_VOICE_SITE", "KAIRO_PORT"):             # set then delete: the original (or none) comes back after
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    clear_settings = get_settings.cache_clear                   # prepare() reloads the settings from kairo.env
+    try:
+        bench_voice.prepare(env)
+        assert str(site) in sys.path
+        import os
+        assert os.environ["KAIRO_PORT"] == "8123"
+        bench_voice.prepare(None)                               # no file: nothing changes, nothing breaks
+        assert bench_voice.parser().parse_args(["--env-file", str(env)]).env_file == env
+    finally:
+        monkeypatch.undo()                                      # the env first, then the settings built from it
+        clear_settings()
