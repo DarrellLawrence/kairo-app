@@ -56,8 +56,10 @@ def _calendars(g) -> list[str]:
     return ["primary"] + [i for i in ids if i != "primary" and not any(c.get("primary") and c["id"] == i for c in items)]
 
 
-def read_days(google_read, tz, start: dt.date, *, days: int = 7, session: Session | None = None) -> CalendarRead:
-    """Every shown calendar, `days` days from `start` (local). Never raises: a failed read is ok=False."""
+def read_days(google_read, tz, start: dt.date, *, days: int = 7, session: Session | None = None,
+              descriptions: bool = False) -> CalendarRead:
+    """Every shown calendar, `days` days from `start` (local). Never raises: a failed read is ok=False. descriptions: each event
+    also carries its description (the Today card's read, for the fast path "next lesson"); nobody else asks for it."""
     lo = dt.datetime.combine(start, dt.time.min, tzinfo=tz)
     hi = lo + dt.timedelta(days=days)
     out = CalendarRead(ok=False, start=start, days=days)
@@ -75,10 +77,13 @@ def read_days(google_read, tz, start: dt.date, *, days: int = 7, session: Sessio
                 if e.get("status") == "cancelled":
                     continue
                 st, en = e.get("start") or {}, e.get("end") or {}
-                out.events.append({"summary": clip(e.get("summary") or "(no title)", 120),
-                                   "start": st.get("dateTime") or st.get("date"), "end": en.get("dateTime") or en.get("date"),
-                                   "all_day": "date" in st and "dateTime" not in st,
-                                   "location": clip(e.get("location"), 120) or None, "calendar": cal})
+                item = {"summary": clip(e.get("summary") or "(no title)", 120),
+                        "start": st.get("dateTime") or st.get("date"), "end": en.get("dateTime") or en.get("date"),
+                        "all_day": "date" in st and "dateTime" not in st,
+                        "location": clip(e.get("location"), 120) or None, "calendar": cal}
+                if descriptions:
+                    item["description"] = str(e.get("description") or "")[:1500] or None     # its line breaks matter: not clip()
+                out.events.append(item)
         out.ok, out.calendars = True, len(cals)
     except (GoogleNotConnected, GoogleError, KeyError, ValueError) as exc:
         out.events, out.error = [], f"{type(exc).__name__}: {exc}"

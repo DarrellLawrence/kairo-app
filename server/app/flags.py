@@ -129,6 +129,13 @@ FLAGS: dict[str, tuple[bool, str]] = {
                              "itself, by a rule on the PC, the moment you finish: the voice model is not asked at all. Only when "
                              "the whole sentence is that question: 'what time is my train' or 'what time is it in Tokyo' still go "
                              "to the voice model. Off: those questions go to the voice model as before. Takes effect at the next call."),
+    "g10.fast_agenda": (True, "Kairo answers 'When is my next appointment?', 'What is my next lesson?' and 'When is the next train?' (and "
+                              "the German ones) itself, from the same calendar, school timetable and connection it already shows on "
+                              "the Today card, without asking the voice model or Claude. Only while that was read in the last few "
+                              "minutes and could be read (a calendar that could not be read is never an empty calendar), and only "
+                              "for the plain question: 'when is the next train to Bern' or 'my next appointment with the dentist' "
+                              "still go to the voice model. A train question is not answered with a bus or the other way round. "
+                              "Off: those questions go to the voice model as before. Takes effect at the next call."),
     "g10.timers": (True, "On a call you can say 'Set a timer for ten minutes', 'Stell einen Timer auf zehn Minuten', 'Remind me in an "
                          "hour to call Lea', 'How much time is left on my timer?' or 'Cancel the timer'. Kairo keeps the timer itself "
                          "and sends a push to your phone when it is up, also at night (quiet hours do not hold it back), with a "

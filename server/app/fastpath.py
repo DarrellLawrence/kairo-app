@@ -27,16 +27,20 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+import threading
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import timerphrase
+from . import timerphrase, timetable
 from .timers import MAX_ACTIVE, TimerError, clean_label, say_duration, say_left
 
 log = logging.getLogger("kairo.fastpath")
 
 MAX_WORDS = 10
+EVENTS_MAX_AGE_S = 300.0     # the card reads the calendar every 3 minutes: older than this is not sure
+TRIP_MAX_AGE_S = 240.0       # the connection every 3 minutes on a call
 
 # ---------------------------------------------------------------- reading the sentence
 
@@ -97,6 +101,18 @@ _RULES: dict[str, list[tuple[str, str | None, list[str], list[str]]]] = {
         ("weekday", None,
          [rf"what day of the week is it{_TODAY}", r"what day of the week is today"],
          [rf"what day of the week it is{_TODAY}"]),
+        ("event", None,
+         [r"(?:what|when) is (?:my|the) next (?P<what>appointment|event|meeting)", r"what (?:do i have|have i got) next",
+          r"what is next (?:on|in) my calendar"],
+         [r"(?:my|the) next (?P<what>appointment|event|meeting)", r"(?:when|what) my next (?P<what>appointment|event|meeting) is"]),
+        ("lesson", None,
+         [r"(?:what|when) is (?:my|the) next (?:lesson|class)", r"when does (?:my|the) next (?:lesson|class) (?:start|begin)",
+          r"what (?:lesson|class) do i have next", r"when do i have (?:my|the) next (?:lesson|class)", r"what (?:lesson|class) is next"],
+         [r"(?:my|the) next (?:lesson|class)", r"when my next (?:lesson|class) (?:is|starts|begins)"]),
+        ("trip", None,
+         [r"(?:when|what) is (?:my|the) next (?P<mode>train|bus|connection)",
+          r"when does (?:my|the) next (?P<mode>train|bus|connection) (?:leave|go|depart)"],
+         [r"(?:my|the) next (?P<mode>train|bus|connection)", r"when (?:my|the) next (?P<mode>train|bus|connection) (?:leaves|goes|departs|is)"]),
     ],
     "de": [
         ("time", None,
@@ -111,21 +127,32 @@ _RULES: dict[str, list[tuple[str, str | None, list[str], list[str]]]] = {
         ("weekday", None,
          [r"welcher wochentag ist (?:heute|es(?: heute)?)", rf"welchen wochentag haben wir{_HEUTE}"],
          [r"welcher wochentag heute ist", r"welchen wochentag wir heute haben"]),
+        ("event", None,
+         [r"(?:wann|was) ist (?:mein|der) nächste[rs]? (?P<what>termin|meeting)", r"wann habe ich (?:meinen|den) nächsten (?P<what>termin|meeting)"],
+         [r"wann (?:mein|der) nächste[rs]? (?P<what>termin|meeting) ist", r"was (?:mein|der) nächste[rs]? (?P<what>termin|meeting) ist",
+          r"(?:mein|meinen|der|den) nächste[rns]? (?P<what>termin|meeting)"]),
+        ("lesson", None,
+         [r"(?:wann|was) ist (?:meine|die) nächste (?:stunde|lektion)", r"wann habe ich (?:meine|die) nächste (?:stunde|lektion)",
+          r"wann (?:beginnt|startet|fängt) (?:meine|die) nächste (?:stunde|lektion)(?: an)?",
+          r"welche (?:stunde|lektion) (?:habe ich|ist|kommt) als nächstes"],
+         [r"wann (?:meine|die) nächste (?:stunde|lektion) (?:ist|beginnt|startet)", r"(?:meine|die) nächste (?:stunde|lektion)"]),
+        ("trip", None,
+         [r"wann (?:fährt|geht|kommt) (?:der|mein) nächste[rn]? (?P<mode>zug|bus)(?: ab)?", r"wann ist (?:der|mein) nächste[rn]? (?P<mode>zug|bus)",
+          r"(?:wann|was) ist (?:meine|die) nächste (?P<mode>verbindung)", r"wann (?:fährt|geht|kommt) (?:meine|die) nächste (?P<mode>verbindung)(?: ab)?",
+          r"welcher (?P<mode>zug|bus) (?:fährt|kommt|geht) als nächstes"],
+         [r"wann (?:der|mein) nächste[rn]? (?P<mode>zug|bus) (?:fährt|geht|kommt)(?: ab)?", r"(?:der|mein) nächste[rn]? (?P<mode>zug|bus)"]),
     ],
 }
 
 
-def _compile(rules) -> dict[str, list[tuple[str, str | None, re.Pattern, re.Pattern | None]]]:
-    out: dict = {}
-    for lang, rows in rules.items():
-        out[lang] = []
-        for kind, sub, alone, after in rows:
-            out[lang].append((kind, sub, re.compile("(?:" + "|".join(alone) + ")"),
-                              re.compile("(?:" + "|".join(alone + after) + ")") if after else None))
-    return out
+def _compile(rules) -> dict[str, list[tuple[str, list[re.Pattern], list[re.Pattern]]]]:
+    """kind -> (the patterns that stand alone, the patterns that count only after "can you tell me ...")."""
+    return {lang: [(kind, [re.compile(p) for p in alone], [re.compile(p) for p in after]) for kind, _sub, alone, after in rows]
+            for lang, rows in rules.items()}
 
 
 _COMPILED = _compile(_RULES)
+_MODE = {"zug": "train", "train": "train", "bus": "bus", "verbindung": "connection", "connection": "connection"}
 
 
 def match(text: str, languages: tuple[str, ...] = ("en", "de")) -> Match | None:
@@ -136,11 +163,14 @@ def match(text: str, languages: tuple[str, ...] = ("en", "de")) -> Match | None:
         return None
     if words <= MAX_WORDS:
         for lang in languages:
-            for kind, _sub, alone, after in _COMPILED.get(lang, ()):
-                rx = after if (asked and after is not None) else alone
-                m = rx.fullmatch(core)
-                if m:
-                    return Match(kind, lang, {k: v for k, v in m.groupdict().items() if v})
+            for kind, alone, after in _COMPILED.get(lang, ()):
+                for rx in (alone + after) if asked else alone:
+                    m = rx.fullmatch(core)
+                    if m:
+                        data = {k: v for k, v in m.groupdict().items() if v}
+                        if "mode" in data:
+                            data["mode"] = _MODE[data["mode"]]
+                        return Match(kind, lang, data)
     if words <= timerphrase.MAX_WORDS:
         got = timerphrase.parse(core, text, languages)
         if got is not None:
@@ -198,6 +228,8 @@ class CallRules:
             return self.time_date
         if kind.startswith("timer_"):
             return self.timers
+        if kind in ("event", "lesson", "trip"):
+            return self.agenda
         return False
 
     def resolve(self, text: str, *, language: str | None = None, mode: str = "auto", execute: bool = True) -> Answer | None:
@@ -225,8 +257,8 @@ class CallRules:
 class FastPaths:
     """tz: the owner's zone; now: the clock (an aware datetime), injected in tests."""
 
-    def __init__(self, *, tz, now: Callable[[], dt.datetime] | None = None, engine=None, timers=None):
-        self.tz, self.engine, self.timers = tz, engine, timers
+    def __init__(self, *, tz, now: Callable[[], dt.datetime] | None = None, engine=None, timers=None, facts: "Facts | None" = None):
+        self.tz, self.engine, self.timers, self.facts = tz, engine, timers, facts
         self._now = now or (lambda: dt.datetime.now(dt.timezone.utc))
 
     def now(self) -> dt.datetime:
@@ -241,7 +273,8 @@ class FastPaths:
         from .db import session_for
         try:
             with session_for(self.engine) as s:
-                return self.rules(time_date=flags.on(s, "g10.fast_paths"), timers=flags.on(s, "g10.timers"))
+                return self.rules(time_date=flags.on(s, "g10.fast_paths"), agenda=flags.on(s, "g10.fast_agenda"),
+                                  timers=flags.on(s, "g10.timers"))
         except Exception:   # no database to read: no rules, the voice model answers as before
             log.exception("fast paths: reading the switches")
             return self.rules(time_date=False)
@@ -257,9 +290,115 @@ class FastPaths:
             text = f"It's {wd}." if m.lang == "en" else f"Heute ist {wd}."
         elif m.kind.startswith("timer_"):
             return self._timer(m, execute)
+        elif m.kind == "event":
+            return self._event(m, now)
+        elif m.kind == "lesson":
+            return self._lesson(m, now)
+        elif m.kind == "trip":
+            return self._trip(m, now)
         else:
             return None
         return Answer(text, m.lang, m.kind)
+
+    # ------------------------------------------------ the agenda: Kairo's own data, only while it is fresh and was read
+
+    def _when(self, start: dt.datetime, now: dt.datetime, lang: str) -> str | None:
+        """"at 3 PM" today, "tomorrow at 9 AM" tomorrow, None for any other day (the data does not reach that far)."""
+        t = say_time(start, lang)
+        if start.date() == now.date():
+            return f"at {t}" if lang == "en" else f"um {t}"
+        if start.date() == now.date() + dt.timedelta(days=1):
+            return f"tomorrow at {t}" if lang == "en" else f"morgen um {t}"
+        return None
+
+    def _event(self, m: Match, now: dt.datetime) -> Answer | None:
+        events = self.facts.events(now.date()) if self.facts is not None else None
+        if events is None:
+            return None
+        ahead, all_day = [], False
+        for e in events:
+            if e.get("all_day"):
+                day = _date(e.get("start"))
+                all_day = all_day or (day is not None and day >= now.date())
+                continue
+            st = _local(e.get("start"), self.tz)
+            if st is not None and st > now:                    # one that is running now is not the next one
+                ahead.append((st, e))
+        lang = m.lang
+        if not ahead:
+            return None if all_day else Answer(_AG[lang]["nothing"], lang, m.kind)
+        ahead.sort(key=lambda x: x[0])
+        st, e = ahead[0]
+        when = self._when(st, now, lang)
+        if when is None:
+            return None
+        title = _title(e.get("summary"), lang)
+        if lang == "de":
+            adj, noun = ("nächstes", "Meeting") if m.data.get("what") == "meeting" else ("nächster", "Termin")
+            return Answer(f"Dein {adj} {noun} ist {title} {when}.", lang, m.kind)
+        return Answer(f"Your next {m.data.get('what') or 'event'} is {title} {when}.", lang, m.kind)
+
+    def _lesson(self, m: Match, now: dt.datetime) -> Answer | None:
+        events = self.facts.events(now.date()) if self.facts is not None else None
+        if events is None:
+            return None
+        best = None
+        for e in events:
+            if e.get("all_day") or e.get("summary") != timetable.SUMMARY:
+                continue
+            st = _local(e.get("start"), self.tz)
+            if st is None:
+                continue
+            for les in timetable.parse_lessons(e.get("description")):
+                start = dt.datetime.combine(st.date(), dt.time.fromisoformat(les["start"]), tzinfo=self.tz)
+                if start > now and (best is None or start < best[0]):
+                    best = (start, les)
+        if best is None:                                       # school is over and the data stops here: not sure
+            return None
+        start, les = best
+        when = self._when(start, now, m.lang)
+        if when is None:
+            return None
+        subject, room = _title(les["subject"], m.lang), _title(les["room"], m.lang) if les["room"] else None
+        if m.lang == "de":
+            return Answer(f"Deine nächste Stunde ist {subject} {when}" + (f", Raum {room}" if room else "") + ".", m.lang, m.kind)
+        return Answer(f"Your next lesson is {subject} {when}" + (f", in room {room}" if room else "") + ".", m.lang, m.kind)
+
+    def _trip(self, m: Match, now: dt.datetime) -> Answer | None:
+        trip = self.facts.trip() if self.facts is not None else None
+        if trip is None:
+            return None
+        mode, lang = m.data.get("mode", "connection"), m.lang
+        ups = []
+        for c in trip["conns"]:
+            dep = _local(c.get("departure"), self.tz)
+            if dep is None:
+                continue
+            delay = c.get("delay") if isinstance(c.get("delay"), int) and c["delay"] > 0 else 0
+            if dep + dt.timedelta(minutes=delay) > now:        # not gone yet
+                ups.append((dep + dt.timedelta(minutes=delay), dep, delay, c))
+        ups.sort(key=lambda x: x[0])
+        cancelled = None
+        for _actual, dep, delay, c in ups:
+            if not _mode_ok(mode, c.get("line")):              # asked for a train and this is a bus (or not known): not sure
+                return None
+            if c.get("cancelled"):
+                cancelled = cancelled or dep
+                continue
+            frm, to = _title(trip["from"], lang), _title(trip["to"], lang)
+            plat = _title(c.get("platform"), lang) if c.get("platform") else None
+            t = say_time(dep, lang)
+            if lang == "de":
+                noun = {"train": "Der nächste Zug", "bus": "Der nächste Bus", "connection": "Die nächste Verbindung"}[mode]
+                text = f"{noun} nach {to} fährt um {t} in {frm} ab" + (f", Gleis {plat}" if plat else "")
+                text += (f", {delay} Minute{'n' if delay != 1 else ''} Verspätung" if delay else "") + "."
+                lead = f"Die Verbindung um {say_time(cancelled, lang)} fällt aus. " if cancelled else ""
+            else:
+                text = f"The next {mode} to {to} leaves {frm} at {t}" + (f", platform {plat}" if plat else "")
+                text += (f", {delay} minute{'s' if delay != 1 else ''} late" if delay else "") + "."
+                lead = f"The {say_time(cancelled, lang)} is cancelled. " if cancelled else ""
+            return Answer(lead + text, lang, m.kind)
+        return None
 
     # ------------------------------------------------ timers (timerphrase reads the words, timers.py rings them)
 
@@ -365,3 +504,97 @@ def _pick(rows: list, d: dict) -> list:
         want = _words_of(d["q"])
         return [r for r in rows if want and all(any(_alike(w, x) for x in _words_of(r.label)) for w in want)]
     return rows
+
+
+# ---------------------------------------------------------------- what the rules know of the owner's day
+
+class Facts:
+    """What the Today card last read, in a form a rule can use: the calendar's events with their times (and the timetable
+    blocks' lessons), and the next connections. The card's keeper fills it (main.py) each time it reads; a rule answers from
+    it only while it is fresh, was read successfully and is for today. Kept in memory, copied, never written anywhere; the
+    description of an event is kept only for the school blocks (the lessons are listed in it)."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock, self._lock = clock, threading.Lock()
+        self._events: tuple[list[dict], bool, dt.date, float] | None = None
+        self._trip: tuple[dict, float] | None = None
+
+    def put_events(self, events: list[dict] | None, ok: bool, day: dt.date) -> None:
+        keep = []
+        for e in events or []:
+            e = dict(e)
+            if e.get("summary") != timetable.SUMMARY:
+                e.pop("description", None)
+            keep.append(e)
+        with self._lock:
+            self._events = (keep, bool(ok), day, self._clock())
+
+    def events(self, day: dt.date) -> list[dict] | None:
+        """The events read for `day`, or None: never read, the read failed, it is for another day, or it is too old."""
+        with self._lock:
+            cur = self._events
+        if cur is None:
+            return None
+        events, ok, read_day, at = cur
+        if not ok or read_day != day or self._clock() - at > EVENTS_MAX_AGE_S:
+            return None
+        return events
+
+    def put_trip(self, conns: list[dict] | None, frm: str | None, to: str | None) -> None:
+        with self._lock:
+            self._trip = ({"conns": [dict(c) for c in conns], "from": frm, "to": to}, self._clock()) if conns and frm and to else None
+
+    def trip(self) -> dict | None:
+        with self._lock:
+            cur = self._trip
+        if cur is None or self._clock() - cur[1] > TRIP_MAX_AGE_S:
+            return None
+        return cur[0]
+
+
+_AG = {"en": {"nothing": "Nothing else on your calendar today or tomorrow.", "untitled": "an event without a title"},
+       "de": {"nothing": "Heute und morgen steht nichts mehr an.", "untitled": "ein Termin ohne Titel"}}
+_MARKUP = re.compile(r"[\x00-\x1f\x7f<>\[\]{}|`\\]+")
+_RAIL = {"S", "R", "RE", "IR", "IC", "ICE", "EC", "ECE", "EN", "NJ", "RJ", "RJX", "TGV", "RB", "REX", "SN", "VAE", "PE", "TER", "D", "TLK"}
+_BUS = {"B", "BUS", "NFB", "NB", "BN"}
+
+
+def _title(text, lang: str, limit: int = 60) -> str:
+    """A name from the calendar, a lesson or a station as one plain line, read aloud and never run: no markup, no brackets,
+    at most `limit` characters (cut at a word)."""
+    raw = str(text or "")
+    if raw.strip() in ("", "(no title)"):
+        return _AG[lang]["untitled"]
+    t = re.sub(r"\s+", " ", _MARKUP.sub(" ", raw)).strip()
+    if len(t) > limit:
+        t = t[:limit].rsplit(" ", 1)[0] if " " in t[:limit] else t[:limit]
+    return t.strip(" ,;:") or _AG[lang]["untitled"]
+
+
+def _mode_ok(mode: str, line) -> bool:
+    """Is this connection the kind of vehicle that was asked for ("S3" and "IC8" are trains, "B12" a bus)? "connection" takes any."""
+    if mode == "connection":
+        return True
+    m = re.match(r"^([A-Za-z]+)", str(line or "").strip())
+    cat = m.group(1).upper() if m else ""
+    return cat in (_RAIL if mode == "train" else _BUS)
+
+
+def _local(t, tz) -> dt.datetime | None:
+    if isinstance(t, dt.datetime):
+        pass
+    elif isinstance(t, str):
+        try:
+            t = dt.datetime.fromisoformat(t.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone(tz)
+
+
+def _date(t) -> dt.date | None:
+    try:
+        return dt.date.fromisoformat(str(t)[:10])
+    except ValueError:
+        return None
