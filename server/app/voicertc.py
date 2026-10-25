@@ -244,6 +244,8 @@ class RtcSpeaker:
     Kairo's own lines (holding line, bring-up) as they are, all in order. stop(): talked over, the rest
     is dropped."""
 
+    second_piece = True                      # g5.second_piece (set per call): only the first piece is cut at five words
+
     def __init__(self, turn: int = 0, whole_numbers: bool = False) -> None:
         from .voicelink import Sentences
         self.turn = turn
@@ -275,10 +277,18 @@ class RtcSpeaker:
                 return
             piece, more = self.first[:at], self.first[at:]
             self.first, self.cut = "", True
+            if self.second_piece:
+                self.rest.count = 1          # the first piece is out: the rest goes by sentence, not cut at five words again
             self._put(piece)
             delta = more
         for piece in self.rest.feed(delta):
             self._put(piece)
+
+    def flush(self) -> None:
+        """The end of what is being said (Claude's text is finished): the words still being collected go to the voice now,
+        not when the speaker closes. The speaker stays open; words after this start a fresh first piece."""
+        if not self.closed and not self.stopped:
+            self._flush()
 
     def _flush(self) -> None:
         if not self.cut and self.first.strip():

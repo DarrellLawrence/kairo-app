@@ -60,8 +60,8 @@ def test_the_speaker_says_the_first_clause_then_sentences_and_kairos_lines_in_or
     s.say("Btw, did you pay the phone bill?")
     s.feed("It's due today.")
     s.finish()
-    assert _drain(s) == ["Sure,", "I'll remind you tomorrow morning.", "And I added it to your list.",
-                         "Btw, did you pay the phone bill?", "It's due today."]
+    assert _drain(s) == ["Sure,", "I'll remind you tomorrow morning. And I added it to your list.",   # after the first piece:
+                         "Btw, did you pay the phone bill?", "It's due today."]                        # sentences of 40+ letters
 
 
 def test_the_speaker_says_a_whole_answer_that_came_at_once_and_nothing_after_stop():
@@ -75,6 +75,87 @@ def test_the_speaker_says_a_whole_answer_that_came_at_once_and_nothing_after_sto
     s.say("A line.")
     s.finish()
     assert _drain(s) == ["Sure,"]
+
+
+# ---------------------------------------------------------------- G5: where the pieces are cut
+
+CLAUDE_SAYS = ("Your next train leaves at 14:32 from platform two and arrives in Bern at 15:10. "
+               "Then you have a free hour. Enjoy it.")
+
+
+def _in_pieces(text: str, n: int = 7) -> list[str]:
+    return [text[i:i + n] for i in range(0, len(text), n)]
+
+
+def _say(speaker: RtcSpeaker, text: str, *, holding_line: str | None = "Okay, one moment.") -> list[str]:
+    if holding_line:
+        speaker.say(holding_line)                       # Kairo's own line: the answer's words start fresh after it
+    for delta in _in_pieces(text):
+        speaker.feed(delta)
+    speaker.finish()
+    return _drain(speaker)
+
+
+def test_g5_the_second_piece_is_not_cut_at_five_words_again():
+    """Measured: the first piece is five words (the owner's rule), but the second was cut at five words too, in the middle
+    of a sentence, so every answer was cut twice. Now: the first piece, then whole sentences."""
+    got = _say(RtcSpeaker(1), CLAUDE_SAYS)
+    assert got == ["Okay, one moment.", "Your next train leaves at",
+                   "14:32 from platform two and arrives in Bern at 15:10. Then you have a free hour.", "Enjoy it."]
+    cuts = [p for p in got[1:] if p[-1] not in ".!?…"]
+    assert cuts == ["Your next train leaves at"]         # one cut mid-sentence per answer, not two
+
+
+def test_g5_the_second_piece_fix_has_a_switch_and_off_is_the_old_cutting():
+    s = RtcSpeaker(1)
+    s.second_piece = False
+    assert _say(s, CLAUDE_SAYS) == ["Okay, one moment.", "Your next train leaves at", "14:32 from platform two and",
+                                    "arrives in Bern at 15:10. Then you have a free hour.", "Enjoy it."]
+    assert RtcSpeaker(2).second_piece is True            # the plain fix is the default of the class
+
+
+def test_g5_the_second_piece_fix_also_holds_without_a_holding_line():
+    got = _say(RtcSpeaker(1), CLAUDE_SAYS, holding_line=None)
+    assert got == ["Your next train leaves at",
+                   "14:32 from platform two and arrives in Bern at 15:10. Then you have a free hour.", "Enjoy it."]
+
+
+def test_g5_a_comma_in_the_first_words_is_still_the_first_piece():
+    got = _say(RtcSpeaker(1), "Sure, your next train leaves at 14:32 from platform two and arrives in Bern.", holding_line=None)
+    assert got == ["Sure,", "your next train leaves at 14:32 from platform two and arrives in Bern."]
+
+
+def test_g5_flush_lets_the_last_words_out_without_closing_the_speaker():
+    s = RtcSpeaker(1)
+    for delta in _in_pieces("Your train is on time. See you"):
+        s.feed(delta)
+    assert _drain(s) == ["Your train is on time."]             # "See you" has no end yet: it is still being collected
+    s.flush()
+    assert not s.closed and not s.stopped
+    assert _drain(s) == ["See you"]                            # the end of Claude's text: nothing waits for the CLI's summary
+    s.feed("Anything else? Just ask me later.")                # words after a flush start a fresh first piece
+    s.finish()
+    assert _drain(s) == ["Anything else?", "Just ask me later."]
+
+
+def test_g5_flush_sends_a_first_piece_that_never_reached_five_words():
+    s = RtcSpeaker(1)
+    s.feed("Okay")
+    assert s.queue.empty()
+    s.flush()
+    assert _drain(s) == ["Okay"]
+
+
+def test_g5_flush_after_stop_or_finish_says_nothing_more():
+    s = RtcSpeaker(1)
+    s.feed("Sure, one")
+    s.stop()
+    s.flush()
+    assert _drain(s) == ["Sure,"]
+    s = RtcSpeaker(2)
+    s.finish("Done.")
+    s.flush()
+    assert _drain(s) == ["Done."]
 
 
 def test_only_tailnet_addresses_are_used():
