@@ -9,10 +9,10 @@ import datetime as dt
 import json
 
 import pytest
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app import outbound
-from app.db import PushSubscription, make_engine
+from app.db import PushLog, PushSubscription, make_engine
 from app.push import Pusher
 from tests.test_pa import PROFILE, TZ
 
@@ -122,3 +122,94 @@ def test_the_real_library_puts_the_ttl_and_the_urgency_into_the_request(push, tm
     assert "ttl: 600" in timer
     assert "urgency: high" in timer
     assert "ttl: 0" in plain and "urgency" not in plain                    # today's pushes: ttl 0, no urgency
+
+
+# ---------------------------------------------------------------- did it go out? (found by the review of G10)
+
+class Down:
+    """A sender that fails the way pywebpush does: with an exception (a timeout, or a push service that says 404 / 410 / 5xx)."""
+
+    def __init__(self, error=None, status=None):
+        self.error, self.status, self.calls = error or TimeoutError("push service timed out"), status, 0
+
+    def __call__(self, **kw):
+        self.calls += 1
+        if self.status is not None:
+            err = RuntimeError(f"Push failed: {self.status}")
+            err.response = type("R", (), {"status_code": self.status})()
+            raise err
+        raise self.error
+
+
+def pushes(push):
+    with Session(push.engine) as s:
+        return [(r.status, r.why) for r in s.exec(select(PushLog).order_by(PushLog.id)).all()]
+
+
+def test_a_push_can_say_how_many_devices_took_it(push):
+    report = {}
+    assert push.notify("Timer", "up", source="timer", now=DAY, ttl=600, tag="timer-1", report=report) == "sent"
+    assert report == {"tried": 1, "delivered": 1, "error": None} and len(push.sent.calls) == 1        # report waits for the answer
+    assert pushes(push) == [("sent", "")]
+
+
+def test_a_push_nobody_took_is_marked_failed_with_the_reason_and_may_be_tried_again(push):
+    push._send = Down()
+    report = {}
+    assert push.notify("Timer", "up", source="timer", now=DAY, tag="timer-1", report=report) == "sent"
+    assert (report["tried"], report["delivered"]) == (1, 0) and "timed out" in report["error"]
+    [(status, why)] = pushes(push)
+    assert status == "failed" and "timed out" in why                                                  # push_log tells the truth
+    push._send = Down()
+    again = {}
+    assert push.notify("Timer", "up", source="timer", now=DAY, tag="timer-1", report=again) == "sent"  # not "the same push, 6 h"
+    assert again["tried"] == 1 and push._send.calls == 1
+    push._send = push.sent                                                                            # and then it goes out
+    done = {}
+    assert push.notify("Timer", "up", source="timer", now=DAY, tag="timer-1", report=done) == "sent"
+    assert done["delivered"] == 1 and [s for s, _ in pushes(push)] == ["failed", "failed", "sent"]
+    assert push.notify("Timer", "up", source="timer", now=DAY, tag="timer-1", report={}) == "dropped"   # delivered once: not twice
+
+
+def test_a_phone_the_push_service_has_forgotten_counts_as_not_delivered(push):
+    push._send = Down(status=410)
+    report = {}
+    push.notify("Timer", "up", source="timer", now=DAY, report=report)
+    assert (report["tried"], report["delivered"]) == (1, 0) and "410" in report["error"]
+    with Session(push.engine) as s:
+        assert s.exec(select(PushSubscription)).all() == []                                           # as before: it unsubscribed
+
+
+def test_with_no_device_at_all_nothing_is_tried_and_it_is_said(push):
+    with Session(push.engine) as s:
+        for sub in s.exec(select(PushSubscription)).all():
+            s.delete(sub)
+        s.commit()
+    report = {}
+    push.notify("Timer", "up", source="timer", now=DAY, report=report)
+    assert (report["tried"], report["delivered"]) == (0, 0) and "no device" in report["error"]
+    assert pushes(push)[0][0] == "failed" and push.sent.calls == []
+
+
+def test_one_device_is_enough_and_the_log_stays_sent(push):
+    with Session(push.engine) as s:
+        s.add(PushSubscription(endpoint="https://fcm.googleapis.com/fcm/send/2", keys_json=json.dumps({"p256dh": "k", "auth": "a"})))
+        s.commit()
+    calls = []
+
+    def one_of_two(**kw):
+        calls.append(kw["subscription_info"]["endpoint"])
+        if "fcm" in calls[-1]:
+            raise TimeoutError("push service timed out")
+
+    push._send = one_of_two
+    report = {}
+    push.notify("Timer", "up", source="timer", now=DAY, report=report)
+    assert (report["tried"], report["delivered"]) == (2, 1) and len(calls) == 2
+    assert pushes(push) == [("sent", "")]
+
+
+def test_a_push_nobody_asked_a_report_for_is_logged_and_sent_exactly_as_before(push):
+    push._send = Down()
+    assert push.notify("Kairo", "Approve?", "/#approvals", source="approval", now=DAY, wait=True) == "sent"
+    assert pushes(push) == [("sent", "")]                                                             # as it always was
