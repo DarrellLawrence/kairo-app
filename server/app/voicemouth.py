@@ -257,6 +257,7 @@ class Unmark:
 @dataclass
 class Turn:
     text: str = ""                      # what Kairo said (markers out)
+    recorded: str = ""                  # G10: a fast path read out other people's words: the neutral note the call keeps instead
     asked: list[str] = field(default_factory=list)
     first_token_ms: int | None = None   # the voice model's first word or tool call
     first_text_ms: int | None = None    # its first spoken word (the holding line counts if it came first)
@@ -586,7 +587,7 @@ class Mouth:
             if greet:
                 line = rule.text if rule is not None else self.greeting
                 self._line(line, speaker, result, said, started)
-                last = {"role": "assistant", "content": line}
+                last = {"role": "assistant", "content": (rule.record if rule is not None else None) or line}
                 self.messages.append(last)
             rounds = 0
             while not greet:
@@ -652,9 +653,11 @@ class Mouth:
                     self.reported.add(item.id)
                     self.report(item, said_line, reply)
             self._unsent = []
+            result.recorded = (rule.record if rule is not None else None) or ""
             if result.text:
-                self.lines.append(f"Kairo (voice): {result.text}")
-                self.transcript = (self.transcript + [f"Kairo (voice): {result.text}"])[-40:]
+                kept = result.recorded or result.text                 # a rule that read out someone else's words: not kept as Kairo's
+                self.lines.append(f"Kairo (voice): {kept}")
+                self.transcript = (self.transcript + [f"Kairo (voice): {kept}"])[-40:]
             result.route = "rule" if rule is not None else (
                 "claude" if result.asked else ("card" if QUESTION.search(owner_text or "") and not greet else "talk"))
         return result

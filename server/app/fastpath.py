@@ -216,6 +216,20 @@ class Answer:
     text: str
     lang: str
     kind: str
+    record: str | None = None      # what the call keeps in place of `text` when `text` holds words other people wrote (a calendar
+                                   # title, a lesson, a platform): said and shown as it is, but never stored as Kairo's own words
+
+
+def _kept(what: str, detail: str) -> str:
+    """The note a call keeps instead of a line that read out the calendar's, the timetable's or the connection's own words:
+    that Kairo answered and when, none of the words (they are data, not instructions, and the Today card wraps them as such)."""
+    return f"(Kairo read out the owner's {what}, {detail}. The source's own words are not repeated here.)"
+
+
+def _when_en(start: dt.datetime, now: dt.datetime) -> str:
+    """"at 4 PM", "tomorrow at 9 AM": the time of the thing read out, in English, for the note a call keeps."""
+    t = say_time(start, "en")
+    return f"tomorrow at {t}" if start.date() > now.date() else f"at {t}"
 
 
 # ---------------------------------------------------------------- the rules for one call
@@ -338,10 +352,11 @@ class FastPaths:
         if when is None:
             return None
         title = _title(e.get("summary"), lang)
+        kept = _kept(f"next {m.data.get('what') or 'event'}", _when_en(st, now))
         if lang == "de":
             adj, noun = ("nächstes", "Meeting") if m.data.get("what") == "meeting" else ("nächster", "Termin")
-            return Answer(f"Dein {adj} {noun} ist {title} {when}.", lang, m.kind)
-        return Answer(f"Your next {m.data.get('what') or 'event'} is {title} {when}.", lang, m.kind)
+            return Answer(f"Dein {adj} {noun} ist {title} {when}.", lang, m.kind, kept)
+        return Answer(f"Your next {m.data.get('what') or 'event'} is {title} {when}.", lang, m.kind, kept)
 
     def _lesson(self, m: Match, now: dt.datetime) -> Answer | None:
         events = self.facts.events(now.date()) if self.facts is not None else None
@@ -365,9 +380,10 @@ class FastPaths:
         if when is None:
             return None
         subject, room = _title(les["subject"], m.lang), _title(les["room"], m.lang) if les["room"] else None
+        kept = _kept("next lesson", _when_en(start, now))
         if m.lang == "de":
-            return Answer(f"Deine nächste Stunde ist {subject} {when}" + (f", Raum {room}" if room else "") + ".", m.lang, m.kind)
-        return Answer(f"Your next lesson is {subject} {when}" + (f", in room {room}" if room else "") + ".", m.lang, m.kind)
+            return Answer(f"Deine nächste Stunde ist {subject} {when}" + (f", Raum {room}" if room else "") + ".", m.lang, m.kind, kept)
+        return Answer(f"Your next lesson is {subject} {when}" + (f", in room {room}" if room else "") + ".", m.lang, m.kind, kept)
 
     def _trip(self, m: Match, now: dt.datetime) -> Answer | None:
         trip = self.facts.trip() if self.facts is not None else None
@@ -402,7 +418,8 @@ class FastPaths:
                 text = f"The next {mode} to {to} leaves {frm} at {t}" + (f", platform {plat}" if plat else "")
                 text += (f", {delay} minute{'s' if delay != 1 else ''} late" if delay else "") + "."
                 lead = f"The {say_time(cancelled, lang)} is cancelled. " if cancelled else ""
-            return Answer(lead + text, lang, m.kind)
+            return Answer(lead + text, lang, m.kind, _kept(f"next {mode}", f"leaving at {say_time(dep, 'en')}"
+                                                           + (f", {delay} min late" if delay else "")))
         return None
 
     # ------------------------------------------------ timers (timerphrase reads the words, timers.py rings them)

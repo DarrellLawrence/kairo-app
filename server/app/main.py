@@ -1844,7 +1844,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         said = result.text if result else re.sub(r"\s*…$", "", (mouth.messages[-1].get("content") or "")).strip()
         said = re.sub(r"\[\[raised:[A-Za-z]\d{1,8}\]\]\s*", "", said)
         if said and said != "…":
-            _rt_said("kairo", said)
+            _rt_said("kairo", (result.recorded if result is not None else "") or said)   # G10: not other people's words as Kairo's
         if result is not None:
             line.route = result.route
             voicestats.record(engine, result.route, release_version())
