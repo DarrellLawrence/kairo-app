@@ -439,7 +439,7 @@ class _Pending:
 Ask = Callable[[str, list[str], str], Awaitable[tuple[str, bool]]]
 # ... and the same with a sink(kind, value) it tells while Claude works (G5): ("text", words; a "\n" stands between the
 # words before a tool call and the message after it), ("escalated", info), ("end", (answer, hang up)) when Claude's text is
-# complete, which is before the CLI has sent its result.
+# complete, which is before the CLI has sent its result, ("error", why) when Claude failed (what it said before is no answer).
 AskStream = Callable[[str, list[str], str, Callable[..., None]], Awaitable[tuple[str, bool]]]
 
 
@@ -703,9 +703,9 @@ class Mouth:
                     {"id": call["id"], "type": "function", "function": {"name": "ask_kairo", "arguments": call.get("arguments") or "{}"}}]})
                 try:
                     if self._streams():
-                        answer, claude_said = await self._ask_streamed(request, item, lang, speaker, result, said, started)
+                        answer, claude_said, cut = await self._ask_streamed(request, item, lang, speaker, result, said, started)
                     else:
-                        answer, claude_said = await self._ask(request, item, lang, speaker, result, said), None
+                        answer, claude_said, cut = await self._ask(request, item, lang, speaker, result, said), None, ""
                 except _Later:                             # Claude needs longer: the call moves on
                     self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
                                           "content": json.dumps({"answer": "(still working on it: Kairo told the owner "
@@ -720,7 +720,7 @@ class Mouth:
                     self.messages.append(last)
                     break
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
-                                      "content": json.dumps({"answer": answer}, ensure_ascii=False)})
+                                      "content": json.dumps({"answer": answer + cut}, ensure_ascii=False)})
             await self._deliver_pending(speaker, result, said, started, lang)
             if not said.streamed and not greet and not result.deferred:   # never a silent line (owner's call 2026-10-20)
                 line = (plain(answer) or AGAIN[lang] if answer is not None else
@@ -908,8 +908,9 @@ class Mouth:
         return answer
 
     async def _ask_streamed(self, request: str, item: str | None, lang: str, speaker, result: Turn, said: _Said,
-                            started: float) -> tuple[str, str | None]:
-        """_ask that is told while Claude works (G5). (the answer, what was said of it word for word or None).
+                            started: float) -> tuple[str, str | None, str]:
+        """_ask that is told while Claude works (G5). (the answer, what was said of it word for word or None, what the
+        voice model must know about words that were cut off or "").
         - the turn goes on at the end of Claude's text (early_end), not at the result, which comes seconds later;
         - stream_verbatim: Claude's words go to the voice as they are written, so no second round of the voice model;
         - the call's wait for Claude (ask_timeout_s) counts to the first spoken piece (cap_first_piece): an answer
@@ -929,11 +930,12 @@ class Mouth:
         answered = (lambda: speech.started or task.done()) if self.bringup_cancel else task.done
         timer[0] = self._wait_bringup(loop, answered, request, lang, speaker, result, said)
         ended: tuple[str, bool] | None = None
+        broke = False                                           # Claude failed (the answer is its error line)
         getter: asyncio.Task | None = None
 
         def take(kind: str, value) -> bool:
             """One thing the ask told. True: Claude's text is complete and the turn goes on."""
-            nonlocal ended
+            nonlocal ended, broke
             if kind == "text":
                 if verbatim:
                     speech.feed(value)
@@ -942,6 +944,8 @@ class Mouth:
             elif kind == "end":
                 ended = value
                 return self.early_end
+            elif kind == "error":
+                broke = True
             return False
         try:
             while True:
@@ -995,14 +999,21 @@ class Mouth:
                 answer, hang = task.result()
             except Exception as exc:   # never a silent call: say why
                 log.exception("ask_kairo")
-                answer, hang = f"{FAILED[lang]} ({type(exc).__name__})", False
+                answer, hang, broke = f"{FAILED[lang]} ({type(exc).__name__})", False, True
         speech.finish()
         if self.early_end:
             flush = getattr(speaker, "flush", None)             # the last words go out now, not when the turn closes
             if flush is not None:
                 flush()
+        heard = speech.text() if verbatim else ""
+        if broke and ended is None and heard:                   # Claude broke off after the owner heard some of it: no answer
+            self.hang_up = self.hang_up or hang                 # (a hang-up in half an answer is not obeyed)
+            said.line("")                                       # the voice model's words start a new stream, not glued to these
+            speaker.feed(" ")
+            said.streamed = False                               # (else a voice model with nothing to say would leave half a sentence)
+            return answer, None, _CUT.format(heard=heard)
         self.hang_up = self.hang_up or hang or speech.hang.seen
-        return answer, (speech.text() or None) if verbatim else None
+        return answer, heard or None, ""
 
     def _let_finish(self, task: asyncio.Task) -> None:
         """The ask goes on in the background (the CLI's summary, the session, the memory fold); nobody waits for it."""
@@ -1079,6 +1090,9 @@ class Mouth:
             raw, _ = await self._round(tools, MAX_ANSWER_TOKENS, speaker, result, said, started, lang, extra=extra)
             self.messages.append({"role": "assistant", "content": raw.strip()})
 
+
+# G5: Claude failed after Kairo had said part of its words: the voice model tells the owner what happened, not those words again.
+_CUT = " Claude broke off before it was done. The owner had already heard this much of it: \"{heard}\". Don't say that part again; tell them in a few words that it broke off."
 
 # G5: Kairo said part of Claude's answer word for word before the owner talked on; the rest must not say it twice.
 _HEARD = " The owner had already heard this much of it before they talked on, so don't say that part again: \"{heard}\"."

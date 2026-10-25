@@ -3596,7 +3596,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                              model: str | None = None) -> tuple[str, bool]:
         """_rt_ask that tells sink(kind, value) while Claude works (G5): ("text", words) as they are written,
         ("escalated", {...}) when Haiku hands over, ("end", (answer, hang up)) when Claude's text is complete, which
-        is before the CLI has sent its result. Returns what _rt_ask returns, at the result."""
+        is before the CLI has sent its result, ("error", why) when Claude failed (words told before it are no answer).
+        Returns what _rt_ask returns, at the result."""
         early, sid, tid = _rt_start()
         if early is not None:
             return early
@@ -3605,6 +3606,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             on_text=lambda words: sink("text", words), on_escalate=lambda info: sink("escalated", info),
             on_end=lambda full: sink("end", realtime.spoken_answer(full)),
             on_session=lambda new: _rt_remember(tid, new))     # (the turn goes on before the result: the next ask needs it now)
+        if error is not None:
+            sink("error", clip_text(error.text, 160))
         return _rt_finish(tid, text, error, new_sid)
     app.state.rt_ask_stream = _rt_ask_stream
 

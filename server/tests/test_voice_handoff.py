@@ -261,6 +261,18 @@ def test_g5_ask_stream_returns_what_ask_returns_and_tells_the_sink_while_claude_
     assert took >= TAIL_S * 0.7                     # (the call itself ran to the result; the sink was told at the end of the text)
 
 
+def test_g5_ask_stream_tells_the_sink_when_claude_fails_and_returns_the_error_line_as_ask_does(migrated):
+    """Words were told, then the CLI failed: the mouth must know it is no answer ("error"), and no "end" came."""
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="Your next lesson is maths at "),
+              BrainEvent(EventKind.error, text="The Claude CLI timed out.", status=BrainStatus.unavailable)]
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        (answer, hang), sunk = ask_stream(c.app)
+        plain, plain_hang = asyncio.run(c.app.state.mouth_ask("what is on today?", ["Owner: what is on today?"], ""))
+    assert [k for k, _ in sunk] == ["text", "error"] and sunk[1][1] == "The Claude CLI timed out."
+    assert (answer, hang) == (plain, plain_hang) == ("I couldn't get that done: The Claude CLI timed out.", False)
+
+
 def test_g5_ask_stream_gives_the_claude_session_back_to_the_conversation_like_ask_does(migrated):
     with TestClient(create_app(migrated)) as c:
         ask_stream(c.app)

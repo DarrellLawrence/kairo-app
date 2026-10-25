@@ -417,3 +417,93 @@ def test_g5_a_bug_in_the_ask_never_kills_the_call():
     r = run(mo.turn("What's on tomorrow?", "en", sp))
     assert "RuntimeError" in json.loads(m.calls[1]["messages"][3]["content"])["answer"] and not r.streamed
     assert sp.heard == "Sorry, I could not get that."
+
+
+# ---------------------------------------------------------------- Claude breaks off in the middle of its answer
+
+class FailBrain:
+    """Claude says some words, then fails (the CLI times out, a usage limit, the process dies). As in main.py: the sink hears
+    ("error", why) and the ask returns the error line. end: Claude's text was complete before it failed. raises: the ask crashes."""
+
+    LINE = "I couldn't get that done: The Claude CLI timed out."
+
+    def __init__(self, words=("Your next lesson is maths at ",), *, end=False, raises=None, tell=True):
+        self.words, self.end, self.raises, self.tell = words, end, raises, tell
+
+    async def __call__(self, request, lines, about, sink):
+        for w in self.words:
+            sink("text", w)
+            await asyncio.sleep(0.02)
+        if self.end:
+            sink("end", ("".join(self.words).strip(), False))
+        await asyncio.sleep(0.02)
+        if self.raises is not None:
+            raise self.raises
+        if self.tell:
+            sink("error", "The Claude CLI timed out.")
+        return self.LINE, False
+
+
+def _tool_answer(m, call=1) -> str:
+    return json.loads(m.calls[call]["messages"][3]["content"])["answer"]
+
+
+def test_g5_claude_failing_after_the_owner_heard_some_of_it_is_told_by_the_voice_model():
+    """Half a sentence and then nothing is the one thing a call must not do (owner's call 2026-10-20): the voice model gets
+    the error and what the owner already heard, and says what happened."""
+    m = Model(tool("what's next?"), text("Sorry, Claude stopped before it was done."))
+    sp = FlushSpeaker()
+    mo = streaming(m, FailBrain())
+    r = run(mo.turn("what's next?", "en", sp))
+    assert len(m.calls) == 2 and not r.streamed
+    answer = _tool_answer(m)
+    assert "couldn't get that done" in answer and "maths at" in answer and "word for word" not in answer
+    assert sp.heard.split() == "Your next lesson is maths at Sorry, Claude stopped before it was done.".split()
+    assert assistants(mo)[-1] == ("assistant", "Sorry, Claude stopped before it was done.")
+    assert r.text == f"{FILLERS['en'][0]} Your next lesson is maths at Sorry, Claude stopped before it was done."
+
+
+def test_g5_the_ask_crashing_after_the_owner_heard_some_of_it_is_told_the_same_way():
+    m = Model(tool("what's next?"), text("Sorry, something broke."))
+    sp = FlushSpeaker()
+    r = run(streaming(m, FailBrain(raises=RuntimeError("bug"), tell=False)).turn("what's next?", "en", sp))
+    assert len(m.calls) == 2 and not r.streamed and "RuntimeError" in _tool_answer(m) and "maths at" in _tool_answer(m)
+    assert sp.heard.split() == "Your next lesson is maths at Sorry, something broke.".split()
+
+
+def test_g5_if_the_voice_model_then_says_nothing_the_owner_still_hears_why():
+    m = Model(tool("what's next?"), text(""))
+    sp = FlushSpeaker()
+    r = run(streaming(m, FailBrain()).turn("what's next?", "en", sp))
+    assert sp.said[-1].startswith("I couldn't get that done") and "timed out" in sp.said[-1] and not r.streamed
+
+
+def test_g5_a_hang_up_inside_words_that_were_cut_off_hangs_nothing_up():
+    m = Model(tool("bye"), text("Sorry, I lost that."))
+    mo = streaming(m, FailBrain(("Bye for now [[hang up]] and ",)))
+    run(mo.turn("bye", "en", FlushSpeaker()))
+    assert mo.hang_up is False
+
+
+def test_g5_nothing_said_before_the_error_is_the_error_line_as_before():
+    m = Model(tool("what's next?"), text("Sorry, Claude is not answering."))
+    sp = FlushSpeaker()
+    r = run(streaming(m, FailBrain(())).turn("what's next?", "en", sp))
+    assert _tool_answer(m) == FailBrain.LINE and sp.heard == "Sorry, Claude is not answering." and not r.streamed
+
+
+def test_g5_without_the_streaming_switch_the_error_goes_to_the_voice_model_as_before():
+    m = Model(tool("what's next?"), text("Sorry, Claude stopped."))
+    sp = FlushSpeaker()
+    r = run(streaming(m, FailBrain(), stream_verbatim=False).turn("what's next?", "en", sp))
+    assert _tool_answer(m) == FailBrain.LINE and sp.heard == "Sorry, Claude stopped." and not r.streamed
+
+
+def test_g5_an_error_after_the_text_was_complete_leaves_the_answer_the_owner_heard_whole():
+    """The CLI can fail after its message ended (the summary, the session): the owner has the whole answer."""
+    for early in (True, False):
+        m = Model(tool("what's next?"), text("Never said."))
+        sp = FlushSpeaker()
+        r = run(streaming(m, FailBrain(("Your next lesson is maths at 8.",), end=True), early_end=early).turn("what's next?", "en", sp))
+        assert len(m.calls) == 1 and r.streamed and sp.heard.strip() == "Your next lesson is maths at 8.", early
+
