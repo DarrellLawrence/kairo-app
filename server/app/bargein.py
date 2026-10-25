@@ -1,5 +1,6 @@
 """Who may interrupt Kairo while it is speaking (voice plan section 1, group G6): pure functions on text, no network, no
-audio. Used by voicertc.py's turn start strategy and its speech to text, tested in test_bargein.py.
+audio. voicertc.py's speech to text asks them once per piece of speech that began over Kairo's voice and puts the
+verdict on the transcript, the turn start strategy carries it out; tested in test_bargein.py.
 
 While Kairo talks, a sound from the owner's side opens a turn but does not stop Kairo. Whisper writes it down, and only
 then these two questions decide:
@@ -9,7 +10,7 @@ then these two questions decide:
                   make to say "go on" ("mhm", "ja", "genau", "okay", "thank you" ...).
   echo(text, said)  is it Kairo's own voice coming back through the phone's microphone? Then it is not the owner.
 
-The word lists are the research's (voice-recipe.md section 1), extended with the words behind the false interrupts it
+The word lists are the voice plan's (research, section 1), extended with the words behind the false interrupts it
 measured. They were tuned on phrases written by the researcher, not on the owner's real Whisper output: a coverage
 test. P10 measures them on the real thing.
 """

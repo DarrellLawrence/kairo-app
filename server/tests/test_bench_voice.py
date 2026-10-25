@@ -15,6 +15,7 @@ import pytest
 
 from app import bench_corpus as bc
 from app import bench_voice as bv
+from app import voicertc
 from app.bench_corpus import Clip
 from app.latency import pct
 from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model and Claude)
@@ -260,8 +261,9 @@ def test_the_fake_phone_asks_no_stun_server_and_the_loopback_rule_is_put_back():
 # ---------------------------------------------------------------- a whole mock run
 
 PLAN = ["q_en_01", "q_en_02", "c_en_02", "bc_en_01", "noise_typing", "bc_long", "os_en_01", "os_en_02", "os_de_01"]
-# a backchannel long enough (1.2 s of speech) for the VAD to hear it every time; the manifest's "Mm-hmm." is too short to be sure
-EXTRA = [bc.Clip("bc_long", "en", "Okay yes I see what you mean there.", "backchannel")]
+# a backchannel long enough (1.2 s of speech) for the VAD to hear it every time; the manifest's "Mm-hmm." is too short to be sure.
+# Every word of it is backchannel (app/bargein.py): the PC writes it down and does not stop Kairo for it (g6.transcript_barge_in).
+EXTRA = [bc.Clip("bc_long", "en", "Okay yes I see yeah right okay sure.", "backchannel")]
 DEAF = "c_en_02"                    # the stand-in Whisper hears nothing in this one: a missed turn
 STT, LLM, TTS = 0.12, 0.15, 0.08
 TOLERANCE_MS = 45                   # a stage is found within this of the wait built into the stand-in (Windows timers: 16 ms)
@@ -331,9 +333,30 @@ def test_false_interrupts_match_what_the_pipeline_really_did(mock_run):
         cut = any(mid and start - 0.05 <= t <= end + 2.0 for t, _, mid in world.interrupts)
         assert r["interrupted"] is cut, (r, world.interrupts, windows)
     assert next(r for r in probes if r["clip"] == "noise_typing")["interrupted"] is False        # a noise isn't speech
-    assert next(r for r in probes if r["clip"] == "bc_long")["interrupted"] is True              # speech is, and cuts the answer
+    # a long backchannel is speech to the VAD and is written down, but it is not an interruption: the answer goes on (G6)
+    assert next(r for r in probes if r["clip"] == "bc_long")["interrupted"] is False
     expected = sum(r["interrupted"] for r in probes) / 3
-    assert bv.summarize(records)["false_interrupt_rate"] == pytest.approx(expected, abs=1e-4)
+    assert expected == 0.0 and bv.summarize(records)["false_interrupt_rate"] == pytest.approx(expected, abs=1e-4)
+
+
+@pytest.fixture(scope="module")
+def old_start_run():
+    """The same long backchannel against the old start (g6.transcript_barge_in and g6.ignore_windows off)."""
+    _needs_pipecat()
+    old = voicertc.Turning(transcript_barge_in=False, ignore_windows=False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(voicertc, "Turning", lambda: old)               # build_call() without the argument: this call's switches
+        return _bench(["q_en_01", "bc_long"])
+
+
+def test_the_old_start_cuts_the_answer_for_the_same_backchannel_and_the_bench_sees_it(old_start_run):
+    """Proves the probe above is heard by the VAD (it is the same clip) and that the bench can register a cut at all: with
+    the old start any speech over Kairo stops it."""
+    records, world, _, windows = old_start_run
+    probe = next(r for r in records if r["clip"] == "bc_long")
+    start, end = next((s, e) for clip_id, s, e in windows if clip_id == "bc_long")
+    assert probe["interrupted"] is True, (probe, world.interrupts, windows)
+    assert any(mid and start - 0.05 <= t <= end + 2.0 for t, _, mid in world.interrupts)
 
 
 def test_the_speaker_check_verdicts_are_read_from_the_data_channel(mock_run):

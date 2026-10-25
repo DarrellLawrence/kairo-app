@@ -1,6 +1,6 @@
 """The turn-taking switches (group G6, flags named g6.*): registered with these defaults, both values work through the
 owner's API, and the call reads exactly these (voicertc.Turning) with the same defaults. What each one does on a call is
-tested in test_voice_turns.py."""
+tested in test_voice_rtc.py."""
 
 from __future__ import annotations
 

@@ -85,14 +85,15 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                 "at the next call."),
     "g6.tap_lag_fix": (True, "Tapping 'I'm done' works when the PC is busy. Before, if the PC was slow, the tap could arrive before the "
                              "words you had said had reached the part that ends the turn, be thrown away as 'nothing was said', and "
-                             "the answer came about 7 seconds late (measured: 1 tap in 4 with the PC at load 7 on 4 cores). Now the "
-                             "tap waits for them, and the speech ends where you tapped, not where the PC had got to: the last words "
-                             "before the tap are no longer lost. Takes effect at the next call."),
+                             "the turn stayed open as long as the room stayed loud (in the test the answer came 7 seconds late, at the "
+                             "hang-up). Seen in 2 of 30 test runs with the PC busy (load 7 or more on 4 cores); the first report said "
+                             "1 in 4. Now the tap waits for the words, and the speech ends where you tapped, not where the PC had got "
+                             "to: the last words before the tap are no longer lost. Takes effect at the next call."),
     "g6.smart_turn_3s": (True, "When the turn detector thinks you have not finished (a sentence that trails off) and you go quiet, Kairo "
                                "waits up to 3.0 seconds before it answers, instead of 0.5. Sentences it thinks are finished are "
                                "answered as fast as before. The price, measured in the research: the detector wrongly calls about 4 "
                                "of 100 finished sentences unfinished, and those answers come 2.5 seconds later, so the average turn is "
-                               "0.1 second slower and about 1 call in 3 has at least one such wait in 10 turns. Your own rate is "
+                               "0.1 second slower, and there is a 1 in 3 chance of at least one such wait in 10 turns. Your own rate is "
                                "measured on the PC (P9). Off: 0.5 seconds, as before. Takes effect at the next call."),
     "g6.ignore_windows": (True, "A sound on your side is not heard as you starting to talk during the first 0.4 seconds of Kairo's voice "
                                 "(its own voice is loudest in the microphone then) nor during 1 second after the phone's audio "
@@ -109,8 +110,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                      "Off: any sound stops Kairo at once, as before. Takes effect at the next call."),
     "g6.long_speech_cut": (False, "Needs g6.transcript_barge_in. If you talk over Kairo for a whole second without a pause, Kairo stops "
                                   "even before Whisper has written your words down, so a long sentence over Kairo stops it after about "
-                                  "1.3 seconds at most (without this it waits for your first pause: 1.7 to 2.8 seconds for a 1.2 second "
-                                  "sentence, longer for a longer one). The price: a long laugh, a hum or your own cough that goes on for a "
+                                  "1.5 seconds at most (the plan said 1.3; the test sandbox measured 1.55; without this it waits for your "
+                                  "first pause: 1.7 to 2.8 seconds for a 1.2 second sentence, longer for a longer one). The price: a long laugh, a hum or your own cough that goes on for a "
                                   "second also stops Kairo, and so does its own voice if it comes back through the microphone that long. "
                                   "Off until you have tried a few calls. Takes effect at the next call."),
 
