@@ -314,6 +314,7 @@ test('g7.no_aec_warning off: no warning even when echo cancelling is off', async
 
 /* The switch turned on (its default is off). */
 const followPc = () => applyFlags([flag('g7.listen_on_barge_in', true, false)])
+const followOld = () => applyFlags([flag('g7.listen_on_barge_in', false, true)])   // the owner switched it off
 
 /* A call in which Kairo is speaking turn 1, then a loud sound on the mic (a cough, a "mhm", a real interruption). */
 async function speakingThenNoise(fn) {
@@ -352,12 +353,12 @@ async function talkedOverToOldPc() {
   return { states, turns }
 }
 
-test('g7.listen_on_barge_in is off by default, on the phone before the PC has answered and after', () => {
-  assert.equal(flagOn('g7.listen_on_barge_in'), false)
-  applyFlags([])
-  assert.equal(flagOn('g7.listen_on_barge_in'), false)
-  followPc()
+test('g7.listen_on_barge_in is on by default (it belongs with g6.transcript_barge_in), on the phone before the PC has answered and after', () => {
   assert.equal(flagOn('g7.listen_on_barge_in'), true)
+  applyFlags([])
+  assert.equal(flagOn('g7.listen_on_barge_in'), true)
+  followOld()
+  assert.equal(flagOn('g7.listen_on_barge_in'), false)
 })
 
 test('g7.listen_on_barge_in on: a loud sound on the mic does not flip the screen while Kairo goes on talking', () => {
@@ -423,7 +424,8 @@ test('g7.listen_on_barge_in on: a normal end of an answer and a barge_in with no
   })
 })
 
-test('g7.listen_on_barge_in off (the default): the old way, any loud sound on the phone flips the screen and is counted as talked over, and barge_in is not listened to', async () => {
+test('g7.listen_on_barge_in off: the old way, any loud sound on the phone flips the screen and is counted as talked over, and barge_in is not listened to', async () => {
+  followOld()
   await speakingThenNoise(({ states }) => assert.equal(states.at(-1), 'listening'))
   const { states, turns } = await talkedOverToOldPc()
   assert.equal(states.at(-1), 'listening')            // the screen leaves "Speaking" as soon as you talk

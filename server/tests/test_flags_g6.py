@@ -20,9 +20,9 @@ from app.main import create_app
 G6 = {
     "g6.empty_turn_fix": True,
     "g6.tap_lag_fix": True,
-    "g6.smart_turn_3s": False,
-    "g6.ignore_windows": False,
-    "g6.transcript_barge_in": False,
+    "g6.smart_turn_3s": True,
+    "g6.ignore_windows": True,
+    "g6.transcript_barge_in": True,
     "g6.long_speech_cut": False,
 }
 

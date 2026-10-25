@@ -126,26 +126,26 @@ FLAGS: dict[str, tuple[bool, str]] = {
                              "hang-up). Seen in 2 of 30 test runs with the PC busy (load 7 or more on 4 cores); the first report said "
                              "1 in 4. Now the tap waits for the words, and the speech ends where you tapped, not where the PC had got "
                              "to: the last words before the tap are no longer lost. Takes effect at the next call."),
-    "g6.smart_turn_3s": (False, "Off until you decide (it costs speed). When the turn detector thinks you have not finished (a sentence that trails off) and you go quiet, Kairo "
+    "g6.smart_turn_3s": (True, "On because your overnight spec asked for a 3 s wait for an unfinished turn; turn it off if turns feel slow. When the turn detector thinks you have not finished (a sentence that trails off) and you go quiet, Kairo "
                                "waits up to 3.0 seconds before it answers, instead of 0.5. Sentences it thinks are finished are "
                                "answered as fast as before. The price, measured in the research: the detector wrongly calls about 4 "
                                "of 100 finished sentences unfinished, and those answers come 2.5 seconds later, so the average turn is "
                                "0.1 second slower, and there is a 1 in 3 chance of at least one such wait in 10 turns. Your own rate is "
-                               "measured on the PC (P9). Off (for now): 0.5 seconds, as before. Takes effect at the next call."),
-    "g6.ignore_windows": (False, "Off until you try it, together with g6.transcript_barge_in. A sound on your side is not heard as you starting to talk during the first 0.4 seconds of Kairo's voice "
+                               "measured on the PC (P9). Off: 0.5 seconds, as before. Takes effect at the next call."),
+    "g6.ignore_windows": (True, "On because your overnight spec asked for it (ignore talk-over at the start of Kairo's voice and after a reconnect). A sound on your side is not heard as you starting to talk during the first 0.4 seconds of Kairo's voice "
                                 "(its own voice is loudest in the microphone then) nor during 1 second after the phone's audio "
                                 "stalled or the call connected (a burst of noise). If you really go on talking past that moment "
-                                "you are heard from your first word. Off (for now): any sound counts at once, as before. Takes effect at the "
+                                "you are heard from your first word. Off: any sound counts at once, as before. Takes effect at the "
                                 "next call."),
-    "g6.transcript_barge_in": (False, "Off until you decide (it makes Kairo slower to stop). Talking over Kairo stops it only when your words are real: a stop word (stop, wait, nein, moment ...) "
+    "g6.transcript_barge_in": (True, "On because your overnight spec asked for it (at least 2 words while Kairo talks). Talking over Kairo stops it only when your words are real: a stop word (stop, wait, nein, moment ...) "
                                      "or at least two words that are not all 'mhm', 'ja', 'genau', 'okay', 'thank you', and not Kairo's own "
                                      "voice coming back through the microphone. A cough, a laugh or an 'mhm' no longer cuts Kairo off, and the "
                                      "call screen switches to 'Listening' only when Kairo really stopped. The price, estimated from the "
                                      "research (not measured on the PC): it now waits for your first pause and for Whisper, so a short 'Stop.' "
                                      "stops Kairo after about 1 to 2 seconds instead of about 0.3 (0.99 to 2.09 s), and a longer sentence "
-                                     "over Kairo after 1.7 to 2.8 s. Acceptance row 4 says 'at once': switching this on breaks that on purpose, "
-                                     "so the row needs your update first. "
-                                     "Off (for now): any sound stops Kairo at once, as before. Takes effect at the next call."),
+                                     "over Kairo after 1.7 to 2.8 s. Acceptance row 4 says 'at once': this breaks that on purpose, "
+                                     "so the row needs your update. "
+                                     "Off: any sound stops Kairo at once, as before. Takes effect at the next call."),
     "g6.long_speech_cut": (False, "Needs g6.transcript_barge_in. If you talk over Kairo for a whole second without a pause, Kairo stops "
                                   "even before Whisper has written your words down, so a long sentence over Kairo stops it after about "
                                   "1.5 seconds at most (the plan said 1.3; the test sandbox measured 1.55; without this it waits for your "
@@ -166,11 +166,11 @@ FLAGS: dict[str, tuple[bool, str]] = {
                            "Off: the usual short log."),
     "g7.no_aec_warning": (True, "A call warns you on screen when the phone says echo cancelling is off, because Kairo could then hear itself and cut itself off. "
                                  "Off: no warning."),
-    "g7.listen_on_barge_in": (False, "The call screen switches to 'Listening' when the PC says you talked over Kairo (or that its answer was cut off), "
+    "g7.listen_on_barge_in": (True, "The call screen switches to 'Listening' when the PC says you talked over Kairo (or that its answer was cut off), "
                                       "not when the phone hears any sound. A cough or an 'mhm' no longer flips the screen while Kairo goes on talking. "
                                       "The PC sends that message now, whenever it cuts Kairo off (the turn-taking build, g6), with g6.transcript_barge_in "
-                                      "on or off. Off for now, until the iPhone echo check on the PC (P12) is done and you have tried the turn-taking "
-                                      "switches. Off: the old way, any loud sound on the phone."),
+                                      "on or off. On because it belongs with g6.transcript_barge_in (also on); if the screen misbehaves on the iPhone, "
+                                      "turn it off and tell me. Off: the old way, any loud sound on the phone."),
     "g7.sound_check_rtc": (True, "The sound check's call test starts the real call connection and has the PC say a line over it, instead of playing a "
                                   "sound inside the app, so it proves what a call really sounds like. Off: the old test."),
 

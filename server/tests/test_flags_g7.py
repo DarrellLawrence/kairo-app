@@ -20,7 +20,7 @@ G7 = {
     "g7.call_audio_mode": True,
     "g7.call_logs": True,
     "g7.no_aec_warning": True,
-    "g7.listen_on_barge_in": False,
+    "g7.listen_on_barge_in": True,
     "g7.sound_check_rtc": True,
 }
 

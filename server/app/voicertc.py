@@ -96,9 +96,9 @@ class Turning:
     so a call built without the argument (tests, the bench) is the call the owner gets with nothing changed."""
     empty_turn_fix: bool = True          # a sound with no words doesn't make Kairo answer the last question again
     tap_lag_fix: bool = True             # a tap on "done" survives a busy PC (the words, or the audio, still on their way)
-    smart_turn_3s: bool = False          # a trailing-off thought is given 3.0 s before Kairo answers (was 0.5 s)
-    ignore_windows: bool = False         # new speech is not heard in the first moments of Kairo's voice or after an audio gap
-    transcript_barge_in: bool = False    # talking over Kairo stops it only when Whisper writes down a stop word or real words
+    smart_turn_3s: bool = True           # a trailing-off thought is given 3.0 s before Kairo answers (was 0.5 s)
+    ignore_windows: bool = True          # new speech is not heard in the first moments of Kairo's voice or after an audio gap
+    transcript_barge_in: bool = True     # talking over Kairo stops it only when Whisper writes down a stop word or real words
     long_speech_cut: bool = False        # ... and speech over Kairo that goes on for LONG_SPEECH_S stops it before Whisper has words
 
     @classmethod
