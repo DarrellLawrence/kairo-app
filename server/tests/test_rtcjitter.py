@@ -212,22 +212,28 @@ def test_the_pinned_library_version_is_one_the_patch_was_checked_against():
 
 
 VOICE_CI_JOBS = ("voice", "voice-windows")        # the jobs in .github/workflows/ci.yml that install the voice packages
-NEEDS_THE_VOICE_PACKAGES = ("tests/test_rtcjitter.py", "tests/test_rtcjitter_loopback.py")
+NEEDS_THE_VOICE_PACKAGES = re.compile(r"""pytest\.importorskip\(\s*["'](?:aiortc|pipecat)""")
 
 
-def test_ci_runs_the_tests_that_need_the_real_library_on_linux_and_windows():
-    """The plain `server` job installs no aiortc or pipecat, so every real-library test of this patch skips there.
-    Without these two files in the voice jobs, a bump of the aiortc pin that the patch no longer fits would be
-    green in CI (the check above only compares the version number) and every call would quietly stay on 16/4."""
+def test_a_test_file_that_skips_without_the_voice_packages_runs_in_both_voice_ci_jobs():
+    """The plain `server` job installs no aiortc or pipecat, so a test that needs them skips there. If no voice job
+    lists its file, it never runs anywhere in CI: a bump of the aiortc pin that the jitter patch no longer fits would
+    stay green and every call would quietly keep the library's 16/4 buffer. (A new file needs an edit of ci.yml, and
+    a pull request that touches .github/ is merged by the owner by hand, so the jitter tests live in test_voice_rtc.py.)"""
     jobs = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    listed = {}
     for name in VOICE_CI_JOBS:
         pytest_steps = [s["run"] for s in jobs[name]["steps"] if "pytest" in s.get("run", "")]
         assert len(pytest_steps) == 1, (name, pytest_steps)
-        listed = pytest_steps[0].split()
-        for test_file in NEEDS_THE_VOICE_PACKAGES:
-            assert test_file in listed, f"{name} does not run {test_file}"
-        assert "tests/test_voice_rtc.py" in listed                       # (sanity: this is the right step)
+        listed[name] = set(pytest_steps[0].split())
     assert jobs["voice"]["runs-on"].startswith("ubuntu") and jobs["voice-windows"]["runs-on"].startswith("windows")
+    tests = Path(__file__).parent
+    needing = sorted(f.name for f in tests.glob("test_*.py")
+                     if f.name != Path(__file__).name and NEEDS_THE_VOICE_PACKAGES.search(f.read_text(encoding="utf-8")))
+    assert "test_voice_rtc.py" in needing                                # (sanity: the scan sees the call tests)
+    for name in VOICE_CI_JOBS:
+        missing = [f for f in needing if f"tests/{f}" not in listed[name]]
+        assert not missing, f"job {name} does not run {missing}: they skip in the plain server job and would never run"
 
 
 def test_the_patch_module_opens_no_connection_and_imports_nothing_that_could():
