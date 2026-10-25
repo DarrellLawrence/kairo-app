@@ -17,6 +17,7 @@ class BrainStatus(str, Enum):
 class EventKind(str, Enum):
     session = "session"          # brain session id is known
     text = "text"                # a chunk of assistant text
+    message_end = "message_end"  # the model finished its answer (stop_reason end_turn); the result follows, up to seconds later
     tool_use = "tool_use"        # the model called a tool (for the activity log)
     usage = "usage"              # usage-limit info from the provider
     result = "result"            # final answer; last event of a successful run

@@ -31,6 +31,14 @@ Flags verified against Claude Code 2.1.296 (`claude --help` and real runs):
 Stream events seen: system/init (session_id), stream_event (event.delta),
 assistant (message.content), rate_limit_event (rate_limit_info.status), result
 (is_error, result, api_error_status, session_id).
+
+The end of an answer (voice G1, measured with 2.1.296): stream_event message_delta carries
+delta.stop_reason and message_stop closes the message. A tool turn has one message_stop per model
+message, only the last has stop_reason end_turn: that one is EventKind.message_end. The result
+comes later: the CLI first writes a summary of the turn (system/post_turn_summary, 1.9-3.4 s on
+Haiku). usage carries the times (ms since the turn began): first_text_ms, last_text_ms,
+message_end_ms, summary_ms (when the summary event came), result_ms, and tail_ms = result_ms -
+message_end_ms.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ from __future__ import annotations
 import base64
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -46,9 +55,11 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .base import BrainEvent, BrainStatus, EventKind
+
+log = logging.getLogger("kairo.brain")
 
 # Only these variables reach the CLI process. The backend's own secrets (for
 # example the write-scoped Google token) must never be visible to the model's
@@ -86,6 +97,18 @@ ENV_ALLOWLIST = (
 # Always set for the CLI: Kairo's installer decides the CLI version.
 FIXED_ENV = {"DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1"}
 ENV_PREFIX_ALLOWLIST = ("KAIRO_HOOK_",)  # settings the gate hook needs
+
+# Voice G1 (owner's decision pending, flag g1.cli_no_summary, off by default): after every answer the CLI writes
+# a summary of the turn (system/post_turn_summary) and sends the result only then: 1.99 s p50, 2.69 s p95
+# (measured with 2.1.296, n = 32). With this variable at 0 the tail is 0.01 s p50. It is undocumented
+# (missing from the CLI's environment variable page, the summary code is marked internal), so it is only set when
+# the owner switches the flag on, and the tail is watched at run time (tail_notes): a CLI update may drop it.
+NO_SUMMARY_FLAG = "g1.cli_no_summary"
+NO_SUMMARY_ENV = {"CLAUDE_CODE_CLASSIFIER_SUMMARY": "0"}
+# The alarm: a result that comes more than this after the end of the answer (log, and a note in Voice speed).
+TAIL_ALARM_MS = 500
+TAIL_LOG_EVERY_S = 600       # one log line per ten minutes, with the count of what it skipped
+TAIL_WINDOW = 20             # the note speaks about the last answers
 
 # A warm process (fix plan 30) is closed after this long without a turn, and is not used for
 # a turn when it started longer ago than WARM_MAX_AGE_S (its system prompt, e.g. "Right now", is stale).
@@ -127,13 +150,16 @@ class ClaudeCLIBrain:
         model: str | None = None,
         env: dict[str, str] | None = None,
         extra_env: dict[str, str] | None = None,
+        flag: Callable[[str], bool] | None = None,
     ) -> None:
+        """flag(name): the owner's switches (app/flags.py); read whenever a process is started, not per event."""
         self.claude_bin = claude_bin
         self.workspace_dir = Path(workspace_dir)
         self.mcp_config = mcp_config
         self.timeout_s = timeout_s
         self.model = model
         self._env = build_env(env)
+        self._flag = flag
         # Settings the gate hook needs (KAIRO_HOOK_*), set by the backend.
         self._env.update(extra_env or {})
         self._status = BrainStatus.ok
@@ -144,8 +170,13 @@ class ClaudeCLIBrain:
         self._warm: _Warm | None = None
         self._warm_lock = threading.Lock()
         self._streamed = False                 # this message's text already went out as deltas
+        self._stop_reason: str | None = None   # of the message being streamed (message_delta), read at message_stop
         self._t0 = 0.0                         # when this run (or warm turn) started
         self._timing: dict[str, Any] = {}
+        self._tails: deque[tuple[int, bool]] = deque(maxlen=TAIL_WINDOW)   # (tail_ms, summary off) of the last answers
+        self._tail_lock = threading.Lock()
+        self._tail_logged_at: float | None = None
+        self._tail_unlogged = 0
         self._turn_warm: _Warm | None = None     # the warm process answering right now (interrupt)
         self._interrupted = threading.Event()   # the owner talked over the answer: not a failure
 
@@ -208,26 +239,28 @@ class ClaudeCLIBrain:
         """Start the CLI for the next turn now, so that turn doesn't wait for it to start (a call).
         It waits on stdin; nothing reaches the model until run(warm=key) sends the turn. Returns
         False when a matching warm process is already there."""
+        env, no_summary = self._spawn_env(origin)
         with self._warm_lock:
             w = self._warm
-            if w is not None and (w.busy or w.usable(key, session_id)):
+            if w is not None and (w.busy or (w.usable(key, session_id) and w.no_summary == no_summary)):
                 return False               # never cut off a turn that is running
-            self._close_warm_locked()
+            self._close_warm_locked()      # (also one started under the other g1.cli_no_summary setting)
             cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=True, model=model,
                                      prompt_file="system-prompt-warm.md")
             self.workspace_dir.mkdir(parents=True, exist_ok=True)
             try:
-                proc = subprocess.Popen(cmd, cwd=self.workspace_dir, env=self.hook_env(origin), stdin=subprocess.PIPE,
+                proc = subprocess.Popen(cmd, cwd=self.workspace_dir, env=env, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
             except OSError:
                 return False
             self._warm = _Warm(proc, key, session_id, on_idle=self._close_if_idle, model=model or self.model,
-                               idle_s=idle_s or WARM_IDLE_S, max_age_s=max_age_s or WARM_MAX_AGE_S)
+                               idle_s=idle_s or WARM_IDLE_S, max_age_s=max_age_s or WARM_MAX_AGE_S, no_summary=no_summary)
             return True
 
     def warm_ready(self, key: Any, session_id: str | None) -> bool:
+        wants = self._wants_no_summary()
         with self._warm_lock:
-            return self._warm is not None and self._warm.usable(key, session_id)
+            return self._warm is not None and self._warm.usable(key, session_id) and self._warm.no_summary == wants
 
     def close_warm(self) -> None:
         with self._warm_lock:
@@ -244,13 +277,14 @@ class ClaudeCLIBrain:
                 self._close_warm_locked()
 
     def _take_warm(self, key: Any, session_id: str | None) -> "_Warm | None":
+        wants = self._wants_no_summary()
         with self._warm_lock:
             w = self._warm
             if w is not None and w.proc.poll() is not None:
                 self._close_warm_locked()      # died while waiting
                 return None
-            if w is None or not w.usable(key, session_id):
-                return None
+            if w is None or not w.usable(key, session_id) or w.no_summary != wants:
+                return None                    # (a process started before the owner flipped g1.cli_no_summary: not used)
             w.busy = True
             return w
 
@@ -265,6 +299,23 @@ class ClaudeCLIBrain:
     def hook_env(self, origin: str) -> dict[str, str]:
         """The environment the CLI (and so the PreToolUse hook it starts) runs with."""
         return {**self._env, "KAIRO_HOOK_ORIGIN": origin}
+
+    def _wants_no_summary(self) -> bool:
+        """Flag g1.cli_no_summary. A flag that can't be read (database not migrated yet) is off."""
+        if self._flag is None:
+            return False
+        try:
+            return bool(self._flag(NO_SUMMARY_FLAG))
+        except Exception:
+            return False
+
+    def _spawn_env(self, origin: str) -> tuple[dict[str, str], bool]:
+        """The environment for a new CLI process, and whether it turns the end-of-turn summary off."""
+        env = self.hook_env(origin)
+        no_summary = self._wants_no_summary()
+        if no_summary:
+            env.update(NO_SUMMARY_ENV)
+        return env, no_summary
 
     def tools_status(self) -> str:
         """Did the CLI's last run connect Kairo's MCP server? (system/init mcp_servers)"""
@@ -323,6 +374,7 @@ class ClaudeCLIBrain:
         self._cancelled.clear()
         self._interrupted.clear()
         self._streamed = False
+        self._stop_reason = None
         self._t0 = time.monotonic()
         self._timing = {}
 
@@ -330,9 +382,10 @@ class ClaudeCLIBrain:
         cmd = self.build_command(session_id=session_id, system=system, tools=tools, images=bool(images), model=model)
         if images:
             prompt = _user_message(prompt, images)
-        run_env = self.hook_env(origin)
+        run_env, no_summary = self._spawn_env(origin)
         self._start_turn()
         self._timing["warm"] = False
+        self._timing["no_summary"] = no_summary
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.Popen(
@@ -404,6 +457,7 @@ class ClaudeCLIBrain:
         model: switched first when the process runs another one (control request set_model)."""
         self._start_turn()
         self._timing["warm"] = True
+        self._timing["no_summary"] = w.no_summary
         proc = w.proc
         if model and w.model != model:
             if not w.control({"subtype": "set_model", "model": model}):
@@ -484,15 +538,26 @@ class ClaudeCLIBrain:
                 self.mcp_status = {str(x.get("name")): str(x.get("status")) for x in servers}
             yield BrainEvent(EventKind.session, session_id=msg.get("session_id"),
                              data={"mcp_servers": servers, "tools": msg.get("tools") or []})
+        elif kind == "system" and msg.get("subtype") == "post_turn_summary":
+            self._timing.setdefault("summary_ms", self._ms())       # what the tail after the answer is made of
         elif kind == "stream_event":
             ev = msg.get("event") or {}
             if ev.get("type") == "message_start":
                 self._streamed = False
+                self._stop_reason = None
+            elif ev.get("type") == "message_delta":
+                self._stop_reason = (ev.get("delta") or {}).get("stop_reason")
+            elif ev.get("type") == "message_stop":
+                reason, self._stop_reason = self._stop_reason, None
+                if reason == "end_turn":                  # a tool call's message ends with tool_use: not the end
+                    now = self._timing["message_end_ms"] = self._ms()
+                    yield BrainEvent(EventKind.message_end, data={"ms": now})
             elif ev.get("type") == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
                 text = ev["delta"].get("text") or ""
                 if text:
                     self._streamed = True
                     self._timing.setdefault("first_text_ms", self._ms())
+                    self._timing["last_text_ms"] = self._ms()
                     yield BrainEvent(EventKind.text, text=text)
         elif kind == "assistant":
             for block in (msg.get("message") or {}).get("content") or []:
@@ -500,6 +565,7 @@ class ClaudeCLIBrain:
                     if self._streamed:
                         continue          # already sent, delta by delta
                     self._timing.setdefault("first_text_ms", self._ms())
+                    self._timing["last_text_ms"] = self._ms()
                     yield BrainEvent(EventKind.text, text=block["text"])
                 elif block.get("type") == "tool_use":
                     yield BrainEvent(EventKind.tool_use, data={"name": block.get("name"), "input": block.get("input")})
@@ -511,6 +577,10 @@ class ClaudeCLIBrain:
             yield BrainEvent(EventKind.usage, data=info)
         elif kind == "result":
             sid = msg.get("session_id")
+            self._timing["result_ms"] = self._ms()
+            if "message_end_ms" in self._timing:
+                self._timing["tail_ms"] = self._timing["result_ms"] - self._timing["message_end_ms"]
+                self._note_tail(self._timing["tail_ms"], bool(self._timing.get("no_summary")))
             usage = {**_usage(msg), **self._timing}
             if self._interrupted.is_set() and msg.get("subtype") == "error_during_execution":
                 yield BrainEvent(EventKind.error, text="Interrupted.", session_id=sid, status=self._status,
@@ -528,15 +598,65 @@ class ClaudeCLIBrain:
     def _ms(self) -> int:
         return int((time.monotonic() - self._t0) * 1000)
 
+    # -- the tail alarm (voice G1) -----------------------------------------
+
+    def _note_tail(self, tail_ms: int, no_summary: bool, now: float | None = None) -> None:
+        """One answer's tail (end of the answer -> result). Over TAIL_ALARM_MS it is logged (at most every
+        TAIL_LOG_EVERY_S) and tail_notes() shows it in Voice speed. no_summary: the process had the setting.
+        The log line is a WARNING only when the setting is on and the tail is still there (a Claude Code update
+        dropped it); with the setting off the tail is expected and is logged at INFO."""
+        now = time.monotonic() if now is None else now
+        with self._tail_lock:
+            self._tails.append((tail_ms, no_summary))
+            if tail_ms <= TAIL_ALARM_MS:
+                return
+            self._tail_unlogged += 1
+            if self._tail_logged_at is not None and now - self._tail_logged_at < TAIL_LOG_EVERY_S:
+                return
+            n, self._tail_unlogged, self._tail_logged_at = self._tail_unlogged, 0, now
+        slow = f"{n} slow answer{'s' if n != 1 else ''} since the last note"
+        if no_summary:
+            log.warning("claude tail: %d ms between the end of the answer and the result although "
+                        "CLAUDE_CODE_CLASSIFIER_SUMMARY=0 is set (%s). This Claude Code version may no longer honour "
+                        "the setting.", tail_ms, slow)
+        else:
+            # Switch off: the tail is the known cost, not a fault. INFO keeps it greppable and out of the
+            # diagnosis' last-15 warnings/errors (a slow answer comes every few minutes while the owner talks).
+            log.info("claude tail: %d ms between the end of the answer and the result (%s). Flag %s would "
+                     "remove it.", tail_ms, slow, NO_SUMMARY_FLAG)
+
+    def tail_notes(self) -> list[dict]:
+        """For Voice speed: what the tail after Claude's answers costs now, [] while the last answers were
+        quick. Only answers run under the current setting count (the newest answer says which)."""
+        with self._tail_lock:
+            rows = list(self._tails)
+        if not rows:
+            return []
+        mine = [ms for ms, no_summary in rows if no_summary == rows[-1][1]]
+        slow = [ms for ms in mine if ms > TAIL_ALARM_MS]
+        if not slow:
+            return []
+        worst, counts = max(slow) / 1000, f"{len(slow)} of the last {len(mine)} answers"
+        if rows[-1][1]:
+            return [{"id": "claude_tail", "title": f"Claude still takes up to {worst:.1f} s to finish an answer",
+                     "what": f"{counts} waited more than 0.5 s for Claude's summary of the turn although the switch "
+                             f"{NO_SUMMARY_FLAG} is on. The Claude Code on this PC may have dropped the setting in an "
+                             "update: look at it after every Claude update."}]
+        return [{"id": "claude_tail", "title": f"Claude takes up to {worst:.1f} s to finish an answer after its last word",
+                 "what": f"{counts} waited more than 0.5 s for Claude's summary of the turn before the next message "
+                         f"could start. The switch {NO_SUMMARY_FLAG} (More → System → Experiments) removes the wait; it "
+                         "uses a Claude Code setting that is not documented, so it stays off until you decide."}]
+
 
 class _Warm:
     """A CLI process waiting for its next turn on stdin (fix plan 30). Voice V1: the conversation
     process for chat and calls lives long (idle_s, max_age_s) and runs the model each turn asks for."""
 
     def __init__(self, proc: subprocess.Popen, key: Any, session_id: str | None, *, on_idle, model: str | None = None,
-                 idle_s: float = WARM_IDLE_S, max_age_s: float = WARM_MAX_AGE_S) -> None:
+                 idle_s: float = WARM_IDLE_S, max_age_s: float = WARM_MAX_AGE_S, no_summary: bool = False) -> None:
         self.proc, self.key, self.session_id = proc, key, session_id
         self.model = model
+        self.no_summary = no_summary           # started with NO_SUMMARY_ENV (the environment is fixed at start)
         self.idle_s, self.max_age_s = idle_s, max_age_s
         self.started = time.monotonic()
         self.busy = False

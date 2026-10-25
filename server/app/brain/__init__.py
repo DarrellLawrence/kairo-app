@@ -6,7 +6,8 @@ from ..settings import Settings
 from .base import Brain, BrainEvent, BrainStatus, EventKind
 
 
-def make_brain(settings: Settings, *, mcp_config=None, hook_env: dict[str, str] | None = None) -> Brain:
+def make_brain(settings: Settings, *, mcp_config=None, hook_env: dict[str, str] | None = None, flag=None) -> Brain:
+    """flag(name) -> bool: the owner's switches (app/flags.py); an adapter reads them when it starts a model process."""
     if settings.brain == "claude_cli":
         from .claude_cli import ClaudeCLIBrain
 
@@ -16,6 +17,7 @@ def make_brain(settings: Settings, *, mcp_config=None, hook_env: dict[str, str] 
             mcp_config=mcp_config,
             timeout_s=settings.brain_timeout_s,
             extra_env=hook_env,
+            flag=flag,
         )
     raise ValueError(f"Unknown KAIRO_BRAIN={settings.brain!r}. Built so far: claude_cli")
 
