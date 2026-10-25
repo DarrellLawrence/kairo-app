@@ -31,6 +31,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import timerphrase
+
 log = logging.getLogger("kairo.fastpath")
 
 MAX_WORDS = 10
@@ -52,7 +54,10 @@ def _clean(text: str) -> tuple[str, bool]:
     t = re.sub(r"\b(what|who|when|where|how|which|there|that|it|here)'s\b", r"\1 is", t)
     t = re.sub(r"\bwhats\b", "what is", t)
     t = t.replace("'", "")                                     # today's -> todays, o'clock -> oclock
-    t = re.sub(r"[\W_]+", " ", t).strip()
+    t = re.sub(r"(?<=\d),(?=\d)", ".", t)                      # 1,5 hours -> 1.5 hours
+    t = re.sub(r"[^\w\s.]|_", " ", t)
+    t = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", t)                  # a full stop, but not the one inside 1.5
+    t = re.sub(r"\s+", " ", t).strip()
     t = _TAIL.sub("", _LEAD.sub("", t))
     asked = False
     stripped = _ASK.sub("", t, count=1)
@@ -125,14 +130,20 @@ _COMPILED = _compile(_RULES)
 def match(text: str, languages: tuple[str, ...] = ("en", "de")) -> Match | None:
     """The fast-path question this is, or None. Pure: no clock, no data, no side effect."""
     core, asked = _clean(text)
-    if not core or len(core.split()) > MAX_WORDS:
+    words = len(core.split())
+    if not core:
         return None
-    for lang in languages:
-        for kind, _sub, alone, after in _COMPILED.get(lang, ()):
-            rx = after if (asked and after is not None) else alone
-            m = rx.fullmatch(core)
-            if m:
-                return Match(kind, lang, {k: v for k, v in m.groupdict().items() if v})
+    if words <= MAX_WORDS:
+        for lang in languages:
+            for kind, _sub, alone, after in _COMPILED.get(lang, ()):
+                rx = after if (asked and after is not None) else alone
+                m = rx.fullmatch(core)
+                if m:
+                    return Match(kind, lang, {k: v for k, v in m.groupdict().items() if v})
+    if words <= timerphrase.MAX_WORDS:
+        got = timerphrase.parse(core, text, languages)
+        if got is not None:
+            return Match(got[0], got[1], got[2])
     return None
 
 
