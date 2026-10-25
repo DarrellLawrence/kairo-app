@@ -50,7 +50,7 @@ from . import bringup, gpu, voicellm
 from .brain.voice_local import PORT, VoiceModel
 from .db import SettingKV
 from .latency import pct
-from .voicemouth import FILLERS, Mouth, g3_options, mouth_args
+from .voicemouth import FILLERS, OLD_FILLERS, Mouth, g3_options, mouth_args
 
 log = logging.getLogger("kairo.voicelab")
 
@@ -712,4 +712,4 @@ def set_waiting(s: Session, why: str | None) -> None:
 
 
 def filler_words() -> set[str]:
-    return {f for fs in FILLERS.values() for f in fs}
+    return {f for table in (FILLERS, OLD_FILLERS) for fs in table.values() for f in fs}

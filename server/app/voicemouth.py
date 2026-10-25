@@ -46,13 +46,29 @@ def g3_options(s) -> dict:
             "gemma_markup": flags.on(s, "g3.gemma_markup"), "constant_tools": flags.on(s, "g3.constant_tools")}
 
 
+def g5_options(s) -> dict:
+    """The G5 switches (app/flags.py) as a call reads them: once, at its start (never per audio frame)."""
+    return {name: flags.on(s, f"g5.{name}") for name in ("stream_verbatim", "second_piece", "flush_at_end", "cap_first_piece",
+                                                          "filler_wording", "bringup_cancel")}
+
+
+def g5_mouth_args(opts: dict) -> dict:
+    """The Mouth(...) arguments the hand-off switches in `opts` (g5_options) choose; a missing switch is its default."""
+    return {"fillers": FILLERS if opts.get("filler_wording", True) else OLD_FILLERS}
+
+
 def mouth_args(opts: dict) -> dict:
     """The Mouth(...) arguments the call-layout switches in `opts` (g3_options) choose: the call, the voice lab."""
     on = bool(opts.get("constant_tools"))
     return {"constant_tools": on, "context_block": on}
 
 
-FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
+# The holding line while Claude works (g5.filler_wording): it only says Kairo needs a moment, never that it is doing
+# something it may not be doing ("Pulling that up." for a note to save). Voice-recipe 8.6.
+FILLERS = {"en": ("Okay, one moment.", "Let me check that.", "One sec."),
+           "de": ("Okay, einen Moment.", "Ich schau kurz nach.", "Sekunde.")}
+OLD_FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."),
+               "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
 # Owner's request 2026-10-17: Claude gets ASK_CALL_TIMEOUT_S on a call; then Kairo says this once and the
 # call moves on. The answer is said later in the call when it comes, and sent as a push.
 ASK_CALL_TIMEOUT_S = 8.0
@@ -347,8 +363,9 @@ class Mouth:
                  context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None,
                  late: Callable[[str, str], None] | None = None, greeting: str | None = None,
                  delivered: Callable[[bringup.Item], None] | None = None, constant_tools: bool = False,
-                 context_block: bool = False):
+                 context_block: bool = False, fillers: dict[str, tuple[str, ...]] | None = None):
         self.model, self.ask = model, ask
+        self.fillers = fillers or FILLERS     # g5.filler_wording: the holding lines
         self.constant_tools = constant_tools    # g3.constant_tools: the same tools with every request, "none" when off
         self.context_block = context_block      # g3.constant_tools: a system prompt that never changes, the card in the first user message
         self._fresh = context_block             # the next user message is the first of its conversation: it carries the card
@@ -674,7 +691,7 @@ class Mouth:
                     call = True
                     if not result.filled:                  # the holding line at most once a turn
                         result.filled = True
-                        filler = FILLERS[lang][self._filler % len(FILLERS[lang])]
+                        filler = self.fillers[lang][self._filler % len(self.fillers[lang])]
                         self._filler += 1
                         speaker.say(filler)
                         said.line(filler)

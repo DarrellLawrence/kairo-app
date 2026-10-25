@@ -425,7 +425,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
-    from .voicemouth import Mouth, g3_options, mouth_args, static_system
+    from .voicemouth import Mouth, g3_options, g5_mouth_args, g5_options, mouth_args, static_system
     _vl_site = voicellm.site(settings.data_dir)
 
     def _voice_llm_resolve():
@@ -1151,10 +1151,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.line_open()                 # jobs keep off the brain while the owner is on the line
         _card_lines[0] += 1
         app.state.today_card.on_call = True
+        with session_for(engine) as s_:
+            g5 = g5_options(s_)                      # the hand-off switches (g5.*), read once as the call starts
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
                                      current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
-                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"), norm=None)
+                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"), norm=None, g5=g5)
 
         def interrupt() -> None:
             """The answer of a talked-over turn stops being written (what was said so far is kept)."""
@@ -1253,7 +1255,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         line.speaker.stop()
                     number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
                     line.current = number
-                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number, norm=line.norm)
+                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number, norm=line.norm,
+                                                     second_piece=line.g5["second_piece"])
                     line.speaker.say(text)
                     if not line.warned:                # the call's first line: then the slow-voice line, once
                         line.warned = True
@@ -1292,7 +1295,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return cache
 
     def _warm_openers() -> None:
-        lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.LATER[lang], voicelink.filler(lang),
+        with session_for(engine) as s_:
+            fillers = g5_mouth_args(g5_options(s_))["fillers"]       # g5.filler_wording: the holding lines this call will say
+        lines = {lang: (*voicertc.OPENERS[lang], *fillers[lang], voicemouth.LATER[lang], voicelink.filler(lang),
                         voicemouth.NEUTRAL[lang], voicemouth.AGAIN[lang], _greeting())
                  for lang in ("en", "de")}
         lines["en"] += (voicelink.SLOW_LINE,)
@@ -1389,6 +1394,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await old.stop()
         with session_for(engine) as s_:              # the owner's switches, read once at the start of the call
             jitter_patch = feature_flags.on(s_, "g4.jitter_patch")
+            g5 = g5_options(s_)                      # the hand-off switches (g5.*)
         conn = await voicertc.connect(sdp, "offer", jitter_patch=jitter_patch)
 
         async def send(frame) -> None:
@@ -1399,7 +1405,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:   # the phone hung up: the answer goes on and is saved (v7)
                 pass
         line = types.SimpleNamespace(send=send, utt=None, speaker=None, writing=None, last=None, current=0, stopped=0,
-                                     carry="", interrupt=None, mouth=None, mouth_task=None, mouth_ready=None)
+                                     carry="", interrupt=None, mouth=None, mouth_task=None, mouth_ready=None, g5=g5)
 
         def interrupt() -> None:
             if line.mouth_task is not None and line.mouth_task[0] <= line.stopped:
@@ -1418,6 +1424,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async def answer(text: str, language, number: int, speaker) -> dict:
             line.current = number
+            speaker.second_piece = line.g5["second_piece"]        # g5.second_piece, as this call started
             if line.speaker is not None and line.speaker is not speaker:
                 line.speaker.stop()
             line.speaker = speaker
@@ -1538,7 +1545,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             line.carry = f"{line.carry} {text}".strip()   # talked on before Kairo answered: one message
             return
         text, line.carry = f"{line.carry} {text}".strip(), ""
-        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm)
+        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm,
+                                    second_piece=line.g5["second_piece"])
         if line.speaker is not None:
             line.speaker.stop()
         line.speaker = speaker
@@ -1627,6 +1635,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
             language = realtime.load_settings(s_).get("language", "auto")
             g3 = g3_options(s_)                                   # the owner's G3 switches, read once per call
+            g5 = getattr(line, "g5", None) or g5_options(s_)      # ... and the hand-off switches (read at the call's start)
         app.state.voice_llm.take_options(g3)
         spec = voicellm.spec(app.state.voice_llm.model_id) or {}
 
@@ -1637,7 +1646,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
-                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
+                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3), **g5_mouth_args(g5))
         line.mouth = mouth
         try:
             await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
