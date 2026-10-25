@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from . import bringup, flags, todaycard
+from . import bringup, flags, speaker_label, todaycard
 from .brain.voice_local import ASK_KAIRO
 from .speech import PlainStream, plain
 
@@ -458,7 +458,9 @@ class Mouth:
                  delivered: Callable[[bringup.Item], None] | None = None, constant_tools: bool = False,
                  context_block: bool = False, fillers: dict[str, tuple[str, ...]] | None = None,
                  ask_stream: AskStream | None = None, stream_verbatim: bool = False, early_end: bool = False,
-                 cap_first_piece: bool = True, bringup_cancel: bool = True):
+                 cap_first_piece: bool = True, bringup_cancel: bool = True,
+                 may_record: Callable[[str | None], bool] | None = None,
+                 on_held: Callable[[bringup.Item], None] | None = None):
         self.model, self.ask = model, ask
         self.fillers = fillers or FILLERS     # g5.filler_wording: the holding lines
         self.ask_stream = ask_stream
@@ -467,6 +469,12 @@ class Mouth:
         self.cap_first_piece = cap_first_piece    # g5.cap_first_piece: the call's wait for Claude counts to the first spoken piece
         self.bringup_cancel = bringup_cancel      # g5.bringup_cancel: a raise not yet said is dropped when Claude's words come
         self._background: set[asyncio.Task] = set()
+        # G13: may words said under this speaker label be recorded (a loop closed, an answer saved)? Same rule as the
+        # gate. A reply that may not is not sent (the hook would refuse it): on_held tells the owner (a push).
+        self.may_record = may_record or (lambda label: True)
+        self.on_held = on_held
+        self._told: set[str] = set()        # items the owner was told about already (once per item and call)
+        self._rearm: list[str] = []         # items whose next reply counts as their answer again
         self.constant_tools = constant_tools    # g3.constant_tools: the same tools with every request, "none" when off
         self.context_block = context_block      # g3.constant_tools: a system prompt that never changes, the card in the first user message
         self._fresh = context_block             # the next user message is the first of its conversation: it carries the card
@@ -492,6 +500,7 @@ class Mouth:
         self.said_for: dict[str, str] = {}  # item id -> what Kairo said when it raised it
         self.raised_items: dict[str, bringup.Item] = {}   # kept even when the list changes later
         self.replies: dict[str, str] = {}   # item id -> what the owner said next
+        self.reply_labels: dict[str, str | None] = {}   # item id -> the speaker label of the turn that reply was said in (G13)
         self.reported: set[str] = set()     # items the voice model already passed to Claude itself
         self._just_raised: list[str] = []
         self._unsent: list = []
@@ -588,6 +597,47 @@ class Mouth:
         return [(self.raised_items[i], self.said_for.get(i, ""), self.replies[i]) for i in self.replies
                 if i in self.raised_items and i not in self.reported]
 
+    def reply_label(self, item_id: str) -> str | None:
+        """G13: the speaker label of the turn the owner's reply to this item was said in (None: not a voice label)."""
+        return self.reply_labels.get(item_id)
+
+    def _may_record(self, label: str | None) -> bool:
+        try:
+            return bool(self.may_record(label))
+        except Exception:   # fails closed: a label that can't be judged records nothing
+            log.exception("speaker label: could not tell whether this turn may record")
+            return False
+
+    def hold(self, item: bringup.Item) -> None:
+        """G13: the owner's reply to this item was not confirmed as theirs, so it is not recorded. Forget it, tell the
+        owner once (on_held), and let their next reply to the item count as its answer again."""
+        self.replies.pop(item.id, None)
+        self.reply_labels.pop(item.id, None)
+        if item.id in self._told:
+            return
+        self._told.add(item.id)
+        self._rearm.append(item.id)
+        if self.on_held is not None:
+            try:
+                self.on_held(item)
+            except Exception:   # a push that fails never costs the call
+                log.exception("speaker label: telling the owner about %s", item.id)
+
+    def _sendable(self) -> list[tuple[bringup.Item, str, str]]:
+        """G13: the replies that may go to Claude in this turn. A reply said under a label that may not change things
+        is held (never sent, whatever turn would carry it). A confirmed reply waits when this turn is not confirmed."""
+        pending = self.reports()
+        if not pending:
+            return []
+        now = self._may_record(speaker_label.current())
+        out = []
+        for item, said, reply in pending:
+            if not self._may_record(self.reply_labels.get(item.id)):
+                self.hold(item)
+            elif now:
+                out.append((item, said, reply))
+        return out
+
     def _asked_last(self) -> bool:
         """Kairo's last words on this call ended with a question (so "yes" may be an answer to act on)."""
         for m in reversed(self.messages):
@@ -675,9 +725,11 @@ class Mouth:
         if self.language_mode == "en":
             lang = "en"
         for item_id in self._just_raised:                    # what they said right after it was raised
-            self.replies.setdefault(item_id, owner_text)
+            if item_id not in self.replies:
+                self.replies[item_id] = owner_text
+                self.reply_labels[item_id] = speaker_label.current()
         self._just_raised = []
-        self._unsent = [r for r in self.reports()]           # goes to Claude in this turn
+        self._unsent = self._sendable()                      # goes to Claude in this turn
         self._compact()
         content = self._content(owner_text)
         self.notes = []
@@ -762,7 +814,8 @@ class Mouth:
                 early.drop()                               # talked over while it ran: the server stops writing
             result.text = said.text(markers=False)
             self.raised.update(result.raised)
-            self._just_raised = list(dict.fromkeys(result.raised))
+            self._just_raised = list(dict.fromkeys([*result.raised, *self._rearm]))
+            self._rearm = []
             for item_id in result.raised:
                 self.said_for.setdefault(item_id, result.text[:240])
                 found = next((i for i in self.items if i.id == item_id), None)

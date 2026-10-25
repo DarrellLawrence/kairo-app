@@ -44,6 +44,8 @@ try:
 except ImportError:                                     # the app runs without them: the checks are off
     np = None
 
+from .speaker_label import LABELS, OWNER, STRANGER, UNCHECKED, UNSURE, worst   # noqa: F401  (LABELS: tests and callers)
+
 log = logging.getLogger("kairo.speaker")
 
 MODEL_NAME = "wespeaker_en_voxceleb_CAM++.onnx"         # the pin (URL, sha256, size) is in voicellm.json
@@ -87,6 +89,7 @@ ENROLL_WINDOW_S, ENROLL_HOP_S = 3.0, 1.5          # the voiceprint: mean of 3 s 
 ENROLL_AGREE, ENROLL_MIN_KEPT = 0.45, 0.75
 MAX_ENROLL_BYTES = int(ENROLL_MAX_S * 1.5 * RATE * 2)   # 90 s of 16-bit audio (pauses included)
 VOICEPRINT = Path("voice") / "voiceprint.bin"     # in the data folder (encrypted: secretbox), never the repo
+MAX_WAITING_LABELS = 16              # G13: verdicts waiting for their answer to start; more than this and the oldest merge
 KEEP_TURNS = 500                     # Voice speed's list (time, reason, score; never the words)
 STATS_KEY = "voice.speaker.turns"
 MODE_KEY = "voice.speaker.mode"
@@ -216,6 +219,22 @@ def speaker_verdict(score: float | None, speech_s: float, mode: str) -> tuple[bo
     if speech_s < SHORT_S:
         return (score >= SHORT_REJECT[mode]), ("short: you" if score >= SHORT_REJECT[mode] else "not_you")
     return (score >= THRESHOLD[mode]), ("you" if score >= THRESHOLD[mode] else "not_you")
+
+
+def label_for(*, on: bool, ok: bool, score: float | None, mode: str, broken: bool = False) -> str:
+    """G13: the label of a turn (speaker_label.py). on: the check runs (a voiceprint, the model, not switched off).
+    ok: the turn passed the check (speaker_verdict). Only a score at or over the threshold is the owner; a short
+    turn that passed with a weaker score, or any turn the check could not score, is unsure.
+    Not on: unchecked when that is the owner's choice (the setting is off, or no voiceprint was ever taught); unsure
+    when it is not (broken: a voiceprint is taught and the setting is not off, but the check cannot run), so the
+    protection does not switch itself off exactly when the check breaks."""
+    if not on:
+        return UNSURE if broken else UNCHECKED
+    if score is None:
+        return UNSURE
+    if not ok:
+        return STRANGER
+    return OWNER if score >= THRESHOLD.get(mode, 2.0) else UNSURE
 
 
 def too_quiet(rms_db: float | None, peak_db: float | None, owner: list[tuple[float, float]]) -> bool:
@@ -474,12 +493,40 @@ class Speaker:
             return False, info["problem"]
         return True, None
 
+    def check_status(self) -> tuple[str, str | None]:
+        """G13: ("on" | "off" | "broken", why not). off is the owner's choice (the setting is off, or no voiceprint was
+        taught): voice requests are unchecked, as before. broken: a voiceprint is there and the setting is not off, but
+        the check cannot run (the model failed or is missing, the voice packages are gone, the voiceprint is unreadable
+        or from another model): voice requests are unsure, so they change nothing, and `kairo diag` says why."""
+        on, why = self.check_state()
+        if on:
+            return "on", None
+        if self.mode() == "off" or self.enrolled() is None:
+            return "off", why
+        return "broken", why
+
+    def label_gate(self) -> dict:
+        """G13, for kairo diag: is the label gate (g13.speaker_label_gate) on, and does the check run? With no check
+        every voice request is unchecked and can change things, as before: that is the diag's WARN."""
+        from sqlmodel import Session
+
+        from . import flags
+        flag = flags.FLAGS["g13.speaker_label_gate"][0]
+        if self.engine is not None:
+            try:
+                with Session(self.engine) as s:
+                    flag = flags.on(s, "g13.speaker_label_gate")
+            except Exception:   # the report never fails over it
+                log.warning("speaker check: the label gate's switch could not be read", exc_info=True)
+        state, why = self.check_status()
+        return {"flag": flag, "checked": state == "on", "state": state, "note": why}
+
     def device(self) -> dict:
         """Voice speed's row for the speaker check (like Whisper's and Kokoro's)."""
         on, why = self.check_state()
         out = {"device": self.model.device, "model": MODEL_NAME.removesuffix(".onnx"), "loaded": self.model.loaded,
                "load_ms": self.model.load_ms, "warm_ms": self.model.warm_ms, "on": on, "note": why,
-               "checked": getattr(self.model, "checked", None)}
+               "checked": getattr(self.model, "checked", None), "label_gate": self.label_gate()}
         if not self.model.installed():
             out.update(ok=False, reason="model missing (run Update Kairo): the speaker check is off, calls still work")
         elif self.model.failed:
@@ -522,7 +569,7 @@ class Speaker:
         if self.engine is None:
             return
         row_ = [v.at, v.path, v.outcome, v.why, v.score, v.rms_db, v.owner_db, v.speech_s, v.ms, v.wait_ms,
-                self.model.device if v.score is not None else None]
+                self.model.device if v.score is not None else None, v.label]
         try:
             with Session(self.engine) as s:
                 row = s.get(SettingKV, STATS_KEY) or SettingKV(key=STATS_KEY)
@@ -543,7 +590,7 @@ class Speaker:
                 "model": self.device(), "record_s": 30, "min_speech_s": ENROLL_MIN_S, **self.summary(s)}
 
 
-COLUMNS = ("at", "path", "outcome", "why", "score", "rms_db", "owner_db", "speech_s", "ms", "wait_ms", "device")
+COLUMNS = ("at", "path", "outcome", "why", "score", "rms_db", "owner_db", "speech_s", "ms", "wait_ms", "device", "label")
 
 
 def _rows(value) -> list:
@@ -551,7 +598,10 @@ def _rows(value) -> list:
         data = json.loads(value) if value else []
     except ValueError:
         data = []
-    return [r for r in data if isinstance(r, list) and len(r) == len(COLUMNS)] if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    # (a record from before the label column has one field fewer: the label is unknown there)
+    return [r + [None] * (len(COLUMNS) - len(r)) for r in data if isinstance(r, list) and len(COLUMNS) - 1 <= len(r) <= len(COLUMNS)]
 
 
 def _pct(v: list, p: float):
@@ -568,10 +618,15 @@ def summarize(rows: list, now: dt.datetime, days: int = 7) -> dict:
         if r["outcome"] in counts:
             counts[r["outcome"]] += 1
     scored = [r for r in recent if r["score"] is not None]
+    answered = [r for r in recent if r["outcome"] == "answered"]
+    labels = {k: sum(1 for r in answered if r["label"] == k) for k in (OWNER, UNSURE, UNCHECKED)}
+    labels["slow"] = sum(1 for r in answered if r["why"] == "slow")           # (these are unsure too)
+    checked = labels[OWNER] + labels[UNSURE]
+    labels["unsure_pct"] = round(100 * labels[UNSURE] / checked, 1) if checked else None
     ignored = [{"at": r["at"], "reason": r["outcome"], "title": REASONS[r["outcome"]], "score": r["score"],
                 "level_db": r["rms_db"], "owner_db": r["owner_db"], "speech_s": r["speech_s"]}
                for r in reversed(recent) if r["outcome"] in REASONS][:20]
-    return {"days": days, "turns": len(recent), "counts": counts, "scored": len(scored),
+    return {"days": days, "turns": len(recent), "counts": counts, "labels": labels, "scored": len(scored),
             "ms": {"p50": _pct([r["ms"] for r in scored], .5), "p95": _pct([r["ms"] for r in scored], .95),
                    "last": scored[-1]["ms"] if scored else None},
             "wait_ms": {"p50": _pct([r["wait_ms"] for r in recent], .5), "p95": _pct([r["wait_ms"] for r in recent], .95)},
@@ -602,6 +657,7 @@ class Verdict:
     wait_ms: int = 0                    # what the turn waited for it (the latency it added)
     path: str = "call"
     at: str = ""
+    label: str = UNCHECKED              # G13: owner | unsure | stranger | unchecked (a word in the record, never in the log line)
 
     def log_line(self) -> str:
         """Score and reason only, never the words."""
@@ -626,6 +682,7 @@ class CallGate:
         self.owner: list[tuple[float, float]] = []    # (rms, peak) of this call's answered turns
         self.quiet_run = 0
         self._lock = threading.Lock()
+        self._answered: list[str] = []                # G13: labels of turns answer() let through, not yet taken by their answer
 
     def hear(self, pcm: bytes) -> _Piece:
         """Thread-safe (the speech-to-text thread calls it). The check starts at once, in its own thread."""
@@ -649,16 +706,17 @@ class CallGate:
             measured = await asyncio.wait_for(asyncio.gather(*(asyncio.wrap_future(p.future) for p in use)), WAIT_MAX_S)
             v = self.judge(list(measured))
         except asyncio.TimeoutError:
-            v = Verdict(True, "answered", "slow")
+            v = Verdict(True, "answered", "slow", label=self._unsure_if_on())
             log.warning("speaker check: not ready after %d ms, the turn is answered", int(WAIT_MAX_S * 1000))
         except Exception as exc:   # never costs the turn
             log.warning("speaker check: %s: %s (the turn is answered)", type(exc).__name__, exc)
-            v = Verdict(True, "answered", "error")
+            v = Verdict(True, "answered", "error", label=self._unsure_if_on())
         v.wait_ms = int((time.monotonic() - t0) * 1000)
         return self._done(v)
 
     def judge(self, measured: list[Measured]) -> Verdict:
-        on, why_off = self.speaker.check_state()
+        state, why_off = self.speaker.check_status()
+        on = state == "on"
         mode = self.speaker.mode() if on else "off"
         frames = sum(m.level.frames for m in measured)
         speech = round(sum(m.level.speech_s for m in measured), 2)
@@ -681,22 +739,35 @@ class CallGate:
             ok, why = True, why_off or "off"
         base = dict(score=score, rms_db=rms, peak_db=peak, owner_db=owner_db, speech_s=speech,
                     ms=sum(m.ms for m in measured), path=self.path)
+        label = label_for(on=on, ok=ok, score=score, mode=mode, broken=state == "broken")
         if not ok:
-            return Verdict(False, "not_you", why, **base)
+            return Verdict(False, "not_you", why, label=label, **base)
         surely_you = score is not None and score >= THRESHOLD.get(mode, 2.0)
         if too_quiet(rms, peak, self.owner) and not surely_you:   # far away, and not known to be the owner
             self.quiet_run += 1
             if self.quiet_run >= QUIET_RESET_AFTER:
                 self.owner, self.quiet_run = [], 0           # the owner moved away: learn the level again
-            return Verdict(False, "too_quiet", "too quiet / far", **base)
+            return Verdict(False, "too_quiet", "too quiet / far", label=UNSURE, **base)   # ignored: nobody ran, but not a confirmed owner
         self.quiet_run = 0
         if rms is not None and peak is not None:
             self.owner = (self.owner + [(rms, peak)])[-QUIET_REF_TURNS:]
-        return Verdict(True, "answered", why, **base)
+        return Verdict(True, "answered", why, label=label, **base)
+
+    def _unsure_if_on(self) -> str:
+        """The label of a turn the check had no verdict for (too slow, crashed): unsure unless the owner has the check
+        off (or never taught a voice), since otherwise Kairo could not say it was the owner. A check that cannot even
+        tell is unsure."""
+        try:
+            return UNCHECKED if self.speaker.check_status()[0] == "off" else UNSURE
+        except Exception:
+            return UNSURE
 
     def _done(self, v: Verdict) -> Verdict:
         v.path = self.path
         v.at = self.speaker.now().isoformat(timespec="seconds")
+        if v.answer and v.label == UNSURE:    # G13: answered, but it changes nothing (gate.py); how often is read from the log
+            log.info("speaker check: answered but not confirmed as you (%s; score %s, %s s of speech): it can look things up, not change them",
+                     v.why, v.score, v.speech_s)
         if not v.answer:
             log.info(v.log_line())
             if self.on_ignored is not None:
@@ -711,8 +782,25 @@ class CallGate:
         return v
 
     async def answer(self) -> bool:
-        """voicertc's hook: True = answer this turn."""
-        return (await self.decide()).answer
+        """voicertc's hook: True = answer this turn. An answered turn's label waits for its answer (take_label)."""
+        v = await self.decide()
+        if v.answer:
+            self._queue_label(v.label)
+        return v.answer
+
+    def _queue_label(self, label: str) -> None:
+        with self._lock:
+            self._answered.append(label)
+            if len(self._answered) > MAX_WAITING_LABELS:     # never grows when answers are slow: the two oldest become their worst
+                self._answered[:2] = [worst(*self._answered[:2])]
+
+    def take_label(self) -> str:
+        """G13: the label for the turn that is about to be answered (the call's answer callback, first thing it does):
+        the least trusted of the verdicts answer() let through since the last take, so no order of events makes a turn
+        more trusted than its own verdict. Nothing waiting (a bug: an answer without a verdict) is unsure, never owner."""
+        with self._lock:
+            label, self._answered = worst(*self._answered), []
+        return label or UNSURE
 
 
 class Listening:

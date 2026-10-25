@@ -11,6 +11,7 @@ call at a time, never across calls.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -19,11 +20,12 @@ from typing import Any, AsyncIterator, Iterator
 
 from sqlmodel import Session, select, update
 
+from . import speaker_label
 from .brain import Brain, BrainEvent, EventKind
 from .db import Approval, ChatMessage, ChatThread, SettingKV, utcnow
 from .profile import Profile
 
-
+log = logging.getLogger("kairo.chat")
 
 # A job call is stopped for the owner at most this often; after that it gives up until its next run
 # (Voice V1: the owner never waits for a job).
@@ -49,6 +51,7 @@ class BrainRunner:
         self.current_thread_id: int | None = None
         self.on_usage = None   # (purpose, usage dict, ok, reason=None) -> None: More -> Usage
         self.router = None     # app/router.Router (G11): logs the route of every owner turn; None: no routing
+        self.voice_turns = None   # app/speaker_label.VoiceTurns (G13): the speaker label of a voice turn, for the gate; None: none
         self.last_owner_wait_ms = 0   # how long the last owner turn waited for the brain (app/turns.py)
 
     def _note(self, purpose: str, event: BrainEvent, reason: str | None = None) -> None:
@@ -133,6 +136,7 @@ class BrainRunner:
         isn't Haiku, recorded with the run."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[BrainEvent | None] = asyncio.Queue()
+        voice = speaker_label.current()   # G13: the caller's context, read here (the thread below does not inherit it)
 
         def post(item: BrainEvent | None) -> None:
             try:
@@ -152,7 +156,15 @@ class BrainRunner:
             with self.hold(owner=True):
                 self.last_owner_wait_ms = int((time.monotonic() - asked) * 1000)
                 self.current_origin, self.current_thread_id = origin, thread_id
+                labelled = None
                 try:
+                    if self.voice_turns is not None:
+                        # G13: who spoke, in the database, once this run holds the brain and before Claude starts (so a
+                        # waiting turn never takes the label of the one running). Not written: Claude does not run.
+                        try:
+                            labelled = self.voice_turns.begin(voice, thread_id=thread_id, purpose=purpose)
+                        except Exception as exc:
+                            raise RuntimeError(f"could not record who was speaking ({exc}); nothing was run") from exc
                     kwargs = {"model": model} if model else {}
                     if warm is not None:
                         kwargs["warm"] = warm
@@ -163,6 +175,11 @@ class BrainRunner:
                     post(BrainEvent(EventKind.error, text=f"Brain error: {exc}"))
                 finally:
                     self.current_origin, self.current_thread_id = None, None
+                    if self.voice_turns is not None:
+                        try:
+                            self.voice_turns.end(labelled)
+                        except Exception:   # the next run replaces a leftover; it only matters for the owner_chat tools after this
+                            log.exception("speaker label: the record of the turn could not be removed")
                     post(None)
 
         threading.Thread(target=work, name="brain-run", daemon=True).start()

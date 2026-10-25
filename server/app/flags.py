@@ -229,6 +229,17 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                "is open; an answer that is not exactly right goes to Claude. Needs g11.router too. Off: "
                                "everything runs on Claude."),
 
+    # -- G13 speaker label
+    "g13.speaker_label_gate": (True, "On a call or the voice button, a request that Kairo cannot confirm came from your voice "
+                                     "changes nothing: Kairo may still look things up and answer, but it will not add a task, write a "
+                                     "note, move or send anything, or make an approval card. It tells you to say it again or to do it "
+                                     "in the app. This works on top of the speaker check, so it only has an effect once you have "
+                                     "taught Kairo your voice (More -> Settings -> Voice); without it every voice request counts as "
+                                     "unchecked and works as before (Voice check warns). If you taught your voice and the check then "
+                                     "cannot run (its model is missing, the voiceprint is unreadable), voice requests change nothing "
+                                     "until it is fixed or you set the check to off (Voice check fails and says why). Off: a voice "
+                                     "request can do what it could before."),
+
 }
 
 

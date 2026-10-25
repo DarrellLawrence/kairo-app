@@ -478,6 +478,9 @@ def _speaker(r: _Report, c: sqlite3.Connection, data_dir: Path, now: dt.datetime
           f"{n['too_quiet']} ignored (too quiet / far); {s['scored']} with a voiceprint score")
     r.add(f"  check time ms p50/p95: {s['ms']['p50']}/{s['ms']['p95']} on {s['device'] or '-'}; "
           f"the turn waited p50/p95: {s['wait_ms']['p50']}/{s['wait_ms']['p95']}")
+    lab = s["labels"]       # G13: how often an answered request was not confirmed as the owner's (it changes nothing)
+    pct = f" ({lab['unsure_pct']} %, {lab['slow']} too slow)" if lab["unsure_pct"] is not None else ""
+    r.add(f"  answered turns by speaker label: owner {lab['owner']}, not confirmed {lab['unsure']}{pct}, unchecked {lab['unchecked']}")
 
 
 def _release(r: _Report, app_root: Path, data_dir: Path) -> None:
