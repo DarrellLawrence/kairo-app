@@ -107,6 +107,12 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                      "stops Kairo after about 1 to 2 seconds instead of about 0.3 (0.99 to 2.09 s), and a longer sentence "
                                      "over Kairo after 1.7 to 2.8 s. Acceptance row 4 says 'at once': this is the change you asked for. "
                                      "Off: any sound stops Kairo at once, as before. Takes effect at the next call."),
+    "g6.long_speech_cut": (False, "Needs g6.transcript_barge_in. If you talk over Kairo for a whole second without a pause, Kairo stops "
+                                  "even before Whisper has written your words down, so a long sentence over Kairo stops it after about "
+                                  "1.3 seconds at most (without this it waits for your first pause: 1.7 to 2.8 seconds for a 1.2 second "
+                                  "sentence, longer for a longer one). The price: a long laugh, a hum or your own cough that goes on for a "
+                                  "second also stops Kairo, and so does its own voice if it comes back through the microphone that long. "
+                                  "Off until you have tried a few calls. Takes effect at the next call."),
 
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "

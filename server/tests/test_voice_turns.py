@@ -551,3 +551,26 @@ def test_nothing_is_started_early_on_a_sound_that_did_not_stop_kairo():
     _over_kairo("Mhm.", interrupt=lambda n: order.append(("interrupt", n)),
                 speculate=lambda words, lang: order.append(("speculate", words)))
     assert order == [("speculate", "Remind me to call the dentist tomorrow morning.")], order
+
+
+# ---------------------------------------------------------------- a long talk-over stops Kairo without waiting for a pause (g6.long_speech_cut)
+
+def test_a_long_stretch_of_speech_over_kairo_stops_it_before_the_owner_pauses_with_the_switch_on():
+    """Off by default. The owner talks over Kairo for 2.5 s without a pause: Whisper can only write it down at the pause,
+    so without the switch Kairo talks on for the whole stretch (the research: speech length + 0.19 s + Whisper). With it, a
+    stretch that has gone on for LONG_SPEECH_S (1.0 s) after the VAD heard it start stops Kairo: the delay is capped at about
+    1.3 s. Whisper writes the stretch down as 'Mhm.' here, so only the switch can have stopped Kairo."""
+    on = _over_kairo("Mhm.", Turning(long_speech_cut=True), clip_s=2.5)
+    off = _over_kairo("Mhm.", Turning(long_speech_cut=False), clip_s=2.5)
+    assert off.stopped == [] and "barge_in" not in off.kinds, (off.stopped, off.kinds)
+    assert on.stopped == [1] and on.kinds.count("barge_in") == 1, (on.stopped, on.kinds)
+    speech_start = 0.5 + 2.54 + 3.0                                  # where the owner's long sound begins on the phone's clock
+    assert on.at["barge_in"] < speech_start + 2.4, on.at              # before the sound even ended (it lasts 2.5 s)
+    assert on.at["barge_in"] > speech_start + 0.9, on.at              # and not before LONG_SPEECH_S
+
+
+def test_the_long_speech_cut_ignores_a_short_sound_and_speech_while_kairo_is_quiet():
+    short = _over_kairo("Mhm.", Turning(long_speech_cut=True), clip_s=0.6)
+    assert short.stopped == [] and "barge_in" not in short.kinds       # 0.6 s is not a talk-over
+    quiet = _over_kairo("Remind me later.", Turning(long_speech_cut=True), after_s=0.0, lines=[], clip_s=2.5)
+    assert "barge_in" not in quiet.kinds                               # nothing was speaking: just the next turn

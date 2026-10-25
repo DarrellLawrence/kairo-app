@@ -14,13 +14,14 @@ from app.main import create_app
 
 # name -> default. On: the plain fixes of measured problems (empty turn, tap), and the three turn-taking changes the owner
 # asked for in his master prompt (transcript barge-in, ignore windows, Smart Turn 3 s; docs/CHANGELOG.md has their costs in
-# plain words).
+# plain words). Off: the long-speech cut, which stops Kairo with no words at all and was not asked for.
 G6 = {
     "g6.empty_turn_fix": True,
     "g6.tap_lag_fix": True,
     "g6.smart_turn_3s": True,
     "g6.ignore_windows": True,
     "g6.transcript_barge_in": True,
+    "g6.long_speech_cut": False,         # beyond the three the owner asked for, and cuts Kairo off with no words at all
 }
 
 

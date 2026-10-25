@@ -69,6 +69,7 @@ TURN_STOP_TIMEOUT_OLD_S = 5.0    # Pipecat's own default, what a call had before
 BARGE_GRACE_S = 0.4              # the first moments of Kairo's own voice: its start in the microphone, an overlap by accident
 RECONNECT_HOLD_S = 1.0           # after the call connected, or after the audio stalled: the noise that comes with it
 AUDIO_GAP_S = 0.5                # no audio for this long counts as a stall
+LONG_SPEECH_S = 1.0              # g6.long_speech_cut: speech over Kairo that has gone on this long (since the VAD heard it start) stops it
 OUT_RATE = 24000              # Kokoro's rate; Piper (22.05 kHz) is resampled to it
 OPENERS = {
     "en": ("Sure,", "Sure.", "Okay,", "Okay.", "Yeah,", "Yeah.", "Got it.", "Hey!", "Hm,", "Right,", "Nice.", "Done."),
@@ -85,6 +86,7 @@ TURN_FLAGS = {
     "smart_turn_3s": "g6.smart_turn_3s",
     "ignore_windows": "g6.ignore_windows",
     "transcript_barge_in": "g6.transcript_barge_in",
+    "long_speech_cut": "g6.long_speech_cut",
 }
 
 
@@ -97,6 +99,7 @@ class Turning:
     smart_turn_3s: bool = True           # a trailing-off thought is given 3.0 s before Kairo answers (was 0.5 s)
     ignore_windows: bool = True          # new speech is not heard in the first moments of Kairo's voice or after an audio gap
     transcript_barge_in: bool = True     # talking over Kairo stops it only when Whisper writes down a stop word or real words
+    long_speech_cut: bool = False        # ... and speech over Kairo that goes on for LONG_SPEECH_S stops it before Whisper has words
 
     @classmethod
     def read(cls, on: Callable[[str], bool]) -> "Turning":
@@ -485,8 +488,8 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
     from pipecat.frames.frames import (
         AggregatedTextFrame, BotStartedSpeakingFrame, BotStoppedSpeakingFrame, ControlFrame, Frame, InputAudioRawFrame,
         InterruptionFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, MetricsFrame,
-        TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame, UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame,
-        VADUserStoppedSpeakingFrame,
+        TranscriptionFrame, TTSAudioRawFrame, TTSSpeakFrame, UserSpeakingFrame, UserStoppedSpeakingFrame,
+        VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
     )
     from pipecat.metrics.metrics import TurnMetricsData
     from pipecat.pipeline.pipeline import Pipeline
@@ -600,6 +603,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             super().__init__()
             self._interrupt = interrupt              # the user aggregator's broadcast_interruption
             self._barged = False                     # this turn has interrupted Kairo already
+            self._since: float | None = None         # when the VAD heard the stretch of speech over Kairo begin
 
         async def handle_user_turn_started(self):
             state.in_turn, self._barged = True, False
@@ -609,11 +613,20 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
 
         async def process_frame(self, frame: Frame):
             if isinstance(frame, VADUserStartedSpeakingFrame):
+                self._since = time.monotonic() if state.stretch_over else None
                 if not state.stretch_over:
                     await self.trigger_user_turn_started()
                 elif not state.in_turn:
                     await self.trigger_user_turn_started(enable_interruptions=False)
                 return ProcessFrameResult.STOP
+            if (isinstance(frame, UserSpeakingFrame) and turning.long_speech_cut and self._since is not None
+                    and state.stretch_over and state.in_turn and not self._barged
+                    and time.monotonic() - self._since >= LONG_SPEECH_S):
+                # g6.long_speech_cut: Whisper can only write a stretch down at its pause. A talk-over this long is not a
+                # cough: Kairo stops now, the words come later. The cap on the delay is LONG_SPEECH_S plus the VAD's start.
+                self._barged = True
+                log.info("rtc: speech over Kairo's voice for %.1f s: stopping it before the words", LONG_SPEECH_S)
+                await self._interrupt()
             if isinstance(frame, TranscriptionFrame):
                 barge = frame.metadata.get("kairo_barge")
                 if barge is True:
