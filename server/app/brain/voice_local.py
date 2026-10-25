@@ -12,6 +12,7 @@ llama.cpp's prompt cache only has to read the newest words.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -62,9 +63,19 @@ ASK_KAIRO = {
 
 _CALL_TAGS = {"<|tool_call_start|>": "<|tool_call_end|>", "<tool_call>": "</tool_call>"}
 _STRAY = ("<|tool_call_end|>", "</tool_call>")
+# Gemma 4 (overnight build 2026-10-23, g3.gemma_markup): `<|tool_call>call:NAME{key:<|"|>text<|"|>}<tool_call|>`, and
+# `<|tool_response>` after a call (its chat template, llama.cpp b11292). On a turn where the tool is off (tool_choice
+# "none") llama-server leaves them in the words, so they have to come out here like the other models' markers.
+_GEMMA_CALL_TAGS = {"<|tool_call>": "<tool_call|>"}
+_GEMMA_STRAY = ("<tool_call|>", "<|tool_response>", "<tool_response|>")
+_GEMMA_QUOTE = '<|"|>'
+_GEMMA_CALL = re.compile(r"\s*call:([A-Za-z_]\w*)\s*\{(.*)\}\s*$", re.S)
+_GEMMA_KEY = re.compile(r"[\s,]*([A-Za-z_]\w*):")
+_GEMMA_LITERAL = re.compile(r"\s*(-?\d+(?:\.\d+)?|true|false|null)\s*(?=,|$)")
 _SPECIAL = re.compile(r"<\|[^<>|\s]{1,40}\|>")            # any other special token (<|im_end|>, ...)
 _MAYBE_SPECIAL = re.compile(r"<\|[^<>|\s]{0,40}\|?")      # could still become one: wait for more
-_CALL_NAME = re.compile(r"""\s*\[?\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(|\s*\[?\s*\{\s*"name"\s*:\s*"([^"]{1,80})\"""")
+_CALL_NAME = re.compile(r"""\s*\[?\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(|\s*\[?\s*\{\s*"name"\s*:\s*"([^"]{1,80})"|"""
+                        r"""\s*call:([A-Za-z_]\w*)\s*\{""")
 MAX_CALL_CHARS = 4000
 
 
@@ -97,6 +108,27 @@ def check_call(name: str, args, offered: dict) -> str | None:
     return None
 
 
+def _gemma_args(inner: str) -> dict | None:
+    """`key:<|"|>text<|"|>,key2:12` -> {key: text, key2: 12}; None when it cannot be read whole."""
+    args, pos = {}, 0
+    while pos < len(inner):
+        m = _GEMMA_KEY.match(inner, pos)
+        if not m:
+            return None if inner[pos:].strip(" ,\r\n\t") else args
+        key, pos = m.group(1), m.end()
+        if inner.startswith(_GEMMA_QUOTE, pos):
+            end = inner.find(_GEMMA_QUOTE, pos + len(_GEMMA_QUOTE))
+            if end < 0:
+                return None
+            args[key], pos = inner[pos + len(_GEMMA_QUOTE):end], end + len(_GEMMA_QUOTE)
+            continue
+        lit = _GEMMA_LITERAL.match(inner, pos)
+        if not lit:
+            return None
+        args[key], pos = json.loads(lit.group(1)), lit.end()
+    return args
+
+
 def _parse_body(body: str, offered: dict) -> list[tuple[str, dict | None]]:
     """[(name, args or None when unreadable)] from what was between the tags. Pythonic calls are read with
     ast (literals only: ast.literal_eval, never eval); JSON with json."""
@@ -121,6 +153,9 @@ def _parse_body(body: str, offered: dict) -> list[tuple[str, dict | None]]:
                     args = None
             out.append((str(d.get("name") or "?"), args if isinstance(args, dict) else None))
         return out
+    g = _GEMMA_CALL.match(b)
+    if g:
+        return [(g.group(1), _gemma_args(g.group(2)))]
     try:
         tree = ast.parse(b, mode="eval").body
     except (SyntaxError, ValueError):
@@ -151,8 +186,10 @@ class TextCalls:
     line can start), tool_call (complete and valid; arguments as a JSON string, like the OpenAI-style path).
     Invalid or not-offered calls are dropped without a word: only the tool's name and the reason are logged."""
 
-    def __init__(self, tools: list[dict] | None):
+    def __init__(self, tools: list[dict] | None, gemma: bool = True):
         self.offered = _offered(tools)
+        self.tags = {**_CALL_TAGS, **(_GEMMA_CALL_TAGS if gemma else {})}      # opener -> its end tag
+        self.stray = (*_STRAY, *(_GEMMA_STRAY if gemma else ()))               # a lone end tag is dropped
         self.buf = ""
         self.closer: str | None = None       # inside a call: the tag that ends it
         self.started = False                 # tool_start given for the call being written
@@ -182,15 +219,15 @@ class TextCalls:
                 self._text(self.buf[:i], out)
                 self.buf = self.buf[i:]
             rest = self.buf
-            opener = next((o for o in _CALL_TAGS if rest.startswith(o)), None)
+            opener = next((o for o in self.tags if rest.startswith(o)), None)
             if opener is not None:
-                self.closer, self.started, self.buf = _CALL_TAGS[opener], False, rest[len(opener):]
+                self.closer, self.started, self.buf = self.tags[opener], False, rest[len(opener):]
                 continue
-            stray = next((s for s in _STRAY if rest.startswith(s)), None)
+            stray = next((s for s in self.stray if rest.startswith(s)), None)
             if stray is not None:
                 self.buf = rest[len(stray):]
                 continue
-            if any(t.startswith(rest) for t in (*_CALL_TAGS, *_STRAY)):
+            if any(t.startswith(rest) for t in (*self.tags, *self.stray)):
                 return out                                      # could still be a tag: wait for more
             m = _SPECIAL.match(rest)
             if m:
@@ -206,7 +243,7 @@ class TextCalls:
         out = self.feed("")
         if self.closer is not None:                              # cut off before its end tag (max tokens)
             log.info("voice model: a tool call was dropped (%s: not finished)", self._name(self.buf))
-        elif self.buf and not any(t.startswith(self.buf) for t in (*_CALL_TAGS, *_STRAY)) \
+        elif self.buf and not any(t.startswith(self.buf) for t in (*self.tags, *self.stray)) \
                 and not _MAYBE_SPECIAL.fullmatch(self.buf):
             self._text(self.buf, out)
         self.buf, self.closer = "", None
@@ -218,13 +255,13 @@ class TextCalls:
 
     def _name(self, body: str) -> str:
         m = _CALL_NAME.match(body)
-        return _safe((m.group(1) or m.group(2)) if m else "?")
+        return _safe((m.group(1) or m.group(2) or m.group(3)) if m else "?")
 
     def _early_start(self, out: list[dict], body: str | None = None) -> None:
         if self.started:
             return
         m = _CALL_NAME.match(self.buf if body is None else body)
-        name = (m.group(1) or m.group(2)) if m else None
+        name = (m.group(1) or m.group(2) or m.group(3)) if m else None
         if name in self.offered:
             self.started = True
             out.append({"kind": "tool_start", "name": name})
@@ -258,24 +295,38 @@ def _int_flag(cmd: list[str], *names: str) -> int | None:
     return None
 
 
-def server_args(model: Path, *, port: int = PORT, context: int = 8192) -> list[str]:
-    """Flags checked against llama.cpp's own argument list (common/arg.cpp, Oct 2026)."""
-    return ["-m", str(model), "--host", HOST, "--port", str(port), "-c", str(context),
+# What the owner's switches (app/flags.py, read at server start and at the start of a call) change here.
+DEFAULT_OPTIONS = {"llama_flags": True, "swa_full": False, "gemma_markup": True, "constant_tools": False}
+
+
+def server_args(model: Path, *, port: int = PORT, context: int = 8192, lean_ram: bool = True,
+                swa_full: bool = False) -> list[str]:
+    """Flags checked against llama.cpp's own argument list (b11292 --help, Oct 2026).
+    lean_ram (g3.llama_flags): --cache-ram 0 (no host-RAM copies of old prompts: the default cache grew 33 MiB a
+    call, up to 8 GiB) and --ctx-checkpoints 8 (3 broke the reuse of a call's start; the default 32 costs RAM).
+    swa_full (g3.swa_full): Gemma's sliding-window cache kept whole (+280 MiB of GPU memory) so the cached start
+    of the prompt survives from one turn to the next."""
+    args = ["-m", str(model), "--host", HOST, "--port", str(port), "-c", str(context),
             "-ngl", "all",                  # every layer in VRAM
             "-fa", "auto",                  # flash attention where the GPU has it
             "--jinja",                      # the model's own chat template: its tool-call format
             "--reasoning", "off", "--reasoning-budget", "0",   # no thinking: straight to words
             "-np", "1",                     # one conversation: one slot, its cache kept
-            "--cache-reuse", "256",         # reuse the cached start even when later text shifts
-            "--no-webui"]
+            "--cache-reuse", "256"]         # reuse the cached start even when later text shifts
+    if lean_ram:
+        args += ["--cache-ram", "0", "--ctx-checkpoints", "8"]
+    if swa_full:
+        args += ["--swa-full"]
+    return [*args, "--no-webui"]
 
 
 class LlamaServer:
     """One llama-server process. command_prefix: [binary] (tests use [python, fake_llama.py])."""
 
     def __init__(self, command_prefix: list[str], model: Path, *, port: int = PORT, context: int = 8192,
-                 log_path: Path | None = None, pid_path: Path | None = None):
-        self.cmd = [*command_prefix, *server_args(model, port=port, context=context)]
+                 log_path: Path | None = None, pid_path: Path | None = None, lean_ram: bool = True,
+                 swa_full: bool = False):
+        self.cmd = [*command_prefix, *server_args(model, port=port, context=context, lean_ram=lean_ram, swa_full=swa_full)]
         self.model, self.port, self.log_path, self.pid_path = Path(model), port, log_path, pid_path
         self.proc: subprocess.Popen | None = None
         self.started_at: float | None = None
@@ -349,8 +400,18 @@ class VoiceModel:
     state: not installed | starting | ready | failed | paused | off (installed, but no model passed the lab)."""
 
     def __init__(self, resolve: Callable[[], tuple[list[str], Path, str, int] | None], *, log_dir: Path,
-                 port: int = PORT, transport: httpx.AsyncBaseTransport | None = None):
+                 port: int = PORT, transport: httpx.AsyncBaseTransport | None = None,
+                 options: Callable[[], dict] | None = None,
+                 warm_messages: Callable[[], list[dict]] | None = None):
         self.resolve, self.log_dir, self.port, self.transport = resolve, Path(log_dir), port, transport
+        self.warm_messages = warm_messages  # the messages every call starts with (g3.constant_tools): read in advance
+        self.warm: dict = {}                # {how, tokens, ms, ...} of the server running now; {} = not (yet)
+        self._warming = False
+        self.last_cache_n: int | None = None      # llama.cpp's own numbers for the latest request: how much of the
+        self.last_prompt_n: int | None = None     # prompt it found cached / had to read
+        self.options = options              # the owner's switches (DEFAULT_OPTIONS keys), read when a server starts
+        self.opts = dict(DEFAULT_OPTIONS)   # what was read last
+        self.applied: dict = {}             # the options the running server was started with
         self.server: LlamaServer | None = None
         self.model_id: str | None = None
         self.state, self.error, self.since = "not installed", None, time.time()
@@ -387,8 +448,10 @@ class VoiceModel:
                 if self.state == "failed" and time.time() - self.failed_at < RETRY_AFTER_S:
                     return self.state
                 self.log_dir.mkdir(parents=True, exist_ok=True)
+                opts = self.read_options()
                 self.server = LlamaServer(prefix, model, port=self.port, context=context,
-                                          log_path=self.log_dir / "voice-llm.log", pid_path=self.log_dir / "voice-llm.pid")
+                                          log_path=self.log_dir / "voice-llm.log", pid_path=self.log_dir / "voice-llm.pid",
+                                          lean_ram=opts["llama_flags"], swa_full=opts["swa_full"])
                 try:
                     self.server.start()
                 except OSError as exc:
@@ -396,12 +459,13 @@ class VoiceModel:
                     self.failed_at = time.time()
                     self._set("failed", f"could not start llama-server: {exc}")
                     return self.state
-                self.model_id = model_id
+                self.model_id, self.applied = model_id, dict(opts)
                 self._set("starting")
             if self.state == "starting":
                 if health(self.port):
                     self._set("ready")
                     log.info("voice model %s ready in %.1fs", model_id, time.monotonic() - (self.server.started_at or 0))
+                    self._warm_soon()
                 elif not self.server.alive() or time.monotonic() - (self.server.started_at or 0) > START_TIMEOUT_S:
                     tail = _tail(self.log_dir / "voice-llm.log")
                     self._stop_server()
@@ -410,6 +474,59 @@ class VoiceModel:
             elif self.state == "ready" and not health(self.port, timeout=5):
                 self._set("starting")          # busy or restarting; checked again next round
             return self.state
+
+    def take_options(self, got: dict) -> dict:
+        self.opts = {**DEFAULT_OPTIONS, **{k: bool(v) for k, v in (got or {}).items() if k in DEFAULT_OPTIONS}}
+        return self.opts
+
+    def read_options(self) -> dict:
+        """The owner's switches now (a failing reader keeps what was read before: the voice never waits on it)."""
+        if self.options is not None:
+            try:
+                self.take_options(self.options())
+            except Exception:
+                log.exception("voice model: reading the switches")
+        return self.opts
+
+    def _warm_soon(self) -> None:
+        """Once per server, beside everything else (a call never waits for it): read the start every call shares."""
+        if self.warm_messages is None or not self.opts.get("constant_tools") or self.warm or self._warming:
+            return
+        self._warming = True
+        threading.Thread(target=self._warm, args=(self.server,), name="voice-llm-warm", daemon=True).start()
+
+    def _warm(self, server) -> None:
+        """No slot file (a truncated one aborts llama-server): the chat template turns the static start (system text + the
+        tool) into tokens and one request with n_predict 1 computes it, so the first call finds it cached. Never raises."""
+        t0 = time.monotonic()
+        try:
+            got = asyncio.run(self._warm_request())
+        except Exception as exc:   # the voice works without it
+            got = {"how": "failed", "why": f"{type(exc).__name__}: {exc}"[:200]}
+        got["ms"] = round((time.monotonic() - t0) * 1000)
+        with self.lock:
+            self._warming = False
+            if self.server is server and server is not None:
+                self.warm = got
+        if got.get("how") == "computed":
+            log.info("voice model: the start of every call (%s tokens) is cached, %s ms", got.get("tokens"), got["ms"])
+        else:
+            log.warning("voice model: warming the start of the prompt failed (%s)", got.get("why"))
+
+    async def _warm_request(self) -> dict:
+        messages = self.warm_messages()
+        async with httpx.AsyncClient(base_url=f"http://{HOST}:{self.port}", transport=self.transport,
+                                     timeout=httpx.Timeout(120.0, connect=2.0)) as c:
+            r = await c.post("/apply-template", json={"messages": messages, "tools": [ASK_KAIRO], "add_generation_prompt": False,
+                                                      "chat_template_kwargs": {"enable_thinking": False}})
+            r.raise_for_status()
+            r = await c.post("/tokenize", json={"content": r.json()["prompt"], "add_special": True, "parse_special": True})
+            r.raise_for_status()
+            tokens = r.json()["tokens"]
+            r = await c.post("/completion", json={"prompt": tokens, "n_predict": 1, "cache_prompt": True, "temperature": 0})
+            r.raise_for_status()
+            timings = r.json().get("timings") or {}
+        return {"how": "computed", "tokens": len(tokens), "cache_n": timings.get("cache_n"), "prompt_n": timings.get("prompt_n")}
 
     def wait_ready(self, timeout: float = START_TIMEOUT_S) -> bool:
         until = time.monotonic() + timeout
@@ -426,6 +543,7 @@ class VoiceModel:
             self.server.stop()
             self.server = None
             self.model_id = None
+            self.warm = {}                  # the cache went with the process
 
     def watch(self) -> threading.Thread:
         """Loaded day and night: checks the server every 15 s."""
@@ -477,26 +595,29 @@ class VoiceModel:
 
     def status(self) -> dict:
         return {"state": self.state, "model": self.model_id, "error": self.error, "since": self.since,
-                "port": self.port, "turns": self.turns}
+                "port": self.port, "turns": self.turns, "options": dict(self.applied or self.opts), "warm": dict(self.warm),
+                "last_cache_n": self.last_cache_n, "last_prompt_n": self.last_prompt_n}
 
     # ---------------------------------------------------------------- one turn
 
     async def stream(self, messages: list[dict], *, tools: list[dict] | None = None, temperature: float = 0.6,
-                     max_tokens: int = 300, slot: int | None = None) -> AsyncIterator[dict]:
+                     max_tokens: int = 300, tool_choice: str | None = None, slot: int | None = None) -> AsyncIterator[dict]:
         """Events: {"kind": "text", "text"} as it is written; {"kind": "tool_start", "name"} when an offered
         tool's call begins; {"kind": "tool_call", "id", "name", "arguments"} once a valid call is complete
         (OpenAI-style deltas or written as text, TextCalls); {"kind": "done", "finish", "first_token_ms",
         "timings", "usage"} at the end. Closing the generator (talked over) closes the connection, and the
         server stops writing. slot: pin the request to one of the server's slots (a background job passes job_slot);
         without it the mouth stays on slot 0 when the server has a slot for jobs, and the request is exactly what it
-        was when the server has one."""
+        was when the server has one.
+        tool_choice "none" (g3.constant_tools): the request carries the tools, so the prompt the server has cached
+        stays the same, but the model may not call them: a call it writes anyway is not offered on this turn."""
         self.turns += 1
-        texts = TextCalls(tools)
+        texts = TextCalls(None if tool_choice == "none" else tools, gemma=self.opts.get("gemma_markup", True))
         body = {"messages": messages, "stream": True, "temperature": temperature, "max_tokens": max_tokens,
                 "cache_prompt": True, "stream_options": {"include_usage": True},
                 "chat_template_kwargs": {"enable_thinking": False}}
         if tools:
-            body.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+            body.update(tools=tools, tool_choice=tool_choice or "auto", parallel_tool_calls=False)
         if slot is None and self.job_slot is not None:
             slot = 0
         if slot is not None:
@@ -550,7 +671,22 @@ class VoiceModel:
                 log.info("voice model: a tool call was dropped (%s: %s)", _safe(call["name"]), why)
                 continue
             yield {"kind": "tool_call", "id": call["id"] or f"call_{i}", "name": call["name"], "arguments": call["arguments"]}
+        if timings:
+            self.last_cache_n, self.last_prompt_n = timings.get("cache_n"), timings.get("prompt_n")
         yield {"kind": "done", "finish": finish, "first_token_ms": first, "timings": timings or {}, "usage": usage or {}}
+
+    async def prime(self, messages: list[dict], **kw) -> dict:
+        """The call's first read of its prompt, before the owner says a word (one token out, thrown away). Returns llama.cpp's
+        timings. With the start warmed, this read must find at least that much cached; if not, it says so in the log."""
+        timings: dict = {}
+        async for ev in self.stream(messages, max_tokens=1, **kw):
+            if ev["kind"] == "done":
+                timings = ev.get("timings") or {}
+        want, got = self.warm.get("tokens"), timings.get("cache_n")
+        if want and isinstance(got, int) and got < want:
+            log.warning("voice model: a call's first read found %s tokens cached, fewer than the %s warmed at start "
+                        "(the prompt's start differs, or the cache was lost)", got, want)
+        return timings
 
 
 def _tail(path: Path, n: int = 300) -> str:

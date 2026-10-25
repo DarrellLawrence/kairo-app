@@ -41,6 +41,35 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                        "before you switch it on."),
 
     # -- G3 mouth
+    "g3.llama_flags": (True, "The voice model's server keeps no extra copies of old prompts in the PC's memory "
+                             "(--cache-ram 0) and at most 8 saved checkpoints (--ctx-checkpoints 8): the memory use "
+                             "grew about 33 MiB with every call. Applies the next time the voice model starts."),
+    "g3.gemma_markup": (True, "Gemma's tool-call markup (<|tool_call>...<tool_call|>) is taken out of what Kairo says on a call, "
+                              "like the other models' markers; without it the voice would read it out when Gemma talks."),
+    "g3.constant_tools": (False, "The voice model's start of every call stays the same: its system text and tool list never change "
+                                 "(a turn that must not call the tool says 'none'), and today's card and the bring-up list "
+                                 "come in the first message instead, slowest-changing first. Less of the prompt is read again at "
+                                 "the start of a call and when a turn switches between small talk and a question. Waits for the "
+                                 "voice lab before/after on the PC (the card moves from the system role to a user message). "
+                                 "Applies from the next call."),
+    "g3.swa_full": (False, "Gemma's cache kept whole (--swa-full): +280 MiB of graphics-card memory, so the cached start of the "
+                           "prompt survives from one turn to the next. Wait for the PC check (the card's memory) before "
+                           "turning it on. Applies the next time the voice model starts."),
+
+    "g3.gemma_first": (False, "Gemma 4 E4B is the voice model Kairo starts with, and the voice lab picks it whenever it passes "
+                              "the lab's checks, even if another model answers faster. LFM2.5 2.6B was measured speaking its own "
+                              "reasoning aloud (2 of 3 probe turns), which the lab does not catch. Nothing is downloaded or removed: "
+                              "LFM stays installed and can still be picked by hand in Voice lab. With this on, the lab also leaves "
+                              "out any model that spoke tool-call markup in its test replies (the report shows the count either way). "
+                              "A model the lab or you already picked stays until the lab is run again. Gemma uses about 3.5 GiB "
+                              "of graphics memory: turn it on after the PC memory check."),
+
+    "g3.smart_turn_pin": (False, "Calls load the exact Smart Turn v3.2 file the installer downloaded and checked (pinned revision and "
+                                 "checksum in voicellm.json) instead of the copy inside the Pipecat package. The same bytes today, so "
+                                 "nothing sounds different; it only keeps a later package update from changing the turn detector "
+                                 "unnoticed. Does nothing yet: voicellm.json carries no pin until you approve the separate update that "
+                                 "adds it (that update makes the installer download llama.cpp again, about 624 MiB). Even then, if the "
+                                 "downloaded file is not the pinned one, calls keep using Pipecat's copy. Applies from the next call."),
 
     # -- G4 jitter buffer
     "g4.jitter_patch": (False, "Calls: your voice reaches Kairo about 60 ms sooner on every turn, and one lost packet no longer "

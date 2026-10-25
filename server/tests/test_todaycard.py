@@ -99,3 +99,36 @@ def test_none_means_keep_and_the_connection_is_faster_on_a_call():
     k2 = todaycard.Keeper({"trip": lambda: None}, clock=clock)
     k2.sections["trip"] = "old"
     assert k2.refresh()["trip"] == "old"
+
+
+# ---------------------------------------------------------------- G3: the order the voice model reads the card in
+
+CARD = {"now": "Friday 16 October 2026", "events": "- Fri 18:00 Training", "tasks": "- buy a lock", "loops": "- reply: Lea",
+        "weather": "Home: now 12°C", "trip": "Home to School:\n- 07:12", "about": "Sam, apprentice", "lately": "- moved chess"}
+
+
+def headers(text: str) -> list[str]:
+    return [ln[3:] for ln in text.splitlines() if ln.startswith("## ")]
+
+
+def test_the_voice_model_reads_the_slow_parts_first_and_the_clock_last():
+    """A call's prompt starts the same as the last one's as far as the card hasn't changed, so what changes least
+    comes first (measured: 73 % of a new call's prompt already cached, against 37 % in the card's own order)."""
+    assert sorted(todaycard.MOUTH_ORDER) == sorted(todaycard.SECTIONS)
+    assert todaycard.MOUTH_ORDER[:2] == ("about", "lately") and todaycard.MOUTH_ORDER[-1] == "now"
+    out = todaycard.render(CARD, order=todaycard.MOUTH_ORDER)
+    assert headers(out) == [todaycard.SECTIONS[k] for k in todaycard.MOUTH_ORDER]
+
+
+def test_the_cards_own_order_is_unchanged_for_everyone_else():
+    assert headers(todaycard.render(CARD)) == list(todaycard.SECTIONS.values())
+    assert todaycard.render(CARD, order=None) == todaycard.render(CARD)
+
+
+def test_the_same_parts_in_either_order_and_changed_parts_still_follow_the_chosen_order():
+    a, b = todaycard.render(CARD), todaycard.render(CARD, order=todaycard.MOUTH_ORDER)
+    assert sorted(a.split("\n\n")) == sorted(b.split("\n\n"))                   # nothing lost, nothing added
+    part = todaycard.render(CARD, only=["events", "about"], order=todaycard.MOUTH_ORDER)
+    assert headers(part) == [todaycard.SECTIONS["about"], todaycard.SECTIONS["events"]]
+    assert "UNTRUSTED DATA" in part                                               # other people's words stay data
+    assert headers(todaycard.render(CARD, order=["nope", "now"])) == [todaycard.SECTIONS["now"]]

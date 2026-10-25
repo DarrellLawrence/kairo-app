@@ -29,9 +29,10 @@ def _content(*pieces: str) -> list[dict]:
         {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
 
 
-def stream(tmp_path, chunks: list[dict], tools=None) -> list[dict]:
+def stream(tmp_path, chunks: list[dict], tools=None, **opts) -> list[dict]:
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=_sse(chunks)))
     vm = VoiceModel(lambda: None, log_dir=tmp_path, transport=transport)
+    vm.opts.update(opts)                         # the owner's switches (g3.*)
 
     async def go():
         return [ev async for ev in vm.stream([{"role": "user", "content": "x"}], tools=tools)]
@@ -143,3 +144,108 @@ def test_the_openai_style_path_is_checked_the_same_way(tmp_path, caplog):
         other = stream(tmp_path, tc("delete_everything", '{"request": "hi"}'), tools=[ASK_KAIRO])
     assert calls(empty) == calls(offered_none) == calls(other) == []
     assert "tool_start" not in [e["kind"] for e in offered_none + other]   # no holding line for a tool it can't use
+
+
+# ---------------------------------------------------------------- Gemma 4 (G3, switch g3.gemma_markup)
+# Gemma 4 writes `<|tool_call>call:NAME{key:<|"|>text<|"|>}<tool_call|>` and ends a call turn with `<|tool_response>`
+# (its chat template, b11292). A tool_choice "none" turn gave nothing to parse them, so they would have been said.
+
+GEMMA = '<|tool_call>call:ask_kairo{request:<|"|>what\'s on tomorrow<|"|>}<tool_call|>'
+
+
+def test_gemma_call_becomes_a_tool_call_and_nothing_is_spoken(tmp_path):
+    evs = stream(tmp_path, _content("<|tool_", "call>call:ask_kairo{req", 'uest:<|"|>what\'s on tomorrow<|"|>}',
+                                    "<tool_call|>", "<|tool_response>"), tools=[ASK_KAIRO])
+    assert spoken(evs) == ""
+    assert calls(evs) == [("ask_kairo", {"request": "what's on tomorrow"})]
+    kinds = [e["kind"] for e in evs]
+    assert kinds.index("tool_start") < kinds.index("tool_call")                 # the holding line comes early
+
+
+def test_no_piece_of_gemmas_markup_is_ever_spoken_even_one_character_at_a_time(tmp_path):
+    evs = stream(tmp_path, _content(*list("Sure. " + GEMMA + "<|tool_response> One sec.")), tools=[ASK_KAIRO])
+    assert spoken(evs) == "Sure.  One sec."
+    assert not any(c in e["text"] for e in evs if e["kind"] == "text" for c in "<|>")
+    assert calls(evs) == [("ask_kairo", {"request": "what's on tomorrow"})]
+
+
+def test_gemmas_call_on_a_turn_without_the_tool_is_dropped_silently(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="kairo.voice_llm"):
+        evs = stream(tmp_path, _content(GEMMA, "<|tool_response>"), tools=None)
+    assert spoken(evs) == "" and calls(evs) == [] and "tool_start" not in [e["kind"] for e in evs]
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "ask_kairo" in log_text and "not offered" in log_text and "tomorrow" not in log_text   # name and reason, no words
+
+
+def test_gemma_values_may_hold_braces_commas_and_colons_and_a_second_argument(tmp_path):
+    body = 'request:<|"|>move {the test}, then: call Lea<|"|>,item:<|"|>l1<|"|>'
+    evs = stream(tmp_path, _content("<|tool_call>call:ask_kairo{" + body + "}<tool_call|>"), tools=[ASK_KAIRO])
+    assert calls(evs) == [("ask_kairo", {"request": "move {the test}, then: call Lea", "item": "l1"})]
+
+
+@pytest.mark.parametrize("body", ["call:ask_kairo{}", 'call:ask_kairo{request:<|"|><|"|>}', "call:ask_kairo{request:}",
+                                  'call:ask_kairo{item:<|"|>L1<|"|>}', "call:ask_kairo", 'call:ask_kairo{request:<|"|>x}'])
+def test_gemmas_unreadable_or_incomplete_calls_are_dropped(tmp_path, body):
+    evs = stream(tmp_path, _content(f"<|tool_call>{body}<tool_call|>"), tools=[ASK_KAIRO])
+    assert calls(evs) == [] and spoken(evs) == ""
+
+
+def test_stray_gemma_tags_are_never_spoken(tmp_path):
+    evs = stream(tmp_path, _content("Okay.<tool_call|><|tool_response>", "<tool_response|> Done."), tools=None)
+    assert spoken(evs) == "Okay. Done."
+
+
+def test_a_gemma_call_cut_off_at_the_end_is_dropped(tmp_path):
+    evs = stream(tmp_path, _content('<|tool_call>call:ask_kairo{request:<|"|>what'), tools=[ASK_KAIRO])
+    assert spoken(evs) == "" and calls(evs) == []
+
+
+def test_with_the_switch_off_gemmas_markup_is_spoken_as_before(tmp_path):
+    """The old behaviour, kept for the switch's off position (the owner's way back)."""
+    evs = stream(tmp_path, _content("Sure.", "<|tool_call>call:ask_kairo{}", "<tool_call|>"), tools=[ASK_KAIRO], gemma_markup=False)
+    assert "tool_call" in spoken(evs) and calls(evs) == []
+
+
+# ---------------------------------------------------------------- tool_choice "none" (G3, switch g3.constant_tools)
+# The request keeps the tools (the cached prompt is the same) and says the model may not call them. A call it writes
+# anyway, as text or as a delta, is not offered on that turn: dropped, never run, never spoken.
+
+def sent(tmp_path, chunks, tools, **kw):
+    """(events, the request body) for one stream() call."""
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, content=_sse(chunks))
+    vm = VoiceModel(lambda: None, log_dir=tmp_path, transport=httpx.MockTransport(handler))
+
+    async def go():
+        return [ev async for ev in vm.stream([{"role": "user", "content": "x"}], tools=tools, **kw)]
+    return asyncio.run(go()), bodies[0]
+
+
+def test_tools_go_with_auto_unless_the_turn_says_none(tmp_path):
+    _, auto = sent(tmp_path, _content("Hi."), [ASK_KAIRO])
+    _, none = sent(tmp_path, _content("Hi."), [ASK_KAIRO], tool_choice="none")
+    _, nothing = sent(tmp_path, _content("Hi."), None)
+    assert auto["tools"] == none["tools"] == [ASK_KAIRO] and auto["tool_choice"] == "auto" and none["tool_choice"] == "none"
+    assert "tools" not in nothing and "tool_choice" not in nothing                       # as before
+
+
+def test_a_text_call_on_a_none_turn_is_dropped_whatever_the_model(tmp_path, caplog):
+    for markup in (LFM2, GEMMA, '<tool_call>{"name": "ask_kairo", "arguments": {"request": "x"}}</tool_call>'):
+        with caplog.at_level(logging.INFO, logger="kairo.voice_llm"):
+            evs, _ = sent(tmp_path, _content("Okay. ", markup), [ASK_KAIRO], tool_choice="none")
+        assert spoken(evs) == "Okay. " and calls(evs) == [] and "tool_start" not in [e["kind"] for e in evs]
+    assert any("not offered" in r.getMessage() for r in caplog.records)
+
+
+def test_a_delta_call_on_a_none_turn_is_dropped_too(tmp_path):
+    chunks = [{"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                                                                   "function": {"name": "ask_kairo", "arguments": ""}}]}}]},
+              {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"request": "x"}'}}]}}]},
+              {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}]
+    evs, _ = sent(tmp_path, chunks, [ASK_KAIRO], tool_choice="none")
+    assert calls(evs) == [] and "tool_start" not in [e["kind"] for e in evs]
+    evs, _ = sent(tmp_path, chunks, [ASK_KAIRO])
+    assert calls(evs) == [("ask_kairo", {"request": "x"})]                              # auto: it runs

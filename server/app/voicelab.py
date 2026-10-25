@@ -50,7 +50,7 @@ from . import bringup, gpu, voicellm
 from .brain.voice_local import PORT, VoiceModel
 from .db import SettingKV
 from .latency import pct
-from .voicemouth import FILLERS, Mouth
+from .voicemouth import FILLERS, Mouth, g3_options, mouth_args
 
 log = logging.getLogger("kairo.voicelab")
 
@@ -222,10 +222,19 @@ def stats(values: list) -> dict:
 
 # ---------------------------------------------------------------- the language models
 
-async def _run_model(vm: VoiceModel, temperature: float) -> dict:
+# What must never be said aloud (G3's gate, "markup spoken 0 of N"): a model's tool-call or reasoning markers that got through
+# the sanitiser (brain/voice_local.TextCalls) into the words.
+_MARKUP = re.compile(r"</?think>|<\|?/?tool_(?:call|response)|\btool_(?:call|response)\|>|\bcall:[A-Za-z_]\w*\s*\{|\[TOOL_CALLS\]", re.I)
+
+
+def spoke_markup(text: str | None) -> bool:
+    return bool(text and _MARKUP.search(text))
+
+
+async def _run_model(vm: VoiceModel, temperature: float, layout: dict | None = None) -> dict:
     out = {"ttft": [], "first_text": [], "tok_s": [], "cold_ms": {}, "need": 0, "hits": 0, "small": 0, "false": 0,
            "facts_n": 0, "facts_ok": 0, "card_n": 0, "card_pc": 0, "card_wrong": 0, "card_claude": 0,
-           "replies": {"en": [], "de": []}, "errors": []}
+           "replies": {"en": [], "de": []}, "errors": [], "spoken_n": 0, "markup": 0}
     for lang, cases in CASES.items():
         answers = {c.text: c.answer for c in cases}
 
@@ -237,7 +246,7 @@ async def _run_model(vm: VoiceModel, temperature: float) -> dict:
             return _answers.get(last) or ("Done." if _lang == "en" else "Erledigt."), False
         mouth = Mouth(vm, ask=brain, context=dict(LAB_CARD), items=LAB_ITEMS, name="Sam", temperature=temperature,
                       ask_timeout_s=120,     # the lab scores Claude's answers: no call cap here
-                      clock=lambda: dt.datetime(2026, 10, 16, 6, 55))
+                      clock=lambda: dt.datetime(2026, 10, 16, 6, 55), **(layout or {}))
         for i, case in enumerate(cases):
             ear = _Ear()
             try:
@@ -253,6 +262,8 @@ async def _run_model(vm: VoiceModel, temperature: float) -> dict:
             if r.timings.get("predicted_per_second"):
                 out["tok_s"].append(round(float(r.timings["predicted_per_second"]), 1))
             spoken = ear.text.strip()
+            out["spoken_n"] += 1
+            out["markup"] += 1 if spoke_markup(spoken) else 0
             if case.card:                      # the card has it: on the PC, right, at once
                 out["card_n"] += 1
                 if r.asked:
@@ -282,6 +293,7 @@ def _summary(raw: dict) -> dict:
             "card_on_pc": round(raw["card_pc"] / raw["card_n"], 2) if raw["card_n"] else None,
             "card_wrong": round(raw["card_wrong"] / raw["card_n"], 2) if raw["card_n"] else None,
             "card_via_claude": round(raw["card_claude"] / raw["card_n"], 2) if raw["card_n"] else None,
+            "markup_spoken": raw.get("markup", 0), "spoken_replies": raw.get("spoken_n", 0),
             "errors": raw["errors"][:5]}
 
 
@@ -321,8 +333,10 @@ def parse_judge(text: str, labels: list[str]) -> dict:
     return out
 
 
-def pick(models: dict, language_mode: str = "auto") -> tuple[str | None, str]:
-    """The fastest model that passes. (id, why)."""
+def pick(models: dict, language_mode: str = "auto", prefer: str | None = None, refuse_markup: bool = False) -> tuple[str | None, str]:
+    """The fastest model that passes; with `prefer` (g3.gemma_first), that one if it passes. (id, why).
+    `refuse_markup` (also g3.gemma_first): a model that spoke tool-call markup does not pass. Off, the count is only reported:
+    leaving a model out moves the live voice model, which is the owner's Gemma decision (recipe 16.6), not a side effect."""
     langs = ("en",) if language_mode == "en" else ("en", "de")
     ok, why_not = [], []
     for mid, m in models.items():
@@ -340,6 +354,8 @@ def pick(models: dict, language_mode: str = "auto") -> tuple[str | None, str]:
             problems.append(f"answers from the card {m['card_on_pc']}")
         if m.get("card_wrong") is not None and m["card_wrong"] > CARD_WRONG_MAX:
             problems.append(f"wrong from the card {m['card_wrong']}")
+        if refuse_markup and (m.get("markup_spoken") or 0) > 0:
+            problems.append(f"spoke tool-call markup in {m['markup_spoken']} of {m.get('spoken_replies')} replies")
         for lang in langs:
             score = (m.get("natural") or {}).get(lang)
             if score is not None and score < NATURAL_MIN[lang]:
@@ -351,6 +367,12 @@ def pick(models: dict, language_mode: str = "auto") -> tuple[str | None, str]:
             why_not.append(f"{mid}: " + ", ".join(problems))
         else:
             ok.append((speed, mid))
+    passing = {mid: speed for speed, mid in ok}
+    if prefer in passing:
+        faster = [f"{mid} {speed} ms" for speed, mid in sorted(ok) if mid != prefer and speed < passing[prefer]]
+        return prefer, (f"preferred, and it passes ({passing[prefer]} ms to its first word)"
+                        + (f"; faster but not picked: {', '.join(faster)}" if faster else "")
+                        + (f"; not picked: {'; '.join(why_not)}" if why_not else ""))
     if ok:
         speed, mid = min(ok)
         return mid, f"fastest that passes ({speed} ms to its first word)" + (f"; not picked: {'; '.join(why_not)}" if why_not else "")
@@ -375,6 +397,16 @@ class Lab:
         with Session(self.engine) as s:
             _put_state(s, {**kw, "at": self.now().isoformat(timespec="seconds")})
 
+    def _options(self) -> dict:
+        """The owner's G3 switches: the lab measures with the same server flags the real server gets."""
+        with Session(self.engine) as s:
+            return g3_options(s)
+
+    def _prefer(self) -> str | None:
+        """g3.gemma_first, read once per run."""
+        with Session(self.engine) as s:
+            return voicellm.preferred(s)
+
     def run(self, language_mode: str = "auto", by: str = "owner") -> dict:
         """by: "owner" (Run) or "auto" (Kairo ran it by itself)."""
         started = time.monotonic()
@@ -388,7 +420,8 @@ class Lab:
             self._speech(report)
             self._kyutai(report)
             report["on_gpu"], report["off_gpu"] = ran_on_gpu(report["models"], self._voice_devices())
-            choice, why = pick(report["models"], language_mode)
+            prefer = self._prefer()                        # g3.gemma_first: prefers Gemma, and refuses a model that spoke markup
+            choice, why = pick(report["models"], language_mode, prefer=prefer, refuse_markup=prefer is not None)
             if choice is None and not report["on_gpu"]:
                 why += "; measured off the GPU, so the voice stays as it was"
             report["pick"] = {"model": choice, "why": why}
@@ -430,7 +463,7 @@ class Lab:
             path = voicellm.model_path(self.site_dir, mid)
             before = nvidia_smi()
             vm = VoiceModel(lambda p=path, m=mid: (self.server_prefix(binary), p, m, int(spec.get("context", 8192))),
-                            log_dir=self.data_dir / "logs", port=self.port)
+                            log_dir=self.data_dir / "logs", port=self.port, options=self._options)
             t0 = time.monotonic()
             try:
                 if not vm.wait_ready():
@@ -443,7 +476,7 @@ class Lab:
                 after = nvidia_smi()
                 if before and after:
                     entry["vram_mb"] = after["used_mb"] - before["used_mb"]
-                raw = asyncio.run(_run_model(vm, float(spec.get("temperature", 0.6))))
+                raw = asyncio.run(_run_model(vm, float(spec.get("temperature", 0.6)), mouth_args(self._options())))
                 entry.update(_summary(raw))
                 entry["_replies"] = raw["replies"]
             except Exception as exc:

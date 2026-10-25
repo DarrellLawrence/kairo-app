@@ -11,7 +11,12 @@ answer is here -> "Okay. <the answer>". Anything else -> "Sure, happy to help wi
 
 FAKE_LLAMA_LOAD_S: seconds of 503 on /health before the model is "loaded".
 FAKE_LLAMA_TOKEN_MS: delay between pieces (default 5). FAKE_LLAMA_FIRST_MS: before the first piece.
+FAKE_LLAMA_GEMMA_TOOLS=1: with FAKE_LLAMA_TEXT_TOOLS the calls are written the way Gemma 4 does it
+(<|tool_call>call:ask_kairo{request:<|"|>...<|"|>}<tool_call|><|tool_response>).
 FAKE_LLAMA_RECORD: every request body is appended there as one JSON line.
+FAKE_LLAMA_RECORD_WARM: the other endpoints (/apply-template, /tokenize, /completion: the warm-up of the prompt's start)
+are appended there as {"path", "body"} lines. FAKE_LLAMA_WARM_FAIL=1: /completion answers 500.
+FAKE_LLAMA_ARGV: the flags this server was started with are written there (one JSON list), so a test can see them.
 FAKE_LLAMA_NO_TOOLS=1: never calls the tool (a model that ignores tools). FAKE_LLAMA_ALWAYS_TOOL=1: always calls it.
 FAKE_LLAMA_TEXT_TOOLS=1: tool calls are written into the words, like LFM2 through llama-server
 (<|tool_call_start|>[ask_kairo(request="...")]<|tool_call_end|> as content); with FAKE_LLAMA_ALWAYS_TOOL=1 it
@@ -25,6 +30,7 @@ import os
 import re
 import sys
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ARGS = sys.argv[1:]
@@ -34,6 +40,10 @@ STARTED = time.monotonic()
 LOAD_S = float(os.environ.get("FAKE_LLAMA_LOAD_S", "0"))
 TOKEN_S = float(os.environ.get("FAKE_LLAMA_TOKEN_MS", "5")) / 1000
 FIRST_S = float(os.environ.get("FAKE_LLAMA_FIRST_MS", "0")) / 1000
+GEMMA = bool(os.environ.get("FAKE_LLAMA_GEMMA_TOOLS"))
+if os.environ.get("FAKE_LLAMA_ARGV"):
+    with open(os.environ["FAKE_LLAMA_ARGV"], "w", encoding="utf-8") as _f:
+        json.dump(ARGS, _f)
 CARD = [(re.compile(r"weather|wetter|\bwarm|\brain\b|regn|temperat|\bcold|kalt", re.I), "## Weather"),
         (re.compile(r"\btrain\b|\bbus\b|\bzug\b|connection|verbindung|platform|gleis|\bmiss\b|verpass", re.I), "## Next connection"),
         (re.compile(r"buy|kauf|overdue|überfällig|lock|schloss|bill|rechnung", re.I), "## Today's tasks"),
@@ -42,11 +52,17 @@ CARD = [(re.compile(r"weather|wetter|\bwarm|\brain\b|regn|temperat|\bcold|kalt",
 DATA = re.compile(r"calendar|remind|mail|list|test|exam|note|task|send|move|kalender|erinner|liste|prüfung|notiz|aufgabe|schick", re.I)
 
 
+def owner_words(text: str) -> str:
+    """What the owner said: after the card block and the notes Kairo puts in front of it (g3.constant_tools)."""
+    return re.sub(r"^\s*\[\d{1,2}:\d{2}\]\s*", "", text.rsplit("</kairo-note>", 1)[-1].rsplit("</kairo-context>", 1)[-1])
+
+
 def from_card(system: str, text: str) -> str | None:
-    """The whole card section the question is about (the facts are somewhere in it)."""
+    """The whole card section the question is about (the facts are somewhere in it). The card is in the system
+    message, or (g3.constant_tools) in a <kairo-context> block of a user message: `system` is then both."""
     if os.environ.get("FAKE_LLAMA_NO_CARD") or "# Today card" not in system:
         return None
-    text = re.sub(r"^\s*\[\d{1,2}:\d{2}\]\s*", "", text.rsplit("</kairo-note>", 1)[-1])
+    text = owner_words(text)
     for rx, header in CARD:
         if rx.search(text) and header in system:
             lines = []
@@ -91,22 +107,48 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    def _other(self, body) -> bool:
+        """The endpoints the warm-up of the prompt's start uses (llama-server's own names and answers)."""
+        if self.path not in ("/apply-template", "/tokenize", "/completion"):
+            return False
+        if os.environ.get("FAKE_LLAMA_RECORD_WARM"):
+            with open(os.environ["FAKE_LLAMA_RECORD_WARM"], "a", encoding="utf-8") as f:
+                f.write(json.dumps({"path": self.path, "body": body}) + "\n")
+        if self.path == "/apply-template":
+            msgs, tools = body.get("messages") or [], body.get("tools") or []
+            text = "".join(f"<{m.get('role')}>{m.get('content')}" for m in msgs)
+            self._json(200, {"prompt": text + ("<tools>" + ",".join(t["function"]["name"] for t in tools) + "</tools>" if tools else "")})
+        elif self.path == "/tokenize":
+            words = str(body.get("content") or "").split()
+            self._json(200, {"tokens": [1] * bool(body.get("add_special")) + [zlib.crc32(w.encode()) % 50000 for w in words]})
+        elif os.environ.get("FAKE_LLAMA_WARM_FAIL"):
+            self._json(500, {"error": {"message": "no slot available"}})
+        else:
+            n = len(body.get("prompt") or [])
+            self._json(200, {"content": "x", "tokens_evaluated": n, "timings": {"cache_n": 0, "prompt_n": n, "prompt_ms": 5.0}})
+        return True
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        if self._other(body):
+            return
         if os.environ.get("FAKE_LLAMA_RECORD"):
             with open(os.environ["FAKE_LLAMA_RECORD"], "a", encoding="utf-8") as f:
                 f.write(json.dumps(body) + "\n")
         msgs = body.get("messages") or []
         last = msgs[-1] if msgs else {}
         text = str(last.get("content") or "")
-        tools = body.get("tools") and not os.environ.get("FAKE_LLAMA_NO_TOOLS")
+        tools = body.get("tools") and body.get("tool_choice") != "none" and not os.environ.get("FAKE_LLAMA_NO_TOOLS")
         pieces, call = [], None
         system = str(msgs[0].get("content") or "") if msgs and msgs[0].get("role") == "system" else ""
+        for m in msgs[1:2]:                                  # the first user message may hold the card
+            if m.get("role") == "user" and "<kairo-context>" in str(m.get("content") or ""):
+                system += "\n" + str(m["content"]).split("</kairo-context>", 1)[0]
         card = from_card(system, text) if last.get("role") == "user" else None
         here = re.search(r"is here: (.*?)\nSay it now", text, re.S)
         if here:
             pieces = ["Okay. "] + [w + " " for w in here.group(1).split()]
-        elif card and not (tools and DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
+        elif card and not (tools and DATA.search(owner_words(text))):
             pieces = ["From ", "your ", "card: "] + [w + " " for w in card.split()]
         elif last.get("role") == "tool":
             try:
@@ -114,14 +156,16 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 said = text
             pieces = ["Okay. "] + [w + " " for w in str(said).split()]
-        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(text.rsplit("</kairo-note>", 1)[-1])):
+        elif tools and (os.environ.get("FAKE_LLAMA_ALWAYS_TOOL") or DATA.search(owner_words(text))):
             call = json.dumps({"request": text}, ensure_ascii=False)
         elif os.environ.get("FAKE_LLAMA_TEXT_TOOLS") and os.environ.get("FAKE_LLAMA_ALWAYS_TOOL"):
-            pieces = ["<|tool_", "call_start|>[ask_kairo(", ")]<|tool_call_end|>"]   # no tool offered, no request
+            pieces = (["<|tool_", "call>call:ask_kairo{", "}<tool_call|>", "<|tool_response>"] if GEMMA else
+                      ["<|tool_", "call_start|>[ask_kairo(", ")]<|tool_call_end|>"])   # no tool offered, no request
         else:
             pieces = ["Sure, ", "happy ", "to ", "help ", "with ", "that."]
         if call is not None and os.environ.get("FAKE_LLAMA_TEXT_TOOLS"):
-            said = "<|tool_call_start|>[ask_kairo(request=" + json.dumps(json.loads(call)["request"]) + ")]<|tool_call_end|>"
+            said = ('<|tool_call>call:ask_kairo{request:<|"|>' + json.loads(call)["request"] + '<|"|>}<tool_call|><|tool_response>' if GEMMA
+                    else "<|tool_call_start|>[ask_kairo(request=" + json.dumps(json.loads(call)["request"]) + ")]<|tool_call_end|>")
             pieces, call = [said[i:i + 7] for i in range(0, len(said), 7)], None
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")

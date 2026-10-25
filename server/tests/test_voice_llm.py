@@ -65,6 +65,168 @@ def test_the_server_gets_the_flags_for_a_fast_talker():
     assert "0.0.0.0" not in flat
 
 
+# The args llama.cpp's server got before G3 (overnight build 2026-10-23), word for word: the flags off must give exactly this.
+OLD_ARGS = ["-m", "m.gguf", "--host", "127.0.0.1", "--port", "8091", "-c", "8192", "-ngl", "all", "-fa", "auto", "--jinja",
+            "--reasoning", "off", "--reasoning-budget", "0", "-np", "1", "--cache-reuse", "256", "--no-webui"]
+
+
+def test_the_server_keeps_no_host_copies_of_old_prompts_and_a_handful_of_checkpoints():
+    """G3 (measured: the host prompt cache grew 33 MiB a call, up to 8 GiB on a 16 GB PC): --cache-ram 0, and
+    --ctx-checkpoints 8 (3 broke the reuse of a call's start; the default 32 is a RAM cost per slot)."""
+    args = voice_local.server_args(Path("m.gguf"), port=8091, context=8192)
+    assert args == [*OLD_ARGS[:-1], "--cache-ram", "0", "--ctx-checkpoints", "8", "--no-webui"]
+    assert "--swa-full" not in args                                   # +280 MiB of GPU memory: its own switch
+    assert "--cache-reuse" in args                                    # kept: only Gemma ignores it (see the CHANGELOG)
+
+
+def test_with_the_ram_flags_off_the_args_are_exactly_the_old_ones():
+    assert voice_local.server_args(Path("m.gguf"), port=8091, context=8192, lean_ram=False) == OLD_ARGS
+
+
+def test_the_gemma_cache_flag_is_added_only_when_asked():
+    assert "--swa-full" in voice_local.server_args(Path("m.gguf"), swa_full=True)
+    assert "--swa-full" not in voice_local.server_args(Path("m.gguf"))
+    both = voice_local.server_args(Path("m.gguf"), lean_ram=False, swa_full=True)
+    assert both == [*OLD_ARGS[:-1], "--swa-full", "--no-webui"] and OLD_ARGS[-1] == "--no-webui"
+
+
+def started_with(tmp_path, vm, options=None, **env):
+    """The flags the (fake) server was really started with."""
+    argv = tmp_path / "argv.json"
+    v = vm(FAKE_LLAMA_ARGV=str(argv), **env)
+    if options is not None:
+        v.options = options
+    assert v.wait_ready(20)
+    return v, json.loads(argv.read_text(encoding="utf-8"))
+
+
+def test_the_manager_starts_the_server_with_what_the_switches_say(vm, tmp_path):
+    v, argv = started_with(tmp_path, vm, options=lambda: {"llama_flags": True, "swa_full": True})
+    assert "--cache-ram" in argv and "--ctx-checkpoints" in argv and "--swa-full" in argv
+    assert v.status()["options"] == {"llama_flags": True, "swa_full": True, "gemma_markup": True, "constant_tools": False}
+
+
+def test_the_manager_with_the_switches_off_starts_the_old_server(vm, tmp_path):
+    v, argv = started_with(tmp_path, vm, options=lambda: {"llama_flags": False, "swa_full": False})
+    assert "--cache-ram" not in argv and "--ctx-checkpoints" not in argv and "--swa-full" not in argv
+    assert "--cache-reuse" in argv
+
+
+def test_a_broken_switch_reader_never_stops_the_voice(vm, tmp_path):
+    def boom():
+        raise RuntimeError("database is locked")
+    v, argv = started_with(tmp_path, vm, options=boom)
+    assert "--cache-ram" in argv and v.status()["state"] == "ready"        # the defaults
+
+
+def test_every_flag_g3_passes_exists_in_the_real_llama_server():
+    """Set KAIRO_LLAMA_SERVER to a llama-server (b11292, the pinned tag): its own --help must know each flag.
+    Skipped where there is none (CI); run on the PC with the installed one (docs/voice-recipe P7)."""
+    exe = os.environ.get("KAIRO_LLAMA_SERVER")
+    if not exe:
+        pytest.skip("no llama-server given (KAIRO_LLAMA_SERVER)")
+    out = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=60).stdout
+    for flag in ("--cache-ram", "--ctx-checkpoints", "--swa-full", "--cache-reuse", "--no-webui", "--reasoning-budget"):
+        assert flag in out, flag
+
+
+# ---------------------------------------------------------------- the start of the prompt, read before the first call (G3)
+# Instead of a slot file (deferred: a truncated one aborts llama-server): when the server is ready, one request computes
+# the static start (system text + tools), so the first call's own first read finds it cached.
+
+def warm_vm(vm, tmp_path, messages=None, on=True, **env):
+    rec = tmp_path / "warm.jsonl"
+    v = vm(FAKE_LLAMA_RECORD_WARM=str(rec), **env)
+    v.warm_messages = lambda: messages if messages is not None else [{"role": "system", "content": "You are Kairo."}]
+    v.take_options({"constant_tools": on})
+    v.options = lambda: {"constant_tools": on}
+    return v, rec
+
+
+def wait_warm(v, timeout=10):
+    until = time.monotonic() + timeout
+    while time.monotonic() < until and not v.warm:
+        time.sleep(0.05)
+    return v.warm
+
+
+def sent_warm(rec):
+    return [json.loads(x) for x in rec.read_text(encoding="utf-8").splitlines()] if rec.is_file() else []
+
+
+def test_the_start_of_the_prompt_is_read_once_when_the_server_is_ready(vm, tmp_path):
+    v, rec = warm_vm(vm, tmp_path)
+    assert v.wait_ready(20)
+    warm = wait_warm(v)
+    assert warm["how"] == "computed" and warm["tokens"] > 0
+    assert v.status()["warm"] == warm and "ms" in warm
+    steps = sent_warm(rec)
+    assert [x["path"] for x in steps] == ["/apply-template", "/tokenize", "/completion"]
+    tmpl, tok, comp = (x["body"] for x in steps)
+    assert tmpl["messages"] == [{"role": "system", "content": "You are Kairo."}] and tmpl["tools"] == [ASK_KAIRO]
+    assert tmpl["add_generation_prompt"] is False and tmpl["chat_template_kwargs"] == {"enable_thinking": False}
+    assert tok["add_special"] is True and tok["parse_special"] is True               # BOS in; special tokens parsed
+    assert comp["n_predict"] == 1 and comp["cache_prompt"] is True and comp["prompt"] and isinstance(comp["prompt"], list)
+    time.sleep(0.5)
+    assert len(sent_warm(rec)) == 3                                                  # once, not every health check
+
+
+def test_without_the_switch_nothing_is_read_in_advance(vm, tmp_path):
+    v, rec = warm_vm(vm, tmp_path, on=False)
+    assert v.wait_ready(20)
+    time.sleep(0.5)
+    assert v.status()["warm"] == {} and sent_warm(rec) == []
+
+
+def test_a_server_that_cannot_warm_up_still_talks(vm, tmp_path):
+    v, rec = warm_vm(vm, tmp_path, FAKE_LLAMA_WARM_FAIL="1")
+    assert v.wait_ready(20)
+    assert wait_warm(v)["how"] == "failed" and "500" in v.status()["warm"]["why"]
+    assert v.state == "ready" and "".join(e["text"] for e in collect(v, [{"role": "user", "content": "hey"}]) if e["kind"] == "text")
+
+
+def test_a_broken_message_builder_never_stops_the_voice(vm, tmp_path):
+    v, rec = warm_vm(vm, tmp_path)
+
+    def boom():
+        raise RuntimeError("no profile yet")
+    v.warm_messages = boom
+    assert v.wait_ready(20)
+    assert wait_warm(v)["how"] == "failed" and v.state == "ready"
+
+
+def test_the_start_is_read_again_when_the_server_starts_again(vm, tmp_path):
+    v, rec = warm_vm(vm, tmp_path)
+    assert v.wait_ready(20)
+    wait_warm(v)
+    v.server.proc.kill()
+    v.server.proc.wait(5)
+    assert v.ensure() in ("starting", "ready") and v.warm == {}                      # forgotten with the server
+    assert v.wait_ready(20)
+    assert wait_warm(v)["how"] == "computed" and len(sent_warm(rec)) == 6
+
+
+def test_the_first_read_of_a_call_says_when_it_found_less_cached_than_the_warm_start(vm, tmp_path, caplog):
+    import logging
+    v, _ = warm_vm(vm, tmp_path)
+    assert v.wait_ready(20)
+    wait_warm(v)
+    v.warm = {"how": "computed", "tokens": 625, "ms": 5}                              # the fake server cached 80 of the prompt
+    with caplog.at_level(logging.WARNING, logger="kairo.voice_llm"):
+        t = asyncio.run(v.prime([{"role": "user", "content": "Hi"}], tools=[ASK_KAIRO], tool_choice="none"))
+    assert t["cache_n"] == 80 and v.status()["last_cache_n"] == 80 and v.status()["last_prompt_n"] == 20
+    assert any("80" in r.getMessage() and "625" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    v.warm = {"how": "computed", "tokens": 70, "ms": 5}
+    with caplog.at_level(logging.WARNING, logger="kairo.voice_llm"):
+        asyncio.run(v.prime([{"role": "user", "content": "Hi"}]))
+    assert not caplog.records
+    v.warm = {}
+    with caplog.at_level(logging.WARNING, logger="kairo.voice_llm"):
+        asyncio.run(v.prime([{"role": "user", "content": "Hi"}]))
+    assert not caplog.records                                                         # nothing was warmed: nothing to compare
+
+
 def test_nothing_installed_means_no_server(vm):
     v = vm(installed=False)
     assert v.ensure() == "not installed" and v.server is None and not v.ready()

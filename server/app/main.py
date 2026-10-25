@@ -425,7 +425,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
-    from .voicemouth import Mouth
+    from .voicemouth import Mouth, g3_options, mouth_args, static_system
     _vl_site = voicellm.site(settings.data_dir)
 
     def _voice_llm_resolve():
@@ -441,7 +441,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return None
         return [str(binary)], path, mid, int((voicellm.spec(mid) or {}).get("context", 8192))
 
-    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs")
+    def _voice_llm_options() -> dict:
+        with session_for(engine) as s_:
+            return g3_options(s_)
+
+    def _voice_warm_messages() -> list[dict]:
+        """What every call starts with when the system text never changes (g3.constant_tools): read in advance."""
+        from . import realtime as rt
+        with session_for(engine) as s_:
+            language = rt.load_settings(s_).get("language", "auto")
+        return [{"role": "system", "content": static_system(profile.name, language)}]
+
+    app.state.voice_llm = VoiceModel(_voice_llm_resolve, log_dir=settings.data_dir / "logs", options=_voice_llm_options,
+                                     warm_messages=_voice_warm_messages)
     with session_for(engine) as _s:
         _pad = (_s.get(SettingKV, voicelab.PAD_KEY).value if _s.get(SettingKV, voicelab.PAD_KEY) else "right")
         if voicelab.clear_stale(_s):                # a run cut off by a restart: Run and the run by itself work again
@@ -1418,6 +1430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             norm = speaknorm.for_call(s_)            # g9.speaknorm: read once, as the call starts
             if hasattr(app.state.voice, "call_started"):
                 app.state.voice.call_started(s_)     # the call's switches (g2.*) are read once, Whisper is warmed
+            turn_model = voicellm.smart_turn_for_calls(s_, _vl_site)      # g3.smart_turn_pin, read once per call
         if _mouth_ok(call_id):
             line.mouth_ready = asyncio.get_running_loop().create_task(_new_mouth(line))
         _warm_openers()
@@ -1437,7 +1450,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         call = voicertc.build_call(conn, voice=speaker_mod.Listening(app.state.voice, gate) if gate else app.state.voice,
                                    answer=answer, interrupt=talked_over, events=None,
                                    language_mode=language_mode if language_mode in ("en", "de") else "auto", openers=_openers(),
-                                   speculate=speculate, discard=discard, greeting=_greeting(),
+                                   smart_turn_model=turn_model, speculate=speculate, discard=discard, greeting=_greeting(),
                                    warning=await asyncio.to_thread(_slow_call) if path == "call" else None,
                                    gate=gate.answer if gate else None, norm=norm)
         key = id(call)
@@ -1613,6 +1626,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with session_for(engine) as s_:
             items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
             language = realtime.load_settings(s_).get("language", "auto")
+            g3 = g3_options(s_)                                   # the owner's G3 switches, read once per call
+        app.state.voice_llm.take_options(g3)
         spec = voicellm.spec(app.state.voice_llm.model_id) or {}
 
         def place() -> str | None:
@@ -1622,12 +1637,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
-                      greeting=_greeting(), delivered=_delivered)
+                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
         line.mouth = mouth
         try:
-            gen = app.state.voice_llm.stream(mouth.messages + [{"role": "user", "content": "Hi"}], max_tokens=1)
-            async for _ in gen:
-                pass
+            await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
         except Exception as exc:   # the first turn reads it then
             log.info("voice model: priming the cache failed: %s", exc)
         return mouth
