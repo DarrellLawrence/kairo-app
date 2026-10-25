@@ -527,3 +527,60 @@ def test_the_real_model_scores_a_voice_higher_against_itself(tmp_path):
     s = sp.Speaker(model, tmp_path / "voiceprint.bin")
     m = s.measure(pcm(voice(2.0, seed=4, wobble=0.06)), True)
     assert m.emb is not None and m.ms >= 0
+
+
+# ---------------------------------------------------------------- G13: the label over WebRTC (needs the call packages)
+# The same end-to-end checks as tests/test_speaker_label_calls.py (old line), here because CI's voice jobs run this file.
+
+G13_WRITE = 'Remind me to call the dentist tomorrow [[fake-tool tasks_create {"title": "call the dentist"}]]'
+
+
+def _g13_call(local, monkeypatch, *, slow: bool):
+    """A WebRTC call whose speaker check says 'owner' for everyone, optionally too slow. Returns (what the phone saw,
+    the labels the brain runner was asked to write)."""
+    pytest.importorskip("pipecat")
+    pytest.importorskip("aiortc")
+    from app import speaker_label as sl
+    from app import voicertc
+    from app.voicertc import OpenerCache
+    from tests import test_voice_rtc as rtc
+    labels: list[str] = []
+    real_begin = sl.VoiceTurns.begin
+
+    def spy(self, label):
+        if label is not None:
+            labels.append(label)
+        return real_begin(self, label)
+    monkeypatch.setattr(sl.VoiceTurns, "begin", spy)
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
+    local.voice.text = G13_WRITE
+    local.app.state.voice = rtc.ToneVoice(local.voice)
+    local.app.state.speaker.model = ConstModel([1.0, 0.0])
+    local.app.state.speaker.enroll(pcm(voice(30, seed=1)))                  # the owner's print: (1, 0), and so is every voice's
+    if slow:                                                                # the check is on, and too slow for this turn
+        monkeypatch.setattr(sp, "WAIT_MAX_S", 0.05)
+        real_measure = local.app.state.speaker.measure
+
+        def late(pcm_, on):
+            time.sleep(0.5)
+            return real_measure(pcm_, on)
+        local.app.state.speaker.measure = late
+    return asyncio.run(rtc._app_call(local, seconds=25)), labels
+
+
+def test_over_webrtc_a_turn_the_check_could_not_confirm_cannot_change_things(local, monkeypatch):  # noqa: F811
+    from app.db import Task
+    phone, labels = _g13_call(local, monkeypatch, slow=True)
+    done = [e for e in phone.events if e.get("type") == "done"]
+    assert done and "TOOL-BLOCKED tasks_create" in done[0]["text"], phone.events      # the real hook said no
+    assert labels == ["unsure"]
+    with Session(make_engine(local.settings.db_url)) as s:
+        assert list(s.exec(select(Task))) == [] and s.get(SettingKV, "voice.turn") is None
+
+
+def test_over_webrtc_an_owner_turn_is_not_blocked(local, monkeypatch):  # noqa: F811
+    phone, labels = _g13_call(local, monkeypatch, slow=False)
+    done = [e for e in phone.events if e.get("type") == "done"]
+    assert done and "TOOL-BLOCKED" not in done[0]["text"], phone.events               # (no tool server here: the call itself errors)
+    assert labels == ["owner"]

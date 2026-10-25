@@ -1,12 +1,11 @@
 """G13 end to end: a voice turn that Kairo cannot confirm as the owner reaches Claude, and Claude's changes are refused.
 
 The real PreToolUse hook runs (the fake Claude starts it like the CLI does), the voice model is the fake llama, the speaker
-model is tests/test_speaker.py's pitch model. Over the old line (/ws/voice) and, when the call packages are installed,
-over WebRTC. Written before the wiring in main.py."""
+model is tests/test_speaker.py's pitch model. Over the old line (/ws/voice) here; over WebRTC (it needs the call packages,
+so those two tests live in test_speaker.py, which CI's voice jobs run) there. Written before the wiring in main.py."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
@@ -17,7 +16,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import Session, select  # noqa: E402
 
 from app import flags  # noqa: E402
-from app import speaker as sp  # noqa: E402
 from app import speaker_label as sl  # noqa: E402
 from app.db import AuditLog, SettingKV, Task, make_engine  # noqa: E402
 from tests.test_speaker import NEAR_HZ, OTHER_HZ, OWNER_HZ, PitchModel, pcm, voice  # noqa: E402
@@ -172,58 +170,3 @@ def test_the_words_of_an_earlier_unsure_turn_do_not_become_the_owners(local, lab
         fr = frames_until(ws, limit=600)
     done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
     assert "TOOL-BLOCKED" in done["text"] and labels[-1:] == ["unsure"]
-
-
-# ---------------------------------------------------------------- over WebRTC (needs the call packages)
-
-def test_over_webrtc_an_unconfirmed_turn_cannot_change_things(local, monkeypatch, labels):
-    pytest.importorskip("pipecat")
-    pytest.importorskip("aiortc")
-    from app import voicertc
-    from app.voicertc import OpenerCache
-    from tests import test_voice_rtc as rtc
-    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
-    local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
-    local.voice.text = WRITE
-    local.app.state.voice = rtc.ToneVoice(local.voice)
-
-    class Const(PitchModel):
-        def embed(self, samples):
-            return np.array([1.0, 0.0], dtype=np.float32)             # whoever talks has the owner's print
-    local.app.state.speaker.model = Const()
-    local.app.state.speaker.enroll(pcm(voice(30, seed=1)))
-    # the check is on, and too slow for this turn: still answered, but nobody could say it was the owner
-    monkeypatch.setattr(sp, "WAIT_MAX_S", 0.05)
-    real_measure = local.app.state.speaker.measure
-
-    def slow(pcm_, on):
-        import time
-        time.sleep(0.5)
-        return real_measure(pcm_, on)
-    local.app.state.speaker.measure = slow
-    phone = asyncio.run(rtc._app_call(local, seconds=25))
-    done = [e for e in phone.events if e.get("type") == "done"]
-    assert done and "TOOL-BLOCKED tasks_create" in done[0]["text"], phone.events
-    assert labels == ["unsure"] and tasks(local) == []
-
-
-def test_over_webrtc_an_owner_turn_is_not_blocked(local, monkeypatch, labels):
-    pytest.importorskip("pipecat")
-    pytest.importorskip("aiortc")
-    from app import voicertc
-    from app.voicertc import OpenerCache
-    from tests import test_voice_rtc as rtc
-    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
-    local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
-    local.voice.text = WRITE
-    local.app.state.voice = rtc.ToneVoice(local.voice)
-
-    class Const(PitchModel):
-        def embed(self, samples):
-            return np.array([1.0, 0.0], dtype=np.float32)
-    local.app.state.speaker.model = Const()
-    local.app.state.speaker.enroll(pcm(voice(30, seed=1)))
-    phone = asyncio.run(rtc._app_call(local, seconds=25))
-    done = [e for e in phone.events if e.get("type") == "done"]
-    assert done and "TOOL-BLOCKED" not in done[0]["text"], phone.events
-    assert labels == ["owner"]
