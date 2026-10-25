@@ -12,7 +12,10 @@ import asyncio
 import fractions
 import io
 import json
+import logging
 import math
+import random
+import statistics
 import time
 import wave
 from pathlib import Path
@@ -20,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import voicertc
+from app import rtcjitter, voicertc
 from app.voicelink import first_clause
 from app.voicertc import OpenerCache, RtcSpeaker, Timeline, offer_on_tailnet, on_tailnet
 
@@ -588,3 +591,375 @@ def test_a_slow_voice_is_said_once_right_after_the_greeting():
                               wait_for=lambda p: sum(e.get("type") == "say" for e in p.events) >= 2, timeout=15))
     said = [e["text"] for e in phone.events if e.get("type") == "say"]
     assert said == ["Hey Sam.", SLOW_LINE] and voice.spoken == []
+
+
+# ---------------------------------------------------------------- the uplink jitter buffer (group G4, app/rtcjitter.py)
+# The checks that need the real library for the patch behind the owner's flag g4.jitter_patch (the ones with stand-in
+# parts are in tests/test_rtcjitter.py). They are in this file because the two voice CI jobs (Linux and Windows), the only
+# ones with aiortc and Pipecat installed, already run it; a file of their own would need an edit of .github/workflows/ci.yml,
+# and a pull request that touches .github/ is merged by the owner by hand (CONTRIBUTING.md). A test in test_rtcjitter.py
+# fails when a test file that skips without the voice packages is not in both jobs.
+
+JITTER_FLAG = "g4.jitter_patch"
+
+
+
+def _real_pc():
+    """A peer connection with an audio and a video receiver, like the library builds them for a call."""
+    from aiortc import RTCConfiguration, RTCPeerConnection
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))      # no STUN, like Kairo and the phone
+    pc.addTransceiver("audio")
+    pc.addTransceiver("video")
+    return pc
+
+
+def _real_buffers(pc) -> dict:
+    return {t.kind: getattr(t.receiver, rtcjitter.SLOT) for t in pc.getTransceivers()}
+
+
+def test_the_real_library_has_what_the_patch_touches_and_the_pin_is_installed():
+    """Fails on a version bump or a rename inside the library: then the patch (and its numbers) must be checked again."""
+    pytest.importorskip("aiortc")
+
+    async def go():
+        pc = _real_pc()
+        try:
+            stock = _real_buffers(pc)
+            assert (stock["audio"]._capacity, stock["audio"]._prefetch, stock["audio"]._is_video) == (16, 4, False)
+            assert (stock["video"]._capacity, stock["video"]._is_video) == (128, True)
+            assert stock["audio"]._origin is None and len(stock["audio"]._packets) == 16
+            name, version = rtcjitter._library_version(pc)
+            assert (name, version in rtcjitter.SUPPORTED) == ("aiortc", True), (name, version)
+            assert rtcjitter.install(pc) is True
+            now = _real_buffers(pc)
+            assert (now["audio"]._capacity, now["audio"]._prefetch) == (8, 1) and now["audio"] is not stock["audio"]
+            assert now["video"] is stock["video"]
+        finally:
+            await pc.close()
+    asyncio.run(go())
+
+
+def _lag(buffer, lost_at: int | None = None, n: int = 400) -> list[int]:
+    """Feed packets 20 ms apart (one frame each, sequence +1, timestamp +960), skip number lost_at, and record
+    after every packet: packets in front of the newest one handed on. The buffer is the library's own."""
+    from aiortc.rtp import RtpPacket
+    lag, newest = [], None
+    for i in range(n):
+        if i == lost_at:
+            continue
+        p = RtpPacket.parse(RtpPacket(payload_type=96, sequence_number=(500 + i) % 65536,
+                                      timestamp=1000 + 960 * i, payload=b"x" * 20).serialize())
+        p._data = p.payload                                      # what the receiver does after depayloading
+        _, frame = buffer.add(p)
+        if frame is not None:
+            newest = (frame.timestamp - 1000) // 960
+        if newest is not None:
+            lag.append(i - newest)
+    return lag
+
+
+def test_the_buffers_delay_in_packets_clean_and_after_one_lost_packet():
+    """Exact (arithmetic on 20 ms packets, no clock): the library's 16/4 holds the voice back 4 packets = 80 ms,
+    and after ONE lost packet 14 packets = 280 ms for the rest of the call. 8/1: 1 packet = 20 ms, then 6 = 120 ms."""
+    pytest.importorskip("aiortc")
+
+    async def buffers():
+        pc = _real_pc()
+        try:
+            stock = _real_buffers(pc)["audio"]
+            assert rtcjitter.install(pc) is True
+            return stock, _real_buffers(pc)["audio"]
+        finally:
+            await pc.close()
+    stock, patched = asyncio.run(buffers())
+    from aiortc.jitterbuffer import JitterBuffer as Library
+    stock_again = Library(capacity=16, prefetch=4)               # a second, untouched 16/4 for the lossy run
+    patched_again = Library(capacity=8, prefetch=1)
+    clean, lossy = _lag(stock), _lag(stock_again, lost_at=100)
+    assert clean[50] == 4 and clean[-1] == 4                     # 80 ms, steady
+    assert max(lossy[95:120]) == 19 and lossy[-1] == 14          # 380 ms just after the loss, 280 ms from then on
+    clean, lossy = _lag(patched), _lag(patched_again, lost_at=100)
+    assert clean[50] == 1 and clean[-1] == 1                     # 20 ms
+    assert max(lossy[95:120]) == 8 and lossy[-1] == 6            # 160 ms just after the loss, 120 ms from then on
+
+
+# in a call: voicertc.connect and the app's flag
+
+def _shape_of(conn) -> list[tuple[int, int]]:
+    """(capacity, prefetch) of each audio receiver's buffer on a call's connection."""
+    return [(t.receiver.__dict__[rtcjitter.SLOT]._capacity, t.receiver.__dict__[rtcjitter.SLOT]._prefetch)
+            for t in conn.pc.getTransceivers() if t.kind == "audio"]
+
+
+async def _phone_offer():
+    """The fake phone: a peer connection with a microphone, and its offer."""
+    from aiortc import RTCConfiguration, RTCPeerConnection
+
+    voicertc.tailnet_only(allow_loopback=True)
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+    pc.addTrack(_phone_track([0.5]))
+    await pc.setLocalDescription(await pc.createOffer())
+    return pc
+
+
+@pytest.mark.parametrize("patch, shape", [(False, (16, 4)), (True, (8, 1))])
+def test_a_call_connection_has_the_8_and_1_buffer_only_when_asked(patch, shape):
+    """The receivers exist when connect() returns (before build_call), so that is where it has to happen."""
+    _needs_pipecat()
+
+    async def go():
+        pc = await _phone_offer()
+        conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                      jitter_patch=patch)
+        try:
+            return _shape_of(conn)
+        finally:
+            await conn.disconnect()
+            await pc.close()
+    assert asyncio.run(go()) == [shape]
+
+
+def test_connect_without_the_argument_leaves_the_library_as_it_is():
+    _needs_pipecat()
+
+    async def go():
+        pc = await _phone_offer()
+        conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
+        try:
+            return _shape_of(conn)
+        finally:
+            await conn.disconnect()
+            await pc.close()
+    assert asyncio.run(go()) == [(16, 4)]
+
+
+def test_the_app_reads_the_flag_at_the_start_of_every_call(local, monkeypatch):
+    """Off by default; the owner turns it on and the next call has the small buffer; off again, the next is stock."""
+    _needs_pipecat()
+    from aiortc import RTCSessionDescription
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    seen = []
+    real = voicertc.connect
+
+    async def spy(*args, **kwargs):
+        conn = await real(*args, **kwargs)
+        seen.append(_shape_of(conn))
+        return conn
+    monkeypatch.setattr(voicertc, "connect", spy)
+
+    async def call():
+        pc = await _phone_offer()
+        r = await asyncio.to_thread(local.post, "/api/rtc/offer",
+                                    json={"sdp": pc.localDescription.sdp, "type": "offer", "path": "call"})
+        assert r.status_code == 200, r.text
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=r.json()["sdp"], type=r.json()["type"]))
+        await pc.close()
+
+    async def go():
+        await call()                                                    # nothing set: the default
+        assert (await asyncio.to_thread(local.put, "/api/flags/" + JITTER_FLAG, json={"on": True})).status_code == 200
+        await call()
+        assert (await asyncio.to_thread(local.put, "/api/flags/" + JITTER_FLAG, json={"on": False})).status_code == 200
+        await call()
+    asyncio.run(go())
+    assert seen == [[(16, 4)], [(8, 1)], [(16, 4)]]
+
+
+def test_a_connection_without_the_peer_connection_it_expects_still_makes_the_call(caplog, monkeypatch):
+    """The patch is an extra: whatever the pipecat connection looks like one day, connect() returns it."""
+    _needs_pipecat()
+    from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+
+
+    def gone(self):
+        raise AttributeError("no pc any more")
+    monkeypatch.setattr(SmallWebRTCConnection, "pc", property(gone))
+
+    async def go():
+        pc = await _phone_offer()
+        with caplog.at_level(logging.INFO, logger="kairo.rtcjitter"):
+            conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                          jitter_patch=True)
+        await conn.disconnect()
+        await pc.close()
+        return conn
+    assert asyncio.run(go()) is not None
+    assert "left as it is" in caplog.text
+
+
+# The jitter buffer's real cost, measured on a real RTP path (voice plan section 7, E1; section 11, S3). A fake phone
+# (aiortc, in this process) sends 100 ms tone bursts at a random moment from a microphone paced in real time; Kairo's
+# side is voicertc.connect() as in a call; the delay is from the moment the phone hands the first frame of a burst to
+# its encoder until the PC's receiver delivers the decoded frame (RemoteStreamTrack.recv()). Opus, packetising,
+# DTLS-SRTP, UDP on 127.0.0.1 and the decoder are all in it, the network is not. Then ONE packet is lost on the way,
+# and the bursts after it are timed again. The numbers are the sandbox's CPU (a shared 4-core machine, 82 / 282 ms
+# stock, 22 / 121 ms patched), not the PC. The windows are wide on purpose (the timers of Windows tick every 15 ms, a
+# busy machine adds more); the two buffers are also compared with each other, from the same run.
+
+UPLINK_BURST_FRAMES = 5                       # 100 ms of tone
+UPLINK_WARM_UP_S = 1.5
+UPLINK_SETTLE_S = 1.2                         # after the loss: the stock buffer fills up (16 packets = 320 ms) and gives up on the gap
+
+
+def _uplink_mic():
+    import numpy as np
+    from aiortc import MediaStreamTrack
+    from av import AudioFrame
+    tone = (6000 * np.sin(2 * np.pi * 1000 * np.arange(960) / 48000)).astype(np.int16)
+
+    class Mic(MediaStreamTrack):
+        """48 kHz mono, 20 ms frames, handed over at real-time pace; burst() makes the next 5 frames a tone."""
+        kind = "audio"
+
+        def __init__(self):
+            super().__init__()
+            self.t0, self.n, self.tone_left, self.onsets = None, 0, 0, []
+
+        def burst(self):
+            self.tone_left = UPLINK_BURST_FRAMES
+            self._first = True
+
+        async def recv(self):
+            if self.t0 is None:
+                self.t0 = time.perf_counter()
+            self.n += 1
+            await asyncio.sleep(max(0.0, self.t0 + self.n * 0.02 - time.perf_counter()))
+            if self.tone_left:
+                if self.tone_left == UPLINK_BURST_FRAMES:
+                    self.onsets.append(time.perf_counter())             # the first tone frame goes to the encoder now
+                chunk, self.tone_left = tone, self.tone_left - 1
+            else:
+                chunk = np.zeros(960, dtype=np.int16)
+            f = AudioFrame.from_ndarray(chunk.reshape(1, -1), format="s16", layout="mono")
+            f.sample_rate, f.pts, f.time_base = 48000, self.n * 960, fractions.Fraction(1, 48000)
+            return f
+    return Mic()
+
+
+async def _uplink_measure(patch: bool, bursts: int, lose_one: bool, seed: int = 3) -> dict:
+    """Delay (ms) of each burst, before and (with lose_one) after one lost uplink packet."""
+    import numpy as np
+    from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+    from aiortc.rtcdtlstransport import RTCDtlsTransport
+    rng = random.Random(seed)
+    voicertc.tailnet_only(allow_loopback=True)
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+    mic = _uplink_mic()
+    pc.addTrack(mic)
+    await pc.setLocalDescription(await pc.createOffer())
+    conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                  jitter_patch=patch)
+    answer = conn.get_answer()
+    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
+
+    arrivals: list[float] = []
+    quiet = True
+
+    async def listen(track):
+        nonlocal quiet
+        while True:
+            try:
+                f = await track.recv()
+            except Exception:
+                return
+            x = f.to_ndarray().astype(np.float64)
+            level = 20 * np.log10(max(np.sqrt(np.mean(x * x)) / 32768.0, 1e-9))
+            if quiet and level > -30:
+                arrivals.append(time.perf_counter())
+                quiet = False
+            elif level < -45:
+                quiet = True
+    track = next(t.receiver.track for t in conn.pc.getTransceivers() if t.kind == "audio")
+    reader = asyncio.get_running_loop().create_task(listen(track))
+
+    lost = {"arm": False, "n": 0, "transport": None}
+    send = RTCDtlsTransport._send_rtp
+
+    async def lossy(self, data):
+        if self is lost["transport"] and lost["arm"] and not 192 <= data[1] <= 223:     # not RTCP
+            lost["arm"], lost["n"] = False, lost["n"] + 1
+            return None                                                                # gone on the way to the PC
+        return await send(self, data)
+    RTCDtlsTransport._send_rtp = lossy
+    try:
+        deadline = time.perf_counter() + 15
+        while not (pc.connectionState == conn.pc.connectionState == "connected") and time.perf_counter() < deadline:
+            await asyncio.sleep(0.05)
+        assert pc.connectionState == conn.pc.connectionState == "connected"
+        lost["transport"] = pc.getSenders()[0].transport
+        await asyncio.sleep(UPLINK_WARM_UP_S)
+
+        async def run_bursts(n: int) -> list[float]:
+            first = len(mic.onsets)
+            for _ in range(n):
+                await asyncio.sleep(rng.uniform(0.45, 0.6))
+                mic.burst()
+            await asyncio.sleep(0.6)
+            delays, j = [], 0
+            for t in mic.onsets[first:]:
+                while j < len(arrivals) and arrivals[j] < t:
+                    j += 1
+                if j < len(arrivals) and arrivals[j] - t < 1.0:
+                    delays.append((arrivals[j] - t) * 1000)
+                    j += 1
+            return delays
+        out = {"clean": await run_bursts(bursts)}
+        if lose_one:
+            lost["arm"] = True
+            while lost["n"] == 0:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(UPLINK_SETTLE_S)
+            out["after_loss"] = await run_bursts(bursts)
+        out["lost"] = lost["n"]
+        out["bursts"] = bursts
+        return out
+    finally:
+        RTCDtlsTransport._send_rtp = send
+        reader.cancel()
+        await conn.disconnect()
+        await pc.close()
+
+
+def _p50(xs: list[float]) -> float:
+    return statistics.median(xs)
+
+
+def _uplink_run(patch: bool, lose_one: bool = True, bursts: int = 8) -> dict:
+    out = asyncio.run(_uplink_measure(patch, bursts, lose_one))
+    label = "8/1 (patched)" if patch else "16/4 (stock)"
+    for key in ("clean", "after_loss"):
+        if key in out:
+            xs = sorted(out[key])
+            print(f"\nuplink jitter buffer {label}, {key}: p50 {_p50(xs):.1f} ms, min {xs[0]:.1f}, max {xs[-1]:.1f}, "
+                  f"{len(xs)}/{out['bursts']} bursts heard")
+    return out
+
+
+@pytest.fixture(scope="module")
+def uplink_runs():
+    """One call per setting (about 12 s each), both under the same load; the tests below read them."""
+    _needs_pipecat()
+    return {"stock": _uplink_run(patch=False), "patched": _uplink_run(patch=True)}
+
+
+def test_the_stock_buffer_delays_every_turn_80_ms_and_one_lost_packet_makes_it_280(uplink_runs):
+    out = uplink_runs["stock"]
+    assert out["lost"] == 1 and len(out["clean"]) >= 6 and len(out["after_loss"]) >= 6
+    assert 50 < _p50(out["clean"]) < 140, out["clean"]            # E1: 82.5 ms = 4 packets of 20 ms + about 2.5 ms
+    assert 220 < _p50(out["after_loss"]) < 400, out["after_loss"]  # E1: 280 ms for the rest of the call
+
+
+def test_the_patched_buffer_delays_20_ms_and_after_a_lost_packet_120(uplink_runs):
+    out = uplink_runs["patched"]
+    assert out["lost"] == 1 and len(out["clean"]) >= 6 and len(out["after_loss"]) >= 6
+    assert 5 < _p50(out["clean"]) < 60, out["clean"]               # E1: 22.3 ms
+    assert 80 < _p50(out["after_loss"]) < 210, out["after_loss"]   # E1: 120-144 ms with the buffer's 6 packets
+
+
+def test_the_patch_takes_60_ms_off_every_turn_and_160_ms_after_a_loss(uplink_runs):
+    """Both runs saw the same machine at the same time, so this holds when the absolute numbers drift."""
+    saved_clean = _p50(uplink_runs["stock"]["clean"]) - _p50(uplink_runs["patched"]["clean"])
+    saved_after_loss = _p50(uplink_runs["stock"]["after_loss"]) - _p50(uplink_runs["patched"]["after_loss"])
+    print(f"\nsaved per turn: {saved_clean:.1f} ms; after one lost packet: {saved_after_loss:.1f} ms")
+    assert 25 < saved_clean < 95                                   # 3 packets of 20 ms
+    assert 90 < saved_after_loss < 240                            # 8 packets of 20 ms
