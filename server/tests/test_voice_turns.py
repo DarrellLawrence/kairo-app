@@ -446,16 +446,17 @@ KAIRO_SAYS = ["Your next meeting is at three with the design team.", "I added mi
 
 
 def _over_kairo(over_says: str, turning: Turning = Turning(), *, after_s: float = 3.0, clip_s: float = 0.8,
-                lines=KAIRO_SAYS, seconds: float = 10.0):
+                lines=KAIRO_SAYS, seconds: float = 10.0, **call):
     """The owner asks something, Kairo starts a long answer (every line a 3 s tone), and the owner makes a sound over it
     that Whisper writes down as `over_says`. Returns what the call did."""
     _needs_pipecat()
     asked, stopped = [], []
     voice = ScriptedVoice("Remind me to call the dentist tomorrow morning.", over_says)
     voice.tone = _tone(3.0)
-    phone = asyncio.run(_call(_kairo_lines(asked, lines), voice=voice, interrupt=stopped.append,
+    interrupt = call.pop("interrupt", stopped.append)
+    phone = asyncio.run(_call(_kairo_lines(asked, lines), voice=voice, interrupt=interrupt,
                               turning=turning, speech=_speech_then(gap_s=after_s, clip_s=clip_s), wait_for=_after(seconds),
-                              timeout=seconds + 8))
+                              timeout=seconds + 8, **call))
     kinds = [e.get("type") for e in phone.events]
     at = {k: phone.event_at[kinds.index(k)] - phone.mic.t0 for k in ("barge_in",) if k in kinds}
     return SimpleNamespace(phone=phone, voice=voice, asked=asked, stopped=stopped, kinds=kinds, at=at,
@@ -530,3 +531,23 @@ def test_a_backchannel_over_kairo_leaves_nothing_behind_that_stops_the_next_real
     kinds = [e.get("type") for e in phone.events]
     assert stopped == [1] and kinds.count("barge_in") == 1, (stopped, kinds)
     assert [t for t, _ in asked] == ["Remind me to call the dentist tomorrow morning.", "No wait, Tuesday."], asked
+
+
+def test_the_voice_model_starts_early_on_the_words_that_stopped_kairo_only_after_kairo_was_stopped():
+    """The voice model starts on the owner's words at their pause, before Smart Turn has decided. For words that stop Kairo
+    the interruption has to come first: it cancels the answer in progress, and a start made before it would find the old
+    answer's task still alive and not start at all."""
+    order = []
+    r = _over_kairo("No wait, Tuesday.", interrupt=lambda n: order.append(("interrupt", n)),
+                    speculate=lambda words, lang: order.append(("speculate", words)))
+    assert r.stopped == [] and ("interrupt", 1) in order, order       # (our own interrupt callback, not _over_kairo's list)
+    assert order.index(("interrupt", 1)) < order.index(("speculate", "No wait, Tuesday.")), order
+    assert order.count(("speculate", "No wait, Tuesday.")) == 1, order
+    assert ("speculate", "Remind me to call the dentist tomorrow morning.") in order      # and the first turn's, as before
+
+
+def test_nothing_is_started_early_on_a_sound_that_did_not_stop_kairo():
+    order = []
+    _over_kairo("Mhm.", interrupt=lambda n: order.append(("interrupt", n)),
+                speculate=lambda words, lang: order.append(("speculate", words)))
+    assert order == [("speculate", "Remind me to call the dentist tomorrow morning.")], order

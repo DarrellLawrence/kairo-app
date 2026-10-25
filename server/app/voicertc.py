@@ -406,6 +406,7 @@ class _State:
         self.stretches: deque[bool] = deque(maxlen=16)   # that, per stretch the VAD ended: the transcripts come back in this order
         self.in_turn = False                    # a user turn is open (the turn start strategy keeps it)
         self.barge_told = -1.0                  # bot_started of the speaking run the phone was told was cut
+        self.start_after_cut = False            # words that stop Kairo: the voice model starts on them once Kairo is cut off
         self.watchdog = False                   # Pipecat's watchdog ended the turn that is ending
         self.verdict: dict | None = None        # Smart Turn's last answer for this turn (complete, probability, ms)
         self.audio_in = 0                       # audio frames that have reached the pipeline (g6.tap_lag_fix: where a tap falls)
@@ -712,7 +713,10 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             if tr.language in ("en", "de"):
                 t.language = state.language = tr.language
             state.heard = f"{state.heard} {text}".strip()
-            state.ahead("start", state.heard, t.language or state.language)   # before Smart Turn has decided
+            if barge:
+                state.start_after_cut = True     # the answer in progress is cancelled first, or this would find it alive
+            else:
+                state.ahead("start", state.heard, t.language or state.language)   # before Smart Turn has decided
             state.send({"type": "heard", "text": text, "language": tr.language,
                         "stt_ms": int((t.stt_done - t.stt_start) * 1000)})
             return text, barge
@@ -759,7 +763,7 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
             await super().process_frame(frame, direction)
             if isinstance(frame, LLMContextFrame):
                 text = _last_user_text(frame.context, strict=turning.empty_turn_fix)
-                state.heard = ""
+                state.heard, state.start_after_cut = "", False
                 if text and state.gate is not None and not await state.gate():   # not the owner (speaker.py)
                     text = ""
                     state.ahead("drop")
@@ -781,6 +785,9 @@ def build_call(conn, *, voice, answer, interrupt: Callable[[int], Any] | None = 
                         state.interrupt(state.speaker.turn)
                     except Exception:
                         log.exception("rtc: interrupting")
+                if state.start_after_cut:
+                    state.start_after_cut = False
+                    state.ahead("start", state.heard, state.language)    # now that the old answer is cancelled
                 await self.push_frame(frame, direction)
             else:
                 await self.push_frame(frame, direction)
