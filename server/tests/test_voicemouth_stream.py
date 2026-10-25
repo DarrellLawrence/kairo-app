@@ -367,8 +367,44 @@ def test_g5_talked_over_mid_answer_the_voice_model_knows_what_was_heard():
     run(go())
     roles = [x["role"] for x in mo.messages]
     assert roles == ["system", "user", "assistant", "tool", "assistant"]
-    assert "talked on" in json.loads(mo.messages[3]["content"])["answer"]
+    assert json.loads(mo.messages[3]["content"])["answer"] == "(the owner talked on while Kairo was saying the answer)"
     assert mo.messages[4]["content"].endswith(" …") and "The trip starts on Friday." in mo.messages[4]["content"]
+
+
+def test_g5_talked_over_before_any_word_of_the_answer_the_voice_model_is_told_so():
+    m = Model(tool("tell me about the trip"))
+    mo = streaming(m, StreamBrain(words=("The trip starts on Friday.",), first=3.0))
+
+    async def go():
+        t = asyncio.get_running_loop().create_task(mo.turn("Tell me about the trip", "en", FlushSpeaker()))
+        await asyncio.sleep(0.15)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+    run(go())
+    assert json.loads(mo.messages[3]["content"])["answer"] == "(the owner talked on before the answer came)"
+
+
+def test_g5_a_talked_over_answer_still_on_its_way_is_waited_for_in_the_next_turn_and_the_voice_model_is_told_what_was_heard():
+    """The owner talks on, and asks the next thing while Claude is still working: that turn waits for the answer and the
+    voice model is told how much of it the owner already heard."""
+    m = Model(tool("tell me about the trip"), text("Sure."), text("It starts on Friday, you leave at 8."))
+    brain = StreamBrain(words=("The trip starts on Friday. ", "You leave at 8 from Bern. "), first=0.02, gap=0.15, tail=0.1)
+    sp = FlushSpeaker()
+    mo = streaming(m, brain)
+
+    async def go():
+        t = asyncio.get_running_loop().create_task(mo.turn("Tell me about the trip", "en", sp))
+        while not any(k == "feed" for _, k, _ in sp.stamps):
+            await asyncio.sleep(0.01)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        return await mo.turn("Wait, what time again?", "en", FlushSpeaker())
+    run(go())
+    note = m.calls[-1]["messages"][-1]["content"]
+    assert note.startswith("<kairo-note>") and "You leave at 8 from Bern." in note
+    assert "already heard" in note and "The trip starts on Friday." in note.split("already heard", 1)[1]
 
 
 def test_g5_the_rest_of_a_talked_over_answer_comes_in_the_next_turn_with_what_was_already_heard():

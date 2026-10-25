@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from app import chat, conversation, realtime
+from app import chat, conversation, realtime, voicelink
 from app.brain.base import BrainEvent, BrainStatus, EventKind
 from app.db import SettingKV, make_engine
 from app.main import create_app
@@ -375,6 +375,18 @@ def test_g5_without_it_the_voice_model_says_the_answer_in_its_own_words_after_cl
     frames, _took = _call(local)
     assert _words(frames).startswith(FILLERS["en"][0])
     assert _model_requests(local) == 3     # the call's start, the call to ask_kairo, then the answer in its own words
+
+
+def test_g5_the_old_lines_speaker_is_flushed_when_claudes_text_ends_and_only_with_the_switch(local, monkeypatch):   # noqa: F811
+    """Tap.flush (main.py) is what hands the mouth's flush to the line's speaker: the last words go out at once."""
+    flushed = []
+    real = voicelink.Speaker.flush
+    monkeypatch.setattr(voicelink.Speaker, "flush", lambda self: flushed.append(1) or real(self))
+    _call(local, flags=[("g5.stream_verbatim", True), ("g5.flush_at_end", False)])
+    before_the_holding_line_only = len(flushed)          # (Speaker.say flushes the words before Kairo's own line)
+    flushed.clear()
+    _call(local, flags=[("g5.stream_verbatim", True), ("g5.flush_at_end", True)])
+    assert len(flushed) == before_the_holding_line_only + 1
 
 
 @pytest.fixture
