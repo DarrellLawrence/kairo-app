@@ -47,8 +47,9 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g3.smart_turn_pin": (False, "Calls load the exact Smart Turn v3.2 file the installer downloaded and checked (pinned revision and "
                                  "checksum in voicellm.json) instead of the copy inside the Pipecat package. The same bytes today, so "
                                  "nothing sounds different; it only keeps a later package update from changing the turn detector "
-                                 "unnoticed. Needs the pin in voicellm.json (the owner-gated commit): without it, or if the downloaded "
-                                 "file is not the pinned one, calls keep using Pipecat's copy. Applies from the next call."),
+                                 "unnoticed. Does nothing yet: voicellm.json carries no pin until you approve the separate update that "
+                                 "adds it (that update makes the installer download llama.cpp again, about 624 MiB). Even then, if the "
+                                 "downloaded file is not the pinned one, calls keep using Pipecat's copy. Applies from the next call."),
 
     # -- G4 jitter buffer
 

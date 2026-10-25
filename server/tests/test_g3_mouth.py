@@ -195,6 +195,26 @@ def test_calls_get_the_downloaded_pinned_file_only_when_the_switch_is_on(migrate
         assert voicellm.smart_turn_for_calls(s, tmp_path) is None
 
 
+def test_the_shipped_voicellm_json_has_no_turn_pin_so_the_tools_folder_and_its_download_stay_as_they_are(migrated, tmp_path):
+    """The installer names the voice tools folder after voicellm.json's checksum: any edit of it means a new folder and llama.cpp
+    (about 624 MiB) downloaded again, which is the owner's call. The Smart Turn pin is therefore a separate branch
+    (overnight/g3-mouth-smartturn-pin), and until it is merged nothing is pinned and g3.smart_turn_pin has nothing to load, on or off."""
+    import json
+    cfg = voicellm.manifest()["smart_turn"]
+    assert voicellm.smart_turn_pin(cfg) is None and "revision" not in cfg and "sha256" not in cfg
+    site = tmp_path / "site"
+    (site / "smart-turn").mkdir(parents=True)
+    (site / "smart-turn" / "smart-turn-v3.2-cpu.onnx").write_bytes(b"x" * 8)
+    (site / voicellm.INSTALLED).write_text(json.dumps({"smart_turn": {"file": "smart-turn/smart-turn-v3.2-cpu.onnx", "size": 8,
+                                                                       "revision": "f" * 40, "sha256": "a" * 64}}), encoding="utf-8")
+    (site / voicellm.COMPLETE).write_text("ok\n", encoding="ascii")
+    assert voicellm.smart_turn_pinned_path(site) is None                       # even a file that claims to be the pinned one
+    with Session(make_engine(migrated.db_url)) as s:
+        assert voicellm.smart_turn_for_calls(s, site) is None                  # switch off
+        flags.set_flag(s, "g3.smart_turn_pin", True)
+        assert voicellm.smart_turn_for_calls(s, site) is None                  # switch on: nothing pinned, pipecat's copy
+
+
 def test_the_app_hands_a_call_the_model_the_switch_says(local, monkeypatch, tmp_path):
     """/api/rtc/offer reads the switch at the start of each call and gives build_call the file (or None: pipecat's copy)."""
     pytest.importorskip("pipecat")
