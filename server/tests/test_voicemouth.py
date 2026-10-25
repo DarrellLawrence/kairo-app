@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import pytest
 
 from app import bringup
-from app.voicemouth import FILLERS, LATER, Mouth, Unmark, small_talk
+from app.voicemouth import FILLERS, LATER, OLD_FILLERS, Mouth, Unmark, g5_mouth_args, g5_options, small_talk
 
 
 class Speaker:
@@ -134,6 +135,40 @@ def test_claude_gets_8_seconds_on_a_call_then_kairo_gets_back_with_a_push():
     assert late == [("check my mail", "Nothing new in your mail.")]
     assert "Nothing new in your mail." in m.calls[-1]["messages"][-1]["content"]   # said in the next turn too
     assert len(m.calls) == 2                                        # no extra round after "I'll get back to you"
+
+
+def test_g5_the_holding_line_does_not_claim_to_be_doing_something():
+    """Measured on calls: "Pulling that up." for a note to save, "Sec, checking." for a reminder. The new lines only
+    say that Kairo needs a moment (voice-recipe 8.6)."""
+    assert FILLERS == {"en": ("Okay, one moment.", "Let me check that.", "One sec."),
+                       "de": ("Okay, einen Moment.", "Ich schau kurz nach.", "Sekunde.")}
+    for line in (*FILLERS["en"], *FILLERS["de"]):
+        assert not re.search(r"\b\w+ing\b|\bpull|\bsearch|\bdone\b|\bsaved?\b|\badded?\b|\bsent\b", line, re.I), line
+    assert OLD_FILLERS["en"][:2] == ("Sec, checking.", "Pulling that up.")           # what the switch turns back to
+
+
+def test_g5_filler_wording_has_a_switch_and_off_is_the_old_wording():
+    async def said(**kw):
+        sp = Speaker()
+        await mouth(Model(tool("a"), text("Done.")), items=[], **kw).turn("a", "en", sp)
+        return sp.said[0]
+    assert run(said()) == FILLERS["en"][0]                                           # the plain fix is the default
+    assert run(said(fillers=OLD_FILLERS)) == "Sec, checking."
+    assert g5_mouth_args({"filler_wording": True})["fillers"] is FILLERS
+    assert g5_mouth_args({"filler_wording": False})["fillers"] is OLD_FILLERS
+
+
+def test_g5_options_read_the_switches_from_the_owners_flags(migrated):
+    from sqlmodel import Session
+
+    from app import flags
+    from app.db import make_engine
+    with Session(make_engine(migrated.db_url)) as s:
+        assert g5_options(s) == {"stream_verbatim": False, "second_piece": True, "flush_at_end": True, "cap_first_piece": True,
+                                 "filler_wording": True, "bringup_cancel": True}
+        flags.set_flag(s, "g5.filler_wording", False)
+        flags.set_flag(s, "g5.stream_verbatim", True)
+        assert g5_options(s)["filler_wording"] is False and g5_options(s)["stream_verbatim"] is True
 
 
 def test_the_holding_line_is_said_once_a_turn():

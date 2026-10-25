@@ -1,0 +1,401 @@
+"""G5 hand-off at the app level (voice-recipe section 8): what ask_kairo gets from Claude while Claude is still
+working. The brain is the fake Claude CLI (tests/fakes/fake_claude.py), which ends an answer with message_stop and then,
+like the real one, takes FAKE_CLAUDE_TAIL_S before it sends the result. The voice model's side is in test_voicemouth_stream.py.
+The call over WebRTC needs the voice packages, so its test lives in test_voice_rtc.py (the voice CI jobs run that file)."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlmodel import Session
+
+from app import chat, conversation, realtime, voicelink
+from app.brain.base import BrainEvent, BrainStatus, EventKind
+from app.db import SettingKV, make_engine
+from app.main import create_app
+from app.voicemouth import FILLERS
+from tests.test_voice_local import local, requests_seen  # noqa: F401  (the app with the fake voice model and Claude)
+from tests.test_voicelink import frames_until, utter
+
+TAIL_S = 1.2
+
+
+@pytest.fixture
+def tail(monkeypatch):
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_TAIL_S", str(TAIL_S))        # the CLI's summary after the answer (2 s on the real one)
+
+
+def call_turn(app, request="what is on today?", **kw):
+    kw.setdefault("model", "haiku")
+    kw.setdefault("thread_id", None)
+    return asyncio.run(app.state.call_turn(request, [f"Owner: {request}"], session_id=None, purpose="call", **kw))
+
+
+def _main_thread(settings):
+    with Session(make_engine(settings.db_url)) as s:
+        return chat.main_thread(s, brain_name="claude_cli").id
+
+
+# ---------------------------------------------------------------- _call_turn
+
+def test_g5_call_turn_tells_the_text_as_it_comes_and_the_end_before_the_cli_is_done(migrated, tail):
+    seen = []
+    with TestClient(create_app(migrated)) as c:
+        started = time.monotonic()
+        text, error, sid = call_turn(c.app, on_text=lambda d: seen.append(("text", d, time.monotonic())),
+                                     on_end=lambda full: seen.append(("end", full, time.monotonic())))
+        done = time.monotonic()
+    assert error is None and text.startswith("echo: (spoken, on a call) what is on today?") and sid
+    kinds = [s[0] for s in seen]
+    assert kinds.count("text") >= 2 and kinds[-1] == "end" and kinds.count("end") == 1     # the fake sends two halves
+    assert "".join(s[1] for s in seen if s[0] == "text") == text
+    assert seen[-1][1] == text                                                             # the end carries the final message
+    assert done - seen[-1][2] >= TAIL_S * 0.5        # the CLI's own tail came after the end: nothing waited for it
+    assert seen[-1][2] - started < TAIL_S + 5
+
+
+def test_g5_call_turn_without_callbacks_is_what_it_was(migrated, tail):
+    with TestClient(create_app(migrated)) as c:
+        text, error, sid = call_turn(c.app)
+    assert error is None and text.startswith("echo: (spoken, on a call) what is on today?") and sid
+
+
+def test_g5_a_hand_over_to_sonnet_is_told_and_is_not_an_end(migrated):
+    seen = []
+    with TestClient(create_app(migrated)) as c:       # (the fake CLI hands over only in a warm process: the conversation's)
+        text, error, _sid = call_turn(c.app, "hmm, what about this [[fake-escalate: judgment, which plan to drop]]",
+                                      thread_id=_main_thread(migrated), on_text=lambda d: seen.append(("text", d)), on_end=lambda full: seen.append(("end", full)),
+                                      on_escalate=lambda info: seen.append(("escalate", info)))
+    assert error is None and "[[sonnet]]" not in text
+    kinds = [s[0] for s in seen]
+    assert kinds.count("escalate") == 1 and kinds.count("end") == 1                         # Haiku's end is no end
+    assert kinds.index("escalate") < kinds.index("end") and kinds.index("escalate") < kinds.index("text")
+    assert next(s for s in seen if s[0] == "escalate")[1]["escalated"] == "sonnet"
+    assert not any("[[sonnet]]" in s[1] for s in seen if s[0] == "text")
+
+
+def test_g5_a_callback_that_breaks_never_breaks_the_turn(migrated):
+    def boom(*_a):
+        raise RuntimeError("my bug")
+    with TestClient(create_app(migrated)) as c:
+        text, error, _sid = call_turn(c.app, on_text=boom, on_end=boom, on_escalate=boom)
+    assert error is None and text.startswith("echo:")
+
+
+class ScriptedBrain:
+    """A brain that plays the given events; "TAIL" waits `tail` seconds (the CLI's summary) before the next one."""
+    name = "claude_cli"
+
+    def __init__(self, events, tail=0.8):
+        self.events, self.tail = events, tail
+
+    def run(self, prompt, *, session_id=None, system="", tools=(), origin="owner_chat", **kw):
+        for ev in self.events:
+            if ev == "TAIL":
+                time.sleep(self.tail)
+            else:
+                yield ev
+
+    def health(self):
+        return BrainStatus.ok
+
+
+def test_g5_words_the_escalation_filter_still_held_are_released_at_the_end_of_the_text(migrated):
+    """Haiku's first words are held while they could still be the hand-over marker ("[[so" ...). When the text ends
+    and it was no marker, they are said at once, not after the CLI's summary."""
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="[[so"),
+              BrainEvent(EventKind.message_end), "TAIL", BrainEvent(EventKind.result, text="[[so", session_id="S1")]
+    seen = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        started = time.monotonic()
+        text, error, _sid = call_turn(c.app, on_text=lambda d: seen.append(("text", d, time.monotonic() - started)),
+                                      on_end=lambda full: seen.append(("end", full, time.monotonic() - started)))
+        done = time.monotonic() - started
+    assert error is None and text == "[[so"
+    assert [s[:2] for s in seen] == [("text", "[[so"), ("end", "[[so")]
+    assert done - seen[0][2] >= 0.6                      # the words came before the 0.8 s tail, not after it
+
+
+def test_g5_a_tool_turns_answer_is_the_words_after_its_last_tool_call(migrated):
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="Checking. "),
+              BrainEvent(EventKind.tool_use, data={"name": "calendar_list"}), BrainEvent(EventKind.text, text="You have school at 8."),
+              BrainEvent(EventKind.message_end), BrainEvent(EventKind.result, text="You have school at 8.", session_id="S1")]
+    ended = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        text, error, _sid = call_turn(c.app, on_end=ended.append)
+    assert error is None and text == "You have school at 8." and ended == ["You have school at 8."]
+
+
+def _tool_turn(first: str, tool_calls: int = 1, tail: str = "You have school at 8 and training at 18:00."):
+    """Claude writes `first`, calls a tool (`tool_calls` times in a row), then writes the answer: the CLI's messages carry
+    no whitespace between them."""
+    events = [BrainEvent(EventKind.session, session_id="S1")]
+    if first:
+        events.append(BrainEvent(EventKind.text, text=first))
+    events += [BrainEvent(EventKind.tool_use, data={"name": "calendar_list"}) for _ in range(tool_calls)]
+    events += [BrainEvent(EventKind.text, text=tail), BrainEvent(EventKind.message_end),
+               BrainEvent(EventKind.result, text=tail, session_id="S1")]
+    return events
+
+
+def _told(migrated, events):
+    seen = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        text, error, _sid = call_turn(c.app, on_text=seen.append)
+    assert error is None
+    return seen, text
+
+
+def test_g5_the_words_before_a_tool_call_and_the_answer_are_told_with_a_line_break_between(migrated):
+    """Two CLI messages are glued without a space ("calendar.You have"), and a sentence ends only at punctuation plus
+    whitespace: the preface and the answer would be one sentence for the voice."""
+    seen, text = _told(migrated, _tool_turn("Checking your calendar."))
+    assert seen == ["Checking your calendar.", "\n", "You have school at 8 and training at 18:00."]
+    assert text == "You have school at 8 and training at 18:00."           # (what the turn returns is untouched)
+
+
+def test_g5_no_line_break_when_nothing_was_written_before_the_tool_call_or_for_a_second_tool_call(migrated):
+    seen, _ = _told(migrated, _tool_turn(""))
+    assert seen == ["You have school at 8 and training at 18:00."]
+    seen, _ = _told(migrated, _tool_turn("Checking.", tool_calls=3))
+    assert seen == ["Checking.", "\n", "You have school at 8 and training at 18:00."]
+
+
+def test_g5_a_tool_turn_whose_first_message_is_thinking_out_loud_is_still_said_after_it(migrated):
+    """End to end with the real mouth: 'Let me check ...' is held and dropped as meta, and the answer after it is
+    Claude's own words, said as they come, with the voice model asked once (not a second round after the end)."""
+    from app.voicemouth import Mouth
+    from tests.test_voicemouth import Model, run, tool
+    from tests.test_voicemouth_stream import FlushSpeaker
+    events = _tool_turn("Let me check your calendar.")
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        m, sp = Model(tool("what's on tomorrow?")), FlushSpeaker()
+        mo = Mouth(m, ask=c.app.state.mouth_ask, ask_stream=c.app.state.mouth_ask_stream, context="## Right now\nThursday 14:00",
+                   items=[], name="Sam", stream_verbatim=True, early_end=True)
+        r = run(mo.turn("What's on tomorrow?", "en", sp))
+    assert len(m.calls) == 1 and r.streamed
+    assert sp.heard.strip() == "You have school at 8 and training at 18:00."
+
+
+def test_g5_a_plain_first_message_is_said_while_the_tool_works_not_glued_to_the_answer(migrated):
+    """'Checking your calendar.' is a sentence on its own: it goes out at the tool call, before the answer exists."""
+    from app.voicemouth import Mouth
+    from tests.test_voicemouth import Model, run, tool
+    from tests.test_voicemouth_stream import FlushSpeaker
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="Checking your calendar."),
+              BrainEvent(EventKind.tool_use, data={"name": "calendar_list"}), "TAIL",
+              BrainEvent(EventKind.text, text="You have school at 8 and training at 18:00."), BrainEvent(EventKind.message_end),
+              BrainEvent(EventKind.result, text="You have school at 8 and training at 18:00.", session_id="S1")]
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events, tail=1.0)
+        m, sp = Model(tool("what's on tomorrow?")), FlushSpeaker()
+        mo = Mouth(m, ask=c.app.state.mouth_ask, ask_stream=c.app.state.mouth_ask_stream, context="## Right now\nThursday 14:00",
+                   items=[], name="Sam", stream_verbatim=True, early_end=True)
+        started = time.monotonic()
+        r = run(mo.turn("What's on tomorrow?", "en", sp))
+    assert r.streamed and len(m.calls) == 1
+    assert sp.heard.split() == "Checking your calendar. You have school at 8 and training at 18:00.".split()
+    assert "calendar.You" not in sp.heard
+    assert sp.first("feed") - started < 0.8              # before the tool's second (the brain waits 1 s at the tool call)
+
+
+# ---------------------------------------------------------------- conversation_parts, once
+
+def test_g5_the_conversation_prompt_is_built_once_a_turn_not_twice(migrated, monkeypatch):
+    built = []
+    real = conversation.static_prompt
+    monkeypatch.setattr(conversation, "static_prompt", lambda *a, **k: built.append(a) or real(*a, **k))
+    with TestClient(create_app(migrated)) as c:
+        tid = _main_thread(migrated)
+        _text, error, sid = asyncio.run(c.app.state.call_turn("first question", ["Owner: first question"], session_id=None,
+                                                              thread_id=tid, purpose="call", model="haiku"))
+        assert error is None and sid
+        built.clear()
+        text, error, _ = asyncio.run(c.app.state.call_turn("second question", ["Owner: second question"], session_id=sid,
+                                                           thread_id=tid, purpose="call", model="haiku"))
+    assert error is None and text.startswith("echo:") and len(built) == 1
+
+
+def test_g5_when_the_lasting_prompt_changed_the_session_starts_fresh_with_the_recent_messages(migrated, monkeypatch):
+    built = []
+    real = conversation.static_prompt
+    monkeypatch.setattr(conversation, "static_prompt", lambda *a, **k: built.append(a) or real(*a, **k))
+    with TestClient(create_app(migrated)) as c:
+        tid = _main_thread(migrated)
+        with Session(make_engine(migrated.db_url)) as s:
+            chat.add_message(s, tid, "owner", "an earlier message")
+            s.merge(SettingKV(key="conversation.prompt_hash", value="stale"))
+            s.commit()
+        text, error, _ = asyncio.run(c.app.state.call_turn("again", ["Owner: again"], session_id="old-session", thread_id=tid,
+                                                           purpose="call", model="haiku"))
+    assert error is None and text.startswith("echo:")
+    assert len(built) == 2 and "Recent conversation" not in built[0][2] and "an earlier message" in built[1][2]
+
+
+# ---------------------------------------------------------------- ask_kairo with a sink
+
+def ask_stream(app, request="what is on today?", about="", **kw):
+    sunk = []
+    out = asyncio.run(app.state.mouth_ask_stream(request, [f"Owner: {request}"], about, lambda kind, value=None: sunk.append((kind, value)), **kw))
+    return out, sunk
+
+
+def test_g5_ask_stream_returns_what_ask_returns_and_tells_the_sink_while_claude_works(migrated, tail):
+    with TestClient(create_app(migrated)) as c:
+        started = time.monotonic()
+        (answer, hang), sunk = ask_stream(c.app)
+        took = time.monotonic() - started
+        plain, plain_hang = asyncio.run(c.app.state.mouth_ask("what is on today?", ["Owner: what is on today?"], ""))
+    kinds = [k for k, _ in sunk]
+    assert kinds.count("text") >= 2 and kinds.count("end") == 1 and kinds[-1] == "end"
+    assert (answer, hang) == (plain, plain_hang) and hang is False and answer.startswith("echo: (spoken, on a call) what is on today?")
+    end_answer, end_hang = sunk[-1][1]
+    assert (end_answer, end_hang) == realtime.spoken_answer("".join(v for k, v in sunk if k == "text"))   # what a call may say
+    assert took >= TAIL_S * 0.7                     # (the call itself ran to the result; the sink was told at the end of the text)
+
+
+def test_g5_ask_stream_tells_the_sink_when_claude_fails_and_returns_the_error_line_as_ask_does(migrated):
+    """Words were told, then the CLI failed: the mouth must know it is no answer ("error"), and no "end" came."""
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="Your next lesson is maths at "),
+              BrainEvent(EventKind.error, text="The Claude CLI timed out.", status=BrainStatus.unavailable)]
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        (answer, hang), sunk = ask_stream(c.app)
+        plain, plain_hang = asyncio.run(c.app.state.mouth_ask("what is on today?", ["Owner: what is on today?"], ""))
+    assert [k for k, _ in sunk] == ["text", "error"] and sunk[1][1] == "The Claude CLI timed out."
+    assert (answer, hang) == (plain, plain_hang) == ("I couldn't get that done: The Claude CLI timed out.", False)
+
+
+def test_g5_ask_stream_gives_the_claude_session_back_to_the_conversation_like_ask_does(migrated):
+    with TestClient(create_app(migrated)) as c:
+        ask_stream(c.app)
+        with Session(make_engine(migrated.db_url)) as s:
+            first = chat.main_thread(s, brain_name="claude_cli").brain_session_id
+    assert first                                                              # the next turn goes on in the same Claude session
+
+
+def test_g5_the_session_is_the_conversations_before_the_cli_has_even_finished(migrated, tail):
+    """The turn goes on at the end of Claude's text, up to two seconds before the result: a second question right
+    away must find the same Claude session, not start a new one."""
+    seen = []
+
+    def sink(kind, value=None):
+        if kind == "end":
+            with Session(make_engine(migrated.db_url)) as s:
+                seen.append(chat.main_thread(s, brain_name="claude_cli").brain_session_id)
+    with TestClient(create_app(migrated)) as c:
+        asyncio.run(c.app.state.mouth_ask_stream("what is on today?", ["Owner: what is on today?"], "", sink))
+        with Session(make_engine(migrated.db_url)) as s:
+            final = chat.main_thread(s, brain_name="claude_cli").brain_session_id
+    assert seen and seen[0] and seen[0] == final
+
+
+def test_g5_ask_stream_says_why_when_kairo_is_updating_or_paused_and_asks_nothing(migrated):
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.maintenance_until = time.time() + 60
+        (answer, hang), sunk = ask_stream(c.app)
+        assert answer == "Kairo is installing an update. Try again in a minute." and hang is False and sunk == []
+        c.app.state.maintenance_until = 0.0
+        assert c.post("/api/kill-switch", json={"paused": True}).status_code == 200
+        (answer, _hang), sunk = ask_stream(c.app)
+        assert answer.startswith("Kairo is paused with the kill switch") and sunk == []
+
+
+def test_g5_ask_stream_hands_a_raised_item_over_as_the_owners_answer_not_as_the_request(migrated):
+    with TestClient(create_app(migrated)) as c:
+        (answer, _hang), _sunk = ask_stream(c.app, "yes, I called her", about="open loop L1")
+    assert "answer to Kairo's open loop" in answer and "Record it as you would in chat" in answer     # (plain speech: "your")
+    assert answer.startswith("echo: (spoken, on a call) yes, I called her [")
+
+
+# ---------------------------------------------------------------- the call screen warms Claude
+
+def test_g5_opening_the_call_screen_starts_claudes_conversation_program(migrated):
+    calls = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain.warm_up = lambda **kw: calls.append(kw) or True
+        assert c.get("/api/voice/realtime").status_code == 200
+        deadline = time.monotonic() + 10
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert calls and calls[0]["origin"] == "owner_chat"
+
+
+def test_g5_the_call_screen_starts_nothing_when_the_switch_is_off(migrated):
+    calls = []
+    with TestClient(create_app(migrated)) as c:
+        assert c.put("/api/flags/g5.warm_on_call_open", json={"on": False}).status_code == 200
+        c.app.state.runner.brain.warm_up = lambda **kw: calls.append(kw) or True
+        assert c.get("/api/voice/realtime").status_code == 200
+        time.sleep(1.0)
+    assert calls == []
+
+
+# ---------------------------------------------------------------- a call on the old line, end to end (fake voice model, fake Claude)
+
+def _call(local_app, *, flags=()):
+    """One data question on /ws/voice. (the frames, seconds from the end of the owner's speech to the done frame)."""
+    for name, on in flags:
+        assert local_app.put(f"/api/flags/{name}", json={"on": on}).status_code == 200
+    local_app.voice.text = "Remind me to call the dentist tomorrow"
+    with local_app.websocket_connect("/ws/voice") as ws:
+        started = time.monotonic()
+        utter(ws)
+        frames = frames_until(ws, last="done", limit=400)
+        took = time.monotonic() - started
+    return frames, took
+
+
+def _words(frames) -> str:
+    return "".join(f["text"] for f in frames if isinstance(f, dict) and f["type"] == "delta")
+
+
+def _model_requests(local_app) -> int:
+    return len([r for r in requests_seen(local_app) if r.get("messages")])
+
+
+def test_g5_with_the_streaming_switch_claudes_words_are_spoken_as_they_are_and_the_voice_model_is_asked_once(local):   # noqa: F811
+    frames, _took = _call(local, flags=[("g5.stream_verbatim", True)])
+    words = _words(frames)
+    assert words.startswith(FILLERS["en"][0] + " echo: (spoken, on a call) Remind me to call the dentist tomorrow")
+    done = next(f for f in frames if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"].startswith(words.strip()[:40]) and done["server"]["tool_ms"] is not None
+    assert done["server"]["streamed"] is True and done["server"]["claude_first_ms"] >= 0
+    assert _model_requests(local) == 2     # the call's start (the prompt read once into the cache) and the call to ask_kairo: no second round
+
+
+def test_g5_without_it_the_voice_model_says_the_answer_in_its_own_words_after_claude_is_done(local):   # noqa: F811
+    frames, _took = _call(local)
+    assert _words(frames).startswith(FILLERS["en"][0])
+    assert _model_requests(local) == 3     # the call's start, the call to ask_kairo, then the answer in its own words
+
+
+def test_g5_the_old_lines_speaker_is_flushed_when_claudes_text_ends_and_only_with_the_switch(local, monkeypatch):   # noqa: F811
+    """Tap.flush (main.py) is what hands the mouth's flush to the line's speaker: the last words go out at once."""
+    flushed = []
+    real = voicelink.Speaker.flush
+    monkeypatch.setattr(voicelink.Speaker, "flush", lambda self: flushed.append(1) or real(self))
+    _call(local, flags=[("g5.stream_verbatim", True), ("g5.flush_at_end", False)])
+    before_the_holding_line_only = len(flushed)          # (Speaker.say flushes the words before Kairo's own line)
+    flushed.clear()
+    _call(local, flags=[("g5.stream_verbatim", True), ("g5.flush_at_end", True)])
+    assert len(flushed) == before_the_holding_line_only + 1
+
+
+@pytest.fixture
+def long_tail(monkeypatch):
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_TAIL_S", "2.0")      # (before the app starts: the CLI is spawned with this environment)
+
+
+def test_g5_the_answer_comes_without_waiting_for_the_cli_summary_and_with_the_switch_off_it_waits(long_tail, local):   # noqa: F811
+    _frames, quick = _call(local)                                         # g5.flush_at_end is on by default
+    _frames, slow = _call(local, flags=[("g5.flush_at_end", False)])
+    assert slow >= 1.9                                                    # (the fake Claude's summary takes 2 s)
+    assert slow - quick >= 1.0                                            # ... which the default no longer waits for

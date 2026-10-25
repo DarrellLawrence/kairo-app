@@ -75,6 +75,58 @@ def test_the_hang_up_marker_is_never_spoken():
     assert s.feed("Bye for now [[hang up]]") == [] and s.flush() == "Bye for now"
 
 
+# ---------------------------------------------------------------- G5: the old line's speaker
+
+def _old_line_pieces(script, **kw) -> list[str]:
+    """Run `script(speaker)` on an old-line Speaker (no voice: only what is queued for it) and return the queue."""
+    import asyncio
+
+    async def go():
+        async def nothing(_msg):
+            return None
+        sp = voicelink.Speaker(None, nothing, nothing, "en", 1, **kw)
+        script(sp)
+        sp.stop()
+        out = []
+        while not sp.queue.empty():
+            piece = sp.queue.get_nowait()
+            if piece is not None:
+                out.append(piece)
+        return out
+    return asyncio.run(go())
+
+
+def test_g5_words_written_before_a_line_of_kairos_own_are_not_jumped_by_it():
+    """A holding line that comes after words the model had already written used to be queued first; the words
+    came after it. Now the line waits its turn, like on the WebRTC speaker."""
+    def script(sp):
+        sp.feed("Let me see what")
+        sp.say("Okay, one moment.")
+        sp.feed("Your next train leaves at 14:32 from platform two and arrives in Bern.")
+        sp.finish()
+    assert _old_line_pieces(script) == ["Let me see what", "Okay, one moment.", "Your next train leaves at",
+                                        "14:32 from platform two and arrives in Bern."]
+    assert _old_line_pieces(script, second_piece=False)[0] == "Okay, one moment."   # off: the old order, the line first
+
+
+def test_g5_flush_lets_the_last_words_of_a_sentence_out_and_the_speaker_goes_on():
+    def script(sp):
+        sp.feed("Your train is on time. See you")
+        sp.flush()
+        sp.feed("Anything else? Just ask me later.")
+        sp.finish()
+    assert _old_line_pieces(script) == ["Your train is on time.", "See you", "Anything else?", "Just ask me later."]
+
+
+def test_g5_flush_does_nothing_when_nothing_is_waiting_or_it_is_over():
+    def script(sp):
+        sp.flush()
+        sp.feed("Done. ")
+        sp.finish()
+        sp.flush()
+    assert _old_line_pieces(script) == ["Done."]
+
+
 def test_noise_transcripts_are_dropped():
     assert voicelink.heard("Untertitel im Auftrag des ZDF, 2021") == ""
     assert voicelink.heard("Subtitles by the Amara.org community") == ""

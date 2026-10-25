@@ -17,6 +17,7 @@ from app import realtime
 from app.brain.voice_local import VoiceModel
 from app.db import ModelRun, make_engine
 from app.main import create_app
+from app.voicemouth import FILLERS, OLD_FILLERS
 from tests.test_voice_llm import FAKE, free_port
 from tests.test_voicelink import PCM, FakeVoice, frames_until, utter
 
@@ -61,6 +62,19 @@ def test_small_talk_is_answered_by_the_voice_model_not_claude(local):
     assert reqs[-1]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
+def test_g5_the_holding_line_is_the_new_wording_and_the_old_one_when_the_switch_is_off(local):
+    from app import flags
+    for value, wording in ((None, FILLERS["en"][0]), (False, OLD_FILLERS["en"][0])):
+        with Session(make_engine(local.settings.db_url)) as s:
+            flags.set_flag(s, "g5.filler_wording", value)
+        local.voice.text = "Remind me to call the dentist tomorrow"
+        with local.websocket_connect("/ws/voice") as ws:
+            utter(ws)
+            fr = frames_until(ws, limit=400)
+        deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
+        assert deltas.startswith(wording), (value, deltas[:60])
+
+
 def test_a_data_question_goes_to_claude_through_ask_kairo(local):
     local.voice.text = "Remind me to call the dentist tomorrow"
     with local.websocket_connect("/ws/voice") as ws:
@@ -68,7 +82,7 @@ def test_a_data_question_goes_to_claude_through_ask_kairo(local):
         fr = frames_until(ws, limit=400)
     deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
     done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
-    assert deltas.startswith("Sec, checking.")                      # the filler first, never silence
+    assert deltas.startswith(FILLERS["en"][0])                      # the filler first, never silence
     assert "echo: (spoken, on a call) Remind me to call the dentist tomorrow" in done["text"]   # Claude's answer, said
     assert done["server"]["tool_ms"] is not None
     tool_round = requests_seen(local)[-1]
@@ -348,7 +362,7 @@ def test_an_urgent_item_comes_in_the_wait_before_claudes_answer(local):
         utter(ws)
         fr = frames_until(ws, limit=400)
     deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
-    assert deltas.startswith("Sec, checking. Before I forget, this one's urgent: The school form has to be signed today.")
+    assert deltas.startswith(FILLERS["en"][0] + " Before I forget, this one's urgent: The school form has to be signed today.")
     assert deltas.index("urgent") < deltas.index("echo:")                    # first, before the answer
     done = next(f for f in fr if isinstance(f, dict) and f["type"] == "done")
     assert "[[" not in done["text"]
@@ -466,7 +480,7 @@ def test_a_model_that_writes_its_tool_call_as_text_still_reaches_claude_and_no_m
         utter(ws)                                                              # "Remind me to call the dentist tomorrow"
         fr = frames_until(ws, limit=400)
     deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
-    assert deltas.startswith("Sec, checking.") and "echo: (spoken, on a call) Remind me" in deltas
+    assert deltas.startswith(FILLERS["en"][0]) and "echo: (spoken, on a call) Remind me" in deltas
     said = " ".join(t for t, _ in local.voice.spoken)
     for raw in ("<|", "|>", "tool_call", "ask_kairo"):
         assert raw not in _all_text(fr) and raw not in said, raw
@@ -479,7 +493,7 @@ def test_a_gemma_call_written_as_text_reaches_claude_and_no_marker_is_said(local
         utter(ws)                                                              # "Remind me to call the dentist tomorrow"
         fr = frames_until(ws, limit=400)
     deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
-    assert deltas.startswith("Sec, checking.") and "echo: (spoken, on a call) Remind me" in deltas
+    assert deltas.startswith(FILLERS["en"][0]) and "echo: (spoken, on a call) Remind me" in deltas
     said = " ".join(t for t, _ in local.voice.spoken)
     for raw in ("<|", "|>", "tool_call", "tool_response", "ask_kairo", "call:ask"):
         assert raw not in _all_text(fr) and raw not in said, raw
@@ -555,7 +569,7 @@ def test_an_item_pushed_recently_is_not_said_on_the_call(local):
         utter(ws)
         fr = frames_until(ws, limit=400)
     deltas = "".join(f["text"] for f in fr if isinstance(f, dict) and f["type"] == "delta")
-    assert deltas.startswith("Sec, checking.") and "school form" not in deltas and "echo:" in deltas
+    assert deltas.startswith(FILLERS["en"][0]) and "school form" not in deltas and "echo:" in deltas
 
 
 def test_an_item_said_on_the_call_is_not_pushed_too(local):

@@ -240,10 +240,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                                       reason=reason):
                 yield event
             return
-        if thread_id is not None and session_id is not None and conversation_hash() != (
-                await asyncio.to_thread(conversation_parts, thread_id, False, before_id))[1]:
-            session_id = None              # the lasting part of the prompt changed: a fresh session gets it
         static, stable = await asyncio.to_thread(conversation_parts, thread_id, session_id is None, before_id)
+        if thread_id is not None and session_id is not None and conversation_hash() != stable:
+            session_id = None              # the lasting part of the prompt changed: a fresh session gets it
+            static = (await asyncio.to_thread(conversation_parts, thread_id, True, before_id))[0]   # (with the recent messages)
         warm = None
         if thread_id is not None:          # the owner's conversation; acceptance turns run on their own
             warm = conversation_key(thread_id, stable)
@@ -263,7 +263,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if out:
                     yield BrainEvent(EventKind.text, text=out)
                 continue
-            if event.kind is EventKind.result:
+            if event.kind is EventKind.message_end:      # the answer's text is complete (the result follows, up to seconds later)
+                if filt.escalated():
+                    continue                             # Haiku handing over: that message is no answer, Sonnet's end comes
+                rest = filt.flush()
+                if rest:
+                    yield BrainEvent(EventKind.text, text=rest)
+            elif event.kind is EventKind.result:
                 if filt.escalated():
                     handed_over_sid = event.session_id or session_id
                     break
@@ -425,7 +431,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Local voice (owner's decision 2026-10-16): a small LLM on the GPU talks, loaded day and night.
     from . import bringup, smartturn, todaycard, voicellm, voicelab, voicestats
     from .brain.voice_local import VoiceModel
-    from .voicemouth import Mouth, g3_options, mouth_args, static_system
+    from .voicemouth import Mouth, g3_options, g5_mouth_args, g5_options, mouth_args, static_system
     _vl_site = voicellm.site(settings.data_dir)
 
     def _voice_llm_resolve():
@@ -1151,10 +1157,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runner.line_open()                 # jobs keep off the brain while the owner is on the line
         _card_lines[0] += 1
         app.state.today_card.on_call = True
+        with session_for(engine) as s_:
+            g5 = g5_options(s_)                      # the hand-off switches (g5.*), read once as the call starts
         # writing: the turn whose answer is being written; stopped: the owner talked over turns up to this one
         line = types.SimpleNamespace(send=_ws_sink(ws), utt=None, speaker=None, writing=None, last=None,
                                      current=0, stopped=0, carry="", interrupt=None, mouth=None, mouth_task=None,
-                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"), norm=None)
+                                     mouth_ready=None, warned=False, gate=_speaker_gate("call"), norm=None, g5=g5)
 
         def interrupt() -> None:
             """The answer of a talked-over turn stops being written (what was said so far is kept)."""
@@ -1253,7 +1261,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         line.speaker.stop()
                     number = data.get("turn") if isinstance(data.get("turn"), int) else line.current + 1
                     line.current = number
-                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number, norm=line.norm)
+                    line.speaker = voicelink.Speaker(app.state.voice, line.send, line.send, None, number, norm=line.norm,
+                                                     second_piece=line.g5["second_piece"])
                     line.speaker.say(text)
                     if not line.warned:                # the call's first line: then the slow-voice line, once
                         line.warned = True
@@ -1292,7 +1301,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return cache
 
     def _warm_openers() -> None:
-        lines = {lang: (*voicertc.OPENERS[lang], *voicemouth.FILLERS[lang], voicemouth.LATER[lang], voicelink.filler(lang),
+        with session_for(engine) as s_:
+            fillers = g5_mouth_args(g5_options(s_))["fillers"]       # g5.filler_wording: the holding lines this call will say
+        lines = {lang: (*voicertc.OPENERS[lang], *fillers[lang], voicemouth.LATER[lang], voicelink.filler(lang),
                         voicemouth.NEUTRAL[lang], voicemouth.AGAIN[lang], _greeting())
                  for lang in ("en", "de")}
         lines["en"] += (voicelink.SLOW_LINE,)
@@ -1389,6 +1400,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await old.stop()
         with session_for(engine) as s_:              # the owner's switches, read once at the start of the call
             jitter_patch = feature_flags.on(s_, "g4.jitter_patch")
+            g5 = g5_options(s_)                      # the hand-off switches (g5.*)
         conn = await voicertc.connect(sdp, "offer", jitter_patch=jitter_patch)
 
         async def send(frame) -> None:
@@ -1399,7 +1411,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:   # the phone hung up: the answer goes on and is saved (v7)
                 pass
         line = types.SimpleNamespace(send=send, utt=None, speaker=None, writing=None, last=None, current=0, stopped=0,
-                                     carry="", interrupt=None, mouth=None, mouth_task=None, mouth_ready=None)
+                                     carry="", interrupt=None, mouth=None, mouth_task=None, mouth_ready=None, g5=g5)
 
         def interrupt() -> None:
             if line.mouth_task is not None and line.mouth_task[0] <= line.stopped:
@@ -1418,6 +1430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         async def answer(text: str, language, number: int, speaker) -> dict:
             line.current = number
+            speaker.second_piece = line.g5["second_piece"]        # g5.second_piece, as this call started
             if line.speaker is not None and line.speaker is not speaker:
                 line.speaker.stop()
             line.speaker = speaker
@@ -1538,7 +1551,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             line.carry = f"{line.carry} {text}".strip()   # talked on before Kairo answered: one message
             return
         text, line.carry = f"{line.carry} {text}".strip(), ""
-        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm)
+        speaker = voicelink.Speaker(app.state.voice, line.send, line.send, language, number, norm=line.norm,
+                                    second_piece=line.g5["second_piece"])
         if line.speaker is not None:
             line.speaker.stop()
         line.speaker = speaker
@@ -1627,17 +1641,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             items = bringup.for_call(s_, profile, dt.datetime.now(profile.tz))
             language = realtime.load_settings(s_).get("language", "auto")
             g3 = g3_options(s_)                                   # the owner's G3 switches, read once per call
+            g5 = getattr(line, "g5", None) or g5_options(s_)      # ... and the hand-off switches (read at the call's start)
         app.state.voice_llm.take_options(g3)
         spec = voicellm.spec(app.state.voice_llm.model_id) or {}
 
         def place() -> str | None:
             with session_for(engine) as s2:
                 return location.current_place(s2)
-        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
+        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, ask_stream=_mouth_ask_stream, context=card.peek(), items=items,
+                      name=profile.name,
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
-                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3))
+                      greeting=_greeting(), delivered=_delivered, **mouth_args(g3), **g5_mouth_args(g5))
         line.mouth = mouth
         try:
             await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
@@ -1772,6 +1788,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request = (f"{request}\n[This is the owner's answer to Kairo's {about}. Record it as you would in chat: "
                        "close or update the loop, save the answer.]")
         return await _rt_ask(request, lines, own=own)
+    app.state.mouth_ask = _mouth_ask
+
+    async def _mouth_ask_stream(request: str, lines: list[str], about: str, sink) -> tuple[str, bool]:
+        """_mouth_ask that tells sink(kind, value) while Claude works (see _rt_ask_stream): G5."""
+        own = bringup.without_reports(request)
+        if about:
+            request = (f"{request}\n[This is the owner's answer to Kairo's {about}. Record it as you would in chat: "
+                       "close or update the loop, save the answer.]")
+        return await _rt_ask_stream(request, lines, sink, own=own)
+    app.state.mouth_ask_stream = _mouth_ask_stream
 
     def _refresh_items(mouth: "Mouth") -> None:
         """Something on the list got done during the call (a loop closed), or was just pushed to the phone
@@ -1817,6 +1843,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 speaker.say(said)
                 sent.append(loop_.create_task(line.send({"type": "delta", "text": said + " ", "turn": number})))
 
+            def flush(self) -> None:                    # G5: Claude's text is complete: the last words go to the voice now
+                getattr(speaker, "flush", lambda: None)()
+
         _rt_said("owner", text)
         line.writing = number
         task = loop_.create_task(mouth.turn(text, language, Tap()))
@@ -1854,7 +1883,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          "server": {"stt_ms": stt_ms, "queue_ms": 0,
                                     "llm_ms": result.first_token_ms if result else None,
                                     "first_words_ms": result.first_text_ms if result else None,
-                                    "tool_ms": result.tool_ms if result else None},
+                                    "tool_ms": result.tool_ms if result else None,
+                                    "claude_first_ms": result.claude_first_ms if result else None,   # G5: Claude's first spoken piece
+                                    "streamed": bool(result and result.streamed)},
                          "early": bool(result and result.early)})
         if interrupted:
             speaker.stop()
@@ -3480,8 +3511,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return todaycard.render({k: v for k, v in card.peek().items() if k in todaycard.REALTIME})
 
     def _rt_prefetch() -> None:
-        """Opening Call or the voice button reads ahead what's due, so the call starts with a fresh card."""
+        """Opening Call or the voice button reads ahead what's due, so the call starts with a fresh card, and starts
+        Claude's conversation program if it isn't running (g5.warm_on_call_open: a cold start costs about a second)."""
         app.state.today_card.warm()
+        if _flag_on("g5.warm_on_call_open"):
+            warm_conversation_soon()
 
     def _rt_said(role: str, text_: str) -> None:
         """A line of the live call, into the one conversation (the owner's words as said on a call)."""
@@ -3512,25 +3546,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await _rt_ask(request, lines, model="haiku")
     app.state.report_ask = _report_ask               # an owner turn for Claude, like ask_kairo (tests listen here)
 
-    async def _rt_ask(request: str, lines: list[str], *, own: str | None = None,
-                      model: str | None = None) -> tuple[str, bool]:
-        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call.
-        Owner's rule 2026-10-19: Haiku unless the request itself is a real judgment call (owner_turn routes on
-        the request, or own, never on brain_prompt's wording around it); the owner's words on the call give
-        the language."""
+    def _rt_start() -> tuple[tuple[str, bool] | None, str | None, int | None]:
+        """What ask_kairo needs before Claude runs: (the answer to give instead, when Kairo can't ask right now; the
+        conversation's Claude session; its thread)."""
         if time.time() < app.state.maintenance_until:
-            return "Kairo is installing an update. Try again in a minute.", False
+            return ("Kairo is installing an update. Try again in a minute.", False), None, None
         with session_for(engine) as s:
             if killswitch.is_paused(s):
-                return "Kairo is paused with the kill switch. Resume it under More.", False
+                return ("Kairo is paused with the kill switch. Resume it under More.", False), None, None
             thread = chat.main_thread(s, brain_name=runner.brain.name)
             if memory.take_fresh(s):
                 thread.brain_session_id = None
                 s.add(thread)
                 s.commit()
-            sid, tid = thread.brain_session_id, thread.id
-        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
-                                                model=model, own=own)
+            return None, thread.brain_session_id, thread.id
+
+    def _rt_remember(tid: int, new_sid: str | None) -> None:
+        """The conversation keeps Claude's session, so the next question resumes it."""
         if new_sid:
             with session_for(engine) as s:
                 thread = s.get(ChatThread, tid)
@@ -3538,32 +3570,98 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     thread.brain_session_id = new_sid
                     s.add(thread)
                     s.commit()
+
+    def _rt_finish(tid: int, text: str, error, new_sid: str | None) -> tuple[str, bool]:
+        """What ask_kairo gives back: the conversation keeps Claude's session; the answer as a call may say it."""
+        _rt_remember(tid, new_sid)
         fold_memory_soon()
         if error is not None:
             return f"I couldn't get that done: {clip_text(error.text, 160)}", False
         return realtime.spoken_answer(text)   # plain speech, on every voice line
 
+    async def _rt_ask(request: str, lines: list[str], *, own: str | None = None,
+                      model: str | None = None) -> tuple[str, bool]:
+        """ask_kairo: the voice model hands the owner's request to the Claude brain, as an owner turn on a call.
+        Owner's rule 2026-10-19: Haiku unless the request itself is a real judgment call (owner_turn routes on
+        the request, or own, never on brain_prompt's wording around it); the owner's words on the call give
+        the language."""
+        early, sid, tid = _rt_start()
+        if early is not None:
+            return early
+        text, error, new_sid = await _call_turn(request, lines, session_id=sid, thread_id=tid, purpose="call",
+                                                model=model, own=own)
+        return _rt_finish(tid, text, error, new_sid)
+
+    async def _rt_ask_stream(request: str, lines: list[str], sink, *, own: str | None = None,
+                             model: str | None = None) -> tuple[str, bool]:
+        """_rt_ask that tells sink(kind, value) while Claude works (G5): ("text", words) as they are written,
+        ("escalated", {...}) when Haiku hands over, ("end", (answer, hang up)) when Claude's text is complete, which
+        is before the CLI has sent its result, ("error", why) when Claude failed (words told before it are no answer).
+        Returns what _rt_ask returns, at the result."""
+        early, sid, tid = _rt_start()
+        if early is not None:
+            return early
+        text, error, new_sid = await _call_turn(
+            request, lines, session_id=sid, thread_id=tid, purpose="call", model=model, own=own,
+            on_text=lambda words: sink("text", words), on_escalate=lambda info: sink("escalated", info),
+            on_end=lambda full: sink("end", realtime.spoken_answer(full)),
+            on_session=lambda new: _rt_remember(tid, new))     # (the turn goes on before the result: the next ask needs it now)
+        if error is not None:
+            sink("error", clip_text(error.text, 160))
+        return _rt_finish(tid, text, error, new_sid)
+    app.state.rt_ask_stream = _rt_ask_stream
+
+    def _tell(callback, *args) -> None:
+        """A hand-off callback (the voice model's side): a bug in it never costs the turn."""
+        if callback is not None:
+            try:
+                callback(*args)
+            except Exception:
+                log.exception("voice: a hand-off callback")
+
     async def _call_turn(request: str, lines: list[str], *, session_id, thread_id, purpose: str,
-                         model: str | None = None, own: str | None = None):
+                         model: str | None = None, own: str | None = None, on_text=None, on_escalate=None, on_end=None,
+                         on_session=None):
         """ask_kairo's turn for Claude, as on any call: the call's wrapper (realtime.brain_prompt), routed on the
         owner's request (own), never on the wrapper's wording (owner's rule 2026-10-19), in the language of the
         owner's words on the call. (Claude's whole answer, the error or None, the brain session.) Acceptance
-        test 43 runs it too."""
+        test 43 runs it too.
+        G5, while Claude works: on_text(delta) for every piece of its words (a "\n" between the words before a tool call
+        and the message after it: the CLI's messages carry no space of their own, and a sentence ends at punctuation
+        plus whitespace); on_escalate({"escalated": model, "why": ...}) when Haiku hands the turn to the stronger model
+        (nothing of Haiku's was said); on_end(the final message's text) when Claude's text is complete, before the CLI
+        has finished its own summary and sent the result; on_session(id) as soon as the Claude session is known."""
         said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
         parts: list[str] = []
+        last_message: list[str] = []       # the words since the last tool call: the answer proper
+        told = False                       # on_text got words since the last message break
         final, error, new_sid = None, None, None
         async for event in owner_turn(realtime.brain_prompt(request, lines), session_id=session_id, thread_id=thread_id,
                                       purpose=purpose, model=model, own=request if own is None else own,
                                       language=conversation.message_language(said) if said else None):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
+                _tell(on_session, event.session_id)
             elif event.kind is EventKind.text:
                 parts.append(event.text)
+                last_message.append(event.text)
+                told = told or bool(event.text.strip())
+                _tell(on_text, event.text)
+            elif event.kind is EventKind.tool_use:
+                last_message.clear()
+                if told:                   # the message before the call ends here, whatever its last character was
+                    told = False
+                    _tell(on_text, "\n")
+            elif event.kind is EventKind.message_end:
+                _tell(on_end, "".join(last_message).strip())
+            elif event.kind is EventKind.usage and (event.data or {}).get("escalated"):
+                _tell(on_escalate, dict(event.data))
             elif event.kind is EventKind.result:
                 final, new_sid = event.text or "".join(parts), event.session_id or new_sid
             elif event.kind is EventKind.error:
                 error, new_sid = event, event.session_id or new_sid
         return (final or "".join(parts)).strip(), error, new_sid
+    app.state.call_turn = _call_turn      # (tests listen here)
 
     @app.get("/api/voice/realtime")
     def realtime_get():

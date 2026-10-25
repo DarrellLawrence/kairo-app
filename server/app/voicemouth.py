@@ -46,13 +46,31 @@ def g3_options(s) -> dict:
             "gemma_markup": flags.on(s, "g3.gemma_markup"), "constant_tools": flags.on(s, "g3.constant_tools")}
 
 
+def g5_options(s) -> dict:
+    """The G5 switches (app/flags.py) as a call reads them: once, at its start (never per audio frame)."""
+    return {name: flags.on(s, f"g5.{name}") for name in ("stream_verbatim", "second_piece", "flush_at_end", "cap_first_piece",
+                                                          "filler_wording", "bringup_cancel")}
+
+
+def g5_mouth_args(opts: dict) -> dict:
+    """The Mouth(...) arguments the hand-off switches in `opts` (g5_options) choose; a missing switch is its default."""
+    return {"fillers": FILLERS if opts.get("filler_wording", True) else OLD_FILLERS,
+            "stream_verbatim": bool(opts.get("stream_verbatim", False)), "early_end": bool(opts.get("flush_at_end", True)),
+            "cap_first_piece": bool(opts.get("cap_first_piece", True)), "bringup_cancel": bool(opts.get("bringup_cancel", True))}
+
+
 def mouth_args(opts: dict) -> dict:
     """The Mouth(...) arguments the call-layout switches in `opts` (g3_options) choose: the call, the voice lab."""
     on = bool(opts.get("constant_tools"))
     return {"constant_tools": on, "context_block": on}
 
 
-FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."), "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
+# The holding line while Claude works (g5.filler_wording): it only says Kairo needs a moment, never that it is doing
+# something it may not be doing ("Pulling that up." for a note to save). Voice-recipe 8.6.
+FILLERS = {"en": ("Okay, one moment.", "Let me check that.", "One sec."),
+           "de": ("Okay, einen Moment.", "Ich schau kurz nach.", "Sekunde.")}
+OLD_FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."),
+               "de": ("Moment, ich schau.", "Ich schau kurz.", "Sekunde.")}
 # Owner's request 2026-10-17: Claude gets ASK_CALL_TIMEOUT_S on a call; then Kairo says this once and the
 # call moves on. The answer is said later in the call when it comes, and sent as a push.
 ASK_CALL_TIMEOUT_S = 8.0
@@ -270,6 +288,9 @@ class Turn:
     early: bool = False                 # its first round was started at the owner's pause (speculation)
     filled: bool = False                # the holding line was said this turn
     deferred: bool = False              # Claude took longer than a call waits: "I'll get back to you"
+    streamed: bool = False              # Claude's own words were said as they came (g5.stream_verbatim)
+    claude_first_ms: int | None = None  # ... the first of them, from the start of the turn
+    escalated: str | None = None        # Claude's Haiku handed this turn to this stronger model
 
 
 class _Said:
@@ -321,6 +342,86 @@ class _Later(Exception):
     """Claude needs longer than a call waits (ASK_CALL_TIMEOUT_S)."""
 
 
+# What the voice model is told in place of Claude's answer when Kairo said it itself, word for word (g5.stream_verbatim).
+SAID_FOR_YOU = "(Kairo said its answer to the owner itself, word for word: nothing for you to add)"
+HANG_UP_MARK = "[[hang up]]"
+
+
+class _Hang:
+    """Takes [[hang up]] out of Claude's words as they arrive (it can come split across pieces); .seen: it was there.
+    Half of the marker at the very end is dropped, never said."""
+
+    def __init__(self) -> None:
+        self.buf = ""
+        self.seen = False
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        out = ""
+        while True:
+            i = self.buf.find("[[")
+            if i < 0:
+                keep = 1 if self.buf.endswith("[") else 0           # maybe the first bracket of the marker
+                out, self.buf = out + self.buf[:len(self.buf) - keep], self.buf[len(self.buf) - keep:]
+                return out
+            out, self.buf = out + self.buf[:i], self.buf[i:]
+            low = self.buf.lower()
+            if low.startswith(HANG_UP_MARK):
+                self.seen, self.buf = True, self.buf[len(HANG_UP_MARK):]
+                continue
+            if HANG_UP_MARK.startswith(low):                        # may still become the marker: wait
+                return out
+            out, self.buf = out + self.buf[:2], self.buf[2:]        # not our marker: speech
+
+    def flush(self) -> str:
+        rest, self.buf = self.buf, ""
+        return "" if len(rest) >= 2 and HANG_UP_MARK.startswith(rest.lower()) else rest
+
+
+class _Feed:
+    """What one ask_kairo tells while Claude works, on its way from the ask's task to the turn."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue()
+
+    def put(self, kind: str, value=None) -> None:
+        self.queue.put_nowait((kind, value))
+
+
+class _ClaudeSpeech:
+    """Claude's words on their way to the voice, as plain speech: [[hang up]] out, no raise marker can raise anything
+    (Claude's words can carry a mail's text), thinking out loud and ids out (speech.PlainStream)."""
+
+    def __init__(self, speaker, said: "_Said", result: "Turn", started: float, on_first: Callable[[], None]) -> None:
+        self.speaker, self.said, self.result, self.turn_started, self.on_first = speaker, said, result, started, on_first
+        self.hang, self.drop, self.clean = _Hang(), Unmark(allow=lambda _item: False), PlainStream()
+        self.heard: list[str] = []
+
+    @property
+    def started(self) -> bool:
+        return bool(self.heard)
+
+    def feed(self, delta: str) -> None:
+        self._say(self.clean.feed(self.drop.feed(self.hang.feed(delta))))
+
+    def finish(self) -> None:
+        self._say(self.clean.feed(self.drop.feed(self.hang.flush()) + self.drop.flush()) + self.clean.flush())
+
+    def _say(self, piece: str) -> None:
+        if not piece:
+            return
+        first = not self.heard
+        self.heard.append(piece)
+        self.said.stream(piece)
+        self.speaker.feed(piece)
+        if first:
+            self.result.claude_first_ms = int((time.monotonic() - self.turn_started) * 1000)
+            self.on_first()
+
+    def text(self) -> str:
+        return "".join(self.heard).strip()
+
+
 def _key(messages: list[dict]) -> str:
     return json.dumps(messages, sort_keys=True, ensure_ascii=False)
 
@@ -332,9 +433,14 @@ class _Pending:
     taken: bool = False                 # being said in a turn right now
     started: float = 0.0                # when Claude got it (the call's wait counts from here)
     push: bool = False                  # the owner was told "I'll get back to you": it goes as a push too
+    heard: str = ""                     # what the owner had already heard of it (g5.stream_verbatim) when they talked on
 
 
 Ask = Callable[[str, list[str], str], Awaitable[tuple[str, bool]]]
+# ... and the same with a sink(kind, value) it tells while Claude works (G5): ("text", words; a "\n" stands between the
+# words before a tool call and the message after it), ("escalated", info), ("end", (answer, hang up)) when Claude's text is
+# complete, which is before the CLI has sent its result, ("error", why) when Claude failed (what it said before is no answer).
+AskStream = Callable[[str, list[str], str, Callable[..., None]], Awaitable[tuple[str, bool]]]
 
 
 class Mouth:
@@ -347,8 +453,17 @@ class Mouth:
                  context_tokens: int = 8192, report: Callable[[bringup.Item, str, str], None] | None = None,
                  late: Callable[[str, str], None] | None = None, greeting: str | None = None,
                  delivered: Callable[[bringup.Item], None] | None = None, constant_tools: bool = False,
-                 context_block: bool = False):
+                 context_block: bool = False, fillers: dict[str, tuple[str, ...]] | None = None,
+                 ask_stream: AskStream | None = None, stream_verbatim: bool = False, early_end: bool = False,
+                 cap_first_piece: bool = True, bringup_cancel: bool = True):
         self.model, self.ask = model, ask
+        self.fillers = fillers or FILLERS     # g5.filler_wording: the holding lines
+        self.ask_stream = ask_stream
+        self.stream_verbatim = stream_verbatim    # g5.stream_verbatim: Claude's own sentences are said as they come
+        self.early_end = early_end                # g5.flush_at_end: the turn goes on when Claude's text is complete, not its result
+        self.cap_first_piece = cap_first_piece    # g5.cap_first_piece: the call's wait for Claude counts to the first spoken piece
+        self.bringup_cancel = bringup_cancel      # g5.bringup_cancel: a raise not yet said is dropped when Claude's words come
+        self._background: set[asyncio.Task] = set()
         self.constant_tools = constant_tools    # g3.constant_tools: the same tools with every request, "none" when off
         self.context_block = context_block      # g3.constant_tools: a system prompt that never changes, the card in the first user message
         self._fresh = context_block             # the next user message is the first of its conversation: it carries the card
@@ -587,15 +702,25 @@ class Mouth:
                 self.messages.append({"role": "assistant", "content": said.text(), "tool_calls": [
                     {"id": call["id"], "type": "function", "function": {"name": "ask_kairo", "arguments": call.get("arguments") or "{}"}}]})
                 try:
-                    answer = await self._ask(request, item, lang, speaker, result, said)
+                    if self._streams():
+                        answer, claude_said, cut = await self._ask_streamed(request, item, lang, speaker, result, said, started)
+                    else:
+                        answer, claude_said, cut = await self._ask(request, item, lang, speaker, result, said), None, ""
                 except _Later:                             # Claude needs longer: the call moves on
                     self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
                                           "content": json.dumps({"answer": "(still working on it: Kairo told the owner "
                                                                  "it will get back to them)"})})
                     self.messages.append({"role": "assistant", "content": said.text() or LATER[lang]})
                     break
+                if claude_said:                            # Claude's own words were said as they came: nothing for the model to add
+                    result.streamed = True
+                    self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
+                                          "content": json.dumps({"answer": SAID_FOR_YOU})})
+                    last = {"role": "assistant", "content": claude_said}
+                    self.messages.append(last)
+                    break
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": "ask_kairo",
-                                      "content": json.dumps({"answer": answer}, ensure_ascii=False)})
+                                      "content": json.dumps({"answer": answer + cut}, ensure_ascii=False)})
             await self._deliver_pending(speaker, result, said, started, lang)
             if not said.streamed and not greet and not result.deferred:   # never a silent line (owner's call 2026-10-20)
                 line = (plain(answer) or AGAIN[lang] if answer is not None else
@@ -609,8 +734,10 @@ class Mouth:
             last = self.messages[-1]
             if last["role"] != "assistant" or last.get("tool_calls"):
                 if last.get("tool_calls"):                        # talked over while Claude worked
+                    gone = ("(the owner talked on while Kairo was saying the answer)" if result.claude_first_ms is not None
+                            else "(the owner talked on before the answer came)")
                     self.messages.append({"role": "tool", "tool_call_id": last["tool_calls"][0]["id"], "name": "ask_kairo",
-                                          "content": json.dumps({"answer": "(the owner talked on before the answer came)"})})
+                                          "content": json.dumps({"answer": gone})})
                 self.messages.append({"role": "assistant", "content": (spoken + " …") if spoken else "…"})
             raise
         finally:
@@ -674,7 +801,7 @@ class Mouth:
                     call = True
                     if not result.filled:                  # the holding line at most once a turn
                         result.filled = True
-                        filler = FILLERS[lang][self._filler % len(FILLERS[lang])]
+                        filler = self.fillers[lang][self._filler % len(self.fillers[lang])]
                         self._filler += 1
                         speaker.say(filler)
                         said.line(filler)
@@ -703,8 +830,12 @@ class Mouth:
         if result.first_text_ms is None:
             result.first_text_ms = int((time.monotonic() - started) * 1000)
 
-    async def _ask(self, request: str, item: str | None, lang: str, speaker, result: Turn, said: _Said) -> str:
-        """Claude works; Kairo uses the wait. Shielded: a talk-over doesn't lose the answer."""
+    def _streams(self) -> bool:
+        """The ask is told while Claude works (G5): it can end the wait at the end of Claude's text, and say Claude's words."""
+        return self.ask_stream is not None and (self.stream_verbatim or self.early_end)
+
+    def _prepare_ask(self, request: str, item: str | None) -> tuple[str, str, list[str]]:
+        """(the request with the owner's answer to a raised item riding along, what that item was, the call since Claude's last ask)."""
         lines, self.lines = self.lines[-20:], []
         about = bringup.describe(item, self.items)
         if about:
@@ -714,9 +845,11 @@ class Mouth:
                 request = f"{request}\n\n{bringup.report_request(it, said_line, reply, live=True)}"
                 self.reported.add(it.id)
         self._unsent = []
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(self.ask(request, lines, about))
-        t0 = time.monotonic()
+        return request, about, lines
+
+    def _wait_bringup(self, loop, answered: Callable[[], bool], request: str, lang: str, speaker, result: Turn, said: _Said):
+        """Kairo uses Claude's wait: an urgent item at once, before the answer; another after wait_after_s, unless the
+        answer is on its way by then (answered()). Returns the timer, to be cancelled when the wait is over."""
         pick = bringup.pick_for_wait(self.items, raised=self.raised | set(result.raised),
                                      normal_left=self._normal_left(result.raised), lang=lang,
                                      talk=" ".join(self.talk[-2:]) + " " + request,
@@ -724,7 +857,7 @@ class Mouth:
                                      place=self._where()) if self._may_raise(result) else None
 
         def raise_item() -> None:
-            if pick is None or (pick.priority != "urgent" and task.done()):   # the answer is here: no detour
+            if pick is None or (pick.priority != "urgent" and answered()):   # the answer is here: no detour
                 return
             line = plain(bringup.wait_line(pick, lang, len(self.said_for)))   # a different lead each time
             if not line:
@@ -739,11 +872,19 @@ class Mouth:
             if tool_msg.get("tool_calls"):                     # the voice model sees what Kairo said
                 tool_msg["content"] = said.text()
 
-        later = None
         if pick is not None and pick.priority == "urgent":
             raise_item()                                       # urgent: always, before the answer
         elif pick is not None:
-            later = loop.call_later(self.wait_after_s, raise_item)
+            return loop.call_later(self.wait_after_s, raise_item)
+        return None
+
+    async def _ask(self, request: str, item: str | None, lang: str, speaker, result: Turn, said: _Said) -> str:
+        """Claude works; Kairo uses the wait. Shielded: a talk-over doesn't lose the answer."""
+        request, about, lines = self._prepare_ask(request, item)
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self.ask(request, lines, about))
+        t0 = time.monotonic()
+        later = self._wait_bringup(loop, task.done, request, lang, speaker, result, said)
         try:
             answer, hang = await asyncio.wait_for(asyncio.shield(task), self.ask_timeout_s)
         except asyncio.TimeoutError:               # owner's request 2026-10-17: never more than this on a call
@@ -766,17 +907,136 @@ class Mouth:
         self.hang_up = self.hang_up or hang
         return answer
 
+    async def _ask_streamed(self, request: str, item: str | None, lang: str, speaker, result: Turn, said: _Said,
+                            started: float) -> tuple[str, str | None, str]:
+        """_ask that is told while Claude works (G5). (the answer, what was said of it word for word or None, what the
+        voice model must know about words that were cut off or "").
+        - the turn goes on at the end of Claude's text (early_end), not at the result, which comes seconds later;
+        - stream_verbatim: Claude's words go to the voice as they are written, so no second round of the voice model;
+        - the call's wait for Claude (ask_timeout_s) counts to the first spoken piece (cap_first_piece): an answer
+          that has begun is never cut. Shielded as _ask: a talk-over keeps the answer and what was heard of it."""
+        request, about, lines = self._prepare_ask(request, item)
+        loop = asyncio.get_running_loop()
+        feed = _Feed()
+        task = loop.create_task(self.ask_stream(request, lines, about, feed.put))
+        t0 = time.monotonic()
+        verbatim = self.stream_verbatim
+        timer: list = [None]
+
+        def first_words() -> None:                             # Claude is speaking: a raise that has not been said is dropped
+            if self.bringup_cancel and timer[0] is not None:
+                timer[0].cancel()
+        speech = _ClaudeSpeech(speaker, said, result, started, first_words)
+        answered = (lambda: speech.started or task.done()) if self.bringup_cancel else task.done
+        timer[0] = self._wait_bringup(loop, answered, request, lang, speaker, result, said)
+        ended: tuple[str, bool] | None = None
+        broke = False                                           # Claude failed (the answer is its error line)
+        getter: asyncio.Task | None = None
+
+        def take(kind: str, value) -> bool:
+            """One thing the ask told. True: Claude's text is complete and the turn goes on."""
+            nonlocal ended, broke
+            if kind == "text":
+                if verbatim:
+                    speech.feed(value)
+            elif kind == "escalated":
+                result.escalated = str((value or {}).get("escalated") or "")
+            elif kind == "end":
+                ended = value
+                return self.early_end
+            elif kind == "error":
+                broke = True
+            return False
+        try:
+            while True:
+                left = None
+                if not (verbatim and speech.started and self.cap_first_piece):
+                    left = self.ask_timeout_s - (time.monotonic() - t0)
+                    if left <= 0:
+                        raise asyncio.TimeoutError
+                getter = getter or loop.create_task(feed.queue.get())
+                await asyncio.wait({getter, task}, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+                if getter.done():
+                    kind, value = getter.result()
+                    getter = None
+                    if take(kind, value):
+                        break
+                    continue
+                if task.done():
+                    break
+                if left is not None and time.monotonic() - t0 >= self.ask_timeout_s:
+                    raise asyncio.TimeoutError
+            if getter is not None:                              # (the ask is over: whatever it told is still in the queue)
+                if getter.done():
+                    take(*getter.result())
+                else:
+                    getter.cancel()
+                getter = None
+            while not feed.queue.empty() and not (ended is not None and self.early_end):
+                take(*feed.queue.get_nowait())
+        except asyncio.TimeoutError:                            # owner's request 2026-10-17: never more than this on a call
+            speech.finish()
+            result.tool_ms = int((time.monotonic() - t0) * 1000)
+            result.deferred = True
+            speaker.say(LATER[lang])
+            said.line(LATER[lang])
+            self._keep(request, task, push=True, started=t0, heard=speech.text())
+            raise _Later() from None
+        except asyncio.CancelledError:                          # talked over: the answer is kept, and what was heard of it
+            self._keep(request, task, started=t0, heard=speech.text())
+            raise
+        finally:
+            if timer[0] is not None:
+                timer[0].cancel()
+            if getter is not None and not getter.done():
+                getter.cancel()
+        result.tool_ms = int((time.monotonic() - t0) * 1000)
+        if ended is not None and self.early_end:                # Claude's text is complete: the result is not waited for
+            answer, hang = ended
+            self._let_finish(task)
+        else:
+            try:
+                answer, hang = task.result()
+            except Exception as exc:   # never a silent call: say why
+                log.exception("ask_kairo")
+                answer, hang, broke = f"{FAILED[lang]} ({type(exc).__name__})", False, True
+        speech.finish()
+        if self.early_end:
+            flush = getattr(speaker, "flush", None)             # the last words go out now, not when the turn closes
+            if flush is not None:
+                flush()
+        heard = speech.text() if verbatim else ""
+        if broke and ended is None and heard:                   # Claude broke off after the owner heard some of it: no answer
+            self.hang_up = self.hang_up or hang                 # (a hang-up in half an answer is not obeyed)
+            said.line("")                                       # the voice model's words start a new stream, not glued to these
+            speaker.feed(" ")
+            said.streamed = False                               # (else a voice model with nothing to say would leave half a sentence)
+            return answer, None, _CUT.format(heard=heard)
+        self.hang_up = self.hang_up or hang or speech.hang.seen
+        return answer, heard or None, ""
+
+    def _let_finish(self, task: asyncio.Task) -> None:
+        """The ask goes on in the background (the CLI's summary, the session, the memory fold); nobody waits for it."""
+        self._background.add(task)
+
+        def done(t: asyncio.Task) -> None:
+            self._background.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                log.warning("ask_kairo, after its answer: %s: %s", type(t.exception()).__name__, t.exception())
+        task.add_done_callback(done)
+
     def _where(self) -> str | None:
         try:
             return self.place() if self.place else None
         except Exception:
             return None
 
-    def _keep(self, request: str, task: asyncio.Task, *, push: bool = False, started: float | None = None) -> None:
+    def _keep(self, request: str, task: asyncio.Task, *, push: bool = False, started: float | None = None,
+              heard: str = "") -> None:
         """Talked over while Claude worked, or Claude took longer than a call waits: the answer is said in the
         next turn once it is in. push: it also goes to the phone as a push the moment it comes (the owner
         was told "I'll get back to you"; the call may be over by then)."""
-        p = _Pending(request, task, started=started if started is not None else time.monotonic(), push=push)
+        p = _Pending(request, task, started=started if started is not None else time.monotonic(), push=push, heard=heard)
         self.pending.append(p)
 
         def done(_t: asyncio.Task) -> None:
@@ -793,7 +1053,8 @@ class Mouth:
             answer, hang = task.result()
             self.hang_up = self.hang_up or hang
             self.notes.append(f"Kairo's answer to the owner's earlier request ({request[:120]}) came after they talked on: "
-                              f"{answer}. Say it after answering what they just said, if it still matters.")
+                              f"{answer}.{_HEARD.format(heard=heard) if heard else ''} "
+                              "Say it after answering what they just said, if it still matters.")
         task.add_done_callback(done)
 
     async def _deliver_pending(self, speaker, result: Turn, said: _Said, started: float, lang: str) -> None:
@@ -821,12 +1082,20 @@ class Mouth:
             self.pending.remove(p)
             self.hang_up = self.hang_up or hang
             self.messages.append({"role": "user", "content": f"<kairo-note>Kairo's answer to the owner's earlier request "
-                                  f"({p.request[:120]}) is here: {answer}\nSay it now, in your own words.</kairo-note>"})
+                                  f"({p.request[:120]}) is here: {answer}{_HEARD.format(heard=p.heard) if p.heard else ''}\n"
+                                  "Say it now, in your own words.</kairo-note>"})
             said.line("")                                      # a new stream starts
             speaker.feed(" ")                                  # ... after the last sentence, not glued to it
             tools, extra = self._tools(False)
             raw, _ = await self._round(tools, MAX_ANSWER_TOKENS, speaker, result, said, started, lang, extra=extra)
             self.messages.append({"role": "assistant", "content": raw.strip()})
+
+
+# G5: Claude failed after Kairo had said part of its words: the voice model tells the owner what happened, not those words again.
+_CUT = " Claude broke off before it was done. The owner had already heard this much of it: \"{heard}\". Don't say that part again; tell them in a few words that it broke off."
+
+# G5: Kairo said part of Claude's answer word for word before the owner talked on; the rest must not say it twice.
+_HEARD = " The owner had already heard this much of it before they talked on, so don't say that part again: \"{heard}\"."
 
 
 def _squash(text: str) -> str:
