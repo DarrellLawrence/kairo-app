@@ -379,6 +379,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             background.append(asyncio.create_task(_boot_loads()))
             warm_conversation_soon()       # Voice V1: the conversation's Claude is ready before the first word
             app.state.today_card.start()   # the Today card: always fresh, before any call
+            background.append(asyncio.create_task(app.state.timers.run()))   # G10: timers set by voice ring on time, restart or not
             background.append(asyncio.create_task(_lab_auto()))
         yield
         for call in list(getattr(app.state, "rtc_calls", {}).values()):   # calls over WebRTC end with Kairo
@@ -1655,6 +1656,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
                       greeting=_greeting(), delivered=_delivered, **mouth_args(g3), **g5_mouth_args(g5))
         line.mouth = mouth
+        mouth.fast = app.state.fast.for_call()                    # G10: fast paths, with the owner's switches as they are now
         try:
             await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
         except Exception as exc:   # the first turn reads it then
@@ -1871,7 +1873,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         said = result.text if result else re.sub(r"\s*…$", "", (mouth.messages[-1].get("content") or "")).strip()
         said = re.sub(r"\[\[raised:[A-Za-z]\d{1,8}\]\]\s*", "", said)
         if said and said != "…":
-            _rt_said("kairo", said)
+            _rt_said("kairo", (result.recorded if result is not None else "") or said)   # G10: not other people's words as Kairo's
         if result is not None:
             line.route = result.route
             voicestats.record(engine, result.route, release_version())
@@ -3423,6 +3425,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # What the voice model answers from at once (app/todaycard.py); also the realtime model's context.
 
     _card_raw: dict = {"events": [], "stations": {}}
+    from . import fastpath, timers as timers_mod
+    fast_facts = fastpath.Facts()      # G10: what the card read, for the rules (fresh, readable, today's)
 
     def _card_now() -> str:
         now = dt.datetime.now(profile.tz)
@@ -3432,8 +3436,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _card_events() -> str:
         now = dt.datetime.now(profile.tz)
         with session_for(engine) as s:
-            r = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s)
+            r = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s, detail=True)
         _card_raw["events"] = r.events if r.ok else []
+        fast_facts.put_events(r.events, r.ok, now.date())
         return todaycard.events_lines(r.events, now, unreadable=None if r.ok else r.text(profile.tz))
 
     def _card_tasks() -> str:
@@ -3478,8 +3483,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if dest is None or not dest.station or dest.station == frm.station:
             return todaycard.trip_lines(None, frm.name, None, profile.tz)
         via = dest.via if frm.kind == "home" else frm.via        # the usual route, both ways
-        return todaycard.trip_lines(app.state.lookup.connections(frm.station, dest.station, via=via),
-                                    frm.name, dest.name, profile.tz)
+        conns = app.state.lookup.connections(frm.station, dest.station, via=via)
+        fast_facts.put_trip(conns, frm.name, dest.name)          # G10: "when is the next train", while this is fresh
+        return todaycard.trip_lines(conns, frm.name, dest.name, profile.tz)
 
     def _quiet_now(now: dt.datetime) -> bool:
         q = getattr(profile, "quiet_hours", None)
@@ -3500,6 +3506,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.today_card = todaycard.Keeper({"now": _card_now, "events": _card_events, "tasks": _card_tasks,
                                              "loops": _card_loops, "weather": _card_weather, "trip": _card_trip,
                                              "about": _card_about, "lately": _card_lately})
+    app.state.timers = timers_mod.Timers(engine, app.state.pusher.notify, tz=profile.tz)     # rings through the notification boss
+    app.state.fast = fastpath.FastPaths(tz=profile.tz, engine=engine, timers=app.state.timers, facts=fast_facts)
 
     def _rt_context() -> str:
         """The card for a call: the last one at once if there is one (a refresh runs beside it), else read now."""

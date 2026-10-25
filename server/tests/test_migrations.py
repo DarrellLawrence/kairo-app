@@ -60,3 +60,16 @@ def test_route_log_table_comes_with_0026_and_goes_again(migrated):
     assert "route_log" not in tables() and "model_runs" in tables()
     command.upgrade(cfg, "head")
     assert "route_log" in tables()
+
+
+def test_timers_table_comes_with_0027_and_goes_again(migrated):
+    """0027: G10's timers and reminders (the runner reads the active ones again after a restart)."""
+    cfg = alembic_config(migrated.db_url)
+    tables = lambda: set(inspect(create_engine(migrated.db_url)).get_table_names())  # noqa: E731
+    assert "timers" in tables()
+    cols = {c["name"] for c in inspect(create_engine(migrated.db_url)).get_columns("timers")}
+    assert cols == {"id", "created_at", "fire_at", "seconds", "label", "kind", "lang", "status", "done_at", "note"}
+    command.downgrade(cfg, "0026")
+    assert "timers" not in tables() and "route_log" in tables()
+    command.upgrade(cfg, "head")
+    assert "timers" in tables()

@@ -22,6 +22,7 @@ from .jobkit import JOB_RULES, clip, extract_json
 log = logging.getLogger("kairo.timetable")
 
 KEY = "timetable.imported"
+SUMMARY = "School"        # the title of the weekly blocks in the calendar; the lessons are listed in the description
 DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
 HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 MAX_LESSONS = 80
@@ -54,6 +55,20 @@ def clean(lessons) -> list[dict]:
         subject = re.sub(r"[\r\n<>]+", " ", str(l.get("subject") or "Lesson"))
         room = re.sub(r"[\r\n<>]+", " ", str(l.get("room") or "")) or None
         out.append({"day": day, "start": start, "end": end, "subject": clip(subject, 60), "room": clip(room, 30)})
+    return out
+
+
+_LESSON_LINE = re.compile(r"^(\d\d:\d\d)\s*[–-]\s*(\d\d:\d\d)\s+(.+?)(?:\s+\(([^()]+)\))?$")
+
+
+def parse_lessons(description: str | None) -> list[dict]:
+    """The lessons listed in a block's description (the lines blocks() writes: "08:00–08:45 Maths (R12)"), start and end as
+    HH:MM, in the order written. Lines that are not a lesson are left out. The fast path "next lesson" reads them."""
+    out = []
+    for line in (description or "").splitlines():
+        m = _LESSON_LINE.match(line.strip())
+        if m and HHMM.match(m.group(1)) and HHMM.match(m.group(2)) and m.group(2) > m.group(1):
+            out.append({"start": m.group(1), "end": m.group(2), "subject": m.group(3).strip(), "room": m.group(4)})
     return out
 
 
@@ -135,7 +150,7 @@ class Importer:
             end = dt.datetime.combine(first, dt.time.fromisoformat(b["end"]), tzinfo=self.tz)
             if start <= dt.datetime.now(self.tz) and first == today:
                 start, end = start + dt.timedelta(days=7), end + dt.timedelta(days=7)
-            args = {"summary": "School", "description": f"Class {self.school_class}\n{b['text']}",
+            args = {"summary": SUMMARY, "description": f"Class {self.school_class}\n{b['text']}",
                     "start": start.isoformat(), "end": end.isoformat(),
                     "recurrence": [f"RRULE:FREQ=WEEKLY;BYDAY={b['day']};UNTIL={until_utc:%Y%m%dT%H%M%SZ}"],
                     "time_zone": str(self.tz)}

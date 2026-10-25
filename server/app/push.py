@@ -33,6 +33,9 @@ PROACTIVE = {"loops", "coach", "location", "lerndoku"}      # share the daily pi
 TO_BRIEF = {"backup"}                                       # at night: the morning brief shows it instead
 DEDUPE = timedelta(hours=6)
 DEFAULT_MAX = 6
+URGENCIES = ("very-low", "low", "normal", "high")      # RFC 8030 section 5.3
+MAX_TTL_S = 7 * 24 * 3600                              # the push services cap it anyway
+MAX_TAG = 64
 
 
 def _b64url(data: bytes) -> str:
@@ -98,11 +101,24 @@ class Pusher:
             s.commit()
 
     def notify(self, title: str, body: str, url: str = "/", *, source: str = "kairo", ignore_quiet: bool = False,
-               wait: bool = False, now: datetime | None = None) -> str:
-        """Sent, held (quiet hours) or dropped (duplicate, budget, or into the brief). Returns which."""
+               wait: bool = False, now: datetime | None = None, ttl: int | None = None, urgency: str | None = None,
+               tag: str | None = None, report: dict | None = None) -> str:
+        """Sent, held (quiet hours) or dropped (duplicate, budget, or into the brief). Returns which.
+
+        ttl, urgency, tag (G10, timers): how long the push service keeps the push for a phone it cannot reach
+        (pywebpush sends 0 = never), RFC 8030's Urgency ("high" wakes the phone), and a notification tag that is
+        its own: the phone replaces a notification with the same tag, so two timers need two tags. A tag is part
+        of what makes a push "the same push" for the 6 h dedupe. Without them the push is exactly as before.
+
+        report (G10, timers): a dict that is filled with {"tried": devices tried, "delivered": devices whose push service took
+        it, "error": the first failure or None}, once the sending is over (so asking for one waits for it, up to 30 s). A push
+        that no device took is marked "failed" in push_log (with the reason), which also lets the caller try it again: a
+        "sent" row would make the retry "the same push, less than 6 h ago". Without a report nothing changes: the row stays
+        "sent" whatever happens to the sending, as it always was."""
         now = (now or datetime.now(self.profile.tz)).astimezone(self.profile.tz)
         body = (body or "")[:1000]
-        key = hashlib.sha1(f"{source}|{title}|{body}".encode("utf-8")).hexdigest()
+        tag = (tag or "")[:MAX_TAG] or None
+        key = hashlib.sha1(f"{source}|{title}|{body}{'|' + tag if tag else ''}".encode("utf-8")).hexdigest()
         with self._lock, Session(self.engine) as s:
             status, why, after = "sent", "", None
             recent = s.exec(select(PushLog).where(PushLog.key == key).where(PushLog.status.in_(("sent", "held")))
@@ -116,15 +132,19 @@ class Pusher:
                     status, why, after = "held", "quiet hours", self._quiet_end(now)
             elif source in PROACTIVE and self.proactive_today(s, now) >= self.max_per_day():
                 status, why = "dropped", f"daily budget of {self.max_per_day()} proactive pings used"
-            s.add(PushLog(ts=now.astimezone(timezone.utc), source=source, title=title[:200], body=body, url=url, key=key,
-                          status=status, why=why, send_after=after.astimezone(timezone.utc) if after else None))
+            row = PushLog(ts=now.astimezone(timezone.utc), source=source, title=title[:200], body=body, url=url, key=key,
+                          status=status, why=why, send_after=after.astimezone(timezone.utc) if after else None)
+            s.add(row)
             s.commit()
+            log_id = row.id
         if status != "sent":
             log.info("push %s (%s): %r", status, why, title)
             return status
-        worker = threading.Thread(target=self._send_all, args=(title, body, url), daemon=True)
+        worker = threading.Thread(target=self._send_all, args=(title, body, url),
+                                  kwargs={"ttl": ttl, "urgency": urgency, "tag": tag, "report": report,
+                                          "log_id": log_id if report is not None else None}, daemon=True)
         worker.start()
-        if wait:
+        if wait or report is not None:
             worker.join(timeout=30)
         return status
 
@@ -172,21 +192,46 @@ class Pusher:
             worker.join(timeout=30)
         return len(rows)
 
-    def _send_all(self, title: str, body: str, url: str) -> None:
-        payload = json.dumps({"title": title, "body": body[:240], "url": url})
+    def _send_all(self, title: str, body: str, url: str, *, ttl: int | None = None, urgency: str | None = None,
+                  tag: str | None = None, report: dict | None = None, log_id: int | None = None) -> None:
+        data = {"title": title, "body": body[:240], "url": url}
+        if tag:
+            data["tag"] = tag
+        payload = json.dumps(data)
+        extra: dict = {}                                       # only what was asked for: other pushes stay as they were
+        if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0:
+            extra["ttl"] = min(ttl, MAX_TTL_S)
+        if urgency in URGENCIES:
+            extra["headers"] = {"Urgency": urgency}
         claims = {"sub": f"mailto:{self.profile.gmail or 'kairo@localhost'}"}
+        tried, delivered, error = 0, 0, None
         with Session(self.engine) as s:
             for sub in s.exec(select(PushSubscription)).all():
                 if not outbound.push_endpoint_ok(sub.endpoint):
                     log.warning("push skipped: subscription %s is not on a browser push service", sub.id)
                     continue
+                tried += 1
                 info = {"endpoint": sub.endpoint, "keys": json.loads(sub.keys_json)}
                 try:
                     self._send(subscription_info=info, data=payload, vapid_private_key=str(self.pem),
-                               vapid_claims=dict(claims), timeout=10)
+                               vapid_claims=dict(claims), timeout=10, **extra)
+                    delivered += 1
                 except Exception as exc:  # pywebpush raises WebPushException with .response
                     status = getattr(getattr(exc, "response", None), "status_code", None)
                     if status in (404, 410):
                         s.delete(sub)   # the device unsubscribed
                         s.commit()
+                    error = error or f"{status or type(exc).__name__}: {exc}"[:200]
                     log.warning("push failed (%s): %s", status, exc)
+        if report is None:
+            return
+        if tried == 0:
+            error = "no device is subscribed to notifications"
+        report.update(tried=tried, delivered=delivered, error=None if delivered else error)
+        if delivered == 0 and log_id is not None:
+            with Session(self.engine) as s:                  # the log says what happened, and a retry is not "the same push"
+                row = s.get(PushLog, log_id)
+                if row is not None and row.status == "sent":
+                    row.status, row.why = "failed", (error or "")[:500]
+                    s.add(row)
+                    s.commit()

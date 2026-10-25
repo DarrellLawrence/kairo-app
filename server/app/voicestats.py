@@ -3,7 +3,9 @@
 Every turn the voice model answers is counted: "card" (a question it answered by itself, from the card),
 "claude" (it went to ask_kairo) or "talk" (small talk, no question). "Question" is read from the
 transcript (a question mark or a question word), so the split is an estimate; the voice lab measures
-it exactly on fixed questions. Voice lab and Run diagnosis show the last 7 days.
+it exactly on fixed questions. A turn a fast-path rule answered with no model at all (G10: the time, the date,
+a timer, the next lesson ...) is counted as "rule" and left out of the percentages, which are about what the
+voice model was asked. Voice lab and Run diagnosis show the last 7 days.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from .db import SettingKV
 
 KEY = "voice.routes"
 KEEP = 1000
-ROUTES = ("card", "claude", "talk")
+ROUTES = ("card", "claude", "talk", "rule")
 
 
 def _load(s: Session) -> list:

@@ -2,8 +2,11 @@
 self.addEventListener('push', (event) => {
   let data = { title: 'Kairo', body: '', url: '/' }
   try { data = { ...data, ...event.data.json() } } catch (e) { /* plain text push */ }
+  // A push may bring its own tag (a timer does: G10): the phone replaces a notification that has the same tag, and a
+  // timer must not replace another timer. Without one the title is the tag, as before.
+  const tag = typeof data.tag === 'string' && data.tag ? data.tag.slice(0, 64) : data.title
   event.waitUntil(self.registration.showNotification(data.title, {
-    body: data.body, tag: data.title, data: { url: data.url }, icon: '/icon-192.png', badge: '/icon-192.png',
+    body: data.body, tag, data: { url: data.url }, icon: '/icon-192.png', badge: '/icon-192.png',
   }))
 })
 

@@ -475,6 +475,23 @@ class RouteLog(SQLModel, table=True):
     fallback_from: str | None = None       # local: its answer was refused, this is the second decision
 
 
+class Timer(SQLModel, table=True):
+    """G10: a timer or a short reminder the owner set by voice (app/timers.py). The row is the truth: a restart reads the
+    active ones again. The words are the owner's own (label), never model text."""
+
+    __tablename__ = "timers"
+    id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    fire_at: datetime = Field(index=True)
+    seconds: int                           # as the owner asked: "10 minutes" is 600
+    label: str | None = None               # the owner's words ("call Lea"), clipped and cleaned
+    kind: str = "timer"                    # timer / reminder
+    lang: str = "en"                       # the language it was set in: the push is worded in it
+    status: str = Field(default="active", index=True)   # active / fired / cancelled / missed
+    done_at: datetime | None = None
+    note: str | None = None                # why: "ran out while Kairo was off", ...
+
+
 class ChatThread(SQLModel, table=True):
     __tablename__ = "chat_threads"
     id: int | None = Field(default=None, primary_key=True)

@@ -275,6 +275,7 @@ class Unmark:
 @dataclass
 class Turn:
     text: str = ""                      # what Kairo said (markers out)
+    recorded: str = ""                  # G10: a fast path read out other people's words: the neutral note the call keeps instead
     asked: list[str] = field(default_factory=list)
     first_token_ms: int | None = None   # the voice model's first word or tool call
     first_text_ms: int | None = None    # its first spoken word (the holding line counts if it came first)
@@ -284,7 +285,7 @@ class Turn:
     waited: list[str] = field(default_factory=list)   # items Kairo raised while Claude worked
     timings: dict = field(default_factory=dict)
     failed: str | None = None
-    route: str = "talk"                 # card (a question answered on the PC) / claude / talk
+    route: str = "talk"                 # card (a question answered on the PC) / claude / talk / rule (a fast path answered, no model)
     early: bool = False                 # its first round was started at the owner's pause (speculation)
     filled: bool = False                # the holding line was said this turn
     deferred: bool = False              # Claude took longer than a call waits: "I'll get back to you"
@@ -445,6 +446,8 @@ AskStream = Callable[[str, list[str], str, Callable[..., None]], Awaitable[tuple
 
 class Mouth:
     """One call's conversation with the voice model."""
+
+    fast = None     # G10: fastpath.CallRules for this call (main.py sets it); None = every turn goes to the voice model, as before
 
     def __init__(self, model, *, ask: Ask, context: str | dict, items: list[bringup.Item], name: str = "the owner",
                  temperature: float = 0.6, language_mode: str = "auto", max_tool_rounds: int = 2,
@@ -613,8 +616,8 @@ class Mouth:
         owner_text = (owner_text or "").strip()
         if not owner_text or self.prompt_tokens + MAX_ANSWER_TOKENS * 3 >= int(self.context_tokens * 0.8):
             return False                                   # nothing to say, or the turn compacts first
-        if greeting_only(owner_text):
-            return False                                   # the greeting needs no model
+        if greeting_only(owner_text) or self._rule(owner_text, None, execute=False) is not None:
+            return False                                   # the greeting, or a fast path's answer, needs no model
         msgs = self.messages + [{"role": "user", "content": self._content(owner_text)}]
         allowed = self.max_tool_rounds > 0 and not small_talk(owner_text, self._asked_last())
         tools, extra = self._tools(allowed)
@@ -636,6 +639,17 @@ class Mouth:
         self._spec = spec
         self.speculated += 1
         return True
+
+    def _rule(self, owner_text: str, language: str | None, execute: bool = True):
+        """G10: the answer a fast path (fastpath.py) gives to this turn, or None (the voice model answers). execute=False only asks.
+        Never raises: a rule that breaks is no answer."""
+        if self.fast is None:
+            return None
+        try:
+            return self.fast.resolve(owner_text, language=language, mode=self.language_mode, execute=execute)
+        except Exception:
+            log.exception("fast path")
+            return None
 
     def drop_speculation(self) -> None:
         spec, self._spec = self._spec, None
@@ -670,6 +684,8 @@ class Mouth:
         self.messages.append({"role": "user", "content": content})
         self._fresh = False                                  # the card has been given (g3.constant_tools)
         greet = greeting_only(owner_text)                        # "hello": the cached greeting, at once
+        rule = None if greet else self._rule(owner_text, language)   # G10: a fast path's answer (the time, a timer ...): no model
+        greet = greet or rule is not None                        # either way, a line Kairo says itself
         self._real = real_ask(owner_text)                        # only then a bring-up
         chat_only = greet or small_talk(owner_text, self._asked_last())   # hello, thanks, bye: never Claude
         early = self._take_speculation(self.max_tool_rounds > 0 and not chat_only)   # started at the pause
@@ -684,8 +700,9 @@ class Mouth:
             last: dict | None = None                           # the turn's final assistant message
             answer: str | None = None                          # Claude's answer this turn, if any
             if greet:
-                self._line(self.greeting, speaker, result, said, started)
-                last = {"role": "assistant", "content": self.greeting}
+                line = rule.text if rule is not None else self.greeting
+                self._line(line, speaker, result, said, started)
+                last = {"role": "assistant", "content": (rule.record if rule is not None else None) or line}
                 self.messages.append(last)
             rounds = 0
             while not greet:
@@ -763,11 +780,13 @@ class Mouth:
                     self.reported.add(item.id)
                     self.report(item, said_line, reply)
             self._unsent = []
+            result.recorded = (rule.record if rule is not None else None) or ""
             if result.text:
-                self.lines.append(f"Kairo (voice): {result.text}")
-                self.transcript = (self.transcript + [f"Kairo (voice): {result.text}"])[-40:]
-            result.route = "claude" if result.asked else ("card" if QUESTION.search(owner_text or "") and not greet
-                                                          else "talk")
+                kept = result.recorded or result.text                 # a rule that read out someone else's words: not kept as Kairo's
+                self.lines.append(f"Kairo (voice): {kept}")
+                self.transcript = (self.transcript + [f"Kairo (voice): {kept}"])[-40:]
+            result.route = "rule" if rule is not None else (
+                "claude" if result.asked else ("card" if QUESTION.search(owner_text or "") and not greet else "talk"))
         return result
 
     async def _round(self, tools, max_tokens: int, speaker, result: Turn, said: _Said, started: float, lang: str,
