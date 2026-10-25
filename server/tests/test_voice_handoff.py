@@ -273,3 +273,21 @@ def test_g5_the_answer_comes_without_waiting_for_the_cli_summary_and_with_the_sw
     assert quick < 1.6                                                    # (the fake Claude's summary takes 2 s)
     _frames, slow = _call(local, flags=[("g5.flush_at_end", False)])
     assert slow >= 1.9
+
+
+def test_g5_a_call_over_webrtc_cuts_claudes_words_once_and_with_the_switch_off_twice(local, monkeypatch):   # noqa: F811
+    """The whole chain on a real (loopback) WebRTC call: the holding line, Claude's words as they come, cut into pieces."""
+    _needs_pipecat()
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    local.app.state.openers = voicertc.OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
+    assert local.put("/api/flags/g5.stream_verbatim", json={"on": True}).status_code == 200
+    got = {}
+    for value in (False, True):
+        assert local.put("/api/flags/g5.second_piece", json={"on": value}).status_code == 200
+        phone = asyncio.run(_app_call(local, seconds=25.0))
+        got[value] = [e["text"] for e in phone.events if e.get("type") == "say"]
+    for value, pieces in got.items():
+        assert pieces[0] == FILLERS["en"][0] and pieces[1] == "echo:", (value, pieces)       # the holding line, then Claude's first piece
+    assert got[False][2] == "(spoken,"                                                       # the second piece cut again at its first clause
+    assert got[True][2].startswith("(spoken, on a call) Remind me to call the dentist tomorrow")   # whole sentence
+    assert len(got[True]) < len(got[False])
