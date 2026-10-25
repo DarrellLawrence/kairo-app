@@ -9,6 +9,11 @@ Verdicts:
   execute  tier 2 proposal: the backend runs it now (logged, in the digest)
   approve  tier 3-4 proposal: store it as an approval card, run only after the owner approves
   deny     anything else
+
+Voice turns (G13, owner's prompt 0.1): a turn that came by voice carries the speaker check's label, from the
+database and never from the model's input (GateContext.voice). Unless it is owner or unchecked, nothing that
+changes anything runs on that turn: propose_action and every tool above tier 0 are denied, reading stays allowed.
+A label nobody knows counts as not confirmed.
 """
 
 from __future__ import annotations
@@ -30,6 +35,12 @@ REQUIRED_MODE = {0: "auto", 1: "auto", 2: "auto", 3: "approve", 4: "approve", 5:
 
 Verdict = Literal["allow", "execute", "approve", "deny"]
 
+# G13: the speaker check's label of a voice turn (app/speaker.py makes it, app/speaker_label.py writes it).
+VOICE_LABELS = ("owner", "unsure", "stranger", "unchecked")
+VOICE_MAY_CHANGE = frozenset({"owner", "unchecked"})   # unchecked: the check is off or has no voiceprint (kairo diag warns)
+VOICE_DENIED = ("This request came by voice and Kairo could not confirm that it was the owner talking, so it changes "
+                "nothing on this turn (reading is fine). Tell the owner to say it again clearly, or to do it in the app.")
+
 
 class GateConfigError(Exception):
     """permissions.yaml is missing, malformed, or would weaken the rules."""
@@ -41,6 +52,13 @@ class GateContext:
     origin: Literal["owner_chat", "job", "voice_note"]
     open_approvals: int
     outbound_last_24h: int
+    voice: str | None = None    # G13: the speaker label of the voice turn this model call belongs to; None: not a voice turn
+
+
+def _voice_blocks(ctx: GateContext) -> bool:
+    """True when this model call is part of a voice turn that was not confirmed as the owner. Only the exact
+    labels owner and unchecked let it change things; anything else (unsure, stranger, a label nobody knows) does not."""
+    return ctx.voice is not None and not (isinstance(ctx.voice, str) and ctx.voice in VOICE_MAY_CHANGE)
 
 
 @dataclass(frozen=True)
@@ -81,6 +99,8 @@ class Gate:
             return _deny("tool input must be an object")
         name = tool_name[len(TOOL_PREFIX):]
         if name == PROPOSE_TOOL:
+            if _voice_blocks(ctx):               # a proposal is always a change (G13)
+                return _deny(VOICE_DENIED)
             return self._decide_proposal(tool_input, ctx)
         action = DIRECT_TOOLS.get(name)
         if action is None or action not in self.actions:
@@ -88,6 +108,8 @@ class Gate:
         tier = self.actions[action]
         if tier > 1:
             return _deny(f"{action} is tier {tier}; it can only be proposed", action, tier)
+        if tier > 0 and _voice_blocks(ctx):      # tier 0 is reading; everything above it changes something (G13)
+            return _deny(VOICE_DENIED, action, tier)
         args = self._validate(action, tool_input)
         if isinstance(args, str):
             return _deny(args, action, tier)

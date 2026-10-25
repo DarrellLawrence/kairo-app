@@ -13,8 +13,12 @@ never grant. The CLI's own allow-list still has to allow the tool.
 
 Environment (set by the backend for each CLI run):
   KAIRO_HOOK_CONFIG_DIR  folder with permissions.yaml
-  KAIRO_HOOK_DB_URL      Kairo's database (kill switch, open cards, limits)
+  KAIRO_HOOK_DB_URL      Kairo's database (kill switch, open cards, limits, and for an owner_chat run the speaker
+                         label of the voice turn it is running: gate_context.read_context(model_turn=True))
   KAIRO_HOOK_ORIGIN      owner_chat | job
+
+The speaker label (G13) never comes from the tool input or the environment: the backend wrote it to the database
+before Claude ran, and nothing the model can call writes there. A label that can't be read blocks like any other error.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ def main() -> int:
         gate = load_gate(Path(config_dir))
         engine = make_engine(db_url)
         try:
-            ctx = read_context(engine, origin)
+            ctx = read_context(engine, origin, model_turn=True)
         finally:
             engine.dispose()
         decision = gate.decide(tool_name, tool_input, ctx)
