@@ -461,6 +461,16 @@ def test_a_tap_with_nothing_said_does_nothing_and_the_call_listens_on(monkeypatc
 # Whisper and the voices are fakes. Every switch (voicertc.Turning, flags g6.*) is tested with both values. They live in
 # this file because CI's two voice jobs list it (a new file would need an edit of ci.yml, which the owner merges by hand).
 # Timings are the sandbox's CPU (a shared 4-core machine), not the PC: the windows are wide on purpose.
+#
+# Defaults (flags.py, pinned by test_flags_g6.py): the two fixes (empty turn, tap) are on; the owner's three decisions (the
+# 3 s Smart Turn wait, the ignore windows, barge-in only on words) and the long-speech cut are off until he switches them on,
+# so Turning() is the call he has with nothing changed. A test of what one of those does says so with _on().
+
+def _on(**changes) -> Turning:
+    """The owner's three turn-taking decisions switched on (what he gets after turning them on in Experiments), then
+    `changes` on top."""
+    return Turning(**{"smart_turn_3s": True, "ignore_windows": True, "transcript_barge_in": True, **changes})
+
 
 # ---------------------------------------------------------------- 6a: a cough over Kairo is not a new question
 
@@ -655,12 +665,14 @@ def _tapped(turning: Turning, *, words_late_s: float = 0.0, tap_late_s: float = 
                            wait=(asked[0][2] - phone.sent[0][0]) if asked and phone.sent else None)
 
 
-def test_a_tap_that_gets_ahead_of_the_words_still_ends_the_turn():
+@pytest.mark.parametrize("turning", [Turning(), _on()], ids=["defaults", "the_three_decisions_on"])
+def test_a_tap_that_gets_ahead_of_the_words_still_ends_the_turn(turning):
     """The flake: under load (load 7 on 4 cores) the tap ended the turn at once in about 3 of 4 runs, and in the rest it
     was thrown away as 'nothing was said' and the answer came 7 s later. Cause: the tap reaches the turn detector while
     Whisper is through (nothing pending) but its transcript has not arrived yet, and the detector took 'no transcript
     yet' for 'no words'. Here the tap is held up 0.3 s and the words 0.8 s on purpose, so it happens every time."""
-    r = _tapped(Turning(tap_lag_fix=True), words_late_s=0.8, tap_late_s=0.3)
+    assert turning.tap_lag_fix                                   # (a default: the fix is on)
+    r = _tapped(turning, words_late_s=0.8, tap_late_s=0.3)
     assert [(text, n) for text, n, _ in r.asked] == [(r.voice.text, 1)], r.phone.events
     assert r.wait < 2.5, "answered right after the tap"
     transcript = next(e for e in r.phone.events if e.get("type") == "transcript")
@@ -884,11 +896,12 @@ KAIRO_SAYS = ["Your next meeting is at three with the design team.", "I added mi
               "Do you want me to move the dentist appointment to Thursday?", "I can't find anything about that in your notes."]
 
 
-def _over_kairo(over_says: str, turning: Turning = Turning(), *, after_s: float = 3.0, clip_s: float = 0.8,
+def _over_kairo(over_says: str, turning: Turning | None = None, *, after_s: float = 3.0, clip_s: float = 0.8,
                 lines=KAIRO_SAYS, seconds: float = 10.0, **call):
     """The owner asks something, Kairo starts a long answer (every line a 3 s tone), and the owner makes a sound over it
     that Whisper writes down as `over_says`. Returns what the call did."""
     _needs_pipecat()
+    turning = _on() if turning is None else turning               # barge-in only on words, unless a test says otherwise
     asked, stopped = [], []
     voice = ScriptedVoice("Remind me to call the dentist tomorrow morning.", over_says)
     voice.tone = _tone(3.0)
@@ -923,6 +936,15 @@ def test_words_over_kairo_stop_it_at_the_transcript_and_are_answered(says):
     assert any(3.5 < t < b for t in r.phone.loud), "...and had been talking until then"
 
 
+def test_the_words_only_start_works_without_the_other_two_switches():
+    """Each switch is its own: barge-in on words alone (no ignore window, no 3 s wait) lets 'Mhm.' go by and obeys 'Stop.'."""
+    alone = Turning(transcript_barge_in=True)
+    mhm = _over_kairo("Mhm.", alone)
+    assert mhm.stopped == [] and "barge_in" not in mhm.kinds, (mhm.stopped, mhm.kinds)
+    stop = _over_kairo("Stop.", alone)
+    assert stop.stopped == [1] and stop.kinds.count("barge_in") == 1, (stop.stopped, stop.kinds)
+
+
 def test_kairos_own_words_coming_back_through_the_microphone_do_not_stop_it():
     """Its echo, written down by Whisper (80 % of the words are in what Kairo just said), is not the owner."""
     r = _over_kairo("meeting is at three with the design team")
@@ -939,8 +961,9 @@ def test_a_cough_over_kairo_neither_stops_it_nor_makes_it_answer_again(monkeypat
     assert r.stopped == [] and [n for _, n in r.asked] == [1] and "barge_in" not in r.kinds
 
 
-def test_with_the_switch_off_any_sound_over_kairo_stops_it_the_old_way_and_the_phone_is_still_told():
-    r = _over_kairo("Mhm.", Turning(transcript_barge_in=False, ignore_windows=False))
+def test_by_default_any_sound_over_kairo_stops_it_the_old_way_and_the_phone_is_still_told():
+    """The switches are off until the owner turns them on (flags.py): a call with nothing changed stops at the VAD's start."""
+    r = _over_kairo("Mhm.", Turning())
     assert r.stopped == [1], (r.stopped, r.kinds)                  # the VAD's start alone, as before
     assert r.kinds.count("barge_in") == 1                          # g7.listen_on_barge_in relies on the PC saying so either way
     assert r.kinds.count("speech") == 2                            # and every stretch of speech told the phone
@@ -949,7 +972,7 @@ def test_with_the_switch_off_any_sound_over_kairo_stops_it_the_old_way_and_the_p
 def test_a_barge_in_is_told_to_the_phone_once_and_only_when_kairos_voice_was_playing():
     r = _over_kairo("Stop.")
     assert r.kinds.count("barge_in") == 1
-    quiet = _over_kairo("Stop.", Turning(), after_s=0.0, lines=[])      # nothing for Kairo to say: the words are just a turn
+    quiet = _over_kairo("Stop.", after_s=0.0, lines=[])      # nothing for Kairo to say: the words are just a turn
     assert "barge_in" not in quiet.kinds and quiet.stopped in ([], [1])
 
 
@@ -966,7 +989,7 @@ def test_a_backchannel_over_kairo_leaves_nothing_behind_that_stops_the_next_real
     voice = ScriptedVoice("Remind me to call the dentist tomorrow morning.", "Mhm.", "No wait, Tuesday.")
     voice.tone = _tone(3.0)
     phone = asyncio.run(_call(_kairo_lines(asked, KAIRO_SAYS), voice=voice, interrupt=stopped.append, speech=track,
-                              wait_for=lambda p: bool(stopped) and len(asked) >= 2, timeout=20))
+                              turning=_on(), wait_for=lambda p: bool(stopped) and len(asked) >= 2, timeout=20))
     kinds = [e.get("type") for e in phone.events]
     assert stopped == [1] and kinds.count("barge_in") == 1, (stopped, kinds)
     assert [t for t, _ in asked] == ["Remind me to call the dentist tomorrow morning.", "No wait, Tuesday."], asked
@@ -999,8 +1022,8 @@ def test_a_long_stretch_of_speech_over_kairo_stops_it_before_the_owner_pauses_wi
     so without the switch Kairo talks on for the whole stretch (the research: speech length + 0.19 s + Whisper). With it, a
     stretch that has gone on for LONG_SPEECH_S (1.0 s) after the VAD heard it start stops Kairo: the delay is capped at about
     1.3 s. Whisper writes the stretch down as 'Mhm.' here, so only the switch can have stopped Kairo."""
-    on = _over_kairo("Mhm.", Turning(long_speech_cut=True), clip_s=2.5)
-    off = _over_kairo("Mhm.", Turning(long_speech_cut=False), clip_s=2.5)
+    on = _over_kairo("Mhm.", _on(long_speech_cut=True), clip_s=2.5)
+    off = _over_kairo("Mhm.", _on(long_speech_cut=False), clip_s=2.5)
     assert off.stopped == [] and "barge_in" not in off.kinds, (off.stopped, off.kinds)
     assert on.stopped == [1] and on.kinds.count("barge_in") == 1, (on.stopped, on.kinds)
     speech_start = 0.5 + 2.54 + 3.0                                  # where the owner's long sound begins on the phone's clock
@@ -1009,9 +1032,9 @@ def test_a_long_stretch_of_speech_over_kairo_stops_it_before_the_owner_pauses_wi
 
 
 def test_the_long_speech_cut_ignores_a_short_sound_and_speech_while_kairo_is_quiet():
-    short = _over_kairo("Mhm.", Turning(long_speech_cut=True), clip_s=0.6)
+    short = _over_kairo("Mhm.", _on(long_speech_cut=True), clip_s=0.6)
     assert short.stopped == [] and "barge_in" not in short.kinds       # 0.6 s is not a talk-over
-    quiet = _over_kairo("Remind me later.", Turning(long_speech_cut=True), after_s=0.0, lines=[], clip_s=2.5)
+    quiet = _over_kairo("Remind me later.", _on(long_speech_cut=True), after_s=0.0, lines=[], clip_s=2.5)
     assert "barge_in" not in quiet.kinds                               # nothing was speaking: just the next turn
 
 

@@ -262,7 +262,8 @@ def test_the_fake_phone_asks_no_stun_server_and_the_loopback_rule_is_put_back():
 
 PLAN = ["q_en_01", "q_en_02", "c_en_02", "bc_en_01", "noise_typing", "bc_long", "os_en_01", "os_en_02", "os_de_01"]
 # a backchannel long enough (1.2 s of speech) for the VAD to hear it every time; the manifest's "Mm-hmm." is too short to be sure.
-# Every word of it is backchannel (app/bargein.py): the PC writes it down and does not stop Kairo for it (g6.transcript_barge_in).
+# Every word of it is backchannel (app/bargein.py): with the owner's words-only start (g6.transcript_barge_in, off by default)
+# the PC writes it down and does not stop Kairo for it; the default start (the VAD's) stops Kairo for any speech.
 EXTRA = [bc.Clip("bc_long", "en", "Okay yes I see yeah right okay sure.", "backchannel")]
 DEAF = "c_en_02"                    # the stand-in Whisper hears nothing in this one: a missed turn
 STT, LLM, TTS = 0.12, 0.15, 0.08
@@ -333,30 +334,31 @@ def test_false_interrupts_match_what_the_pipeline_really_did(mock_run):
         cut = any(mid and start - 0.05 <= t <= end + 2.0 for t, _, mid in world.interrupts)
         assert r["interrupted"] is cut, (r, world.interrupts, windows)
     assert next(r for r in probes if r["clip"] == "noise_typing")["interrupted"] is False        # a noise isn't speech
-    # a long backchannel is speech to the VAD and is written down, but it is not an interruption: the answer goes on (G6)
-    assert next(r for r in probes if r["clip"] == "bc_long")["interrupted"] is False
+    assert next(r for r in probes if r["clip"] == "bc_long")["interrupted"] is True              # speech is, and cuts the answer
     expected = sum(r["interrupted"] for r in probes) / 3
-    assert expected == 0.0 and bv.summarize(records)["false_interrupt_rate"] == pytest.approx(expected, abs=1e-4)
+    assert bv.summarize(records)["false_interrupt_rate"] == pytest.approx(expected, abs=1e-4)
 
 
 @pytest.fixture(scope="module")
-def old_start_run():
-    """The same long backchannel against the old start (g6.transcript_barge_in and g6.ignore_windows off)."""
+def words_start_run():
+    """The same long backchannel against the owner's three turn-taking decisions switched on (g6.transcript_barge_in,
+    g6.ignore_windows, g6.smart_turn_3s: all off by default)."""
     _needs_pipecat()
-    old = voicertc.Turning(transcript_barge_in=False, ignore_windows=False)
+    on = voicertc.Turning(smart_turn_3s=True, ignore_windows=True, transcript_barge_in=True)
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(voicertc, "Turning", lambda: old)               # build_call() without the argument: this call's switches
+        mp.setattr(voicertc, "Turning", lambda: on)                # build_call() without the argument: this call's switches
         return _bench(["q_en_01", "bc_long"])
 
 
-def test_the_old_start_cuts_the_answer_for_the_same_backchannel_and_the_bench_sees_it(old_start_run):
-    """Proves the probe above is heard by the VAD (it is the same clip) and that the bench can register a cut at all: with
-    the old start any speech over Kairo stops it."""
-    records, world, _, windows = old_start_run
+def test_with_the_words_only_start_a_long_backchannel_does_not_cut_the_answer_and_the_bench_sees_it(words_start_run):
+    """A long backchannel is speech to the VAD (the default run above: the same clip cuts the answer) and is written
+    down, but it is not an interruption with g6.transcript_barge_in on: the answer goes on, and the bench reports no cut."""
+    records, world, _, windows = words_start_run
     probe = next(r for r in records if r["clip"] == "bc_long")
     start, end = next((s, e) for clip_id, s, e in windows if clip_id == "bc_long")
-    assert probe["interrupted"] is True, (probe, world.interrupts, windows)
-    assert any(mid and start - 0.05 <= t <= end + 2.0 for t, _, mid in world.interrupts)
+    assert probe["interrupted"] is False, (probe, world.interrupts, windows)
+    assert not any(mid and start - 0.05 <= t <= end + 2.0 for t, _, mid in world.interrupts)
+    assert bv.summarize(records)["false_interrupt_rate"] == 0.0
 
 
 def test_the_speaker_check_verdicts_are_read_from_the_data_channel(mock_run):

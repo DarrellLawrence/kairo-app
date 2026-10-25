@@ -442,8 +442,8 @@ def machine_info(card: dict | None = None, *, local: bool = True) -> dict:
             "ram_gb": _ram_gb() if local else None, "cpu": _cpu_name() if local else "another machine (not reported)"}
 
 
-TURN_ANALYZER = (f"smart-turn-v3 (pipecat), waits at most {SMART_TURN_SILENCE_S} s when it is unsure "
-                 f"({SMART_TURN_SILENCE_OLD_S} s with g6.smart_turn_3s off)")
+TURN_ANALYZER = (f"smart-turn-v3 (pipecat), waits at most {SMART_TURN_SILENCE_OLD_S} s when it is unsure "
+                 f"({SMART_TURN_SILENCE_S} s with g6.smart_turn_3s on)")
 
 
 def config_info(devices: dict | None) -> dict:

@@ -12,16 +12,18 @@ from app import flags, voicertc
 from app.db import make_engine
 from app.main import create_app
 
-# name -> default. On: the plain fixes of measured problems (empty turn, tap), and the three turn-taking changes the owner
-# asked for in his master prompt (transcript barge-in, ignore windows, Smart Turn 3 s; docs/CHANGELOG.md has their costs in
-# plain words). Off: the long-speech cut, which stops Kairo with no words at all and was not asked for.
+# name -> default. On: only the plain fixes of measured problems (empty turn, tap). Off: everything that is the owner's
+# decision (voice plan section 16 items 1 and 2, gate "owner OK for 6b (both costs); P9, P10") until he switches it on in
+# More -> System -> Experiments: the 3 s Smart Turn wait, the ignore windows, the words-only barge-in, and the long-speech
+# cut. KICKOFF and ACCEPTANCE row 4 say "talking over Kairo stops it at once"; the words-only barge-in breaks that on
+# purpose, so it is not shipped on without his say-so. docs/CHANGELOG.md has their costs in plain words.
 G6 = {
     "g6.empty_turn_fix": True,
     "g6.tap_lag_fix": True,
-    "g6.smart_turn_3s": True,
-    "g6.ignore_windows": True,
-    "g6.transcript_barge_in": True,
-    "g6.long_speech_cut": False,         # beyond the three the owner asked for, and cuts Kairo off with no words at all
+    "g6.smart_turn_3s": False,
+    "g6.ignore_windows": False,
+    "g6.transcript_barge_in": False,
+    "g6.long_speech_cut": False,
 }
 
 
