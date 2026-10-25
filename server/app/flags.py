@@ -84,7 +84,8 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                   "(about 150 words) about one and a half seconds sooner (estimates from timelines measured "
                                   "on a test machine, not this PC). Off until you decide: it replaces your choice of "
                                   "2026-10-16 that the voice model says the answer. A hang-up request from Claude still "
-                                  "hangs up. Takes effect at the next call."),
+                                  "hangs up. If Claude breaks off half way, the voice model tells you so. "
+                                  "Takes effect at the next call."),
     "g5.second_piece": (True, "Kairo's voice cuts an answer into pieces so it can start before the answer is written. The first piece "
                               "is cut after five words (or the first comma), as you asked. Until now the second piece was cut "
                               "after five words as well, in the middle of a sentence, so every answer was cut twice there; "
