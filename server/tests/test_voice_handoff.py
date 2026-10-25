@@ -14,8 +14,10 @@ from sqlmodel import Session
 from app import chat, conversation, realtime, voicertc
 from app.db import SettingKV, make_engine
 from app.main import create_app
-from tests.test_voice_local import local  # noqa: F401  (the app with the fake voice model and Claude)
+from app.voicemouth import FILLERS
+from tests.test_voice_local import local, requests_seen  # noqa: F401  (the app with the fake voice model and Claude)
 from tests.test_voice_rtc import _app_call, _needs_pipecat
+from tests.test_voicelink import frames_until, utter
 
 TAIL_S = 1.2
 
@@ -145,6 +147,22 @@ def test_g5_ask_stream_gives_the_claude_session_back_to_the_conversation_like_as
     assert first                                                              # the next turn goes on in the same Claude session
 
 
+def test_g5_the_session_is_the_conversations_before_the_cli_has_even_finished(migrated, tail):
+    """The turn goes on at the end of Claude's text, up to two seconds before the result: a second question right
+    away must find the same Claude session, not start a new one."""
+    seen = []
+
+    def sink(kind, value=None):
+        if kind == "end":
+            with Session(make_engine(migrated.db_url)) as s:
+                seen.append(chat.main_thread(s, brain_name="claude_cli").brain_session_id)
+    with TestClient(create_app(migrated)) as c:
+        asyncio.run(c.app.state.mouth_ask_stream("what is on today?", ["Owner: what is on today?"], "", sink))
+        with Session(make_engine(migrated.db_url)) as s:
+            final = chat.main_thread(s, brain_name="claude_cli").brain_session_id
+    assert seen and seen[0] and seen[0] == final
+
+
 def test_g5_ask_stream_says_why_when_kairo_is_updating_or_paused_and_asks_nothing(migrated):
     with TestClient(create_app(migrated)) as c:
         c.app.state.maintenance_until = time.time() + 60
@@ -204,3 +222,54 @@ def test_g5_a_call_through_the_app_gives_its_speaker_the_switch_it_started_with(
         seen.clear()
         asyncio.run(_app_call(local, seconds=20.0))
         assert seen and set(seen) == {value}, (value, seen)
+
+
+# ---------------------------------------------------------------- a call on the old line, end to end (fake voice model, fake Claude)
+
+def _call(local_app, *, flags=()):
+    """One data question on /ws/voice. (the frames, seconds from the end of the owner's speech to the done frame)."""
+    for name, on in flags:
+        assert local_app.put(f"/api/flags/{name}", json={"on": on}).status_code == 200
+    local_app.voice.text = "Remind me to call the dentist tomorrow"
+    with local_app.websocket_connect("/ws/voice") as ws:
+        started = time.monotonic()
+        utter(ws)
+        frames = frames_until(ws, last="done", limit=400)
+        took = time.monotonic() - started
+    return frames, took
+
+
+def _words(frames) -> str:
+    return "".join(f["text"] for f in frames if isinstance(f, dict) and f["type"] == "delta")
+
+
+def _model_requests(local_app) -> int:
+    return len([r for r in requests_seen(local_app) if r.get("messages")])
+
+
+def test_g5_with_the_streaming_switch_claudes_words_are_spoken_as_they_are_and_the_voice_model_is_asked_once(local):   # noqa: F811
+    frames, _took = _call(local, flags=[("g5.stream_verbatim", True)])
+    words = _words(frames)
+    assert words.startswith(FILLERS["en"][0] + " echo: (spoken, on a call) Remind me to call the dentist tomorrow")
+    done = next(f for f in frames if isinstance(f, dict) and f["type"] == "done")
+    assert done["text"].startswith(words.strip()[:40]) and done["server"]["tool_ms"] is not None
+    assert done["server"]["streamed"] is True and done["server"]["claude_first_ms"] >= 0
+    assert _model_requests(local) == 2     # the call's start (the prompt read once into the cache) and the call to ask_kairo: no second round
+
+
+def test_g5_without_it_the_voice_model_says_the_answer_in_its_own_words_after_claude_is_done(local):   # noqa: F811
+    frames, _took = _call(local)
+    assert _words(frames).startswith(FILLERS["en"][0])
+    assert _model_requests(local) == 3     # the call's start, the call to ask_kairo, then the answer in its own words
+
+
+@pytest.fixture
+def long_tail(monkeypatch):
+    monkeypatch.setenv("KAIRO_HOOK_FAKE_TAIL_S", "2.0")      # (before the app starts: the CLI is spawned with this environment)
+
+
+def test_g5_the_answer_comes_without_waiting_for_the_cli_summary_and_with_the_switch_off_it_waits(long_tail, local):   # noqa: F811
+    _frames, quick = _call(local)                                         # g5.flush_at_end is on by default
+    assert quick < 1.6                                                    # (the fake Claude's summary takes 2 s)
+    _frames, slow = _call(local, flags=[("g5.flush_at_end", False)])
+    assert slow >= 1.9

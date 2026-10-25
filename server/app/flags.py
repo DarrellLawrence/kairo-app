@@ -88,8 +88,11 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g5.second_piece": (True, "Kairo's voice cuts an answer into pieces so it can start before the answer is written. The first piece "
                               "is cut after five words (or the first comma), as you asked. Until now the second piece was cut "
                               "after five words as well, in the middle of a sentence, so every answer was cut twice there; "
-                              "now only once. On the old line, the holding line no longer jumps in front of words that "
-                              "were already written. Takes effect at the next call."),
+                              "now only once. The second piece is now a whole sentence, which a voice running on the processor "
+                              "(not the graphics card) can need a moment for: on a test machine's processor that left a pause "
+                              "of half a second to a second in 3 of 8 answers; turn this off if you hear it. On the old line, "
+                              "the holding line no longer jumps in front of words that were already written. Takes effect at "
+                              "the next call."),
     "g5.flush_at_end": (True, "Kairo goes on as soon as Claude's text is finished, not when the Claude program has also finished "
                               "writing its own summary of the turn (about 2 seconds later, measured). The voice model gets "
                               "the answer then, and with the streaming switch the last words are spoken at once instead of "

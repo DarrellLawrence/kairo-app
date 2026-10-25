@@ -1648,7 +1648,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def place() -> str | None:
             with session_for(engine) as s2:
                 return location.current_place(s2)
-        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, context=card.peek(), items=items, name=profile.name,
+        mouth = Mouth(app.state.voice_llm, ask=_mouth_ask, ask_stream=_mouth_ask_stream, context=card.peek(), items=items,
+                      name=profile.name,
                       temperature=float(spec.get("temperature", 0.6)), language_mode=language,
                       clock=lambda: dt.datetime.now(profile.tz), place=place,
                       context_tokens=int(spec.get("context") or 8192), report=_report_live, late=_late_answer,
@@ -1842,6 +1843,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 speaker.say(said)
                 sent.append(loop_.create_task(line.send({"type": "delta", "text": said + " ", "turn": number})))
 
+            def flush(self) -> None:                    # G5: Claude's text is complete: the last words go to the voice now
+                getattr(speaker, "flush", lambda: None)()
+
         _rt_said("owner", text)
         line.writing = number
         task = loop_.create_task(mouth.turn(text, language, Tap()))
@@ -1879,7 +1883,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          "server": {"stt_ms": stt_ms, "queue_ms": 0,
                                     "llm_ms": result.first_token_ms if result else None,
                                     "first_words_ms": result.first_text_ms if result else None,
-                                    "tool_ms": result.tool_ms if result else None},
+                                    "tool_ms": result.tool_ms if result else None,
+                                    "claude_first_ms": result.claude_first_ms if result else None,   # G5: Claude's first spoken piece
+                                    "streamed": bool(result and result.streamed)},
                          "early": bool(result and result.early)})
         if interrupted:
             speaker.stop()
@@ -3555,8 +3561,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 s.commit()
             return None, thread.brain_session_id, thread.id
 
-    def _rt_finish(tid: int, text: str, error, new_sid: str | None) -> tuple[str, bool]:
-        """What ask_kairo gives back: the conversation keeps Claude's session; the answer as a call may say it."""
+    def _rt_remember(tid: int, new_sid: str | None) -> None:
+        """The conversation keeps Claude's session, so the next question resumes it."""
         if new_sid:
             with session_for(engine) as s:
                 thread = s.get(ChatThread, tid)
@@ -3564,6 +3570,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     thread.brain_session_id = new_sid
                     s.add(thread)
                     s.commit()
+
+    def _rt_finish(tid: int, text: str, error, new_sid: str | None) -> tuple[str, bool]:
+        """What ask_kairo gives back: the conversation keeps Claude's session; the answer as a call may say it."""
+        _rt_remember(tid, new_sid)
         fold_memory_soon()
         if error is not None:
             return f"I couldn't get that done: {clip_text(error.text, 160)}", False
@@ -3593,7 +3603,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         text, error, new_sid = await _call_turn(
             request, lines, session_id=sid, thread_id=tid, purpose="call", model=model, own=own,
             on_text=lambda words: sink("text", words), on_escalate=lambda info: sink("escalated", info),
-            on_end=lambda full: sink("end", realtime.spoken_answer(full)))
+            on_end=lambda full: sink("end", realtime.spoken_answer(full)),
+            on_session=lambda new: _rt_remember(tid, new))     # (the turn goes on before the result: the next ask needs it now)
         return _rt_finish(tid, text, error, new_sid)
     app.state.rt_ask_stream = _rt_ask_stream
 
@@ -3606,14 +3617,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 log.exception("voice: a hand-off callback")
 
     async def _call_turn(request: str, lines: list[str], *, session_id, thread_id, purpose: str,
-                         model: str | None = None, own: str | None = None, on_text=None, on_escalate=None, on_end=None):
+                         model: str | None = None, own: str | None = None, on_text=None, on_escalate=None, on_end=None,
+                         on_session=None):
         """ask_kairo's turn for Claude, as on any call: the call's wrapper (realtime.brain_prompt), routed on the
         owner's request (own), never on the wrapper's wording (owner's rule 2026-10-19), in the language of the
         owner's words on the call. (Claude's whole answer, the error or None, the brain session.) Acceptance
         test 43 runs it too.
         G5, while Claude works: on_text(delta) for every piece of its words; on_escalate({"escalated": model, "why": ...})
         when Haiku hands the turn to the stronger model (nothing of Haiku's was said); on_end(the final message's text)
-        when Claude's text is complete, before the CLI has finished its own summary and sent the result."""
+        when Claude's text is complete, before the CLI has finished its own summary and sent the result;
+        on_session(id) as soon as the Claude session is known."""
         said = " ".join(ln.removeprefix("Owner: ") for ln in lines if ln.startswith("Owner: "))
         parts: list[str] = []
         last_message: list[str] = []       # the words since the last tool call: the answer proper
@@ -3623,6 +3636,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                       language=conversation.message_language(said) if said else None):
             if event.kind is EventKind.session and event.session_id:
                 new_sid = event.session_id
+                _tell(on_session, event.session_id)
             elif event.kind is EventKind.text:
                 parts.append(event.text)
                 last_message.append(event.text)
