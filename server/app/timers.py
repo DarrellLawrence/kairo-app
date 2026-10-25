@@ -9,7 +9,7 @@ sleeps wakes it.
 
 When a timer is up, a push goes to the owner's devices through the one notification boss (push.Pusher.notify):
 - quiet hours do not hold it back: the owner asked for exactly this moment;
-- it has a time-to-live, so the push service keeps it for a phone it cannot reach right now (pywebpush's own 0 means
+- it has a time-to-live, so the push service keeps it for a phone it cannot reach right now (the push library's own 0 means
   "never"), and urgency high, so the phone wakes for it (RFC 8030);
 - its notification tag is its own (timer-<id>), so two timers that ring together are two notifications and the 6 h
   "same push" rule cannot swallow the second;
