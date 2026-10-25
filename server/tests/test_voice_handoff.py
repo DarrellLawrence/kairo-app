@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from app import chat, conversation, realtime, voicertc
+from app.brain.base import BrainEvent, BrainStatus, EventKind
 from app.db import SettingKV, make_engine
 from app.main import create_app
 from app.voicemouth import FILLERS
@@ -82,6 +83,52 @@ def test_g5_a_callback_that_breaks_never_breaks_the_turn(migrated):
     with TestClient(create_app(migrated)) as c:
         text, error, _sid = call_turn(c.app, on_text=boom, on_end=boom, on_escalate=boom)
     assert error is None and text.startswith("echo:")
+
+
+class ScriptedBrain:
+    """A brain that plays the given events; "TAIL" waits `tail` seconds (the CLI's summary) before the next one."""
+    name = "claude_cli"
+
+    def __init__(self, events, tail=0.8):
+        self.events, self.tail = events, tail
+
+    def run(self, prompt, *, session_id=None, system="", tools=(), origin="owner_chat", **kw):
+        for ev in self.events:
+            if ev == "TAIL":
+                time.sleep(self.tail)
+            else:
+                yield ev
+
+    def health(self):
+        return BrainStatus.ok
+
+
+def test_g5_words_the_escalation_filter_still_held_are_released_at_the_end_of_the_text(migrated):
+    """Haiku's first words are held while they could still be the hand-over marker ("[[so" ...). When the text ends
+    and it was no marker, they are said at once, not after the CLI's summary."""
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="[[so"),
+              BrainEvent(EventKind.message_end), "TAIL", BrainEvent(EventKind.result, text="[[so", session_id="S1")]
+    seen = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        started = time.monotonic()
+        text, error, _sid = call_turn(c.app, on_text=lambda d: seen.append(("text", d, time.monotonic() - started)),
+                                      on_end=lambda full: seen.append(("end", full, time.monotonic() - started)))
+        done = time.monotonic() - started
+    assert error is None and text == "[[so"
+    assert [s[:2] for s in seen] == [("text", "[[so"), ("end", "[[so")]
+    assert done - seen[0][2] >= 0.6                      # the words came before the 0.8 s tail, not after it
+
+
+def test_g5_a_tool_turns_answer_is_the_words_after_its_last_tool_call(migrated):
+    events = [BrainEvent(EventKind.session, session_id="S1"), BrainEvent(EventKind.text, text="Checking. "),
+              BrainEvent(EventKind.tool_use, data={"name": "calendar_list"}), BrainEvent(EventKind.text, text="You have school at 8."),
+              BrainEvent(EventKind.message_end), BrainEvent(EventKind.result, text="You have school at 8.", session_id="S1")]
+    ended = []
+    with TestClient(create_app(migrated)) as c:
+        c.app.state.runner.brain = ScriptedBrain(events)
+        text, error, _sid = call_turn(c.app, on_end=ended.append)
+    assert error is None and text == "You have school at 8." and ended == ["You have school at 8."]
 
 
 # ---------------------------------------------------------------- conversation_parts, once
