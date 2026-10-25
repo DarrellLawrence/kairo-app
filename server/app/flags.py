@@ -88,6 +88,12 @@ FLAGS: dict[str, tuple[bool, str]] = {
                              "the answer came about 7 seconds late (measured: 1 tap in 4 with the PC at load 7 on 4 cores). Now the "
                              "tap waits for them, and the speech ends where you tapped, not where the PC had got to: the last words "
                              "before the tap are no longer lost. Takes effect at the next call."),
+    "g6.smart_turn_3s": (True, "When the turn detector thinks you have not finished (a sentence that trails off) and you go quiet, Kairo "
+                               "waits up to 3.0 seconds before it answers, instead of 0.5. Sentences it thinks are finished are "
+                               "answered as fast as before. The price, measured in the research: the detector wrongly calls about 4 "
+                               "of 100 finished sentences unfinished, and those answers come 2.5 seconds later, so the average turn is "
+                               "0.1 second slower and about 1 call in 3 has at least one such wait in 10 turns. Your own rate is "
+                               "measured on the PC (P9). Off: 0.5 seconds, as before. Takes effect at the next call."),
 
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "

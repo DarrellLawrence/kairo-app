@@ -451,7 +451,7 @@ def test_a_tap_with_nothing_said_does_nothing_and_the_call_listens_on(monkeypatc
     assert voice.heard == 1 and [(text, n) for text, n, _ in asked] == [(voice.text, 1)], phone.events
     assert asked[0][2] - phone.mic.ends[0] > 0.1             # ended by the pause after the speech, not by the tap
     transcript = next(e for e in phone.events if e.get("type") == "transcript")
-    assert "ended" not in transcript
+    assert transcript.get("ended") != "tap"                   # (g6: "silence" if Smart Turn said not done and the quiet ended it)
 
 
 # ---------------------------------------------------------------- through the app (/api/rtc/offer)

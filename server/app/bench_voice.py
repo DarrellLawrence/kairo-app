@@ -51,7 +51,7 @@ from .bench_corpus import ANSWERED, PROBES
 from .latency import pct
 from .settings import REPO_ROOT, get_settings
 from .voice import KOKORO_MODEL, KOKORO_VOICE, PIPER_DE
-from .voicertc import TURN_MAX_SILENCE_S, VAD_STOP_S
+from .voicertc import SMART_TURN_SILENCE_OLD_S, SMART_TURN_SILENCE_S, VAD_STOP_S
 
 SCHEMA = 1
 TARGET_P95_MS = 1000
@@ -442,7 +442,8 @@ def machine_info(card: dict | None = None, *, local: bool = True) -> dict:
             "ram_gb": _ram_gb() if local else None, "cpu": _cpu_name() if local else "another machine (not reported)"}
 
 
-TURN_ANALYZER = f"smart-turn-v3 (pipecat), pause at most {TURN_MAX_SILENCE_S} s"
+TURN_ANALYZER = (f"smart-turn-v3 (pipecat), waits at most {SMART_TURN_SILENCE_S} s when it is unsure "
+                 f"({SMART_TURN_SILENCE_OLD_S} s with g6.smart_turn_3s off)")
 
 
 def config_info(devices: dict | None) -> dict:

@@ -8,6 +8,7 @@ Timings are the sandbox's CPU (a shared 4-core machine), not the PC: the windows
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 
@@ -241,3 +242,85 @@ def test_a_tap_keeps_the_words_said_before_it_when_the_vad_is_behind():
     assert on.voice.lengths[0] >= 2.3, (on.voice.lengths, off.voice.lengths)       # 0.5 s to 3.0 s, minus the VAD's start
     assert on.voice.lengths[0] > off.voice.lengths[0] + 0.4, (on.voice.lengths, off.voice.lengths)
     assert on.wait < 5.0, on.wait                                  # bounded: the VAD catches up, then the turn ends
+
+
+# ---------------------------------------------------------------- Smart Turn waits up to 3 s (g6.smart_turn_3s)
+
+def _smart_turn_says_not_done(mp):
+    """The real Smart Turn model says 'not finished' about whatever it hears (a thought that trails off)."""
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    mp.setattr(LocalSmartTurnAnalyzerV3, "_predict_endpoint", lambda self, audio: {"prediction": 0, "probability": 0.2})
+
+
+class _Stamped:
+    """Log lines kairo.voicertc wrote, with the time each was written."""
+
+    def __init__(self):
+        self.rows: list[tuple[float, str]] = []
+        outer = self
+
+        class H(logging.Handler):
+            def emit(self, record):
+                outer.rows.append((time.monotonic(), record.getMessage()))
+        self.handler = H(level=logging.INFO)
+        self.log = logging.getLogger("kairo.voicertc")
+
+    def __enter__(self):
+        self.old = self.log.level
+        self.log.setLevel(logging.INFO)
+        self.log.addHandler(self.handler)
+        return self
+
+    def __exit__(self, *exc):
+        self.log.removeHandler(self.handler)
+        self.log.setLevel(self.old)
+
+
+def _unfinished_thought(turning: Turning, *, silence_s: float = 2.0, watchdog_s: float = 2.0):
+    """The owner says a sentence the turn detector thinks is not finished and then says nothing more. Returns when the
+    answer was asked, counted from the end of the speech (the shortened constants stand for 3.0 s)."""
+    _needs_pipecat()
+    asked = []
+
+    async def answer(text, language, number, speaker):
+        asked.append(time.monotonic())
+        speaker.finish("Okay.")
+        return {"route": "talk"}
+
+    with pytest.MonkeyPatch.context() as mp:
+        _smart_turn_says_not_done(mp)
+        mp.setattr(voicertc, "SMART_TURN_SILENCE_S", silence_s)
+        mp.setattr(voicertc, "TURN_STOP_TIMEOUT_S", watchdog_s)
+        phone = asyncio.run(_call(answer, turning=turning, wait_for=lambda p: bool(asked), timeout=20))
+    assert asked, phone.events
+    transcript = next(e for e in phone.events if e.get("type") == "transcript")
+    return asked[0] - phone.mic.ends[0], transcript
+
+
+def test_a_thought_that_trails_off_waits_the_long_pause_when_the_switch_is_on():
+    """Smart Turn says 'not done', the owner stays quiet: the turn ends after SMART_TURN_SILENCE_S (3.0 s; shortened to
+    2.0 s here), counted from the VAD's stop, not after the old 0.5 s. Cost in the research: +2.5 s on the 3.8 % of
+    finished turns Smart Turn takes for unfinished, +0.096 s on the mean turn."""
+    on_wait, on_event = _unfinished_thought(Turning(smart_turn_3s=True))
+    off_wait, off_event = _unfinished_thought(Turning(smart_turn_3s=False))
+    assert 2.0 < on_wait < 3.6, (on_wait, off_wait)                       # 0.2 s VAD + 2.0 s + the answer's start
+    assert 0.4 < off_wait < 1.6, (on_wait, off_wait)                      # the old 0.5 s
+    assert on_event.get("ended") == "silence" and off_event.get("ended") == "silence"   # no tap, no watchdog: the quiet ended it
+
+
+def test_a_turn_with_no_words_ends_at_the_watchdog_and_the_switch_picks_which():
+    """A sound Whisper writes nothing for opens a turn nothing can end except the watchdog: 3.0 s with the switch on
+    (Pipecat's own 5.0 s off). The call says so in its log."""
+    _needs_pipecat()
+    ends = {}
+    for on in (True, False):
+        voice = ScriptedVoice("")
+        with _Stamped() as seen, pytest.MonkeyPatch.context() as mp:
+            mp.setattr(voicertc, "TURN_STOP_TIMEOUT_S", 1.0)
+            mp.setattr(voicertc, "TURN_STOP_TIMEOUT_OLD_S", 2.5)
+            phone = asyncio.run(_call(lambda *a: None, voice=voice, turning=Turning(smart_turn_3s=on),
+                                      wait_for=_after(8.0), timeout=14))
+        hits = [t for t, line in seen.rows if "watchdog" in line]
+        assert hits, [line for _, line in seen.rows]
+        ends[on] = hits[0] - phone.mic.ends[0]
+    assert ends[False] - ends[True] > 1.0, ends                           # the switch decides how long the watchdog waits

@@ -17,6 +17,7 @@ from app.main import create_app
 G6 = {
     "g6.empty_turn_fix": True,
     "g6.tap_lag_fix": True,
+    "g6.smart_turn_3s": True,
 }
 
 
