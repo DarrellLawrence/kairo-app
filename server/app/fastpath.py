@@ -15,8 +15,9 @@ A wrong rule answer is worse than a slow one, so a rule only answers when it is 
 
 A rule's answer is a fixed template with numbers from the clock or data from the owner's own calendar, timetable and
 connection. Titles from the calendar can come from other people (invites): they are cleaned to one plain line and
-only read aloud, as the Today card does; nothing in them is ever run. Nothing here reaches another person, calls the
-network or asks the model.
+read aloud, but never kept as Kairo's own words: an Answer from such data carries a `record`, a neutral note that the
+call's history, the lines for Claude and the chat keep instead (the Today card wraps the same text as untrusted data);
+nothing in them is ever run. Nothing here reaches another person, calls the network or asks the model.
 
 Used from voicemouth.Mouth.turn() (a rule's answer is a line Kairo says, like the greeting, with no model round) and
 read once per call: `FastPaths.for_call()` reads the three switches (g10.fast_paths, g10.fast_agenda, g10.timers).
