@@ -246,7 +246,10 @@ _STOP_Q = {"my", "the", "that", "this", "a", "an", "mein", "meinen", "meinem", "
            "diesen", "diesem", "diese", "einen", "ein", "eine"}
 
 
-def _query(kind: str, m: re.Match, lang: str) -> tuple[str, dict]:
+MAX_NAME_WORDS = 4          # "cancel the pasta timer": a name is a few words, not a sentence
+
+
+def _query(kind: str, m: re.Match, lang: str) -> tuple[str, dict] | None:
     if kind != "timer_cancel" and kind != "timer_left":
         return kind, {}
     q = (m.groupdict().get("q2") or m.groupdict().get("q") or "").strip()
@@ -255,6 +258,8 @@ def _query(kind: str, m: re.Match, lang: str) -> tuple[str, dict]:
     if q in ("all", "every", "alle", "alles") or q.startswith(("all ", "alle ")):
         q = ""
     q = " ".join(w for w in q.split() if w not in _STOP_Q)
+    if len(q.split()) > MAX_NAME_WORDS or _COMPOUND.search(q):
+        return None
     if every and not q:
         return kind, {"all": True}
     if not q:
@@ -278,8 +283,10 @@ def parse(core: str, original: str, languages: tuple[str, ...]) -> tuple[str, st
         for kind, rx in _ASK[lang]:
             m = rx.fullmatch(t)
             if m:
-                k, data = _query(kind, m, lang)
-                return k, lang, data
+                got = _query(kind, m, lang)
+                if got is None:
+                    return None
+                return got[0], lang, got[1]
         for kind, rx in _SET[lang]:
             m = rx.fullmatch(t)
             if not m:

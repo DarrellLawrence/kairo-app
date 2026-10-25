@@ -257,3 +257,38 @@ def test_the_runner_rings_a_short_timer_and_wakes_for_one_added_while_it_sleeps(
 def rows_of(engine):
     with Session(engine) as s:
         return list(s.exec(select(Timer).order_by(Timer.id)).all())
+
+
+# ---------------------------------------------------------------- housekeeping
+
+def test_old_finished_timers_are_forgotten_after_a_month_and_waiting_ones_never(rig):
+    a, b, c = rig.add(60, label="old fired"), rig.add(60, label="old cancelled"), rig.add(60, label="recent fired")
+    waiting = rig.add(60 * 60 * 20, label="waiting")
+    rig.cancel([b.id])
+    rig.clock.advance(minutes=2)
+    assert rig.fire_due() == 2
+    rig.clock.advance(days=timers_mod.KEEP_DAYS - 1)
+    assert rig.purge() == 0                                                         # none of them is a month old yet
+    rig.clock.advance(days=2)
+    c2 = rig.add(60, label="young")                                                 # set just now: never touched
+    rig.clock.advance(minutes=2)
+    rig.fire_due()
+    assert rig.purge() == 3                                                         # the three old finished ones
+    assert [r.label for r in rows(rig)] == ["waiting", "young"] and rows(rig)[0].id == waiting.id and c2.id == rows(rig)[1].id
+    assert a.id != b.id != c.id
+
+
+def test_the_runner_cleans_up_by_itself_at_most_every_few_hours(rig):
+    def old_row():
+        with Session(rig.engine) as s:
+            s.add(Timer(created_at=rig.clock() - dt.timedelta(days=41), fire_at=rig.clock() - dt.timedelta(days=41), seconds=60,
+                        status="fired", done_at=rig.clock() - dt.timedelta(days=40)))
+            s.commit()
+    rig._tick()                                                                     # the first look cleans (nothing there yet)
+    old_row()
+    rig.clock.advance(hours=1)
+    rig._tick()
+    assert len(rows(rig)) == 1                                                      # it cleaned an hour ago: not again yet
+    rig.clock.advance(hours=timers_mod.PURGE_EVERY_H)
+    rig._tick()
+    assert rows(rig) == []

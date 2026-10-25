@@ -104,6 +104,14 @@ def test_the_politeness_and_the_name_are_left_out_but_nothing_else():
     assert norm("  What   day IS it today?!  ") == "what day is it today"
 
 
+def test_a_huge_transcript_is_not_a_quick_question_and_costs_nothing():
+    import time
+    for text in ("what time is it " * 2000, "set a timer for ten minutes " + "word " * 5000, "x" * 100_000, "timer " * 3000):
+        t0 = time.perf_counter()
+        assert match(text) is None
+        assert time.perf_counter() - t0 < 0.05, text[:20]
+
+
 def test_matching_is_fast_enough_to_run_on_every_turn():
     import time
     phrases = TIME_EN + TIME_DE + DATE_EN + DATE_DE + NOT_RULE_EN + NOT_RULE_DE
@@ -217,3 +225,21 @@ def test_a_call_keeps_the_switches_it_started_with(migrated):
     with Session(engine) as s:
         flags.set_flag(s, "g10.fast_paths", False)
     assert rules.resolve("what time is it") is not None and fp.for_call().resolve("what time is it") is None
+
+
+def test_random_word_salad_never_raises_and_never_takes_long():
+    """5,000 random strings of the words the rules use (a fixed seed): no error, and none takes more than a tenth of a second."""
+    import random
+    import time
+    vocab = ("set a an the timer timers for of on minutes minute hours hour seconds ten five 10 5 1.5 and half quarter remind me in to about "
+             "cancel stop what time is it day date my next train bus lesson class appointment when does leave Lea nudeln stell einen Timer "
+             "auf Minuten Stunde eine halbe erinner mich an die Wäsche wann fährt der nächste Zug Termin wie spät ist es kairo please bitte "
+             "can you tell me how long left much on").split()
+    rnd = random.Random(1)
+    worst = 0.0
+    for _ in range(5000):
+        s = " ".join(rnd.choice(vocab) for _ in range(rnd.randint(1, 20)))
+        t0 = time.perf_counter()
+        match(s)
+        worst = max(worst, time.perf_counter() - t0)
+    assert worst < 0.1, worst

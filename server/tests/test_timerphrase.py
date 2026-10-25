@@ -166,6 +166,13 @@ def test_a_label_may_not_be_a_time_of_day_or_a_pile_of_words():
     assert m is not None and m.data["label"] == "the second batch"
 
 
+def test_a_name_to_cancel_is_a_few_words_not_a_sentence():
+    assert got("cancel the pasta timer") is not None and got("cancel the big green pasta timer") is not None
+    for junk in ("stop and ten Timer", "stop long nudeln appointment of class date Timer", "cancel much and day timers",
+                 "stop der time day class erinner next hours timer", "cancel when a 10 ist eine remind is leave timer"):
+        assert got(junk) is None, junk
+
+
 def test_the_length_is_a_whole_number_of_seconds():
     assert setting("set a timer for 1.5 minutes")[0] == 90
     assert setting("set a timer for 0.5 hours")[0] == 1800

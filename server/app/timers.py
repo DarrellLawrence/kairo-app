@@ -1,4 +1,4 @@
-"""Timers and short reminders the owner sets by voice (fast paths, G10; owner's request 2026-10-24).
+"""Timers and short reminders the owner sets by voice (fast paths, G10; the owner's request in the Phase 1 voice plan).
 
 "Set a timer for ten minutes" is answered by a rule on the PC (fastpath.py), not by a model; this module is what
 makes it ring. Their own runner, not the job scheduler: reloading the scheduler's jobs dropped a one-off job that
@@ -42,6 +42,8 @@ LABEL_MAX = 60
 LATE_NOTE_S = 120       # later than this when it rings: the push says so
 STALE_S = 30 * 60       # later than this: missed, not told
 PUSH_TTL_S = 600        # the push service keeps an undelivered timer push for ten minutes
+KEEP_DAYS = 30          # a finished timer is forgotten after this
+PURGE_EVERY_H = 6
 RETRY_S = 5.0           # a timer that is due but could not be told is tried again after this
 UTC = dt.timezone.utc
 
@@ -134,6 +136,7 @@ class Timers:
                  chunk_s: float = CHUNK_S):
         self.engine, self.notify, self.tz, self.chunk_s = engine, notify, tz, chunk_s
         self.now = now or (lambda: dt.datetime.now(UTC))
+        self._purged_at: dt.datetime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wake: asyncio.Event | None = None
 
@@ -204,14 +207,28 @@ class Timers:
                 s.commit()
         return rang
 
+    def purge(self) -> int:
+        """Forgets timers that finished more than KEEP_DAYS ago (fired, cancelled or missed). Waiting ones are never touched."""
+        cutoff = _utc(self.now()) - dt.timedelta(days=KEEP_DAYS)
+        with session_for(self.engine) as s:
+            old = s.exec(select(Timer).where(Timer.status != "active").where(Timer.done_at < cutoff)).all()
+            for t in old:
+                s.delete(t)
+            s.commit()
+        return len(old)
+
     def next_fire(self) -> dt.datetime | None:
         with session_for(self.engine) as s:
             row = s.exec(select(Timer.fire_at).where(Timer.status == "active").order_by(Timer.fire_at).limit(1)).first()
         return _utc(row) if row is not None else None
 
     def _tick(self) -> float:
-        """Rings what is due, then says how long to sleep."""
+        """Rings what is due, cleans up now and then, then says how long to sleep."""
         self.fire_due()
+        now = _utc(self.now())
+        if self._purged_at is None or now - self._purged_at >= dt.timedelta(hours=PURGE_EVERY_H):
+            self._purged_at = now
+            self.purge()
         nxt = self.next_fire()
         if nxt is None:
             return self.chunk_s

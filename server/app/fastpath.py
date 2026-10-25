@@ -1,4 +1,4 @@
-"""Fast paths (G10, owner's request 2026-10-24): a few questions on a call are answered by a rule on the PC, with no model.
+"""Fast paths (G10, the owner's request in the Phase 1 voice plan): a few questions on a call are answered by a rule on the PC, with no model.
 
 What is answered: the time, the date and the weekday; (agenda) the next appointment, the next lesson and the next
 train or bus, from Kairo's own data when it is fresh; (timers) setting, asking about and cancelling a timer or a
@@ -39,6 +39,7 @@ from .timers import MAX_ACTIVE, TimerError, clean_label, say_duration, say_left
 log = logging.getLogger("kairo.fastpath")
 
 MAX_WORDS = 10
+MAX_CHARS = 400              # a longer transcript is not a quick question (and is never run through the patterns)
 EVENTS_MAX_AGE_S = 300.0     # the card reads the calendar every 3 minutes: older than this is not sure
 TRIP_MAX_AGE_S = 240.0       # the connection every 3 minutes on a call
 
@@ -157,6 +158,8 @@ _MODE = {"zug": "train", "train": "train", "bus": "bus", "verbindung": "connecti
 
 def match(text: str, languages: tuple[str, ...] = ("en", "de")) -> Match | None:
     """The fast-path question this is, or None. Pure: no clock, no data, no side effect."""
+    if not text or len(text) > MAX_CHARS:
+        return None
     core, asked = _clean(text)
     words = len(core.split())
     if not core:
@@ -317,6 +320,8 @@ class FastPaths:
             return None
         ahead, all_day = [], False
         for e in events:
+            if e.get("declined"):                              # the owner said no to it: it is not on their day
+                continue
             if e.get("all_day"):
                 day = _date(e.get("start"))
                 all_day = all_day or (day is not None and day >= now.date())
@@ -344,7 +349,7 @@ class FastPaths:
             return None
         best = None
         for e in events:
-            if e.get("all_day") or e.get("summary") != timetable.SUMMARY:
+            if e.get("all_day") or e.get("declined") or e.get("summary") != timetable.SUMMARY:
                 continue
             st = _local(e.get("start"), self.tz)
             if st is None:

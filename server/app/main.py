@@ -3405,7 +3405,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _card_events() -> str:
         now = dt.datetime.now(profile.tz)
         with session_for(engine) as s:
-            r = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s, descriptions=True)
+            r = calendar_read.read_days(google_read, profile.tz, now.date(), days=2, session=s, detail=True)
         _card_raw["events"] = r.events if r.ok else []
         fast_facts.put_events(r.events, r.ok, now.date())
         return todaycard.events_lines(r.events, now, unreadable=None if r.ok else r.text(profile.tz))

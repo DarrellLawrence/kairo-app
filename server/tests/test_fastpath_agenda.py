@@ -113,7 +113,7 @@ def test_a_blocks_description_reads_back_into_its_lessons():
     assert timetable.SUMMARY == "School"
 
 
-def test_the_card_can_read_the_descriptions_and_nothing_else_does_by_default(migrated):
+def test_the_card_can_read_the_details_and_nothing_else_does_by_default(migrated):
     from app.google.client import GoogleAPI
     fake = FakeGoogle()
     secrets = migrated.data_dir / "secrets"
@@ -122,9 +122,13 @@ def test_the_card_can_read_the_descriptions_and_nothing_else_does_by_default(mig
     fake.events["e1"]["description"] = "Class 3a\n13:00–13:45 Maths (R12)"
     read = lambda: GoogleAPI(secrets, "read", transport=fake.transport())  # noqa: E731
     plain = calendar_read.read_days(read, TZ, WED.date(), days=2)
-    withd = calendar_read.read_days(read, TZ, WED.date(), days=2, descriptions=True)
-    assert "description" not in plain.events[0]                                       # the brief and the loops see what they saw
-    assert withd.events[0]["description"] == "Class 3a\n13:00–13:45 Maths (R12)"
+    withd = calendar_read.read_days(read, TZ, WED.date(), days=2, detail=True)
+    assert "description" not in plain.events[0] and "declined" not in plain.events[0]    # the brief and the loops see what they saw
+    assert withd.events[0]["description"] == "Class 3a\n13:00–13:45 Maths (R12)" and withd.events[0]["declined"] is False
+    fake.add_event("e2", summary="Dinner", start="2026-10-14T19:00:00+02:00", end="2026-10-14T20:00:00+02:00",
+                   attendees=[{"email": "lea@example.com", "responseStatus": "accepted"}, {"email": fake.owner, "self": True, "responseStatus": "declined"}])
+    got = {e["summary"]: e["declined"] for e in calendar_read.read_days(read, TZ, WED.date(), days=2, detail=True).events}
+    assert got == {"School": False, "Dinner": True}
 
 
 # ---------------------------------------------------------------- how fresh the data must be
@@ -187,6 +191,16 @@ def test_a_title_from_an_invite_is_one_plain_line_that_is_only_read_aloud(rig):
     rig.events(ev("(no title)", "2026-10-14T12:00:00+02:00"))
     assert rig.say("what is my next appointment") == "Your next appointment is an event without a title at noon."
     assert rig.say("Wann ist mein nächster Termin") == "Dein nächster Termin ist ein Termin ohne Titel um 12 Uhr."
+
+
+def test_an_event_the_owner_declined_is_not_their_next_appointment_or_lesson(rig):
+    declined = ev("Dentist", "2026-10-14T15:00:00+02:00")
+    declined["declined"] = True
+    rig.events(declined, ev("Gym", "2026-10-14T18:00:00+02:00"))
+    assert rig.say("when is my next appointment") == "Your next appointment is Gym at 6 PM."
+    school = dict(SCHOOL_TODAY, declined=True)
+    rig.events(school, SCHOOL_TOMORROW)
+    assert rig.say("when is my next lesson") == "Your next lesson is Biology tomorrow at 9 AM, in room R3."
 
 
 # ---------------------------------------------------------------- the next lesson
