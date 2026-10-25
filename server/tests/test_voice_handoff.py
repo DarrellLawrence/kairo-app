@@ -1,6 +1,7 @@
 """G5 hand-off at the app level (voice-recipe section 8): what ask_kairo gets from Claude while Claude is still
 working. The brain is the fake Claude CLI (tests/fakes/fake_claude.py), which ends an answer with message_stop and then,
-like the real one, takes FAKE_CLAUDE_TAIL_S before it sends the result. The voice model's side is in test_voicemouth.py."""
+like the real one, takes FAKE_CLAUDE_TAIL_S before it sends the result. The voice model's side is in test_voicemouth_stream.py.
+The call over WebRTC needs the voice packages, so its test lives in test_voice_rtc.py (the voice CI jobs run that file)."""
 
 from __future__ import annotations
 
@@ -11,13 +12,12 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session
 
-from app import chat, conversation, realtime, voicertc
+from app import chat, conversation, realtime
 from app.brain.base import BrainEvent, BrainStatus, EventKind
 from app.db import SettingKV, make_engine
 from app.main import create_app
 from app.voicemouth import FILLERS
 from tests.test_voice_local import local, requests_seen  # noqa: F401  (the app with the fake voice model and Claude)
-from tests.test_voice_rtc import _app_call, _needs_pipecat
 from tests.test_voicelink import frames_until, utter
 
 TAIL_S = 1.2
@@ -251,26 +251,6 @@ def test_g5_the_call_screen_starts_nothing_when_the_switch_is_off(migrated):
     assert calls == []
 
 
-# ---------------------------------------------------------------- the switches reach a call
-
-def test_g5_a_call_through_the_app_gives_its_speaker_the_switch_it_started_with(local, monkeypatch):   # noqa: F811
-    """Read once as the call starts (voicertc.RtcSpeaker.second_piece is set per speaker, from the call's switches)."""
-    _needs_pipecat()
-    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
-    local.app.state.openers = voicertc.OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
-    seen, real = [], voicertc.RtcSpeaker.feed
-
-    def spy(self, delta):
-        seen.append(self.second_piece)
-        return real(self, delta)
-    monkeypatch.setattr(voicertc.RtcSpeaker, "feed", spy)
-    for value in (False, True):
-        assert local.put("/api/flags/g5.second_piece", json={"on": value}).status_code == 200
-        seen.clear()
-        asyncio.run(_app_call(local, seconds=20.0))
-        assert seen and set(seen) == {value}, (value, seen)
-
-
 # ---------------------------------------------------------------- a call on the old line, end to end (fake voice model, fake Claude)
 
 def _call(local_app, *, flags=()):
@@ -320,21 +300,3 @@ def test_g5_the_answer_comes_without_waiting_for_the_cli_summary_and_with_the_sw
     _frames, slow = _call(local, flags=[("g5.flush_at_end", False)])
     assert slow >= 1.9                                                    # (the fake Claude's summary takes 2 s)
     assert slow - quick >= 1.0                                            # ... which the default no longer waits for
-
-
-def test_g5_a_call_over_webrtc_cuts_claudes_words_once_and_with_the_switch_off_twice(local, monkeypatch):   # noqa: F811
-    """The whole chain on a real (loopback) WebRTC call: the holding line, Claude's words as they come, cut into pieces."""
-    _needs_pipecat()
-    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
-    local.app.state.openers = voicertc.OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
-    assert local.put("/api/flags/g5.stream_verbatim", json={"on": True}).status_code == 200
-    got = {}
-    for value in (False, True):
-        assert local.put("/api/flags/g5.second_piece", json={"on": value}).status_code == 200
-        phone = asyncio.run(_app_call(local, seconds=25.0))
-        got[value] = [e["text"] for e in phone.events if e.get("type") == "say"]
-    for value, pieces in got.items():
-        assert pieces[0] == FILLERS["en"][0] and pieces[1] == "echo:", (value, pieces)       # the holding line, then Claude's first piece
-    assert got[False][2] == "(spoken,"                                                       # the second piece cut again at its first clause
-    assert got[True][2].startswith("(spoken, on a call) Remind me to call the dentist tomorrow")   # whole sentence
-    assert len(got[True]) < len(got[False])

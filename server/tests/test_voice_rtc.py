@@ -1044,3 +1044,32 @@ def test_the_patch_takes_60_ms_off_every_turn_and_160_ms_after_a_loss(uplink_run
     print(f"\nsaved per turn: {saved_clean:.1f} ms; after one lost packet: {saved_after_loss:.1f} ms")
     assert 25 < saved_clean < 95                                   # 3 packets of 20 ms
     assert 90 < saved_after_loss < 240                            # 8 packets of 20 ms
+
+
+def test_g5_a_call_through_the_app_cuts_claudes_words_once_and_the_speaker_has_the_switch_the_call_started_with(local, monkeypatch):
+    """G5 on a loopback WebRTC call through the app (fake voice model, fake Claude): the holding line, Claude's first
+    piece, then the second piece as a whole sentence with g5.second_piece, and as "(spoken," plus the rest with it off.
+    The speaker gets the switch as the call started (read once, not per piece)."""
+    from app.voicemouth import FILLERS
+    _needs_pipecat()
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))       # no warm-up noise
+    seen, real = [], RtcSpeaker.feed
+
+    def spy(self, delta):
+        seen.append(self.second_piece)
+        return real(self, delta)
+    monkeypatch.setattr(RtcSpeaker, "feed", spy)
+    assert local.put("/api/flags/g5.stream_verbatim", json={"on": True}).status_code == 200
+    got = {}
+    for value in (False, True):
+        assert local.put("/api/flags/g5.second_piece", json={"on": value}).status_code == 200
+        seen.clear()
+        phone = asyncio.run(_app_call(local, seconds=25.0))
+        assert seen and set(seen) == {value}, (value, seen)
+        got[value] = [e["text"] for e in phone.events if e.get("type") == "say"]
+    for value, pieces in got.items():
+        assert pieces[0] == FILLERS["en"][0] and pieces[1] == "echo:", (value, pieces)       # the holding line, then Claude's first piece
+    assert got[False][2] == "(spoken,"                                                       # the second piece cut again at its first clause
+    assert got[True][2].startswith("(spoken, on a call) Remind me to call the dentist tomorrow")   # a whole sentence
+    assert len(got[True]) < len(got[False])
