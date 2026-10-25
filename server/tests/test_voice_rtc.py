@@ -360,7 +360,7 @@ def test_talking_over_kairo_stops_its_voice_and_the_answer():
     voice.tone = _tone(1.5)                                  # every sentence plays for 1.5 s
     phone = asyncio.run(_call(answer, times=(0.5, 5.0), voice=voice, interrupt=stopped.append,
                               wait_for=lambda p: len(p.audio_after) >= 2 or (stopped and 2 in turns and len(p.audio_after) >= 2),
-                              timeout=30))
+                              timeout=30, turning=voicertc.Turning(transcript_barge_in=False)))   # the old start: the VAD alone
     assert stopped == [1], (stopped, turns, phone.events)
     assert turns == [1, 2]
     # the long answer played until the owner talked (from 5.0 s), then not at all while they spoke

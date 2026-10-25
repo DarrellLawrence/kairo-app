@@ -95,14 +95,14 @@ def test_a_cough_over_kairo_does_not_make_it_answer_the_last_question_again(monk
     """Measured in the research (section 1): the sound opens a turn with no words, Pipecat's recovery adds a note to
     the conversation, and Kairo answered the previous turn a second time."""
     _needs_pipecat()
-    asked, stopped = _cough_over_kairo(Turning(empty_turn_fix=True), monkeypatch)
+    asked, stopped = _cough_over_kairo(Turning(empty_turn_fix=True, transcript_barge_in=False), monkeypatch)
     assert asked == [("Remind me to call the dentist tomorrow morning.", 1)], asked
-    assert stopped == [1]                       # the sound still cut the first answer short (the transcript-gated start is 6b)
+    assert stopped == [1]                       # the old start: any sound cut the first answer short (g6.transcript_barge_in fixes that)
 
 
 def test_with_the_fix_off_the_cough_makes_kairo_answer_again_the_old_way(monkeypatch):
     _needs_pipecat()
-    asked, _ = _cough_over_kairo(Turning(empty_turn_fix=False), monkeypatch)
+    asked, _ = _cough_over_kairo(Turning(empty_turn_fix=False, transcript_barge_in=False), monkeypatch)
     assert [n for _, n in asked] == [1, 2] and asked[0][0] == asked[1][0], asked     # the same question, answered twice
 
 
@@ -421,3 +421,112 @@ def test_the_first_second_after_the_call_connects_is_a_window_too():
         first[on] = phone.event_at[i] - phone.mic.t0
         assert asked
     assert first[True] > first[False] + 0.8, first                # held until the window closed
+
+
+# ---------------------------------------------------------------- barge-in only on words (g6.transcript_barge_in)
+
+def _kairo_lines(asked: list, lines: list[str], second: str = ""):
+    """An answer of fixed lines (each played as a 3 s tone); later turns get `second` (or nothing)."""
+    async def answer(text, language, number, speaker):
+        asked.append((text, number))
+        if number == 1:
+            for line in lines:
+                speaker.feed(line + " ")
+                await asyncio.sleep(0.02)
+        elif second:
+            speaker.feed(second)
+        speaker.finish()
+        return {"route": "talk"}
+    return answer
+
+
+KAIRO_SAYS = ["Your next meeting is at three with the design team.", "I added milk to the shopping list.",
+              "It will be sunny tomorrow, around eighteen degrees.", "The train to Zurich leaves at eight fifteen.",
+              "Do you want me to move the dentist appointment to Thursday?", "I can't find anything about that in your notes."]
+
+
+def _over_kairo(over_says: str, turning: Turning = Turning(), *, after_s: float = 3.0, clip_s: float = 0.8,
+                lines=KAIRO_SAYS, seconds: float = 10.0):
+    """The owner asks something, Kairo starts a long answer (every line a 3 s tone), and the owner makes a sound over it
+    that Whisper writes down as `over_says`. Returns what the call did."""
+    _needs_pipecat()
+    asked, stopped = [], []
+    voice = ScriptedVoice("Remind me to call the dentist tomorrow morning.", over_says)
+    voice.tone = _tone(3.0)
+    phone = asyncio.run(_call(_kairo_lines(asked, lines), voice=voice, interrupt=stopped.append,
+                              turning=turning, speech=_speech_then(gap_s=after_s, clip_s=clip_s), wait_for=_after(seconds),
+                              timeout=seconds + 8))
+    kinds = [e.get("type") for e in phone.events]
+    at = {k: phone.event_at[kinds.index(k)] - phone.mic.t0 for k in ("barge_in",) if k in kinds}
+    return SimpleNamespace(phone=phone, voice=voice, asked=asked, stopped=stopped, kinds=kinds, at=at,
+                           heard=[e for e in phone.events if e.get("type") == "heard"])
+
+
+@pytest.mark.parametrize("says", ["Mhm.", "Yeah, okay.", "Tuesday."])
+def test_a_sound_of_agreement_over_kairo_does_not_stop_it(says):
+    r = _over_kairo(says)
+    assert r.stopped == [] and "barge_in" not in r.kinds, (r.stopped, r.kinds)
+    assert [n for _, n in r.asked] == [1], r.asked                 # not answered, nothing new started
+    assert len(r.heard) == 1 and r.voice.heard == 2                # written down, but the phone and the voice model never heard it
+    assert r.kinds.count("speech") == 1                            # the phone was not told "you are talking" for it
+    assert any(t > 7.0 for t in r.phone.loud), "Kairo went on talking"
+
+
+@pytest.mark.parametrize("says", ["No wait, Tuesday.", "Stop.", "Make it five o'clock instead."])
+def test_words_over_kairo_stop_it_at_the_transcript_and_are_answered(says):
+    r = _over_kairo(says)
+    assert r.stopped == [1] and r.kinds.count("barge_in") == 1, (r.stopped, r.kinds)
+    assert [n for _, n in r.asked] == [1, 2] and r.asked[1][0] == says         # the new turn is the words, answered
+    assert len(r.heard) == 2 and r.heard[1]["text"] == says
+    b = r.at["barge_in"]
+    assert not [t for t in r.phone.loud if b + 0.7 < t < b + 3.5], "Kairo went quiet after the barge-in"
+    assert any(3.5 < t < b for t in r.phone.loud), "...and had been talking until then"
+
+
+def test_kairos_own_words_coming_back_through_the_microphone_do_not_stop_it():
+    """Its echo, written down by Whisper (80 % of the words are in what Kairo just said), is not the owner."""
+    r = _over_kairo("meeting is at three with the design team")
+    assert r.stopped == [] and "barge_in" not in r.kinds, (r.stopped, r.kinds)
+    assert [n for _, n in r.asked] == [1]
+    # ... while words of its own make it the owner: only 2 of 7 are in what Kairo said
+    r = _over_kairo("no, make the meeting five o'clock instead")
+    assert r.stopped == [1], (r.stopped, r.kinds)
+
+
+def test_a_cough_over_kairo_neither_stops_it_nor_makes_it_answer_again(monkeypatch):
+    monkeypatch.setattr(voicertc, "TURN_STOP_TIMEOUT_S", 1.5)
+    r = _over_kairo("", seconds=12.0)
+    assert r.stopped == [] and [n for _, n in r.asked] == [1] and "barge_in" not in r.kinds
+
+
+def test_with_the_switch_off_any_sound_over_kairo_stops_it_the_old_way_and_the_phone_is_still_told():
+    r = _over_kairo("Mhm.", Turning(transcript_barge_in=False, ignore_windows=False))
+    assert r.stopped == [1], (r.stopped, r.kinds)                  # the VAD's start alone, as before
+    assert r.kinds.count("barge_in") == 1                          # g7.listen_on_barge_in relies on the PC saying so either way
+    assert r.kinds.count("speech") == 2                            # and every stretch of speech told the phone
+
+
+def test_a_barge_in_is_told_to_the_phone_once_and_only_when_kairos_voice_was_playing():
+    r = _over_kairo("Stop.")
+    assert r.kinds.count("barge_in") == 1
+    quiet = _over_kairo("Stop.", Turning(), after_s=0.0, lines=[])      # nothing for Kairo to say: the words are just a turn
+    assert "barge_in" not in quiet.kinds and quiet.stopped in ([], [1])
+
+
+def test_a_backchannel_over_kairo_leaves_nothing_behind_that_stops_the_next_real_interruption():
+    """'Mhm' over Kairo opens a turn nothing will answer; it closes (or is still waiting for the quiet) when the owner
+    really breaks in a few seconds later, and that is heard and obeyed all the same."""
+    import numpy as np
+    _needs_pipecat()
+    speech = _speech_48k()
+    gap = np.zeros(int(2.0 * 48000), dtype=np.int16)
+    track = np.concatenate([speech, np.zeros(int(2.5 * 48000), dtype=np.int16), speech[:int(0.7 * 48000)], gap,
+                            speech[:int(0.9 * 48000)]])
+    asked, stopped = [], []
+    voice = ScriptedVoice("Remind me to call the dentist tomorrow morning.", "Mhm.", "No wait, Tuesday.")
+    voice.tone = _tone(3.0)
+    phone = asyncio.run(_call(_kairo_lines(asked, KAIRO_SAYS), voice=voice, interrupt=stopped.append, speech=track,
+                              wait_for=lambda p: bool(stopped) and len(asked) >= 2, timeout=20))
+    kinds = [e.get("type") for e in phone.events]
+    assert stopped == [1] and kinds.count("barge_in") == 1, (stopped, kinds)
+    assert [t for t, _ in asked] == ["Remind me to call the dentist tomorrow morning.", "No wait, Tuesday."], asked

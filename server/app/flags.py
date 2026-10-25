@@ -99,6 +99,14 @@ FLAGS: dict[str, tuple[bool, str]] = {
                                 "stalled or the call connected (a burst of noise). If you really go on talking past that moment "
                                 "you are heard from your first word. Off: any sound counts at once, as before. Takes effect at the "
                                 "next call."),
+    "g6.transcript_barge_in": (True, "Talking over Kairo stops it only when your words are real: a stop word (stop, wait, nein, moment ...) "
+                                     "or at least two words that are not all 'mhm', 'ja', 'genau', 'okay', 'thank you', and not Kairo's own "
+                                     "voice coming back through the microphone. A cough, a laugh or an 'mhm' no longer cuts Kairo off, and the "
+                                     "call screen switches to 'Listening' only when Kairo really stopped. The price, estimated from the "
+                                     "research (not measured on the PC): it now waits for your first pause and for Whisper, so a short 'Stop.' "
+                                     "stops Kairo after about 1 to 2 seconds instead of about 0.3 (0.99 to 2.09 s), and a longer sentence "
+                                     "over Kairo after 1.7 to 2.8 s. Acceptance row 4 says 'at once': this is the change you asked for. "
+                                     "Off: any sound stops Kairo at once, as before. Takes effect at the next call."),
 
     # -- G7 phone
     "g7.mic_constraints": (True, "On a call the phone asks the microphone for echo cancelling, noise reduction and automatic volume. "

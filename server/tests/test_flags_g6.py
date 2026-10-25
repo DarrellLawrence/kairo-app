@@ -12,13 +12,15 @@ from app import flags, voicertc
 from app.db import make_engine
 from app.main import create_app
 
-# name -> default. On: the plain fix of a measured problem (6a), and the three turn-taking changes the owner asked for in
-# his master prompt (docs/CHANGELOG.md has their costs in plain words).
+# name -> default. On: the plain fixes of measured problems (empty turn, tap), and the three turn-taking changes the owner
+# asked for in his master prompt (transcript barge-in, ignore windows, Smart Turn 3 s; docs/CHANGELOG.md has their costs in
+# plain words).
 G6 = {
     "g6.empty_turn_fix": True,
     "g6.tap_lag_fix": True,
     "g6.smart_turn_3s": True,
     "g6.ignore_windows": True,
+    "g6.transcript_barge_in": True,
 }
 
 
