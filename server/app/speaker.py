@@ -657,7 +657,7 @@ class Verdict:
     wait_ms: int = 0                    # what the turn waited for it (the latency it added)
     path: str = "call"
     at: str = ""
-    label: str = UNCHECKED              # G13: owner | unsure | stranger | unchecked (kept off the record and the log)
+    label: str = UNCHECKED              # G13: owner | unsure | stranger | unchecked (a word in the record, never in the log line)
 
     def log_line(self) -> str:
         """Score and reason only, never the words."""

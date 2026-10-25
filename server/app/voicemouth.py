@@ -507,9 +507,12 @@ class Mouth:
     def _sendable(self) -> list[tuple[bringup.Item, str, str]]:
         """G13: the replies that may go to Claude in this turn. A reply said under a label that may not change things
         is held (never sent, whatever turn would carry it). A confirmed reply waits when this turn is not confirmed."""
+        pending = self.reports()
+        if not pending:
+            return []
         now = self._may_record(speaker_label.current())
         out = []
-        for item, said, reply in self.reports():
+        for item, said, reply in pending:
             if not self._may_record(self.reply_labels.get(item.id)):
                 self.hold(item)
             elif now:
