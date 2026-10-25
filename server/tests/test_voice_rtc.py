@@ -12,6 +12,7 @@ import asyncio
 import fractions
 import io
 import json
+import logging
 import math
 import time
 import wave
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import voicertc
+from app import rtcjitter, voicertc
 from app.voicelink import first_clause
 from app.voicertc import OpenerCache, RtcSpeaker, Timeline, offer_on_tailnet, on_tailnet
 
@@ -588,3 +589,197 @@ def test_a_slow_voice_is_said_once_right_after_the_greeting():
                               wait_for=lambda p: sum(e.get("type") == "say" for e in p.events) >= 2, timeout=15))
     said = [e["text"] for e in phone.events if e.get("type") == "say"]
     assert said == ["Hey Sam.", SLOW_LINE] and voice.spoken == []
+
+
+# ---------------------------------------------------------------- the uplink jitter buffer (group G4, app/rtcjitter.py)
+# The checks that need the real library for the patch behind the owner's flag g4.jitter_patch (the ones with stand-in
+# parts are in tests/test_rtcjitter.py). They are in this file because the two voice CI jobs (Linux and Windows), the only
+# ones with aiortc and Pipecat installed, already run it; a file of their own would need an edit of .github/workflows/ci.yml,
+# and a pull request that touches .github/ is merged by the owner by hand (CONTRIBUTING.md). A test in test_rtcjitter.py
+# fails when a test file that skips without the voice packages is not in both jobs.
+
+JITTER_FLAG = "g4.jitter_patch"
+
+
+
+def _real_pc():
+    """A peer connection with an audio and a video receiver, like the library builds them for a call."""
+    from aiortc import RTCConfiguration, RTCPeerConnection
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))      # no STUN, like Kairo and the phone
+    pc.addTransceiver("audio")
+    pc.addTransceiver("video")
+    return pc
+
+
+def _real_buffers(pc) -> dict:
+    return {t.kind: getattr(t.receiver, rtcjitter.SLOT) for t in pc.getTransceivers()}
+
+
+def test_the_real_library_has_what_the_patch_touches_and_the_pin_is_installed():
+    """Fails on a version bump or a rename inside the library: then the patch (and its numbers) must be checked again."""
+    pytest.importorskip("aiortc")
+
+    async def go():
+        pc = _real_pc()
+        try:
+            stock = _real_buffers(pc)
+            assert (stock["audio"]._capacity, stock["audio"]._prefetch, stock["audio"]._is_video) == (16, 4, False)
+            assert (stock["video"]._capacity, stock["video"]._is_video) == (128, True)
+            assert stock["audio"]._origin is None and len(stock["audio"]._packets) == 16
+            name, version = rtcjitter._library_version(pc)
+            assert (name, version in rtcjitter.SUPPORTED) == ("aiortc", True), (name, version)
+            assert rtcjitter.install(pc) is True
+            now = _real_buffers(pc)
+            assert (now["audio"]._capacity, now["audio"]._prefetch) == (8, 1) and now["audio"] is not stock["audio"]
+            assert now["video"] is stock["video"]
+        finally:
+            await pc.close()
+    asyncio.run(go())
+
+
+def _lag(buffer, lost_at: int | None = None, n: int = 400) -> list[int]:
+    """Feed packets 20 ms apart (one frame each, sequence +1, timestamp +960), skip number lost_at, and record
+    after every packet: packets in front of the newest one handed on. The buffer is the library's own."""
+    from aiortc.rtp import RtpPacket
+    lag, newest = [], None
+    for i in range(n):
+        if i == lost_at:
+            continue
+        p = RtpPacket.parse(RtpPacket(payload_type=96, sequence_number=(500 + i) % 65536,
+                                      timestamp=1000 + 960 * i, payload=b"x" * 20).serialize())
+        p._data = p.payload                                      # what the receiver does after depayloading
+        _, frame = buffer.add(p)
+        if frame is not None:
+            newest = (frame.timestamp - 1000) // 960
+        if newest is not None:
+            lag.append(i - newest)
+    return lag
+
+
+def test_the_buffers_delay_in_packets_clean_and_after_one_lost_packet():
+    """Exact (arithmetic on 20 ms packets, no clock): the library's 16/4 holds the voice back 4 packets = 80 ms,
+    and after ONE lost packet 14 packets = 280 ms for the rest of the call. 8/1: 1 packet = 20 ms, then 6 = 120 ms."""
+    pytest.importorskip("aiortc")
+
+    async def buffers():
+        pc = _real_pc()
+        try:
+            stock = _real_buffers(pc)["audio"]
+            assert rtcjitter.install(pc) is True
+            return stock, _real_buffers(pc)["audio"]
+        finally:
+            await pc.close()
+    stock, patched = asyncio.run(buffers())
+    from aiortc.jitterbuffer import JitterBuffer as Library
+    stock_again = Library(capacity=16, prefetch=4)               # a second, untouched 16/4 for the lossy run
+    patched_again = Library(capacity=8, prefetch=1)
+    clean, lossy = _lag(stock), _lag(stock_again, lost_at=100)
+    assert clean[50] == 4 and clean[-1] == 4                     # 80 ms, steady
+    assert max(lossy[95:120]) == 19 and lossy[-1] == 14          # 380 ms just after the loss, 280 ms from then on
+    clean, lossy = _lag(patched), _lag(patched_again, lost_at=100)
+    assert clean[50] == 1 and clean[-1] == 1                     # 20 ms
+    assert max(lossy[95:120]) == 8 and lossy[-1] == 6            # 160 ms just after the loss, 120 ms from then on
+
+
+# in a call: voicertc.connect and the app's flag
+
+def _shape_of(conn) -> list[tuple[int, int]]:
+    """(capacity, prefetch) of each audio receiver's buffer on a call's connection."""
+    return [(t.receiver.__dict__[rtcjitter.SLOT]._capacity, t.receiver.__dict__[rtcjitter.SLOT]._prefetch)
+            for t in conn.pc.getTransceivers() if t.kind == "audio"]
+
+
+async def _phone_offer():
+    """The fake phone: a peer connection with a microphone, and its offer."""
+    from aiortc import RTCConfiguration, RTCPeerConnection
+
+    voicertc.tailnet_only(allow_loopback=True)
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+    pc.addTrack(_phone_track([0.5]))
+    await pc.setLocalDescription(await pc.createOffer())
+    return pc
+
+
+@pytest.mark.parametrize("patch, shape", [(False, (16, 4)), (True, (8, 1))])
+def test_a_call_connection_has_the_8_and_1_buffer_only_when_asked(patch, shape):
+    """The receivers exist when connect() returns (before build_call), so that is where it has to happen."""
+    _needs_pipecat()
+
+    async def go():
+        pc = await _phone_offer()
+        conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                      jitter_patch=patch)
+        try:
+            return _shape_of(conn)
+        finally:
+            await conn.disconnect()
+            await pc.close()
+    assert asyncio.run(go()) == [shape]
+
+
+def test_connect_without_the_argument_leaves_the_library_as_it_is():
+    _needs_pipecat()
+
+    async def go():
+        pc = await _phone_offer()
+        conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True)
+        try:
+            return _shape_of(conn)
+        finally:
+            await conn.disconnect()
+            await pc.close()
+    assert asyncio.run(go()) == [(16, 4)]
+
+
+def test_the_app_reads_the_flag_at_the_start_of_every_call(local, monkeypatch):
+    """Off by default; the owner turns it on and the next call has the small buffer; off again, the next is stock."""
+    _needs_pipecat()
+    from aiortc import RTCSessionDescription
+    monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
+    seen = []
+    real = voicertc.connect
+
+    async def spy(*args, **kwargs):
+        conn = await real(*args, **kwargs)
+        seen.append(_shape_of(conn))
+        return conn
+    monkeypatch.setattr(voicertc, "connect", spy)
+
+    async def call():
+        pc = await _phone_offer()
+        r = await asyncio.to_thread(local.post, "/api/rtc/offer",
+                                    json={"sdp": pc.localDescription.sdp, "type": "offer", "path": "call"})
+        assert r.status_code == 200, r.text
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=r.json()["sdp"], type=r.json()["type"]))
+        await pc.close()
+
+    async def go():
+        await call()                                                    # nothing set: the default
+        assert (await asyncio.to_thread(local.put, "/api/flags/" + JITTER_FLAG, json={"on": True})).status_code == 200
+        await call()
+        assert (await asyncio.to_thread(local.put, "/api/flags/" + JITTER_FLAG, json={"on": False})).status_code == 200
+        await call()
+    asyncio.run(go())
+    assert seen == [[(16, 4)], [(8, 1)], [(16, 4)]]
+
+
+def test_a_connection_without_the_peer_connection_it_expects_still_makes_the_call(caplog, monkeypatch):
+    """The patch is an extra: whatever the pipecat connection looks like one day, connect() returns it."""
+    _needs_pipecat()
+    from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+
+
+    def gone(self):
+        raise AttributeError("no pc any more")
+    monkeypatch.setattr(SmallWebRTCConnection, "pc", property(gone))
+
+    async def go():
+        pc = await _phone_offer()
+        with caplog.at_level(logging.INFO, logger="kairo.rtcjitter"):
+            conn = await voicertc.connect(pc.localDescription.sdp, pc.localDescription.type, allow_loopback=True,
+                                          jitter_patch=True)
+        await conn.disconnect()
+        await pc.close()
+        return conn
+    assert asyncio.run(go()) is not None
+    assert "left as it is" in caplog.text
