@@ -740,6 +740,9 @@ class CallGate:
     def _done(self, v: Verdict) -> Verdict:
         v.path = self.path
         v.at = self.speaker.now().isoformat(timespec="seconds")
+        if v.answer and v.label == UNSURE:    # G13: answered, but it changes nothing (gate.py); how often is read from the log
+            log.info("speaker check: answered but not confirmed as you (%s; score %s, %s s of speech): it can look things up, not change them",
+                     v.why, v.score, v.speech_s)
         if not v.answer:
             log.info(v.log_line())
             if self.on_ignored is not None:

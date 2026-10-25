@@ -161,7 +161,7 @@ class BrainRunner:
                     if self.voice_turns is not None:
                         # G13: who spoke, in the database, once this run holds the brain and before Claude starts (so a
                         # waiting turn never takes the label of the one running). Not written: Claude does not run.
-                        labelled = self.voice_turns.begin(voice)
+                        labelled = self.voice_turns.begin(voice, thread_id=thread_id, purpose=purpose)
                     kwargs = {"model": model} if model else {}
                     if warm is not None:
                         kwargs["warm"] = warm

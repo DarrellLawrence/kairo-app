@@ -44,10 +44,10 @@ def labels(monkeypatch):
     seen: list[str] = []
     real = sl.VoiceTurns.begin
 
-    def spy(self, label):
+    def spy(self, label, **kw):
         if label is not None:
             seen.append(label)
-        return real(self, label)
+        return real(self, label, **kw)
     monkeypatch.setattr(sl.VoiceTurns, "begin", spy)
     return seen
 

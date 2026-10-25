@@ -206,3 +206,14 @@ def test_the_least_trusted_label_wins():
     assert worst("unsure", "stranger", "owner") == "stranger"
     assert worst("owner", "unchecked") == "unchecked"
     assert worst("owner", "root") == "root"                  # a label nobody knows is the worst: the gate denies it
+
+
+def test_an_unsure_turn_that_was_answered_is_in_the_log_without_words(tmp_path, caplog):
+    """How often the owner's own requests are unsure is read from the log (voice plan P19), so it must be there."""
+    caplog.set_level("INFO", logger="kairo.speaker")
+    g = taught(tmp_path).gate()
+    decided(g, (voice(0.6, NEAR_HZ, seed=5), True))
+    assert "answered but not confirmed as you" in caplog.text and "short: you" in caplog.text
+    caplog.clear()
+    decided(g, (voice(2.0, OWNER_HZ, seed=2), True))
+    assert "not confirmed" not in caplog.text                          # an owner turn is not logged

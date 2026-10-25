@@ -74,10 +74,11 @@ class VoiceTurns:
     def __init__(self, engine):
         self.engine = engine
 
-    def begin(self, label: str | None) -> str | None:
+    def begin(self, label: str | None, *, thread_id: int | None = None, purpose: str | None = None) -> str | None:
         """Write the label (None: a turn that is not a voice turn: only remove what a crash left). Returns the run's id
         for end(), or None when nothing was written (no label, or g13.speaker_label_gate is off). Raises when the label is
-        not one Kairo knows or the database fails: the caller must then not run Claude."""
+        not one Kairo knows or the database fails: the caller must then not run Claude. thread_id and purpose say which
+        conversation and which kind of run it is (kept with the label; never words)."""
         from sqlmodel import Session
 
         from . import flags
@@ -96,7 +97,8 @@ class VoiceTurns:
                 return None
             run = uuid.uuid4().hex[:12]
             row = s.get(SettingKV, KEY) or SettingKV(key=KEY)
-            row.value = json.dumps({"label": label, "run": run, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            row.value = json.dumps({"label": label, "run": run, "thread": thread_id, "purpose": purpose,
+                                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             s.add(row)
             s.commit()
             return run

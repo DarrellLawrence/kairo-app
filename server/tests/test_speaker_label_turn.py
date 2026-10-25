@@ -119,6 +119,29 @@ def test_begin_writes_the_label_and_end_removes_it(db):
     assert row(db) is None and seen_by_the_hook(db) is None
 
 
+def test_the_record_says_which_conversation_and_kind_of_run_and_no_words(db):
+    run = sl.VoiceTurns(db).begin("unsure", thread_id=7, purpose="call")
+    rec = json.loads(row(db))
+    assert rec["thread"] == 7 and rec["purpose"] == "call" and rec["run"] == run
+    assert set(rec) == {"label", "run", "thread", "purpose", "at"}
+
+
+def test_the_runner_hands_over_the_conversation_and_purpose(db):
+    class Peek(Brain):
+        def run(self, prompt, *, session_id, system, tools, origin="owner_chat", **kw):
+            self.during.append(json.loads(row(db)))
+            yield BrainEvent(EventKind.result, text="ok")
+    brain = Peek(db)
+    runner = BrainRunner(brain)
+    runner.voice_turns = sl.VoiceTurns(db)
+
+    async def go():
+        with sl.scope("owner"):
+            return [e async for e in runner.stream("hi", session_id=None, system="s", tools=[], thread_id=5, purpose="call")]
+    asyncio.run(go())
+    assert brain.during[0]["thread"] == 5 and brain.during[0]["purpose"] == "call" and brain.during[0]["label"] == "owner"
+
+
 def test_begin_without_a_label_clears_what_a_crash_left(db):
     put_turn(db, json.dumps({"label": "stranger", "run": "old", "at": "2026-10-24T10:00:00+00:00"}))
     assert sl.VoiceTurns(db).begin(None) is None
@@ -240,7 +263,7 @@ def test_if_the_label_cannot_be_written_claude_does_not_run(db):
     runner = BrainRunner(brain)
 
     class Broken:
-        def begin(self, label):
+        def begin(self, label, **kw):
             raise RuntimeError("database is locked")
 
         def end(self, run):

@@ -547,10 +547,10 @@ def _g13_call(local, monkeypatch, *, slow: bool):
     labels: list[str] = []
     real_begin = sl.VoiceTurns.begin
 
-    def spy(self, label):
+    def spy(self, label, **kw):
         if label is not None:
             labels.append(label)
-        return real_begin(self, label)
+        return real_begin(self, label, **kw)
     monkeypatch.setattr(sl.VoiceTurns, "begin", spy)
     monkeypatch.setattr(voicertc, "ALLOW_LOOPBACK", True)
     local.app.state.openers = OpenerCache(lambda text, lang: (b"\x00\x10" * 2400, 24000))
