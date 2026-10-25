@@ -39,9 +39,10 @@ FLAGS: dict[str, tuple[bool, str]] = {
     "g3.gemma_first": (False, "Gemma 4 E4B is the voice model Kairo starts with, and the voice lab picks it whenever it passes "
                               "the lab's checks, even if another model answers faster. LFM2.5 2.6B was measured speaking its own "
                               "reasoning aloud (2 of 3 probe turns), which the lab does not catch. Nothing is downloaded or removed: "
-                              "LFM stays installed and can still be picked by hand in Voice lab. A model the lab or you already "
-                              "picked stays until the lab is run again. Gemma uses about 3.5 GiB of graphics memory: turn it on "
-                              "after the PC memory check."),
+                              "LFM stays installed and can still be picked by hand in Voice lab. With this on, the lab also leaves "
+                              "out any model that spoke tool-call markup in its test replies (the report shows the count either way). "
+                              "A model the lab or you already picked stays until the lab is run again. Gemma uses about 3.5 GiB "
+                              "of graphics memory: turn it on after the PC memory check."),
 
     "g3.smart_turn_pin": (False, "Calls load the exact Smart Turn v3.2 file the installer downloaded and checked (pinned revision and "
                                  "checksum in voicellm.json) instead of the copy inside the Pipecat package. The same bytes today, so "

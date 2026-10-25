@@ -240,9 +240,42 @@ def test_the_lab_summary_and_the_pick_know_about_spoken_markup():
     assert s["markup_spoken"] == 2 and s["spoken_replies"] == 40
     base = {"tool_recall": 1.0, "false_calls": 0.0, "fidelity": 1.0, "natural": {"en": 4.0, "de": 3.5}, "first_word_ms": {"p50": 90}}
     mid, why = voicelab.pick({"a": {**base, "markup_spoken": 2, "spoken_replies": 40}, "b": {**base, "first_word_ms": {"p50": 200},
-                                                                                          "markup_spoken": 0}})
+                                                                                          "markup_spoken": 0}}, refuse_markup=True)
     assert mid == "b" and "markup" in why and "2" in why
     assert voicelab.pick({"a": {**base}})[0] == "a"                       # an older report without the number is fine
+
+
+def test_the_markup_rule_only_acts_when_gemma_first_is_on():
+    """Leaving a model out for spoken markup moves the voice model: it is part of the owner's Gemma decision (16.6), not a side effect.
+    Switch off (the default): the lab picks exactly as before, and the count is still reported."""
+    base = {"tool_recall": 1.0, "false_calls": 0.0, "fidelity": 1.0, "natural": {"en": 4.0, "de": 3.5}}
+    models = {"lfm2.5-2.6b": {**base, "first_word_ms": {"p50": 90}, "markup_spoken": 1, "spoken_replies": 40},
+              "gemma-4-e4b": {**base, "first_word_ms": {"p50": 140}, "markup_spoken": 0, "spoken_replies": 40}}
+    mid, why = voicelab.pick(models)                                      # off: nothing about markup, the fastest wins as before
+    assert mid == "lfm2.5-2.6b" and "markup" not in why
+    mid, why = voicelab.pick(models, refuse_markup=True)                  # on: LFM is left out, Gemma is picked
+    assert mid == "gemma-4-e4b" and "markup" in why and "lfm2.5-2.6b" in why
+    assert voicelab.pick({"lfm2.5-2.6b": models["lfm2.5-2.6b"]}, refuse_markup=True)[0] is None
+    assert voicelab.pick({"lfm2.5-2.6b": models["lfm2.5-2.6b"]})[0] == "lfm2.5-2.6b"
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_the_lab_run_leaves_out_a_model_that_spoke_markup_only_with_gemma_first(migrated, tmp_path, monkeypatch, on):
+    from tests.test_voicelab import lab, make_site
+    pytest.importorskip("numpy")
+    site = make_site(monkeypatch, tmp_path)
+    engine, the_lab = lab(migrated, tmp_path, site, None, monkeypatch)
+    monkeypatch.setattr(voicelab, "spoke_markup", lambda text: True)      # every reply counts as spoken markup
+    with Session(engine) as s:
+        flags.set_flag(s, "g3.gemma_first", on)
+    rep = the_lab.run()
+    assert all(m["markup_spoken"] == m["spoken_replies"] > 0 for m in rep["models"].values())    # reported either way
+    if on:
+        assert rep["pick"]["model"] is None and "spoke tool-call markup" in rep["pick"]["why"]
+    else:
+        assert rep["pick"]["model"] is not None and "markup" not in rep["pick"]["why"]
+        with Session(engine) as s:
+            assert voicellm.active(s, site) == rep["pick"]["model"]
 
 
 def test_the_lab_run_reports_how_many_replies_carried_markup(migrated, tmp_path, monkeypatch):

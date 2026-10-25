@@ -333,8 +333,10 @@ def parse_judge(text: str, labels: list[str]) -> dict:
     return out
 
 
-def pick(models: dict, language_mode: str = "auto", prefer: str | None = None) -> tuple[str | None, str]:
-    """The fastest model that passes; with `prefer` (g3.gemma_first), that one if it passes. (id, why)."""
+def pick(models: dict, language_mode: str = "auto", prefer: str | None = None, refuse_markup: bool = False) -> tuple[str | None, str]:
+    """The fastest model that passes; with `prefer` (g3.gemma_first), that one if it passes. (id, why).
+    `refuse_markup` (also g3.gemma_first): a model that spoke tool-call markup does not pass. Off, the count is only reported:
+    leaving a model out moves the live voice model, which is the owner's Gemma decision (recipe 16.6), not a side effect."""
     langs = ("en",) if language_mode == "en" else ("en", "de")
     ok, why_not = [], []
     for mid, m in models.items():
@@ -352,7 +354,7 @@ def pick(models: dict, language_mode: str = "auto", prefer: str | None = None) -
             problems.append(f"answers from the card {m['card_on_pc']}")
         if m.get("card_wrong") is not None and m["card_wrong"] > CARD_WRONG_MAX:
             problems.append(f"wrong from the card {m['card_wrong']}")
-        if (m.get("markup_spoken") or 0) > 0:
+        if refuse_markup and (m.get("markup_spoken") or 0) > 0:
             problems.append(f"spoke tool-call markup in {m['markup_spoken']} of {m.get('spoken_replies')} replies")
         for lang in langs:
             score = (m.get("natural") or {}).get(lang)
@@ -418,7 +420,8 @@ class Lab:
             self._speech(report)
             self._kyutai(report)
             report["on_gpu"], report["off_gpu"] = ran_on_gpu(report["models"], self._voice_devices())
-            choice, why = pick(report["models"], language_mode, prefer=self._prefer())
+            prefer = self._prefer()                        # g3.gemma_first: prefers Gemma, and refuses a model that spoke markup
+            choice, why = pick(report["models"], language_mode, prefer=prefer, refuse_markup=prefer is not None)
             if choice is None and not report["on_gpu"]:
                 why += "; measured off the GPU, so the voice stays as it was"
             report["pick"] = {"model": choice, "why": why}
