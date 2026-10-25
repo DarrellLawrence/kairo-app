@@ -43,6 +43,10 @@ FLAGS: dict[str, tuple[bool, str]] = {
     # -- G3 mouth
 
     # -- G4 jitter buffer
+    "g4.jitter_patch": (False, "Calls: your voice reaches Kairo about 60 ms sooner on every turn, and one lost packet no longer "
+                               "makes the rest of the call 280 ms late (about 120 ms instead). It changes how the call library "
+                               "buffers incoming audio (its inner parts; only the version Kairo ships, any other is left alone). "
+                               "Takes effect on the next call."),
 
     # -- G5 hand-off
 
