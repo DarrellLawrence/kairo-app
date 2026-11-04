@@ -56,8 +56,9 @@ VAD_STOP_S = 0.2              # the first short pause: Whisper starts, Smart Tur
 SMART_TURN_SILENCE_S = 3.0
 SMART_TURN_SILENCE_OLD_S = 0.5
 # Pipecat's watchdog for a turn nothing ended (no words came, or no strategy fired). It must not fire before Smart Turn's
-# own silence timer does, or it would end the thought at the watchdog's time: 3.0 s with the switch on, Pipecat's 5.0 s off.
-TURN_STOP_TIMEOUT_S = 3.0
+# own silence timer does, or it would end the thought at the watchdog's time: 3.5 s with the switch on (the silence timer's
+# 3.0 s plus the VAD's stop and a margin: with both at 3.0 the two raced, and on Windows the watchdog won), Pipecat's 5.0 s off.
+TURN_STOP_TIMEOUT_S = 3.5
 TRAILING_SILENCE_S = 0.2      # Whisper gets this much silence after the words (it ends the last word)
 # After a tap the VAD hears nothing until that turn is taken (a loud room would start a new stretch of speech,
 # which holds the turn open, before Whisper is through); never longer than this.

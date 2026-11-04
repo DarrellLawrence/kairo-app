@@ -811,7 +811,7 @@ class _Stamped:
         self.log.setLevel(self.old)
 
 
-def _unfinished_thought(turning: Turning, *, silence_s: float = 2.0, watchdog_s: float = 2.0):
+def _unfinished_thought(turning: Turning, *, silence_s: float = 2.0, watchdog_s: float = 2.5):
     """The owner says a sentence the turn detector thinks is not finished and then says nothing more. Returns when the
     answer was asked, counted from the end of the speech (the shortened constants stand for 3.0 s)."""
     _needs_pipecat()
@@ -844,7 +844,7 @@ def test_a_thought_that_trails_off_waits_the_long_pause_when_the_switch_is_on():
 
 
 def test_a_turn_with_no_words_ends_at_the_watchdog_and_the_switch_picks_which():
-    """A sound Whisper writes nothing for opens a turn nothing can end except the watchdog: 3.0 s with the switch on
+    """A sound Whisper writes nothing for opens a turn nothing can end except the watchdog: 3.5 s with the switch on
     (Pipecat's own 5.0 s off; shortened here to 1.0 s and 3.5 s). The call says so in its log."""
     _needs_pipecat()
     ends = {}

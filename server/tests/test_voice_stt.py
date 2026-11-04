@@ -13,6 +13,8 @@ import types
 import pytest
 from sqlmodel import Session
 
+pytest.importorskip("numpy")      # the speech code needs it: the voice CI jobs (and the PC) have it, the plain server job doesn't
+
 from app import flags, voice as voice_mod
 from app.db import make_engine
 from app.voice import NotInstalled, Voice
