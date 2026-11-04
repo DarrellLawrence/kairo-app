@@ -1061,8 +1061,8 @@ def test_a_barge_in_is_told_to_the_phone_once_and_only_when_kairos_voice_was_pla
 def test_a_backchannel_over_kairo_leaves_nothing_behind_that_stops_the_next_real_interruption():
     """'Mhm' over Kairo opens a turn nothing will answer; it closes (or is still waiting for the quiet) when the owner
     really breaks in a few seconds later, and that is heard and obeyed all the same."""
-    import numpy as np
     _needs_pipecat()
+    import numpy as np
     speech = _speech_48k()
     gap = np.zeros(int(2.0 * 48000), dtype=np.int16)
     track = np.concatenate([speech, np.zeros(int(2.5 * 48000), dtype=np.int16), speech[:int(0.7 * 48000)], gap,

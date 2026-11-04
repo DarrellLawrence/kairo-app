@@ -88,8 +88,8 @@ def test_the_words_are_the_same_as_with_the_language_given():
 
 
 def test_quiet_noise_is_filtered_before_any_encoder_pass():
+    model = real_model()                   # skips first where no model is set (and the plain server job has no numpy)
     import numpy as np
-    model = real_model()
     noise = (np.random.default_rng(1).standard_normal(16000 * 3) * 0.01).astype(np.float32)
     segments, info = langid.transcribe_en_de(model, noise, prev_language="de", vad_filter=True, **OPTS)
     assert list(segments) == [] and model.encodes == 0 and info.language == "de"

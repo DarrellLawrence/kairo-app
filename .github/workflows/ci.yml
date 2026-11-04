@@ -301,7 +301,7 @@ jobs:
           key: memory-model-${{ hashFiles('server/requirements-memory.txt') }}
       - run: pip install -r server/requirements-dev.txt
       - run: pip install --disable-pip-version-check --target memory-site -r server/requirements-memory.txt
-      - run: python -m pytest -o addopts="" tests/test_semantic.py -s
+      - run: python -m pytest -o addopts="" tests/test_semantic.py tests/test_embed_batch.py -s
         working-directory: server
 
   # The school portal's read-only rule in a real browser (Chromium) against a fake OLAT.

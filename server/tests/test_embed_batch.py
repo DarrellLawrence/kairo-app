@@ -20,7 +20,7 @@ def test_the_worker_reads_four_pieces_at_a_time_and_still_cuts_at_512_tokens():
 
 
 def fake_model(batch):
-    import numpy as np
+    np = pytest.importorskip("numpy")      # the plain server job has no numpy; the memory job runs these
     m = embed_worker.Model.__new__(embed_worker.Model)     # no ONNX session here: only the batching is looked at
     m.batch, calls = batch, []
     m._run = lambda texts: calls.append(list(texts)) or np.full((len(texts), 3), len(calls), dtype=np.float32)

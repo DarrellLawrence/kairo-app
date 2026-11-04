@@ -202,7 +202,10 @@ def test_a_model_the_installer_did_not_download_is_reported_not_fetched_in_the_m
     assert whisper.made == []                              # nothing was asked for by name: no download
 
 
-def test_with_only_the_small_model_downloaded_the_call_runs_on_the_cpu_and_says_why(tmp_path, whisper):
+def test_with_only_the_small_model_downloaded_the_call_runs_on_the_cpu_and_says_why(tmp_path, whisper, monkeypatch):
+    # two different models, as on the PC (CI's voice job sets both to "base", which would put the GPU model there too)
+    monkeypatch.setattr(voice_mod, "WHISPER_GPU", "large-v3-turbo")
+    monkeypatch.setattr(voice_mod, "WHISPER_CPU", "small")
     put_models(tmp_path, voice_mod.WHISPER_CPU)
     v = Voice(tmp_path)
     assert v.transcribe_pcm(PCM, "en").text == "hello"
