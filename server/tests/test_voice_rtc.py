@@ -1619,7 +1619,9 @@ def test_the_stock_buffer_delays_every_turn_80_ms_and_one_lost_packet_makes_it_2
 def test_the_patched_buffer_delays_20_ms_and_after_a_lost_packet_120(uplink_runs):
     out = uplink_runs["patched"]
     assert out["lost"] == 1 and len(out["clean"]) >= 6 and len(out["after_loss"]) >= 6
-    assert 5 < _p50(out["clean"]) < 60, out["clean"]               # E1: 22.3 ms
+    # E1: 22.3 ms. Floor 0, not 5: on Windows a packet that arrives right behind the one held back comes out after
+    # ~2.5 ms (half of the 2026-11-04 CI run was 2.3-2.7 ms, the rest ~20 ms): faster is fine, the ceiling is the point.
+    assert 0 < _p50(out["clean"]) < 60, out["clean"]
     assert 80 < _p50(out["after_loss"]) < 210, out["after_loss"]   # E1: 120-144 ms with the buffer's 6 packets
 
 
