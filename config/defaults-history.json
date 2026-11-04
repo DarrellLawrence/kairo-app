@@ -130,6 +130,15 @@
    "[\"actions\", \"notes.write\"]": [
     "9fe4c6d61f516b4f83823780"
    ],
+   "[\"actions\", \"pending.clear\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
+   "[\"actions\", \"pending.list\"]": [
+    "d5f7e60aa5c52aca74fa4e18"
+   ],
+   "[\"actions\", \"pending.restore\"]": [
+    "9fe4c6d61f516b4f83823780"
+   ],
    "[\"actions\", \"people.list\"]": [
     "d5f7e60aa5c52aca74fa4e18"
    ],

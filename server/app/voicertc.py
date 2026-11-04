@@ -391,6 +391,16 @@ class Call:
     async def run(self) -> None:
         await self.runner.run(self.task)
 
+    def say_now(self, text: str) -> bool:
+        """Kairo speaks between turns (a late answer from Claude): only while nobody talks and nothing is being
+        said. False: not now (the caller sends it as a push instead). Called on the call's event loop."""
+        st = self.state
+        if st.vad_on or st.bot_speaking or not (text or "").strip():
+            return False
+        from pipecat.frames.frames import TTSSpeakFrame
+        asyncio.get_running_loop().create_task(self.task.queue_frames([TTSSpeakFrame(text.strip())]))
+        return True
+
     async def stop(self) -> None:
         await self.task.cancel()
 

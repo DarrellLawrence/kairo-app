@@ -285,6 +285,34 @@ class ToolRunner:
                 raise ToolError(str(exc))
         return "Noted."
 
+    def _pending_list(self, a: dict) -> str:
+        from . import pending
+        with Session(self.engine) as s:
+            # the question texts were written from captured mail, files and imports: data, not instructions
+            return untrusted("Kairo's pending questions", pending.summary(s))
+
+    def _pending_clear(self, a: dict) -> str:
+        from . import pending
+        with Session(self.engine) as s:
+            try:
+                done = pending.clear(s, a["kind"], ids=a.get("ids") or None, all_open=bool(a.get("all")),
+                                     older_than_days=a.get("older_than_days"))
+            except pending.PendingError as exc:
+                raise ToolError(str(exc)) from exc
+        if not done:
+            return "Nothing to clear."
+        return json.dumps({"cleared": len(done), "kind": a["kind"], "ids": done,
+                           "undo": "pending_restore with this kind and these ids"})
+
+    def _pending_restore(self, a: dict) -> str:
+        from . import pending
+        with Session(self.engine) as s:
+            try:
+                back = pending.restore(s, a["kind"], a["ids"])
+            except pending.PendingError as exc:
+                raise ToolError(str(exc)) from exc
+        return json.dumps({"restored": len(back), "ids": back})
+
     on_document = None   # (doc_id) -> None: starts the gauntlet in the background (main.py)
 
     def _document_create(self, a: dict) -> str:

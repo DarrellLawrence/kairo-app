@@ -90,7 +90,9 @@ def test_tool_list_has_no_write_tools(setup):
                      # knowledge calls: Kairo's own questions and the owner's profile/people notes
                      "knowledge_ask_later", "knowledge_answered", "profile_learn",
                      # document gauntlet: Kairo-owned vault file + mail to the owner's own address
-                     "document_create"}
+                     "document_create",
+                     # 2026-11-04: Kairo tidies its own pending questions (status only, undoable)
+                     "pending_list", "pending_clear", "pending_restore"}
     propose = [t for t in tools if t["name"] == "propose_action"][0]
     assert "gmail.send" in propose["inputSchema"]["properties"]["action"]["enum"]
     assert not any("pay" in a or "money" in a for a in propose["inputSchema"]["properties"]["action"]["enum"])

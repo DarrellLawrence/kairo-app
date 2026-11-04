@@ -82,6 +82,9 @@ CASES = {
         Case("Add milk to my shopping list.", "Milk is on the shopping list.", (("milk",),)),
         Case("When is my next maths test?", "Your next maths test is on Tuesday at 10:15.",
              (("Tuesday",), ("10:15", "10.15", "quarter past ten"))),
+        # owner 2026-11-04: questions that need thinking go to Claude, never answered by the voice model itself
+        Case("Should I move the dentist to Thursday or keep it?", "Keep it: Thursday is training, and the dentist is short.",
+             (("keep",), ("training",))),
         Case("Thanks, that's all for now."),
     ],
     "de": [
@@ -96,6 +99,8 @@ CASES = {
         Case("Schreib Milch auf die Einkaufsliste.", "Milch steht auf der Einkaufsliste.", (("Milch",),)),
         Case("Wann ist meine nächste Mathe-Prüfung?", "Deine nächste Mathe-Prüfung ist am Dienstag um 10:15.",
              (("Dienstag",), ("10:15", "10.15", "viertel nach zehn"))),
+        Case("Soll ich den Zahnarzt auf Donnerstag verschieben?", "Lass ihn, wo er ist: Donnerstag ist Training.",
+             (("Training",),)),
         Case("Danke, das war's."),
     ],
 }

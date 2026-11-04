@@ -1681,3 +1681,26 @@ def test_g5_a_call_through_the_app_cuts_claudes_words_once_and_the_speaker_has_t
     assert got[False][2] == "(spoken,"                                                       # the second piece cut again at its first clause
     assert got[True][2].startswith("(spoken, on a call) Remind me to call the dentist tomorrow")   # a whole sentence
     assert len(got[True]) < len(got[False])
+
+
+def test_a_late_answer_is_spoken_only_while_nobody_talks_and_kairo_is_quiet():
+    """Owner 2026-11-04: the late answer from Claude is said between turns, never over the owner or over Kairo."""
+    _needs_pipecat()
+    queued = []
+
+    class Task:
+        async def queue_frames(self, frames):
+            queued.extend(frames)
+
+    async def go():
+        state = __import__("types").SimpleNamespace(vad_on=False, bot_speaking=False)
+        call = voicertc.Call(None, Task(), None, state)
+        assert call.say_now("About what you asked: Thursday.") is True
+        state.vad_on = True
+        assert call.say_now("again") is False                   # the owner is talking
+        state.vad_on, state.bot_speaking = False, True
+        assert call.say_now("again") is False                   # Kairo is still speaking
+        assert call.say_now("   ") is False
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    assert [f.text for f in queued] == ["About what you asked: Thursday."]

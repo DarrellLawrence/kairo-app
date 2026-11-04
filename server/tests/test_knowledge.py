@@ -117,7 +117,38 @@ def test_calls_once_a_day_with_three_or_four_topics(engine):
         s.add(call)
         s.commit()
     assert not c.run(WED_EVENING + dt.timedelta(hours=2))["called"]
-    assert c.run(WED_EVENING + dt.timedelta(days=1))["called"]
+    assert not c.run(WED_EVENING + dt.timedelta(days=1))["called"]                  # one missed: 2 days' rest
+    assert c.run(WED_EVENING + dt.timedelta(days=2))["called"]
+
+
+def test_a_missed_call_counts_as_asked_and_three_missed_drop_the_questions(engine):
+    """Owner 2026-11-04: missed getting-to-know-you calls piled up; the same questions rang again every day."""
+    pushes = Pushes()
+    c = caller(engine, pushes)
+    with Session(engine) as s:
+        seed(s, 4)
+    day = WED_EVENING
+    for _ in range(3):
+        assert c.run(day)["called"]
+        day += dt.timedelta(days=16)                      # past ringing (missed) and past any rest
+    assert c.run(day)["called"] is False                  # all four asked on 3 missed calls: dropped, nothing to ask
+    with Session(engine) as s:
+        assert {q.status for q in s.exec(select(KnowledgeItem)).all()} == {"dropped"}
+        assert all(call.status == "missed" and call.ended_at for call in s.exec(select(Call)).all())
+        assert {q.asks for q in s.exec(select(KnowledgeItem)).all()} == {3}     # each missed call counted once
+
+
+def test_missed_calls_in_a_row_wait_longer(engine):
+    c = caller(engine, Pushes())
+    with Session(engine) as s:
+        seed(s, 8)
+    assert c.run(WED_EVENING)["called"]
+    out = c.run(WED_EVENING + dt.timedelta(days=1))       # the first one rang out: missed
+    assert not out["called"] and "1 missed" in out["why"]
+    assert c.run(WED_EVENING + dt.timedelta(days=2))["called"]
+    out = c.run(WED_EVENING + dt.timedelta(days=5))       # two in a row: 4 days
+    assert not out["called"] and "2 missed" in out["why"]
+    assert c.run(WED_EVENING + dt.timedelta(days=6))["called"]
 
 
 def test_not_enough_to_ask_waits(engine):

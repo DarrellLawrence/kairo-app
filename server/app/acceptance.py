@@ -895,7 +895,7 @@ async def t_knowledge_call(ctx: Context) -> dict:
         if when is None:
             return _result(False, {"a call window that is also a good moment": False},
                            "no call window fits the good times in Settings")
-        first = await asyncio.to_thread(caller.run, when)
+        first = await asyncio.to_thread(lambda: caller.run(when, rest=False))   # the owner's missed calls don't count here
         if first.get("call_id"):
             made.append(first["call_id"])
         with Session(ctx.engine) as s:
@@ -906,7 +906,7 @@ async def t_knowledge_call(ctx: Context) -> dict:
                        created_at=when.astimezone(dt.timezone.utc)))
             s.commit()
             made.extend(c.id for c in s.exec(select(Call).where(Call.reason == f"{MARK} earlier call")).all())
-        second = await asyncio.to_thread(caller.run, when + dt.timedelta(minutes=30))
+        second = await asyncio.to_thread(lambda: caller.run(when + dt.timedelta(minutes=30), rest=False))
         if second.get("call_id"):
             made.append(second["call_id"])
         checks = {"a learning call with 3-4 questions": bool(first.get("called")) and 3 <= len(agenda) <= 4,

@@ -489,6 +489,35 @@ class KnowledgeAnswered(Strict):
     summary: str = Field(min_length=1, max_length=300)
 
 
+class PendingList(Strict):
+    """What waits on the owner in Kairo's own app: quick questions and getting-to-know-you questions."""
+
+
+class PendingClear(Strict):
+    """The owner said to clear them ("clear the get-to-know-you questions", "drop all those questions"): the ids
+    given, or all open ones of that kind (optionally only those older than N days). Nothing is deleted."""
+
+    kind: Literal["quick_question", "knowledge_question"]
+    ids: list[Annotated[int, Field(ge=1)]] = Field(default_factory=list, max_length=200)
+    all: bool = False
+    older_than_days: int | None = Field(default=None, ge=1, le=3650)
+
+    @model_validator(mode="after")
+    def which(self):
+        if not self.ids and not self.all:
+            raise ValueError("give ids, or all=true")
+        if self.ids and self.all:
+            raise ValueError("ids or all, not both")
+        return self
+
+
+class PendingRestore(Strict):
+    """Undo a clear: the owner wants those back."""
+
+    kind: Literal["quick_question", "knowledge_question"]
+    ids: list[Annotated[int, Field(ge=1)]] = Field(min_length=1, max_length=200)
+
+
 class ProfileLearn(Strict):
     """A fact about the owner, saved to the vault (10 Profile/Learned by Kairo.md)."""
 
@@ -531,6 +560,9 @@ SCHEMAS: dict[str, type[Strict]] = {
     "knowledge.ask_later": KnowledgeAskLater,
     "knowledge.answered": KnowledgeAnswered,
     "profile.learn": ProfileLearn,
+    "pending.list": PendingList,
+    "pending.clear": PendingClear,
+    "pending.restore": PendingRestore,
     "document.create": DocumentCreate,
     "finance.list": FinanceList,
     "health.list": HealthList,
@@ -573,6 +605,7 @@ MIN_TIER: dict[str, int] = {
     "gmail.send": 3, "gmail.reply": 3, "calendar.respond": 3,
     "calendar.tag": 1, "loops.list": 0, "debrief": 0, "settings.list": 0, "settings.set": 1, "place.set": 1, "place.remove": 1, "loops.add": 1, "loops.snooze": 1, "loops.close": 1,
     "knowledge.ask_later": 1, "knowledge.answered": 1, "profile.learn": 1, "document.create": 1,
+    "pending.list": 0, "pending.clear": 1, "pending.restore": 1,   # Kairo's own pending items: status only
     "gmail.send_self": 2, "calendar.move": 2,
     "gmail.trash": 2,   # v7: Gmail keeps trash 30 days
     "calendar.delete": 4,
@@ -615,6 +648,9 @@ DIRECT_TOOLS: dict[str, str] = {
     "knowledge_ask_later": "knowledge.ask_later",
     "knowledge_answered": "knowledge.answered",
     "profile_learn": "profile.learn",
+    "pending_list": "pending.list",
+    "pending_clear": "pending.clear",
+    "pending_restore": "pending.restore",
     "document_create": "document.create",
 }
 

@@ -10,7 +10,7 @@ import re
 import pytest
 
 from app import bringup
-from app.voicemouth import FILLERS, LATER, OLD_FILLERS, Mouth, Unmark, g5_mouth_args, g5_options, small_talk
+from app.voicemouth import FILLERS, LATE_INTRO, LATER, OLD_FILLERS, Mouth, Unmark, g5_mouth_args, g5_options, small_talk
 
 
 class Speaker:
@@ -135,6 +135,39 @@ def test_claude_gets_8_seconds_on_a_call_then_kairo_gets_back_with_a_push():
     assert late == [("check my mail", "Nothing new in your mail.")]
     assert "Nothing new in your mail." in m.calls[-1]["messages"][-1]["content"]   # said in the next turn too
     assert len(m.calls) == 2                                        # no extra round after "I'll get back to you"
+
+
+def test_a_late_answer_is_said_in_the_call_when_the_line_is_quiet():
+    """Owner 2026-11-04: "it doesn't answer what it has to think about". After "I'll get back to you", Claude's
+    answer is said in the call the moment it comes (when nobody talks): no push, and not said a second time."""
+    m = Model(tool("should I move the dentist"), text("ok"))
+    late, spoken = [], []
+    mo = mouth(m, Brain(answer="Move it to Thursday, you're free then.", delay=0.3), items=[], ask_timeout_s=0.1,
+               late=lambda req, ans: late.append((req, ans)))
+    mo.speak_late = lambda line, ans: spoken.append(line) or True
+
+    async def go():
+        r1 = await mo.turn("should I move the dentist", "en", Speaker())
+        await asyncio.sleep(0.4)
+        return r1
+    r1 = run(go())
+    assert r1.deferred
+    assert spoken == [f"{LATE_INTRO['en']} Move it to Thursday, you're free then."]
+    assert late == [] and mo.pending == [] and mo.notes == []
+
+
+def test_a_late_answer_on_a_busy_line_goes_as_the_push_and_the_next_turn():
+    m = Model(tool("should I move the dentist"), text("ok"))
+    late = []
+    mo = mouth(m, Brain(answer="Move it to Thursday.", delay=0.3), items=[], ask_timeout_s=0.1,
+               late=lambda req, ans: late.append((req, ans)))
+    mo.speak_late = lambda line, ans: False                  # the owner is talking, or the call is over
+
+    async def go():
+        await mo.turn("Sollte ich den Zahnarzt verschieben?", "de", Speaker())
+        await asyncio.sleep(0.4)
+    run(go())
+    assert late and any("Move it to Thursday." in n for n in mo.notes)
 
 
 def test_g5_the_holding_line_does_not_claim_to_be_doing_something():

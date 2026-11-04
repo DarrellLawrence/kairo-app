@@ -1478,6 +1478,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         key = id(call)
         _rtc_calls[key] = call
 
+        def speak_late(text: str, answer: str) -> bool:
+            """Claude's answer came after "I'll get back to you": said in this call now when the line is quiet
+            (owner 2026-11-04); otherwise False, and it goes as the push it was."""
+            if key not in _rtc_calls or line.mouth_task is not None or line.writing is not None:
+                return False
+            if not call.say_now(text):
+                return False
+            try:
+                _rt_said("kairo", answer)
+            except Exception:
+                log.exception("voice: saving a late answer")
+            return True
+        line.speak_late = speak_late
+
         phone_ip = request.headers.get("x-forwarded-for")    # tailscale serve: the phone's tailnet address
 
         async def network() -> None:
@@ -1671,6 +1685,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       greeting=_greeting(), delivered=_delivered, may_record=_may_record, on_held=_reply_held,
                       **mouth_args(g3), **g5_mouth_args(g5))
         line.mouth = mouth
+        mouth.speak_late = lambda text, answer: (getattr(line, "speak_late", None) or (lambda *_: False))(text, answer)
         mouth.fast = app.state.fast.for_call()                    # G10: fast paths, with the owner's switches as they are now
         try:
             await app.state.voice_llm.prime(mouth.prime_messages(), **mouth.prime_args())
@@ -2871,6 +2886,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return capture.as_dict(capture.dismiss(s, capture_id))
             except capture.CaptureError as exc:
                 raise HTTPException(404, str(exc))
+
+    @app.post("/api/pending/clear")
+    def pending_clear(body: dict):
+        """Today's "Clear the rest": the owner's own tap, Kairo's own items (status only; /api/pending/restore undoes)."""
+        from . import pending
+        kind = str(body.get("kind") or "")
+        ids = [int(i) for i in (body.get("ids") or []) if str(i).isdigit()][:200]
+        with session_for(engine) as s:
+            try:
+                done = pending.clear(s, kind, ids=ids or None, all_open=not ids)
+            except pending.PendingError as exc:
+                raise HTTPException(400, str(exc))
+        return {"cleared": done}
+
+    @app.post("/api/pending/restore")
+    def pending_restore(body: dict):
+        from . import pending
+        ids = [int(i) for i in (body.get("ids") or []) if str(i).isdigit()][:200]
+        with session_for(engine) as s:
+            try:
+                return {"restored": pending.restore(s, str(body.get("kind") or ""), ids)}
+            except pending.PendingError as exc:
+                raise HTTPException(400, str(exc))
 
     @app.get("/api/capture/setup")
     def capture_setup(request: Request):

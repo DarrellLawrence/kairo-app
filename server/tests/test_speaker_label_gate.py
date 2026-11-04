@@ -54,6 +54,8 @@ ARGS = {
     "settings_list": {}, "settings_set": {"key": "x", "value": 1}, "place_set": {"name": "Home"}, "place_remove": {"name": "Home"},
     "loops_list": {}, "loops_add": {}, "loops_snooze": {}, "loops_close": {}, "knowledge_ask_later": {},
     "knowledge_answered": {}, "profile_learn": {}, "document_create": {},
+    "pending_list": {}, "pending_clear": {"kind": "knowledge_question", "all": True},
+    "pending_restore": {"kind": "knowledge_question", "ids": [3]},
 }
 
 

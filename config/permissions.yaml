@@ -35,6 +35,9 @@ actions:
   knowledge.ask_later:   1_internal   # a question for the next getting-to-know-you call (no secrets: refused)
   knowledge.answered:    1_internal
   profile.learn:         1_internal   # vault 10 Profile/Learned by Kairo.md, Kairo's own section
+  pending.list:          0_read       # 2026-11-04: what waits on the owner in Kairo's own app (quick / knowledge questions)
+  pending.clear:         1_internal   # the owner said to clear them: status only, nothing deleted
+  pending.restore:       1_internal   # undo a clear
   document.create:       1_internal   # gauntlet: PDF in vault Kairo/Documents; the mail to self is gated again (tier 2)
   settings.list:         0_read       # owner settings (not the gate, not permissions)
   settings.set:          1_internal

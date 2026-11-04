@@ -561,6 +561,33 @@ def test_knowledge_tools_bad_args_denied(gate, tool, args):
     assert gate.decide(P + tool, args, ctx()).verdict == "deny"
 
 
+# ---------------------------------------------------------------- Kairo tidies its own pending questions
+
+@pytest.mark.parametrize("tool,args,tier", [
+    ("pending_list", {}, 0),
+    ("pending_clear", {"kind": "knowledge_question", "all": True}, 1),
+    ("pending_clear", {"kind": "quick_question", "ids": [4, 7]}, 1),
+    ("pending_clear", {"kind": "quick_question", "all": True, "older_than_days": 7}, 1),
+    ("pending_restore", {"kind": "quick_question", "ids": [4]}, 1),
+])
+def test_pending_tools_are_internal(gate, tool, args, tier):
+    d = gate.decide(P + tool, args, ctx())
+    assert (d.verdict, d.tier) == ("allow", tier)
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("pending_clear", {"kind": "knowledge_question"}),                            # neither ids nor all
+    ("pending_clear", {"kind": "quick_question", "ids": [1], "all": True}),       # both
+    ("pending_clear", {"kind": "tasks", "all": True}),                            # only Kairo's own questions
+    ("pending_clear", {"kind": "quick_question", "ids": [0]}),
+    ("pending_clear", {"kind": "quick_question", "all": True, "delete": True}),   # nothing is deleted
+    ("pending_restore", {"kind": "quick_question", "ids": []}),
+    ("pending_list", {"kind": "x"}),
+])
+def test_pending_tools_bad_args_denied(gate, tool, args):
+    assert gate.decide(P + tool, args, ctx()).verdict == "deny"
+
+
 # ---------------------------------------------------------------- document gauntlet (written before the code)
 
 def test_document_create_is_internal(gate):

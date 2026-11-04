@@ -49,7 +49,7 @@ CARD = [(re.compile(r"weather|wetter|\bwarm|\brain\b|regn|temperat|\bcold|kalt",
         (re.compile(r"buy|kauf|overdue|überfällig|lock|schloss|bill|rechnung", re.I), "## Today's tasks"),
         (re.compile(r"lea\b|promise|versproch|wollte", re.I), "## Open loops"),
         (re.compile(r"next|nächst|training|school|schule|friday|freitag|cinema|kino|tomorrow|morgen", re.I), "## Next events")]
-DATA = re.compile(r"calendar|remind|mail|list|test|exam|note|task|send|move|kalender|erinner|liste|prüfung|notiz|aufgabe|schick", re.I)
+DATA = re.compile(r"calendar|remind|mail|list|test|exam|note|task|send|move|kalender|erinner|liste|prüfung|notiz|aufgabe|schick|should i|soll ich|verschieb|decide|entscheid", re.I)
 
 
 def owner_words(text: str) -> str:

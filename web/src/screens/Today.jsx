@@ -18,6 +18,7 @@ function greeting(d = new Date()) {
 
 const time = (iso) => (iso && iso.length > 10 ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'All day')
 const day = (iso) => (iso ? new Date(iso).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }) : '')
+const SHOWN_QUESTIONS = 3   // more than this: one row, "Clear the rest" (owner 2026-11-04: they piled up)
 const isToday = (iso) => iso && new Date(iso).toDateString() === new Date().toDateString()
 
 function Top3({ items }) {
@@ -266,6 +267,22 @@ export default function Today({ go, onboarding }) {
     setLater((a) => a.filter((x) => x.id !== c.id))
   }
 
+  // At most SHOWN question cards; the rest go in one tap (and come back with Undo)
+  const clearRest = async () => {
+    const rest = asking.slice(SHOWN_QUESTIONS).map((c) => c.id)
+    try {
+      const r = await api('/api/pending/clear', { method: 'POST', body: { kind: 'quick_question', ids: rest } })
+      setAsking((a) => a.filter((c) => !r.cleared.includes(c.id)))
+      toast.show({
+        text: `Cleared ${r.cleared.length} question${r.cleared.length === 1 ? '' : 's'}.`,
+        action: { label: 'Undo', onAction: async () => {
+          await api('/api/pending/restore', { method: 'POST', body: { kind: 'quick_question', ids: r.cleared } })
+          setAsking((await api('/api/captures?status=asking')) || [])
+        } },
+      })
+    } catch (e) { toast.show({ text: e.message }) }
+  }
+
   const h = home && !home.error ? home : null
   const name = h?.name || ''
   const briefIsToday = brief && brief.date === new Date().toLocaleDateString('sv-SE')
@@ -411,7 +428,7 @@ export default function Today({ go, onboarding }) {
       )}
 
       <AnimatePresence initial={false}>
-        {asking.map((c) => (
+        {asking.slice(0, SHOWN_QUESTIONS).map((c) => (
           <motion.div key={`q${c.id}`} layout initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, height: 0 }} transition={spring.smooth}
             style={{ marginTop: 24 }}>
             <Card accent>
@@ -426,6 +443,12 @@ export default function Today({ go, onboarding }) {
           </motion.div>
         ))}
       </AnimatePresence>
+      {asking.length > SHOWN_QUESTIONS && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+          <p className="k-card-sub" style={{ margin: 0 }}>{asking.length - SHOWN_QUESTIONS} more questions</p>
+          <Button variant="ghost" size="sm" onClick={clearRest}>Clear the rest</Button>
+        </div>
+      )}
 
       {notes.length > 0 && (
         <>

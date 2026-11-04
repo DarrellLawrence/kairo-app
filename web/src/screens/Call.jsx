@@ -13,6 +13,7 @@ import { IconCaptions, IconMic, IconPhone } from '../ui/index.js'
 import { VoiceOrb } from '../ui/Orb.jsx'
 import { releaseWhileSpeaking, setReleaseWhileSpeaking, unlockAudio } from '../voice.js'
 import { QUIET_REASONS, realtimeStatus, startLine, tapOrb as tapLine } from '../realtime.js'
+import { silenceWatch } from '../nosound.js'
 
 const HANG_UP = /\s*\[\[hang up\]\]\s*$/i
 const HANG_UP_ANY = /\s*\[\[hang up\]\]\s*/gi   // the marker is never spoken or shown
@@ -37,6 +38,7 @@ export default function Call({ callId: initialId, onClose }) {
   const [err, setErr] = useState('')
   const [warn, setWarn] = useState('')           // a heads-up that stays for the call (echo cancelling off)
   const [needTap, setNeedTap] = useState(false)   // iOS didn't play Kairo's voice: "Tap to play"
+  const [noSound, setNoSound] = useState(false)   // Kairo speaks and this phone has heard nothing for 3 s
   const [talking, setTalking] = useState(false)   // the line hears a turn of yours: a tap on the orb ends it
   const [engine, setEngine] = useState(null)      // 'realtime' (OpenAI), 'webrtc' (the PC's own voice over WebRTC) or 'local' (the old line)
   const rtStatus = useRef(null)
@@ -70,6 +72,15 @@ export default function Call({ callId: initialId, onClose }) {
   useEffect(() => {
     if (!['listening', 'thinking', 'speaking', 'paused', 'muted'].includes(phase)) return undefined
     const t = setInterval(() => setSecs(Math.round((Date.now() - live.current.started) / 1000)), 1000)
+    return () => clearInterval(t)
+  }, [phase])
+
+  // "No sound? Tap to play" only when the phone really hears nothing while Kairo speaks (not on every greeting)
+  useEffect(() => {
+    setNoSound(false)
+    if (phase !== 'speaking') return undefined
+    const w = silenceWatch()
+    const t = setInterval(() => { if (w.feed(live.current.voice?.level() || 0, Date.now())) setNoSound(true) }, 200)
     return () => clearInterval(t)
   }, [phase])
 
@@ -206,7 +217,7 @@ export default function Call({ callId: initialId, onClose }) {
         {engine && !over && <p className="k-call-sub" style={{ opacity: 0.55 }}>{engine === 'realtime' ? 'Realtime voice' : engine === 'webrtc' ? 'Local voice · WebRTC' : 'Local voice'}</p>}
         {err && phase !== 'error' && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{err}</p>}
         {warn && !over && <p className="k-call-sub" style={{ color: 'var(--warn)' }}>{warn}</p>}
-        {(needTap || phase === 'speaking') && (
+        {(needTap || (phase === 'speaking' && noSound)) && (
           <button type="button" className={needTap ? 'k-btn primary sm' : 'k-btn ghost sm'} style={{ marginTop: 10 }} onClick={tapToPlay}>
             {needTap ? 'Tap to play Kairo' : 'No sound? Tap to play'}
           </button>

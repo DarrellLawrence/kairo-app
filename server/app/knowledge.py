@@ -31,7 +31,8 @@ log = logging.getLogger("kairo.knowledge")
 TOPICS_PER_CALL = 4
 MIN_QUESTIONS = 3          # fewer: wait, unless the oldest is OLD_DAYS old
 OLD_DAYS = 3
-MAX_ASKS = 3               # asked on 3 calls without an answer: dropped
+MAX_ASKS = 3               # asked on 3 calls without an answer (or 3 missed calls): dropped
+MISSED_MAX_WAIT_DAYS = 14  # after missed calls in a row: 2, 4, 8, then at most 14 days to the next one
 LAST_CALL = "21:00"        # no getting-to-know-you call after this
 BUSY_PLACES = ("school", "work", "training")
 CLOSE = re.compile(r"(girl|boy)friend|partner|wife|husband|fianc|mother|father|mum|mom|dad|sister|brother|"
@@ -153,19 +154,61 @@ def good_moment(now: dt.datetime, tz, times: dict, *, busy: Callable[[dt.datetim
     return True, "ok"
 
 
+def settle_missed(s: Session, now: dt.datetime) -> int:
+    """A getting-to-know-you call nobody picked up counts as asked (owner 2026-11-04: missed calls piled up, the same
+    questions rang again every day and were never dropped). ended_at marks it settled, so it counts once."""
+    from .voice import calls as voice_calls
+    n = 0
+    for c in s.exec(select(Call).where(Call.purpose == "learn").where(Call.status.in_(["ringing", "missed"]))
+                    .where(Call.ended_at == None)).all():   # noqa: E711 (SQL NULL)
+        if c.status == "ringing" and now - _aware(c.created_at) > dt.timedelta(minutes=voice_calls.RING_MINUTES):
+            c.status = "missed"
+        if c.status != "missed":
+            continue
+        finish(s, c)
+        c.ended_at = now.astimezone(dt.timezone.utc)
+        s.add(c)
+        n += 1
+    if n:
+        s.commit()
+    return n
+
+
+def missed_backoff(s: Session, now: dt.datetime) -> str | None:
+    """After missed calls in a row, wait longer before the next one: 2, 4, 8, then 14 days."""
+    rows = s.exec(select(Call).where(Call.purpose == "learn").where(Call.status.in_(["answered", "ended", "missed"]))
+                  .order_by(Call.created_at.desc()).limit(6)).all()
+    streak = 0
+    for c in rows:
+        if c.status != "missed":
+            break
+        streak += 1
+    if not streak:
+        return None
+    days = min(2 ** streak, MISSED_MAX_WAIT_DAYS)
+    if _aware(rows[0].created_at) > now - dt.timedelta(days=days):
+        return f"{streak} missed call(s) in a row: waiting {days} days"
+    return None
+
+
 class Caller:
     def __init__(self, *, engine, tz, times, pusher, busy: Callable[[dt.datetime], bool],
                  place_kind: Callable[[], str | None]):
         self.engine, self.tz, self.times, self.pusher = engine, tz, times, pusher
         self.busy, self.place_kind = busy, place_kind
 
-    def run(self, now: dt.datetime | None = None) -> dict:
+    def run(self, now: dt.datetime | None = None, *, rest: bool = True) -> dict:
+        """rest=False: the wait after missed calls is skipped (the acceptance check: it tests the one-a-day budget)."""
         now = now or dt.datetime.now(self.tz)
         with Session(self.engine) as s:
+            missed = settle_missed(s, now)
             find_gaps(s)
             qs = open_questions(s)
             if not qs:
                 return {"called": False, "why": "nothing to ask"}
+            wait = missed_backoff(s, now) if rest else None
+            if wait:
+                return {"called": False, "why": wait}
             old = min(_aware(q.created_at) for q in qs) <= now - dt.timedelta(days=OLD_DAYS)
             if len(qs) < MIN_QUESTIONS and not old:
                 return {"called": False, "why": f"only {len(qs)} question(s), waiting for more"}

@@ -75,6 +75,9 @@ OLD_FILLERS = {"en": ("Sec, checking.", "Pulling that up.", "One sec."),
 # call moves on. The answer is said later in the call when it comes, and sent as a push.
 ASK_CALL_TIMEOUT_S = 8.0
 LATER = {"en": "I'll get back to you.", "de": "Ich melde mich gleich."}
+# Owner 2026-11-04 ("it doesn't answer what it has to think about"): the late answer is said in the call the moment it
+# comes, when the line is quiet, with this in front; only a call that is over (or busy) gets the push instead.
+LATE_INTRO = {"en": "About what you asked:", "de": "Zu deiner Frage:"}
 FAILED = {"en": "I couldn't reach Kairo's brain just now.", "de": "Ich komme gerade nicht an Kairos Gehirn."}
 # Owner's call 2026-10-20: a reply that was only a dropped tool call left the line silent. Then Kairo says
 # one of these (both made at start with the other short lines: they play at once). NEUTRAL is a cached opener.
@@ -150,7 +153,9 @@ reading out links. {language}
 The Today card below is what you know. When it has the answer, give it straight away, keeping every
 name, time and number exactly as it says (the owner's words start with the time now, like [14:05]).
 For anything the card doesn't have (their notes, mail, plans, people, decisions, anything to do, note
-or remember), call ask_kairo with what the owner wants. Never guess and never say you can't: ask
+or remember), call ask_kairo with what the owner wants. Advice, "should I", weighing options, planning,
+explaining something or any question that needs thinking or facts beyond the card always goes to
+ask_kairo too: never answer those yourself, even if you think you know. Never guess and never say you can't: ask
 Kairo. When ask_kairo answers, say its answer in your own words and keep every name, number and time
 exactly as it says. While Kairo works on it, Kairo itself may say a short line and raise one bring-up
 item (you see it in your last message): don't repeat that, just give the answer.
@@ -187,7 +192,9 @@ The Today card is what you know: it comes at the start of the first message, ins
 with the bring-up list. When it has the answer, give it straight away, keeping every name, time and number
 exactly as it says (the owner's words start with the time now, like [14:05]).
 For anything the card doesn't have (their notes, mail, plans, people, decisions, anything to do, note
-or remember), call ask_kairo with what the owner wants. When you call ask_kairo, write nothing before the
+or remember), call ask_kairo with what the owner wants. Advice, "should I", weighing options, planning,
+explaining something or any question that needs thinking or facts beyond the card always goes to
+ask_kairo too: never answer those yourself, even if you think you know. When you call ask_kairo, write nothing before the
 call. Never guess and never say you can't: ask Kairo. When ask_kairo answers, say its answer in your own
 words and keep every name, number and time exactly as it says. While Kairo works on it, Kairo itself may
 say a short line and raise one bring-up item (you see it in your last message): don't repeat that, just
@@ -435,6 +442,7 @@ class _Pending:
     started: float = 0.0                # when Claude got it (the call's wait counts from here)
     push: bool = False                  # the owner was told "I'll get back to you": it goes as a push too
     heard: str = ""                     # what the owner had already heard of it (g5.stream_verbatim) when they talked on
+    lang: str = "en"                    # the language of the turn that asked: the late answer is introduced in it
 
 
 Ask = Callable[[str, list[str], str], Awaitable[tuple[str, bool]]]
@@ -486,6 +494,7 @@ class Mouth:
         self.max_tool_rounds, self.ask_timeout_s, self.wait_after_s = max_tool_rounds, ask_timeout_s, wait_after_s
         self.clock, self.place, self.context_tokens, self.report = clock, place, context_tokens, report
         self.late = late                    # (request, answer): an answer that came after the call moved on (a push)
+        self.speak_late = None              # (line, answer) -> bool: say it in the call now (True: said; set per call line)
         self.name = (name or "the owner")[:60]
         self.card: dict[str, str] | None = dict(context) if isinstance(context, dict) else None
         self._context = context if isinstance(context, str) else None
@@ -964,10 +973,11 @@ class Mouth:
             result.deferred = True
             speaker.say(LATER[lang])
             said.line(LATER[lang])
-            self._keep(request, task, push=True, started=t0)
+            log.info("ask_kairo: no answer after %.0f s on a call: 'I'll get back to you'", self.ask_timeout_s)
+            self._keep(request, task, push=True, started=t0, lang=lang)
             raise _Later() from None
         except asyncio.CancelledError:
-            self._keep(request, task, started=t0)
+            self._keep(request, task, started=t0, lang=lang)
             raise
         except Exception as exc:   # never a silent call: say why
             log.exception("ask_kairo")
@@ -1052,10 +1062,11 @@ class Mouth:
             result.deferred = True
             speaker.say(LATER[lang])
             said.line(LATER[lang])
-            self._keep(request, task, push=True, started=t0, heard=speech.text())
+            log.info("ask_kairo: no answer after %.0f s on a call: 'I'll get back to you'", self.ask_timeout_s)
+            self._keep(request, task, push=True, started=t0, heard=speech.text(), lang=lang)
             raise _Later() from None
         except asyncio.CancelledError:                          # talked over: the answer is kept, and what was heard of it
-            self._keep(request, task, started=t0, heard=speech.text())
+            self._keep(request, task, started=t0, heard=speech.text(), lang=lang)
             raise
         finally:
             if timer[0] is not None:
@@ -1104,14 +1115,30 @@ class Mouth:
             return None
 
     def _keep(self, request: str, task: asyncio.Task, *, push: bool = False, started: float | None = None,
-              heard: str = "") -> None:
+              heard: str = "", lang: str = "en") -> None:
         """Talked over while Claude worked, or Claude took longer than a call waits: the answer is said in the
         next turn once it is in. push: it also goes to the phone as a push the moment it comes (the owner
         was told "I'll get back to you"; the call may be over by then)."""
-        p = _Pending(request, task, started=started if started is not None else time.monotonic(), push=push, heard=heard)
+        p = _Pending(request, task, started=started if started is not None else time.monotonic(), push=push, heard=heard,
+                     lang=lang if lang in LATE_INTRO else "en")
         self.pending.append(p)
 
         def done(_t: asyncio.Task) -> None:
+            if (p.push and not p.taken and p in self.pending and self.speak_late is not None
+                    and not task.cancelled() and task.exception() is None):
+                answer = task.result()[0]
+                try:
+                    spoken = bool(self.speak_late(f"{LATE_INTRO[p.lang]} {answer}", answer))
+                except Exception:
+                    log.exception("late answer, said in the call")
+                    spoken = False
+                if spoken:                                   # said: no push, and no note to say it again
+                    log.info("ask_kairo: the late answer was said in the call")
+                    self.pending.remove(p)
+                    return
+            if p.push and not task.cancelled() and task.exception() is not None:   # was silent: never lost unseen
+                log.warning("ask_kairo after 'I'll get back to you' failed: %s: %s",
+                            type(task.exception()).__name__, task.exception())
             if p.push and not task.cancelled() and task.exception() is None and self.late is not None:
                 try:
                     self.late(request, task.result()[0])
