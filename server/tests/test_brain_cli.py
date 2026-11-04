@@ -463,9 +463,11 @@ def test_a_flag_that_cant_be_read_counts_as_off(tmp_path):
 
 
 def test_the_flag_changes_the_tail_the_cli_leaves_behind(tmp_path):
-    slow = run(make(tmp_path, flag=lambda name: False, KAIRO_HOOK_FAKE_TAIL_S="0.8"))[-1].data["usage"]
-    fast = run(make(tmp_path, flag=lambda name: True, KAIRO_HOOK_FAKE_TAIL_S="0.8"))[-1].data["usage"]
-    assert slow["tail_ms"] >= 700 and "summary_ms" in slow
+    # a 1.5 s fake tail: Windows CI measured 594 ms of a 0.8 s one (the answer's end reaches the backend late), so the
+    # gap between "waits for the tail" and "doesn't" must be wider than that loss
+    slow = run(make(tmp_path, flag=lambda name: False, KAIRO_HOOK_FAKE_TAIL_S="1.5"))[-1].data["usage"]
+    fast = run(make(tmp_path, flag=lambda name: True, KAIRO_HOOK_FAKE_TAIL_S="1.5"))[-1].data["usage"]
+    assert slow["tail_ms"] >= 1000 and "summary_ms" in slow
     assert fast["tail_ms"] < 500 and "summary_ms" not in fast
 
 
@@ -489,12 +491,12 @@ def owner_flag(migrated):
 
 def test_the_owner_flips_the_flag_and_the_next_process_follows(tmp_path, owner_flag):
     read, switch = owner_flag
-    brain = make(tmp_path, flag=read, KAIRO_HOOK_FAKE_TAIL_S="0.8")
-    assert run(brain)[-1].data["usage"]["tail_ms"] >= 700
+    brain = make(tmp_path, flag=read, KAIRO_HOOK_FAKE_TAIL_S="1.5")   # wide gap: see above
+    assert run(brain)[-1].data["usage"]["tail_ms"] >= 1000
     switch(True)
     assert run(brain)[-1].data["usage"]["tail_ms"] < 500
     switch(None)                                    # back to the default: off
-    assert run(brain)[-1].data["usage"]["tail_ms"] >= 700
+    assert run(brain)[-1].data["usage"]["tail_ms"] >= 1000
 
 
 def test_a_warm_process_started_before_the_flip_is_replaced(tmp_path, owner_flag):
@@ -583,10 +585,10 @@ def test_a_tail_over_half_a_second_is_logged(tmp_path, caplog):
 
 def test_a_tail_with_the_switch_on_says_the_setting_stopped_working(tmp_path, caplog):
     import logging
-    brain = make(tmp_path, flag=lambda name: True, KAIRO_HOOK_FAKE_TAIL_S="0.8", KAIRO_HOOK_FAKE_TAIL_ALWAYS="1")
+    brain = make(tmp_path, flag=lambda name: True, KAIRO_HOOK_FAKE_TAIL_S="1.5", KAIRO_HOOK_FAKE_TAIL_ALWAYS="1")
     with caplog.at_level(logging.INFO, logger="kairo.brain"):
         usage = run(brain)[-1].data["usage"]
-    assert usage["no_summary"] is True and usage["tail_ms"] >= 700
+    assert usage["no_summary"] is True and usage["tail_ms"] >= 1000
     text = " ".join(r.getMessage() for r in tail_logs(caplog))
     assert "CLAUDE_CODE_CLASSIFIER_SUMMARY=0" in text and "g1.cli_no_summary" not in text
     assert [r.levelno for r in tail_logs(caplog)] == [logging.WARNING]      # on and still slow: the real alarm
